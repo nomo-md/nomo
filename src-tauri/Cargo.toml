@@ -1,6 +1,6 @@
 [package]
 name = "nomo"
-version = "0.5.1"
+version = "0.5.2"
 description = "A lightweight Markdown-first editor"
 authors = ["清羽"]
 license = "AGPL-3.0-or-later"

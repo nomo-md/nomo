@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Nomo",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "identifier": "com.nomo.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -80,7 +80,7 @@
     ],
     "macOS": {
       "minimumSystemVersion": "12.0",
-      "bundleVersion": "3012"
+      "bundleVersion": "3013"
     }
   }
 }

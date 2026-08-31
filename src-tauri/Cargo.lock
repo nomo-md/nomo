@@ -2476,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "nomo"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "block2",
  "chrono",
