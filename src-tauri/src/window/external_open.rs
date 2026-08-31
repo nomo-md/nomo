@@ -152,28 +152,7 @@ pub(crate) fn route_external_open(app: &AppHandle, paths: Vec<String>) -> Result
     let label = window.label().to_string();
     let _ = persist_pending_external_open(app, &label, &paths);
 
-    // 恢复窗口显示并强制到前台（处理托盘/最小化/后台等各种状态）
-    window
-        .show()
-        .map_err(|error| format!("显示外部打开目标窗口失败：{error}"))?;
-    window
-        .unminimize()
-        .map_err(|error| format!("还原外部打开目标窗口失败：{error}"))?;
-    window
-        .set_focus()
-        .map_err(|error| format!("聚焦外部打开目标窗口失败：{error}"))?;
-    crate::window::os::bring_window_to_front(&window);
-
-    // 延迟补一次激活，确保在 WebView 初始化或异步场景下也能成功
-    let window_for_focus = window.clone();
-    tauri::async_runtime::spawn(async move {
-        std::thread::sleep(std::time::Duration::from_millis(120));
-        let _ = window_for_focus.show();
-        let _ = window_for_focus.unminimize();
-        let _ = window_for_focus.set_focus();
-        crate::window::os::bring_window_to_front(&window_for_focus);
-    });
-
+    // 这里只转交请求；前端确定使用当前窗口或需要询问时再激活，避免新窗口模式唤起旧窗口。
     window
         .emit(
             OPEN_DOCUMENT_EVENT,
@@ -183,7 +162,6 @@ pub(crate) fn route_external_open(app: &AppHandle, paths: Vec<String>) -> Result
             },
         )
         .map_err(|error| format!("发送外部打开文件事件失败：{error}"))?;
-    crate::window::tray::set_tray_active(app, true);
     Ok(())
 }
 

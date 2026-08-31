@@ -30,7 +30,7 @@
 | Markdown 文档小窗 | `src/app/App.svelte` | `src/app/components/AppShell.svelte`, `src/app/components/AppTitleBar.svelte`, `src/app/components/MarkdownMiniLargePreview.svelte`, `src/app/services/desktopWindow.ts`, `src-tauri/src/window/state.rs` | 修改小窗进入/返回、置顶、只读降级、快捷键或窗口几何恢复 |
 | 全局滚动条显隐 | `src/app/services/scrollbarVisibility.ts` | `src/main.ts`, `src/app/styles/global.css`, `src/app/styles/app-layout.css`, `src/app/styles/editor-segmented.css` | 修改滚动时显示、边缘触发、延时隐藏或局部滚动容器覆盖 |
 | 外部打开路由 | `src-tauri/src/window/external_open.rs` | `src-tauri/src/lib.rs` | 单实例/启动参数/macOS open 事件 |
-| 跨窗口打开目标去重 | `src-tauri/src/window/open_targets.rs` | `src/app/App.svelte`, `src/app/services/desktopWindow.ts`, `src-tauri/src/window/external_open.rs` | 修改文件/文件夹打开优先级、空窗口复用、窗口聚焦或目标预留 |
+| 跨窗口打开目标去重 | `src-tauri/src/window/open_targets.rs` | `src/app/services/openTargetRouting.ts`, `src/app/App.svelte`, `src/app/services/desktopWindow.ts`, `src-tauri/src/window/external_open.rs` | 修改文件/文件夹打开优先级、空窗口复用、窗口聚焦或目标预留 |
 
 ### 编辑器核心（ProseMirror）
 
@@ -2006,12 +2006,33 @@
 
 ---
 
+### `src/app/services/openTargetRouting.ts`
+
+**Kind:** service
+
+**Owns:** 文件与文件夹打开策略的调用顺序；确定使用当前窗口或显示询问框后才激活接收窗口；同目录目标打开后继续处理混合批次中的剩余目标。
+
+**Does not own:** 不改变路径归属、初始空窗口判定、启动队列或原生窗口创建流程。
+
+**Called by:** `src/app/App.svelte`
+
+**Depends on:** `src/app/services/desktopWindow.ts`, `src/app/services/settings.ts`
+
+**Change this when:** 修改打开方式的分支或窗口激活时机。
+
+**Related tests:** `src/app/services/openTargetRouting.test.ts`
+
+**Confidence:** high
+
+---
+
 ### `src-tauri/src/window/open_targets.rs`
 
 **Kind:** service / registry
 
 **Owns:**
 - 维护进程内文档窗口当前文件夹、全部已打开文件及在建窗口目标预留
+- 文件先匹配已打开路径，再匹配已登记的直接父目录窗口；同目录文件进入已有窗口的标签
 - 规范化绝对路径，原子判断目标归属并聚焦已有窗口或生成唯一新窗口标签
 - 提供同步目标、准备打开窗口和创建失败释放预留的 IPC
 
@@ -2026,7 +2047,7 @@
 **Change this when:**
 - 修改跨窗口目标匹配、预留超时、已有窗口激活或新窗口标签规则
 
-**Related tests:** —
+**Related tests:** 同文件 Rust 测试（文件优先、直接父目录匹配和批次目标划分）
 
 **Confidence:** high
 
@@ -2040,6 +2061,7 @@
 - 解析启动参数、单实例参数
 - macOS open 事件中的文件/文件夹解析
 - 把待打开路径写入 pending 设置并 emit `nomo://open-document` / `nomo://open-folder`
+- 接收文件请求时不显示或激活窗口，由前端确定最终去向后执行激活
 
 **Does not own：**
 - 不拥有前端打开处理（在 App.svelte 中）
@@ -3505,6 +3527,7 @@
 - 桌面窗口关闭、退出与设置窗口打开操作
 - 新窗口创建时的 chrome 选项（macOS overlay / Windows 无装饰）及 Windows 隐藏初始化
 - 打开目标联合类型、窗口目标同步/准备 IPC 与预留窗口创建失败清理
+- 当前文档窗口自身的激活 IPC 适配（`activateDocumentWindow`）
 - Markdown 小窗进入、返回和置顶 IPC 的前端适配
 
 **Does not own:**

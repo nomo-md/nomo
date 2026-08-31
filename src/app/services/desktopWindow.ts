@@ -12,7 +12,7 @@ export type OpenTarget =
 
 export type OpenTargetRouteDecision =
   | { action: 'handled' }
-  | { action: 'activate-current'; target: OpenTarget }
+  | { action: 'activate-current'; target: OpenTarget; remainingTarget?: OpenTarget }
   | { action: 'open-current'; target: OpenTarget }
   | { action: 'create-window'; windowLabel: string; target: OpenTarget };
 
@@ -132,10 +132,17 @@ export async function createAppWindow(
   }
 }
 
+export async function activateDocumentWindow(desktopEnabled: boolean): Promise<void> {
+  if (!desktopEnabled) return;
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('activate_document_window');
+}
+
 export async function prepareOpenTargetWindow(
   desktopEnabled: boolean,
   target: OpenTarget,
   createIfMissing: boolean,
+  options: { reuseDirectoryWindow?: boolean } = {},
 ): Promise<OpenTargetRouteDecision> {
   if (!desktopEnabled) {
     return { action: 'open-current', target };
@@ -144,6 +151,7 @@ export async function prepareOpenTargetWindow(
   return invoke<OpenTargetRouteDecision>('prepare_open_target_window', {
     target,
     createIfMissing,
+    reuseDirectoryWindow: options.reuseDirectoryWindow ?? true,
   });
 }
 

@@ -31,6 +31,8 @@ pub(crate) enum OpenTargetRouteDecision {
     Handled,
     ActivateCurrent {
         target: OpenTargetInput,
+        #[serde(rename = "remainingTarget", skip_serializing_if = "Option::is_none")]
+        remaining_target: Option<OpenTargetInput>,
     },
     OpenCurrent {
         target: OpenTargetInput,
@@ -107,6 +109,7 @@ pub(crate) fn prepare_open_target_window(
     registry: State<'_, OpenTargetRegistry>,
     target: OpenTargetInput,
     create_if_missing: bool,
+    reuse_directory_window: Option<bool>,
 ) -> Result<OpenTargetRouteDecision, String> {
     let current_label = window.label().to_string();
     let (existing_documents, current_target, remaining_target) = {
@@ -116,7 +119,12 @@ pub(crate) fn prepare_open_target_window(
             .lock()
             .map_err(|_| "锁定窗口目标注册表失败".to_string())?;
         prune_registry(&mut state, &alive_labels);
-        resolve_existing_targets(&state, &current_label, target)
+        resolve_existing_targets(
+            &state,
+            &current_label,
+            target,
+            reuse_directory_window.unwrap_or(true),
+        )
     };
 
     for (label, paths) in existing_documents {
@@ -137,10 +145,14 @@ pub(crate) fn prepare_open_target_window(
         }
     }
 
+    if let Some(target) = current_target {
+        // 同目录的新文件要先在当前窗口增加标签，混合批次的其余文件继续按设置处理。
+        return Ok(OpenTargetRouteDecision::ActivateCurrent {
+            target,
+            remaining_target,
+        });
+    }
     if remaining_target.is_none() {
-        if let Some(target) = current_target {
-            return Ok(OpenTargetRouteDecision::ActivateCurrent { target });
-        }
         return Ok(OpenTargetRouteDecision::Handled);
     }
     let Some(remaining_target) = remaining_target else {
@@ -229,6 +241,7 @@ fn resolve_existing_targets(
     state: &RegistryState,
     current_label: &str,
     target: OpenTargetInput,
+    reuse_directory_window: bool,
 ) -> (
     BTreeMap<String, Vec<String>>,
     Option<OpenTargetInput>,
@@ -267,7 +280,17 @@ fn resolve_existing_targets(
                 if !seen.insert(key.clone()) {
                     continue;
                 }
-                if let Some(owner) = find_target_owner(state, current_label, &key, false) {
+                let owner = find_target_owner(state, current_label, &key, false).or_else(|| {
+                    if !reuse_directory_window {
+                        return None;
+                    }
+                    // 精确文件（包括在建预留）优先；只复用已经登记的直接父目录窗口。
+                    let (parent, _) = key.rsplit_once('/')?;
+                    let parent = if parent.is_empty() { "/" } else { parent };
+                    find_target_owner(state, current_label, parent, true)
+                        .filter(|label| state.windows.contains_key(label))
+                });
+                if let Some(owner) = owner {
                     if owner == current_label {
                         current_paths.push(path);
                     } else {
@@ -417,4 +440,203 @@ fn focus_document_window(app: &AppHandle, label: &str) {
     let _ = window.unminimize();
     let _ = window.set_focus();
     crate::window::os::bring_window_to_front(&window);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(folder: &str, files: &[&str]) -> WindowTargetSnapshot {
+        WindowTargetSnapshot {
+            folder_key: normalize_target_path(folder),
+            file_keys: files
+                .iter()
+                .filter_map(|path| normalize_target_path(path))
+                .collect(),
+        }
+    }
+
+    fn documents(paths: &[&str]) -> OpenTargetInput {
+        OpenTargetInput::Documents {
+            paths: paths.iter().map(|path| (*path).to_string()).collect(),
+        }
+    }
+
+    fn paths(target: Option<OpenTargetInput>) -> Vec<String> {
+        match target {
+            Some(OpenTargetInput::Documents { paths }) => paths,
+            None => Vec::new(),
+            _ => panic!("expected document target"),
+        }
+    }
+
+    #[test]
+    fn another_file_in_current_directory_opens_in_current_window() {
+        let mut state = RegistryState::default();
+        state.windows.insert(
+            "main".into(),
+            snapshot("/issue46/notes", &["/issue46/notes/a.md"]),
+        );
+        let (other, current, remaining) =
+            resolve_existing_targets(&state, "main", documents(&["/issue46/notes/b.md"]), true);
+        assert!(other.is_empty());
+        assert_eq!(paths(current), vec!["/issue46/notes/b.md"]);
+        assert!(remaining.is_none());
+    }
+
+    #[test]
+    fn directory_in_another_window_receives_the_new_file() {
+        let mut state = RegistryState::default();
+        state
+            .windows
+            .insert("main".into(), snapshot("/issue46/old", &[]));
+        state
+            .windows
+            .insert("window-notes".into(), snapshot("/issue46/notes", &[]));
+        let (other, current, remaining) =
+            resolve_existing_targets(&state, "main", documents(&["/issue46/notes/b.md"]), true);
+        assert_eq!(other["window-notes"], vec!["/issue46/notes/b.md"]);
+        assert!(current.is_none() && remaining.is_none());
+    }
+
+    #[test]
+    fn already_open_file_takes_priority_over_directory_window() {
+        let mut state = RegistryState::default();
+        state
+            .windows
+            .insert("main".into(), snapshot("/issue46/notes", &[]));
+        state.windows.insert(
+            "window-file".into(),
+            snapshot("/issue46/other", &["/issue46/notes/a.md"]),
+        );
+        let (other, current, remaining) =
+            resolve_existing_targets(&state, "main", documents(&["/issue46/notes/a.md"]), true);
+        assert_eq!(other["window-file"], vec!["/issue46/notes/a.md"]);
+        assert!(current.is_none() && remaining.is_none());
+    }
+
+    #[test]
+    fn file_reservation_also_takes_priority_over_directory_window() {
+        let mut state = RegistryState::default();
+        state
+            .windows
+            .insert("main".into(), snapshot("/issue46/notes", &[]));
+        state.reservations.insert(
+            "window-pending".into(),
+            TargetReservation {
+                target_keys: HashSet::from([normalize_target_path("/issue46/notes/a.md").unwrap()]),
+                created_at: Instant::now(),
+            },
+        );
+        let (other, current, remaining) =
+            resolve_existing_targets(&state, "main", documents(&["/issue46/notes/a.md"]), true);
+        assert!(other.contains_key("window-pending"));
+        assert!(current.is_none() && remaining.is_none());
+    }
+
+    #[test]
+    fn pending_directory_is_not_treated_as_an_existing_window() {
+        let mut state = RegistryState::default();
+        state.reservations.insert(
+            "window-pending".into(),
+            TargetReservation {
+                target_keys: HashSet::from([normalize_target_path("/issue46/notes").unwrap()]),
+                created_at: Instant::now(),
+            },
+        );
+        let (other, current, remaining) =
+            resolve_existing_targets(&state, "main", documents(&["/issue46/notes/b.md"]), true);
+        assert!(other.is_empty() && current.is_none());
+        assert_eq!(paths(remaining), vec!["/issue46/notes/b.md"]);
+    }
+
+    #[test]
+    fn nested_and_similarly_named_directories_do_not_match() {
+        let mut state = RegistryState::default();
+        state
+            .windows
+            .insert("main".into(), snapshot("/issue46/notes", &[]));
+        let requested = ["/issue46/notes/sub/a.md", "/issue46/notes-other/a.md"];
+        let (other, current, remaining) =
+            resolve_existing_targets(&state, "main", documents(&requested), true);
+        assert!(other.is_empty() && current.is_none());
+        assert_eq!(paths(remaining), requested);
+    }
+
+    #[test]
+    fn preview_ignores_directory_owner_but_still_finds_an_open_file() {
+        let mut state = RegistryState::default();
+        state.windows.insert(
+            "window-notes".into(),
+            snapshot("/issue46/notes", &["/issue46/notes/a.md"]),
+        );
+        let (other, current, remaining) =
+            resolve_existing_targets(&state, "main", documents(&["/issue46/notes/b.md"]), false);
+        assert!(other.is_empty() && current.is_none());
+        assert_eq!(paths(remaining), vec!["/issue46/notes/b.md"]);
+        let (other, current, remaining) =
+            resolve_existing_targets(&state, "main", documents(&["/issue46/notes/a.md"]), false);
+        assert_eq!(other["window-notes"], vec!["/issue46/notes/a.md"]);
+        assert!(current.is_none() && remaining.is_none());
+    }
+
+    #[test]
+    fn current_directory_window_wins_when_multiple_windows_show_that_directory() {
+        let mut state = RegistryState::default();
+        state
+            .windows
+            .insert("main".into(), snapshot("/issue46/notes", &[]));
+        state
+            .windows
+            .insert("window-notes".into(), snapshot("/issue46/notes", &[]));
+        let (other, current, remaining) = resolve_existing_targets(
+            &state,
+            "window-notes",
+            documents(&["/issue46/notes/b.md"]),
+            true,
+        );
+        assert!(other.is_empty() && remaining.is_none());
+        assert_eq!(paths(current), vec!["/issue46/notes/b.md"]);
+    }
+
+    #[test]
+    fn mixed_batch_keeps_current_other_and_unmatched_files() {
+        let mut state = RegistryState::default();
+        state
+            .windows
+            .insert("main".into(), snapshot("/issue46/notes", &[]));
+        state
+            .windows
+            .insert("window-other".into(), snapshot("/issue46/other", &[]));
+        let (other, current, remaining) = resolve_existing_targets(
+            &state,
+            "main",
+            documents(&[
+                "/issue46/notes/b.md",
+                "/issue46/other/c.md",
+                "/issue46/new/d.md",
+                "/issue46/notes/b.md",
+            ]),
+            true,
+        );
+        assert_eq!(paths(current), vec!["/issue46/notes/b.md"]);
+        assert_eq!(other["window-other"], vec!["/issue46/other/c.md"]);
+        assert_eq!(paths(remaining), vec!["/issue46/new/d.md"]);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn directory_matching_handles_windows_case_separators_and_drive_root() {
+        for (folder, file) in [
+            ("D:\\Issue46\\Notes\\", "d:/issue46/notes/b.md"),
+            ("D:\\", "d:/issue46.md"),
+        ] {
+            let mut state = RegistryState::default();
+            state.windows.insert("main".into(), snapshot(folder, &[]));
+            let (other, current, remaining) =
+                resolve_existing_targets(&state, "main", documents(&[file]), true);
+            assert!(other.is_empty() && remaining.is_none());
+            assert_eq!(paths(current), vec![file]);
+        }
+    }
 }

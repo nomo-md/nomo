@@ -320,6 +320,7 @@ pub fn run() {
             crate::config::commands::list_app_settings,
             crate::window::commands::update_window_state,
             crate::window::commands::refresh_window_menu,
+            crate::window::commands::activate_document_window,
             crate::window::commands::report_window_title,
             crate::window::commands::refresh_interface_language_chrome,
             crate::window::commands::set_desktop_icon_theme,

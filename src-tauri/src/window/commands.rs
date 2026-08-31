@@ -74,6 +74,26 @@ pub(crate) fn refresh_window_menu(
     menu_result
 }
 
+/// 仅在确定打开去向后激活调用者自身，不接受其他窗口标签。
+#[tauri::command]
+pub(crate) fn activate_document_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    if !crate::window::external_open::is_document_window_label(window.label()) {
+        return Err("当前窗口不是文档窗口".to_string());
+    }
+    window
+        .show()
+        .map_err(|error| format!("显示文档窗口失败：{error}"))?;
+    window
+        .unminimize()
+        .map_err(|error| format!("还原文档窗口失败：{error}"))?;
+    window
+        .set_focus()
+        .map_err(|error| format!("聚焦文档窗口失败：{error}"))?;
+    crate::window::os::bring_window_to_front(&window);
+    crate::window::tray::sync_tray_active_with_window_visibility(window.app_handle());
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) fn report_window_title(
     app: AppHandle,

@@ -86,6 +86,7 @@
   } from './services/appCommands';
   import {
     closeAppWindow as closeDesktopWindow,
+    activateDocumentWindow,
     createAppWindow,
     enterMarkdownMiniMode,
     exitApp as exitDesktopApp,
@@ -98,6 +99,7 @@
     updateAppWindowTitle,
     type OpenTarget,
   } from './services/desktopWindow';
+  import { routeOpenTarget } from './services/openTargetRouting';
   import { createImageInsertionHandlers } from './services/imageInsertion';
   import { readEditorClipboard, writeEditorClipboard } from './services/clipboard';
   import { createDesktopImageLoader } from './services/desktopImageLoader';
@@ -1970,25 +1972,6 @@
     }
   }
 
-  async function openTargetInNewWindow(target: OpenTarget) {
-    const decision = await prepareOpenTargetWindow(desktopEnabled, target, true);
-    if (decision.action === 'handled') {
-      return;
-    }
-    if (decision.action === 'activate-current') {
-      await openTargetInCurrentWindow(decision.target);
-      return;
-    }
-    if (decision.action === 'open-current') {
-      await openTargetInCurrentWindow(decision.target);
-      return;
-    }
-    const created = await createAppWindow(desktopEnabled, decision.windowLabel);
-    if (!created) {
-      statusMessage = target.kind === 'folder' ? t.loadFolderTreeFailed() : t.openFileFailed();
-    }
-  }
-
   function enqueueOpenTargetOperation<T>(operation: () => Promise<T>) {
     const result = openTargetOperationQueue.then(operation);
     openTargetOperationQueue = result.then(
@@ -1999,41 +1982,29 @@
   }
 
   function openTargetWithBehavior(target: OpenTarget) {
-    return enqueueOpenTargetOperation(() => routeOpenTargetWithBehavior(target));
-  }
-
-  async function routeOpenTargetWithBehavior(target: OpenTarget) {
-    await syncCurrentWindowOpenTargetsNow();
-    const decision = await prepareOpenTargetWindow(desktopEnabled, target, false);
-    if (decision.action === 'handled') {
-      return;
-    }
-    if (decision.action === 'activate-current') {
-      await openTargetInCurrentWindow(decision.target);
-      return;
-    }
-    const remainingTarget = decision.target;
-
-    if (isReusableInitialWindow() || openDefaultBehavior === 'current-window') {
-      await openTargetInCurrentWindow(remainingTarget);
-      return;
-    }
-    if (openDefaultBehavior === 'new-window') {
-      await openTargetInNewWindow(remainingTarget);
-      return;
-    }
-
-    const result = await requestOpenTargetChoice(remainingTarget);
-    if (!result) return;
-    if (result.remember) {
-      openDefaultBehavior = result.choice;
-      await updateAppSetting('openDefaultBehavior', result.choice).catch(() => undefined);
-    }
-    if (result.choice === 'current-window') {
-      await openTargetInCurrentWindow(remainingTarget);
-    } else {
-      await openTargetInNewWindow(remainingTarget);
-    }
+    return enqueueOpenTargetOperation(() =>
+      routeOpenTarget(target, {
+        syncTargets: syncCurrentWindowOpenTargetsNow,
+        prepare: (remaining, create) => prepareOpenTargetWindow(desktopEnabled, remaining, create),
+        activateCurrent: () => activateDocumentWindow(desktopEnabled),
+        openCurrent: openTargetInCurrentWindow,
+        createWindow: async (label) => {
+          const created = await createAppWindow(desktopEnabled, label);
+          if (!created) {
+            // 接收窗口不再提前显示；创建失败时仍需让用户看到原有错误提示。
+            await activateDocumentWindow(desktopEnabled);
+            statusMessage = target.kind === 'folder' ? t.loadFolderTreeFailed() : t.openFileFailed();
+          }
+        },
+        isReusableInitialWindow,
+        getBehavior: () => openDefaultBehavior,
+        requestChoice: requestOpenTargetChoice,
+        rememberBehavior: async (behavior) => {
+          openDefaultBehavior = behavior;
+          await updateAppSetting('openDefaultBehavior', behavior).catch(() => undefined);
+        },
+      }),
+    );
   }
 
   function openFolderWithBehavior(folderPath: string) {
@@ -3601,6 +3572,7 @@
       desktopEnabled,
       { kind: 'documents', paths: [path] },
       false,
+      { reuseDirectoryWindow: false }, // 文件树单击保留当前窗口预览，仅已打开文件跨窗口定位。
     ).catch((error) => {
       showVisibleError(error, t.previewOpenFailed());
       return null;

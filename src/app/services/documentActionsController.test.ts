@@ -175,6 +175,30 @@ afterEach(() => {
 });
 
 describe('documentActionsController', () => {
+  it('打开同目录新文件增加标签，保留旧标签内容和脏状态，重复打开不增加标签', async () => {
+    const oldTab = createTab();
+    const before = { ...oldTab };
+    const { options, getState } = createOptions([oldTab]);
+    const controller = createDocumentActionsController(options as any);
+    const document: NativeDocument = {
+      path: 'C:/docs/second.md',
+      fileName: 'second.md',
+      markdown: '# Second',
+      modifiedAt: 1,
+      sizeBytes: 8,
+      readonly: false,
+    };
+    await controller.applyNativeDocument(document, 'opened');
+    expect(getState().tabs).toHaveLength(2);
+    expect(getState().tabs[0]).toEqual(before);
+    expect(getState().tabs[0].dirty).toBe(true);
+    expect(getState().tabs[1].nativePath).toBe(document.path);
+    expect(getState().activeTabId).toBe(getState().tabs[1].id);
+    await controller.applyNativeDocument(document, 'opened again');
+    expect(getState().tabs).toHaveLength(2);
+    expect(getState().tabs[0]).toEqual(before);
+  });
+
   it('关闭脏标签时，如果保存失败则保留标签页', async () => {
     const tab = createTab();
     const { options, getState } = createOptions([tab]);
