@@ -61,6 +61,15 @@ function pushLog(entry: LogEntry): void {
     return;
   }
 
+  if (/Android/i.test(globalThis.navigator?.userAgent ?? '')) {
+    // Redact before buffering, DevTools and IPC, not only when the native log is written.
+    entry = {
+      ...entry,
+      message: redactAndroidMessage(entry.message),
+      data: redactAndroidData(entry.data),
+    };
+  }
+
   logBuffer.push(entry);
   if (logBuffer.length > MAX_BUFFER_SIZE) {
     logBuffer = logBuffer.slice(logBuffer.length - MAX_BUFFER_SIZE);
@@ -68,6 +77,29 @@ function pushLog(entry: LogEntry): void {
 
   writeDevTools(entry);
   writeNative(entry);
+}
+
+function redactAndroidMessage(message: string): string {
+  const match =
+    /(?:https?:\/\/|content:\/\/|file:\/\/|data:|mailto:|\/(?:data|storage|sdcard|mnt)\/)/i.exec(
+      message,
+    );
+  return match ? message.slice(0, match.index) + '[redacted]' : message;
+}
+
+function redactAndroidData(value: unknown, depth = 0): unknown {
+  // Free-form strings can be a filename, provider URI, error stack or shared body.
+  if (typeof value === 'string' || depth > 4) return '[redacted]';
+  if (Array.isArray(value)) return value.map((item) => redactAndroidData(item, depth + 1));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        redactAndroidMessage(key),
+        redactAndroidData(item, depth + 1),
+      ]),
+    );
+  }
+  return value;
 }
 
 function writeDevTools(entry: LogEntry): void {

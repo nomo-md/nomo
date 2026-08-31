@@ -1,4 +1,8 @@
 {
+  "mobileSearchProgress": "本文を検索中：{completed}/{total}",
+  "mobileSearchFailed": "検索を開始できませんでした。パネルを閉じて再試行してください。",
+  "mobileSearchPartialFailure": "一部の文書を検索できません。下のファイル名から開けます。",
+  "mobileSearchReadFailed": "本文を読み取れないか変更されています。文書を開き直してください。",
   "$schema": "https://inlang.com/schema/inlang-message-format",
   "appName": "Nomo",
   "settingsTitle": "環境設定",

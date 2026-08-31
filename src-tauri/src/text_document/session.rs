@@ -1973,6 +1973,22 @@ impl DocumentSessionManager {
         }
     }
 
+    /// 抽屉搜索只需要固定 revision 的正文，不等待或创建全文行索引。
+    #[cfg(any(mobile, test))]
+    pub(crate) fn mobile_search_snapshot_readers(
+        &self,
+        session_id: &str,
+        revision: u64,
+    ) -> Result<impl Fn() -> Box<dyn std::io::Read + Send>, String> {
+        let session = self.session(session_id).map_err(|_| "session-closed")?;
+        let snapshot = session.snapshot().map_err(|_| "snapshot-unavailable")?;
+        if snapshot.revision != revision {
+            return Err("revision-changed".into());
+        }
+        // Re-read the same immutable snapshot for encoding detection, without buffering its body.
+        Ok(move || -> Box<dyn std::io::Read + Send> { Box::new(snapshot.reader()) })
+    }
+
     pub(super) fn task_snapshot(
         &self,
         session_id: &str,

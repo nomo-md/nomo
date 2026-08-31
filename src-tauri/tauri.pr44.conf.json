@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "android": {
+      "debugApplicationIdSuffix": ".pr44"
+    }
+  }
+}

@@ -147,6 +147,8 @@
   let dirtyPreferenceKeys = new Set<AppPreferenceKey>();
   let desktopEnabled = false;
   let platformCapabilities = getPlatformCapabilities();
+  const isMobileRuntime = /Android|iPhone|iPad|iPod/i.test(globalThis.navigator?.userAgent ?? '');
+  const mobileHiddenShortcutIds = new Set<ShortcutCommandId>(['toggle-focus', 'toggle-toolbar', 'toggle-markdown-mini']);
   let picgoTesting = false;
   let bindingMdAssociation = false;
   let unbindingMdAssociation = false;
@@ -1986,13 +1988,13 @@
             </div>
           {:else if activeCategory === 'files'}
             <div class="settings-group">
-              <h2>{t.filesAndWindows()}</h2>
+              <h2>{isMobileRuntime ? t.file() : t.filesAndWindows()}</h2>
               <div class="setting-row">
                 <div>
                   <span class="setting-label">{t.folderOpenDefaultBehavior()}</span>
                   <p>{t.folderOpenDefaultBehaviorDescription()}</p>
                 </div>
-                <div class="triple-control" role="group" aria-label={t.folderOpenDefaultBehavior()}>
+                <div class="triple-control" role="group" aria-label={t.folderOpenDefaultBehavior()} class:hidden-mobile={isMobileRuntime}>
                   <button
                     type="button"
                     class:active={draftSettings.openDefaultBehavior === 'ask-every-time'}
@@ -2014,7 +2016,7 @@
                 </div>
               </div>
 
-              <label class="toggle-row" for="filePreviewEnabled">
+              <label class="toggle-row" class:hidden-mobile={isMobileRuntime} for="filePreviewEnabled">
                 <span>
                   <span class="toggle-title">{t.filePreviewTab()}</span>
                   <span class="toggle-desc">{t.filePreviewTabDescription()}</span>
@@ -2042,12 +2044,12 @@
                 <span class="toggle-switch" aria-hidden="true"></span>
               </label>
 
-              <div class="setting-row">
+              <div class="setting-row" class:hidden-mobile={isMobileRuntime}>
                 <div>
                   <span class="setting-label">{t.closeWindowBehavior()}</span>
                   <p>{t.closeWindowBehaviorDescription()}</p>
                 </div>
-                <div class="triple-control" role="group" aria-label={t.closeWindowBehavior()}>
+                <div class="triple-control" role="group" aria-label={t.closeWindowBehavior()} class:hidden-mobile={isMobileRuntime}>
                   <button
                     type="button"
                     class:active={draftSettings.closeWindowBehavior === 'ask-every-time'}
@@ -2106,7 +2108,7 @@
                 </div>
               </div>
 
-              <div class="setting-row">
+              <div class="setting-row" class:hidden-mobile={isMobileRuntime}>
                 <div>
                   <span class="setting-label">{t.bindMdDefaultApp()}</span>
                   <p>{mdAssociationDesc}</p>
@@ -2139,7 +2141,7 @@
                 </div>
               </div>
 
-              <div class="setting-row">
+              <div class="setting-row" class:hidden-mobile={isMobileRuntime}>
                 <div>
                   <span class="setting-label">{t.registerMdContextMenu()}</span>
                   <p>{contextMenuDesc}</p>
@@ -2473,6 +2475,7 @@
             </div>
           {:else if activeCategory === 'advanced'}
             <div class="settings-group">
+              {#if !isMobileRuntime}
               <h2>{t.renderingMode()}</h2>
               <div class="setting-row">
                 <div>
@@ -2494,6 +2497,7 @@
                   >
                 </div>
               </div>
+              {/if}
 
               <h2>{t.defaultInsertBehavior()}</h2>
               <div class="setting-row">
@@ -2548,6 +2552,7 @@
                       type="text"
                       spellcheck="false"
                       value={draftSettings.shortcutPreferences[shortcut.id]}
+                      disabled={isMobileRuntime && mobileHiddenShortcutIds.has(shortcut.id)}
                       on:input={(event) => updateShortcut(shortcut.id, event)}
                     />
                   </div>
@@ -3074,6 +3079,10 @@
   .compact-row {
     min-height: 54px;
     padding: 10px 0;
+  }
+
+  .hidden-mobile {
+    display: none !important;
   }
 
   .shortcut-settings {

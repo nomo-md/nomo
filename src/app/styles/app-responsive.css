@@ -90,6 +90,119 @@
   }
 }
 
+.app-layout.mobile-runtime .toolbar {
+  min-height: 52px;
+  gap: 5px;
+  padding: 6px 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.app-layout.mobile-runtime .toolbar::-webkit-scrollbar {
+  display: none;
+}
+
+.app-layout.mobile-runtime .document-layout {
+  padding-right: max(12px, env(safe-area-inset-right));
+  padding-left: max(12px, env(safe-area-inset-left));
+}
+
+.app-layout.mobile-runtime {
+  height: 100dvh;
+  box-sizing: border-box;
+  padding-top: max(30px, env(safe-area-inset-top));
+}
+
+.app-layout.mobile-runtime .editor-toolbar-region,
+.app-layout.mobile-runtime .editor-toolbar-region > div {
+  height: 52px;
+}
+
+.app-layout.mobile-runtime .toolbar button,
+.app-layout.mobile-runtime .toolbar .icon-button,
+.app-layout.mobile-runtime .width-control-compact {
+  min-width: 40px;
+  min-height: 40px;
+  border-radius: 8px;
+}
+
+.app-layout.mobile-runtime .toolbar .mobile-toolbar-menu {
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  flex: 0 0 40px;
+  border: 1px solid var(--md-editor-border);
+  background: var(--editor-card-surface, var(--md-editor-surface));
+  color: var(--md-editor-fg);
+}
+
+.app-layout.mobile-runtime .toolbar .mobile-toolbar-divider {
+  width: 1px;
+  height: 28px;
+  flex: 0 0 1px;
+  background: var(--md-editor-border);
+}
+
+.app-layout.mobile-runtime .mode-switch {
+  --mode-indicator-width: 40px;
+  grid-template-columns: repeat(2, 40px);
+}
+
+.app-layout.mobile-runtime .mode-switch button {
+  min-width: 40px;
+}
+
+@media (max-width: 767px) {
+  .app-layout.mobile-runtime button,
+  .app-layout.mobile-runtime [role='button'] {
+    min-height: 40px;
+  }
+}
+
+.app-layout.mobile-runtime .workspace {
+  --md-editor-effective-sidebar-width: 0px;
+  grid-template-columns: minmax(0, 1fr);
+  transition: none;
+}
+
+.app-layout.mobile-runtime .editor-shell {
+  margin-top: 0;
+  min-height: 0;
+}
+
+.app-layout.mobile-runtime .editor-card {
+  min-height: 100%;
+}
+
+
+.app-layout.mobile-runtime .rail,
+.app-layout.mobile-runtime .sidebar-resizer {
+  display: none;
+}
+
+.app-layout.mobile-runtime .editor-card {
+  width: 100%;
+  max-width: none;
+}
+
+.app-layout.mobile-runtime .document-layout {
+  grid-template-columns: 1fr !important;
+  justify-content: stretch;
+  width: 100%;
+  padding-right: max(12px, env(safe-area-inset-right));
+  padding-left: max(12px, env(safe-area-inset-left));
+}
+
+.app-layout.mobile-runtime .prosemirror-host,
+.app-layout.mobile-runtime .source-editor,
+.app-layout.mobile-runtime .front-matter-card,
+.app-layout.mobile-runtime .editor-scroll-past-end {
+  grid-column: 1 !important;
+  width: min(820px, 100%) !important;
+  max-width: 100% !important;
+}
+
 .titlebar {
   position: relative;
   display: flex;

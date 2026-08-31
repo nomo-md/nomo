@@ -1302,13 +1302,32 @@ function createMouseDown(clientX: number, clientY = 0): MouseEvent {
   });
 }
 
-function createClick(clientX: number, clientY = 0): MouseEvent {
-  return new MouseEvent('click', {
-    bubbles: true,
-    cancelable: true,
-    clientX,
-    clientY,
-  });
+function createClick(clientX: number, clientY = 0): PointerEvent {
+  // jsdom 25 lacks PointerEvent; keep a dispatchable mouse event with the full pointer contract.
+  return Object.assign(
+    new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      clientX,
+      clientY,
+    }),
+    {
+      pointerId: 1,
+      pointerType: 'mouse',
+      isPrimary: true,
+      width: 1,
+      height: 1,
+      pressure: 0,
+      tangentialPressure: 0,
+      tiltX: 0,
+      tiltY: 0,
+      twist: 0,
+      altitudeAngle: Math.PI / 2,
+      azimuthAngle: 0,
+      getCoalescedEvents: () => [],
+      getPredictedEvents: () => [],
+    },
+  );
 }
 
 function createKeyDown(key: 'ArrowLeft' | 'ArrowRight'): KeyboardEvent {

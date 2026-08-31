@@ -69,6 +69,13 @@
         "description": "JSON Document",
         "role": "Editor",
         "mimeType": "application/json"
+      },
+      {
+        "ext": ["md", "markdown", "txt", "json"],
+        "name": "Nomo Document (Generic)",
+        "description": "Nomo Document",
+        "role": "Editor",
+        "mimeType": "application/octet-stream"
       }
     ],
     "icon": [

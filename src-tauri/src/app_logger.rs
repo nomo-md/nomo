@@ -103,6 +103,8 @@ fn logger_state() -> &'static Mutex<LoggerState> {
 }
 
 fn format_log_line(level: &str, tag: &str, message: &str) -> String {
+    #[cfg(target_os = "android")]
+    let message = redact_android_message(message);
     format!(
         "[{}][{}][{}] {}",
         Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
@@ -110,6 +112,55 @@ fn format_log_line(level: &str, tag: &str, message: &str) -> String {
         tag,
         message
     )
+}
+
+#[cfg(any(target_os = "android", test))]
+fn redact_android_message(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    let first_private = [
+        "https://",
+        "http://",
+        "content://",
+        "file://",
+        "data:",
+        "mailto:",
+        "/data/",
+        "/storage/",
+        "/sdcard/",
+        "/mnt/",
+    ]
+    .iter()
+    .filter_map(|marker| lower.find(marker))
+    .min();
+    match first_private {
+        Some(index) => format!("{}[redacted]", &message[..index]),
+        None => message.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod mobile_privacy_tests {
+    use super::redact_android_message;
+
+    #[test]
+    fn mobile_logs_redact_shared_urls_and_paths_but_keep_safe_diagnostics() {
+        for private in [
+            "https://example.com/?token=secret",
+            "content://provider/private.md",
+            "/data/user/0/app/files/private name.md",
+            "/storage/emulated/0/private name.md",
+            "data:text/plain,shared%20body",
+        ] {
+            assert_eq!(
+                redact_android_message(&format!("打开文档：{private}")),
+                "打开文档：[redacted]"
+            );
+        }
+        assert_eq!(
+            redact_android_message("导入失败，请检查读取权限"),
+            "导入失败，请检查读取权限"
+        );
+    }
 }
 
 fn append_to_log_file(line: &str) -> Result<(), String> {

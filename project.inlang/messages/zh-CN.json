@@ -1,4 +1,8 @@
 {
+  "mobileSearchProgress": "正在搜索正文：{completed}/{total}",
+  "mobileSearchFailed": "搜索未能启动，请关闭抽屉后重试。",
+  "mobileSearchPartialFailure": "部分文档无法搜索正文，仍可通过下方文件名打开。",
+  "mobileSearchReadFailed": "正文无法读取或已发生变化，请重新打开文档后重试。",
   "$schema": "https://inlang.com/schema/inlang-message-format",
   "appName": "Nomo",
   "settingsTitle": "偏好设置",

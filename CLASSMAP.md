@@ -119,6 +119,9 @@
 | CodeMirror 分段核心 | `src/lib/text-editor/SegmentedTextEditorCore.ts` | `positionMapping.ts`, `editBatch.ts`, `jsonLexer.ts` | 修改局部窗口编辑、全局选区/锚点映射、临时只读或历史门禁 |
 | 窗口读取、缓存与预取 | `src/lib/text-editor/viewportController.ts` | `chunkCache.ts`, `protocol.ts` | 修改主读取乱序保护、窗口大小、LRU、预览扩展或前后预取 |
 | 分段文件后端会话 | `src-tauri/src/text_document/session.rs` | `src-tauri/src/text_document/mod.rs`, `line_index.rs`, `task_runner.rs` | 修改首窗口、窗口读取上限、revision、编辑日志或后台索引/任务 |
+| Android 分享与持久导入 | `src-tauri/src/android_intent.rs`, `src-tauri/src/mobile_imports.rs` | `src-tauri/src/mobile.rs`, `src-tauri/gen/android/app/src/main/java/com/nomo/desktop/MainActivity.kt`, `SharedText.kt`, `src-tauri/src/config/mod.rs` | 分享文本/链接归一化、内部文件原子发布、旧缓存与配置引用迁移；不回写来源、不按年龄删除；内含测试临时目录并行隔离回归 |
+| Android 打开路径边界 | `src/app/services/desktopWindow.ts`, `src/app/utils/pathLabels.ts` | `src/app/services/platform.ts`, `src/app/App.svelte` | 移动端始终路由当前窗口，不调用桌面窗口登记 IPC；Android 路径大小写敏感，保留桌面比较行为 |
+| 移动抽屉全文搜索 | `src/app/services/mobileDocumentSearch.ts`, `src-tauri/src/mobile_search.rs` | `mobileDocumentSearch.worker.ts`, `src/app/components/MobileDocumentsSidebar.svelte`, `src-tauri/src/mobile_search/scanner.rs`, `src-tauri/src/text_document/session.rs` | 300ms 防抖、64KiB 后台扫描、当前未保存快照、首条有限摘要、取消与过期结果过滤 |
 
 ### 大纲与导航
 

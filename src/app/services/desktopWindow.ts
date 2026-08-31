@@ -4,7 +4,7 @@ import {
   type BackgroundThrottlingPolicy,
 } from '@tauri-apps/api/window';
 import { createPerfTimer, logError, logInfo } from '../../lib/services/logger';
-import { getPlatformCapabilities } from './platform';
+import { getPlatformCapabilities, isMobilePlatform } from './platform';
 
 export type OpenTarget =
   | { kind: 'documents'; paths: string[] }
@@ -137,7 +137,7 @@ export async function prepareOpenTargetWindow(
   target: OpenTarget,
   createIfMissing: boolean,
 ): Promise<OpenTargetRouteDecision> {
-  if (!desktopEnabled) {
+  if (!desktopEnabled || isMobilePlatform()) {
     return { action: 'open-current', target };
   }
   const { invoke } = await import('@tauri-apps/api/core');
@@ -151,7 +151,7 @@ export async function syncWindowOpenTargets(
   desktopEnabled: boolean,
   snapshot: WindowOpenTargetsSnapshot,
 ): Promise<void> {
-  if (!desktopEnabled) {
+  if (!desktopEnabled || isMobilePlatform()) {
     return;
   }
   const { invoke } = await import('@tauri-apps/api/core');

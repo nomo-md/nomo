@@ -1,15 +1,32 @@
 mod app_logger;
 mod config;
-mod export;
-mod external_link;
 mod file_system;
 mod i18n;
 mod models;
-mod pdf_outline;
-mod software_update;
 mod text_document;
+#[cfg(any(target_os = "android", test))]
+mod mobile_imports;
+#[cfg(any(mobile, test))]
+mod mobile_search;
+
+#[cfg(target_os = "android")]
+mod android_intent;
+
+#[cfg(desktop)]
+mod export;
+#[cfg(desktop)]
+mod external_link;
+#[cfg(desktop)]
+mod pdf_outline;
+#[cfg(desktop)]
+mod software_update;
+#[cfg(desktop)]
 mod window;
+#[cfg(desktop)]
 mod windows_package;
+
+#[cfg(desktop)]
+use tauri::{Emitter, Manager, WindowEvent};
 
 #[cfg(target_os = "windows")]
 mod export_windows;
@@ -17,9 +34,10 @@ mod export_windows;
 #[cfg(target_os = "macos")]
 mod export_macos;
 
-use tauri::{Emitter, Manager, WindowEvent};
+#[cfg(mobile)]
+mod mobile;
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg(desktop)]
 pub fn run() {
     // 先生成 context 以获取应用 identifier，便于启动阶段读取配置
     let context: tauri::Context<tauri::Wry> = tauri::generate_context!();

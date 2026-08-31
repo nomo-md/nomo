@@ -1,0 +1,104 @@
+name: PR validation
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Contributor code never receives release credentials or a write-scoped repository token.
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend build, types and regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Targeted regression tests
+        run: pnpm exec vitest run src/app/services/mobileDocumentSearch.test.ts src/app/services/desktopWindow.mobile.test.ts src/app/utils/pathLabels.mobile.test.ts src/lib/services/logger.mobile.test.ts src/lib/editor-core/plugins/pendingInlineMark.test.ts
+      - name: Type check (baseline failures are not ignored)
+        run: pnpm check
+
+  desktop:
+    name: ${{ matrix.os }} compile and Rust regressions
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --lib mobile_ --locked
+      - name: Existing document save regression
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib manager_applies_revisioned_edits_and_stream_saves_bom_and_crlf --locked
+
+  android:
+    name: Android ARM64 preview APK and share regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ORG_GRADLE_PROJECT_nomoPrPreview: 'true'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - name: Install project Android toolchain
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - run: pnpm install --frozen-lockfile
+      - name: Build offline-capable preview with ephemeral debug signing
+        run: pnpm tauri android build --debug --apk --target aarch64 --ci --config src-tauri/tauri.pr44.conf.json
+      - name: Share text unit tests
+        working-directory: src-tauri/gen/android
+        run: ./gradlew :app:testArm64DebugUnitTest --no-daemon
+      - name: Verify preview isolation and produce SHA-256 manifest
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/android/package-preview.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nomo-pr44-arm64-${{ github.event.pull_request.head.sha }}
+          path: .artifacts/android-preview/*
+          if-no-files-found: error
+          retention-days: 30

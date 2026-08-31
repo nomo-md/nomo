@@ -1,6 +1,10 @@
 export type AppPlatform = 'macos' | 'windows' | 'linux' | 'unknown';
 export type WindowChromeMode = 'native' | 'windows-custom';
 
+export function isMobilePlatform(userAgent = globalThis.navigator?.userAgent ?? ''): boolean {
+  return /Android|iPhone|iPad|iPod/i.test(userAgent);
+}
+
 export interface PlatformCapabilities {
   platform: AppPlatform;
   isMac: boolean;

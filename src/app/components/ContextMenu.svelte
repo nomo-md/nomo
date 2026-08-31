@@ -120,11 +120,11 @@
     await tick();
     if (!menuEl) return;
     const rect = menuEl.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
 
-    adjustedX = Math.max(8, Math.min(x, vw - rect.width - 8));
-    adjustedY = Math.max(8, Math.min(y, vh - rect.height - 8));
+    adjustedX = Math.max(8, Math.min(Math.max(8, x), Math.max(8, vw - rect.width - 8)));
+    adjustedY = Math.max(8, Math.min(Math.max(8, y), Math.max(8, vh - rect.height - 8)));
     submenuOpensLeft = adjustedX + rect.width + 236 > vw - 8;
   }
 
@@ -384,7 +384,8 @@
   .context-menu {
     z-index: var(--md-editor-z-context-menu, 80);
     min-width: 210px;
-    max-width: 300px;
+    max-width: min(300px, calc(100vw - 16px));
+    max-height: calc(100dvh - 16px);
     padding: 4px;
     overflow: visible;
     border: 1px solid var(--md-editor-border);
@@ -403,13 +404,19 @@
     position: absolute;
     top: -4px;
     left: calc(100% + 4px);
-    max-height: min(520px, calc(100vh - 24px));
+    max-height: min(520px, calc(100dvh - 24px));
     overflow-y: auto;
   }
 
   .context-menu-submenu.opens-left {
     right: calc(100% + 4px);
     left: auto;
+  }
+
+  @media (max-width: 767px), (pointer: coarse) {
+    .context-menu {
+      overflow: auto;
+    }
   }
 
   @keyframes context-menu-in {

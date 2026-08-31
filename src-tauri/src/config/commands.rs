@@ -41,7 +41,7 @@ pub(crate) fn remember_recent_entry(app: AppHandle, input: RecentEntryInput) -> 
 
 #[tauri::command]
 pub(crate) fn list_recent_entries(app: AppHandle) -> Result<Vec<RecentEntry>, String> {
-    query_recent_entries_with_limit(&app, 20)
+    query_recent_entries_with_limit(&app, 200)
 }
 
 #[tauri::command]

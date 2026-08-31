@@ -142,6 +142,14 @@ impl ConfigManager {
         self.save_config(&config)
     }
 
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn replace_after_save(&self, next: AppConfig) -> Result<(), String> {
+        let mut current = self.config.write().map_err(|_| "配置写锁不可用".to_string())?;
+        self.save_config(&next)?;
+        *current = next;
+        Ok(())
+    }
+
     #[allow(dead_code)]
     pub(crate) fn reset_to_default(&self) -> Result<(), String> {
         self.update(|config| *config = AppConfig::default())

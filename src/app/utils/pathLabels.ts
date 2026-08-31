@@ -8,6 +8,10 @@ import { t } from '../i18n';
  * - Unicode NFC 规范化（macOS 文件系统使用 NFD）
  */
 function normalizePathForComparison(path: string) {
+  // Android internal storage is case-sensitive; distinct imports must not share an editor tab.
+  if (/Android/i.test(globalThis.navigator?.userAgent ?? '')) {
+    return path.replace(/\/+$/, '');
+  }
   return path
     .replace(/\\/g, '/')
     .replace(/\/+$/, '')

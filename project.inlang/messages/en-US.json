@@ -1,4 +1,8 @@
 {
+  "mobileSearchProgress": "Searching contents: {completed}/{total}",
+  "mobileSearchFailed": "Search could not start. Close and reopen the drawer to retry.",
+  "mobileSearchPartialFailure": "Some files could not be searched. Their names are still available below.",
+  "mobileSearchReadFailed": "Contents unavailable or changed; reopen the document and retry.",
   "$schema": "https://inlang.com/schema/inlang-message-format",
   "appName": "Nomo",
   "settingsTitle": "Preferences",

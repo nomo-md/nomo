@@ -15,6 +15,7 @@
     Link,
     List,
     ListTree,
+    Menu,
     MessageSquare,
     Info,
     Quote,
@@ -26,6 +27,7 @@
     Table2,
     TableOfContents,
     Underline,
+    WandSparkles,
   } from '@lucide/svelte';
   import {
     DIAGRAM_TEMPLATES,
@@ -59,6 +61,8 @@
   export let toggleToolbar: () => void;
   export let inactive = false;
   export let openSearchPanel: () => void;
+  export let mobile = false;
+  export let openMobileDocuments: () => void = () => undefined;
 
   const tableRows = [1, 2, 3, 4, 5];
   const tableColumns = [1, 2, 3, 4, 5, 6];
@@ -66,10 +70,50 @@
   let previewColumns = 4;
   let diagramPickerOpen = false;
   let widthPickerOpen = false;
+  let stylePickerOpen = false;
+  const styleShortcuts: Array<{ label: string; hint: string; command: EditorCommand }> = [
+    { label: 'H1', hint: '#', command: { type: 'setHeading', level: 1 } },
+    { label: 'H2', hint: '##', command: { type: 'setHeading', level: 2 } },
+    { label: 'H3', hint: '###', command: { type: 'setHeading', level: 3 } },
+    { label: t.bold(), hint: '**', command: { type: 'toggleBold' } },
+    { label: t.italic(), hint: '*', command: { type: 'toggleItalic' } },
+    { label: t.strikethrough(), hint: '~~', command: { type: 'toggleStrikethrough' } },
+    { label: t.underline(), hint: '<u>', command: { type: 'toggleUnderline' } },
+    { label: t.highlight(), hint: '==', command: { type: 'toggleHighlight' } },
+    { label: t.inlineCode(), hint: '`', command: { type: 'toggleCode' } },
+    { label: t.quote(), hint: '>', command: { type: 'toggleBlockquote' } },
+    { label: t.unorderedList(), hint: '-', command: { type: 'toggleBulletList' } },
+    { label: t.orderedList(), hint: '1.', command: { type: 'toggleOrderedList' } },
+    { label: t.taskList(), hint: '[ ]', command: { type: 'toggleTaskList' } },
+  ];
 
   $: if (inactive) {
     diagramPickerOpen = false;
     widthPickerOpen = false;
+    stylePickerOpen = false;
+  }
+
+  function closeStylePicker() {
+    stylePickerOpen = false;
+  }
+
+  function toggleStylePicker() {
+    closeTablePicker();
+    closeDiagramPicker();
+    closeWidthPicker();
+    stylePickerOpen = !stylePickerOpen;
+  }
+
+  function applyStyle(command: EditorCommand) {
+    runCommand(command);
+    stylePickerOpen = false;
+  }
+
+  function handleStylePickerKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      stylePickerOpen = false;
+    }
   }
 
   function toggleTablePicker() {
@@ -121,6 +165,7 @@
   function openLinkEditor() {
     closeDiagramPicker();
     closeWidthPicker();
+    closeStylePicker();
     openLinkPicker();
   }
 
@@ -159,7 +204,61 @@
 
 {#key interfaceLocale}
   <div class="toolbar" aria-label={t.formatToolbar()} data-interface-locale={interfaceLocale}>
+    {#if mobile}
+      <button
+        class="mobile-toolbar-menu"
+        type="button"
+        title={t.file()}
+        aria-label={t.file()}
+        on:click={openMobileDocuments}
+      >
+        <Menu size={20} />
+      </button>
+      <span class="mobile-toolbar-divider" aria-hidden="true"></span>
+    {/if}
     <div class="toolbar-group toolbar-group-core">
+      <div class="style-picker-anchor" use:clickOutside={closeStylePicker}>
+        <button
+          class="style-picker-button"
+          class:active={stylePickerOpen}
+          title={t.formatToolbar()}
+          aria-label={t.formatToolbar()}
+          aria-haspopup="dialog"
+          aria-expanded={stylePickerOpen}
+          on:mousedown|preventDefault
+          on:click|stopPropagation={toggleStylePicker}
+        >
+          <WandSparkles size={17} />
+        </button>
+        {#if stylePickerOpen}
+          <div
+            class="style-picker-popover"
+            role="dialog"
+            tabindex="-1"
+            aria-label={t.formatToolbar()}
+            on:keydown={handleStylePickerKeydown}
+          >
+            {#each styleShortcuts as shortcut (shortcut.label + shortcut.hint)}
+              <button
+                type="button"
+                on:mousedown|preventDefault
+                on:click={() => applyStyle(shortcut.command)}
+              >
+                <strong>{shortcut.label}</strong>
+                <small>{shortcut.hint}</small>
+              </button>
+            {/each}
+            <button
+              type="button"
+              on:mousedown|preventDefault
+              on:click={() => applyStyle({ type: 'insertCodeBlock' })}
+            >
+              <strong>{t.codeBlock()}</strong>
+              <small>```</small>
+            </button>
+          </div>
+        {/if}
+      </div>
       <button
         title={t.title()}
         aria-label={t.setHeadingOne()}
