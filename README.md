@@ -2,25 +2,25 @@
   <img src="./assets/128x128.png" alt="Nomo 图标" width="60">
 </p>
 
-\<h1 align="center">\<strong>Nomo\</strong>\</h1>
+<h1 align="center"><strong>Nomo</strong></h1>
 
-\<p align="center">
-\<a href="https://github.com/LIXianSenQwQ/nomo/releases">
-\<img src="https://img.shields.io/github/v/release/LIXianSenQwQ/nomo?label=release" alt="GitHub Release">
-\</a>
-\<a href="./LICENSE">
-\<img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License">
-\</a>
-\<img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey" alt="Platform">
-\<img src="https://img.shields.io/badge/Tauri-2-24C8DB" alt="Tauri 2">
-\<img src="https://img.shields.io/badge/Svelte-5-FF3E00" alt="Svelte 5">
-\</p>
+<p align="center">
+  <a href="https://github.com/LIXianSenQwQ/nomo/releases">
+    <img src="https://img.shields.io/github/v/release/LIXianSenQwQ/nomo?label=release" alt="GitHub Release">
+  </a>
+  <a href="./LICENSE">
+    <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License">
+  </a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey" alt="Platform">
+  <img src="https://img.shields.io/badge/Tauri-2-24C8DB" alt="Tauri 2">
+  <img src="https://img.shields.io/badge/Svelte-5-FF3E00" alt="Svelte 5">
+</p>
 
-\<p align="center">
-\<a href="./README.md">\<strong>简体中文\</strong>\</a>
-·
-\<a href="./README.en.md">English\</a>
-\</p>
+<p align="center">
+  <a href="./README.md"><strong>简体中文</strong></a>
+  ·
+  <a href="./README.en.md">English</a>
+</p>
 
 ---
 
@@ -85,7 +85,7 @@ Windows NSIS 安装版与 macOS App 会向系统声明 `.md`、`.markdown`、`.t
 
 - **当前文档查找替换**：Markdown、TXT、JSON 使用一致的查找面板，支持向前 / 向后、全词、区分大小写、循环、单次替换、全部替换和结果计数。
 - **大纲重排**：标题可逐项折叠、全部展开或按默认层级收起；拖拽会连同子章节整节移动，支持放到目标之前、内部或之后，自动调整层级并可撤销。双栏模式下，大纲悬浮覆盖正文，不挤占左右编辑栏的内容宽度。
-- **链接导航**：在语义编辑中使用 \<kbd>Ctrl\</kbd> / \<kbd>Cmd\</kbd> + 点击，可跳转文内锚点、打开本地 Markdown / TXT / JSON、交给系统打开受支持的 PDF、Office、CSV 与图片附件，或打开 `http`、`https`、`mailto` 外部链接。
+- **链接导航**：在语义编辑中使用 <kbd>Ctrl</kbd> / <kbd>Cmd</kbd> + 点击，可跳转文内锚点、打开本地 Markdown / TXT / JSON、交给系统打开受支持的 PDF、Office、CSV 与图片附件，或打开 `http`、`https`、`mailto` 外部链接。
 - **统计与格式检查**：状态栏可显示行数、词数、字符数、预计阅读时间和缩放；Markdown 格式检查 Beta 提供宽松 / 默认规则、问题列表、源码定位和手动重试。
 
 ### 图片、剪贴板与对象操作
@@ -96,7 +96,7 @@ Windows NSIS 安装版与 macOS App 会向系统声明 `.md`、`.markdown`、`.t
 
 ### 外观、窗口与平台集成
 
-- **主题与排版**：支持跟随系统 / 浅色 / 深色，内置 Nomo 默认、琥珀纸页、经典灰、GitHub 四套配色，以及引用块与 Callout 的经典 / 现代样式；可调字号、行高、正文宽度、界面缩放和 \<kbd>Ctrl\</kbd> + 滚轮缩放。
+- **主题与排版**：支持跟随系统 / 浅色 / 深色，内置 Nomo 默认、琥珀纸页、经典灰、GitHub 四套配色，以及引用块与 Callout 的经典 / 现代样式；可调字号、行高、正文宽度、界面缩放和 <kbd>Ctrl</kbd> + 滚轮缩放。
 - **界面语言**：可跟随系统，或选择简体中文、繁体中文、English、日本語。
 - **专注与窗口**：资源管理器、工具栏、大纲和统计可独立显示；Markdown 可进入共享当前编辑状态的可置顶小窗；主窗口可选择关闭、每次询问或隐藏到系统托盘。
 - **导出与预览**：Markdown 可导出单文件 HTML，并尽量内嵌可访问的图片；Windows / macOS PDF 会尝试根据标题写入书签。macOS Quick Look 支持 UTF-8 Markdown 的主题、代码、公式和 Mermaid 预览。
@@ -263,14 +263,14 @@ pnpm run build:macos
 
 ## 支持项目
 
-\<p>
-\<a href="https://github.com/LIXianSenQwQ">
-\<img src="https://img.shields.io/github/followers/LIXianSenQwQ?style=social" alt="Follow LIXianSenQwQ">
-\</a>
-\<a href="https://github.com/LIXianSenQwQ/nomo">
-\<img src="https://img.shields.io/github/stars/LIXianSenQwQ/nomo?style=social" alt="Star Nomo">
-\</a>
-\</p>
+<p>
+  <a href="https://github.com/LIXianSenQwQ">
+    <img src="https://img.shields.io/github/followers/LIXianSenQwQ?style=social" alt="Follow LIXianSenQwQ">
+  </a>
+  <a href="https://github.com/LIXianSenQwQ/nomo">
+    <img src="https://img.shields.io/github/stars/LIXianSenQwQ/nomo?style=social" alt="Star Nomo">
+  </a>
+</p>
 
 如果 Nomo 对你有帮助，欢迎关注 [LIXianSenQwQ](https://github.com/LIXianSenQwQ)，并为 [Nomo](https://github.com/LIXianSenQwQ/nomo) 点一个 Star。
 
