@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setDesktopIconTheme } from './desktopWindow';
 import {
   LEGACY_THEME_BOOT_SNAPSHOT_KEY,
@@ -6,7 +6,7 @@ import {
   applyResolvedTheme,
   applyThemeRuntime,
   bootstrapThemeFromSnapshot,
-  cancelThemePaintFollowUp,
+  cancelPendingThemeEffects,
   readThemeBootSnapshot,
   resolveTheme,
   resolveThemeMode,
@@ -27,8 +27,13 @@ beforeEach(() => {
   document.documentElement.removeAttribute('data-theme-style');
   document.documentElement.removeAttribute('data-document-style');
   document.documentElement.removeAttribute('data-block-style');
-  cancelThemePaintFollowUp();
+  cancelPendingThemeEffects();
   vi.mocked(setDesktopIconTheme).mockClear();
+});
+
+afterEach(() => {
+  cancelPendingThemeEffects();
+  vi.unstubAllGlobals();
 });
 
 describe('themeManager', () => {
@@ -136,7 +141,10 @@ describe('themeManager', () => {
     expect(document.documentElement.dataset.themeStyle).toBe('paper');
   });
 
-  it('applies visible theme atomically and defers editor highlight and icons', async () => {
+  it('updates the latest editor theme even when the background window never paints', async () => {
+    // 模拟后台 WKWebView 不再执行 rAF，主题更新仍须在当前任务结束后完成。
+    const pausedAnimationFrame = vi.fn(() => 1);
+    vi.stubGlobal('requestAnimationFrame', pausedAnimationFrame);
     const editor = { updateTheme: vi.fn() };
     const withoutIcons = applyThemeRuntime(
       {
@@ -170,14 +178,24 @@ describe('themeManager', () => {
     expect(editor.updateTheme).not.toHaveBeenCalled();
     expect(setDesktopIconTheme).not.toHaveBeenCalled();
 
-    await new Promise<void>((resolve) => {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => resolve());
-      });
-    });
+    await Promise.resolve();
 
     expect(editor.updateTheme).toHaveBeenCalledTimes(1);
+    expect(editor.updateTheme).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'light', colorThemeId: 'nomo-github' }),
+    );
     expect(setDesktopIconTheme).toHaveBeenCalledWith(true, 'light', expect.any(String));
+    expect(pausedAnimationFrame).not.toHaveBeenCalled();
+  });
+
+  it('does not apply queued effects after cancellation', async () => {
+    const editor = { updateTheme: vi.fn() };
+    applyThemeRuntime({ themeMode: 'dark' }, { editor, desktopEnabled: true });
+    cancelPendingThemeEffects();
+    await Promise.resolve();
+
+    expect(editor.updateTheme).not.toHaveBeenCalled();
+    expect(setDesktopIconTheme).not.toHaveBeenCalled();
   });
 
   it('falls back for invalid theme and document style identifiers', () => {

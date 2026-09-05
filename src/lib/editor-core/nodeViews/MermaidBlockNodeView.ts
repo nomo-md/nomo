@@ -40,6 +40,10 @@ export class MermaidBlockNodeView {
   private editSurfaceEl: HTMLElement | null = null;
   private fullscreenBinding: MermaidFullscreenBinding | null = null;
   private unsubscribeLocale: () => void = () => undefined;
+  private themeObserver: IntersectionObserver | null = null;
+  private themeVisible = true;
+  private themeDirty = false;
+  private themeRender: Promise<void> | null = null;
 
   constructor(node: ProseMirrorNode, view: EditorView, getPos: () => number) {
     this.node = node;
@@ -51,6 +55,20 @@ export class MermaidBlockNodeView {
     this.dom.className = 'mermaid-block';
     this.dom.contentEditable = 'false';
     this.dom.setAttribute('data-code', node.attrs.code as string);
+
+    // 切主题不能重排整篇文档的 SVG；提前 200px 更新将进入视口的图表。
+    // 未提供 IntersectionObserver 的宿主保持即时更新，不让节点永久等待。
+    if (typeof IntersectionObserver === 'function') {
+      this.themeObserver = new IntersectionObserver(
+        ([entry]) => {
+          if (!entry) return;
+          this.themeVisible = entry.isIntersecting;
+          if (this.themeVisible) void this.applyPendingTheme();
+        },
+        { rootMargin: '200px' },
+      );
+      this.themeObserver.observe(this.dom);
+    }
 
     this.dom.addEventListener('click', (event) => {
       if (this.editing) return;
@@ -73,12 +91,32 @@ export class MermaidBlockNodeView {
       MermaidBlockNodeView.currentTheme = theme;
     }
     for (const instance of MermaidBlockNodeView.instances) {
-      if (instance.editing) {
-        void instance.updatePreview();
-      } else {
-        void instance.renderMermaid();
-      }
+      // 立即作废旧请求，即便节点在屏幕外也不能让旧异步结果覆盖新主题。
+      instance.renderId += 1;
+      instance.previewRenderId += 1;
+      instance.themeDirty = true;
+      if (instance.themeVisible) void instance.applyPendingTheme();
     }
+  }
+
+  /** 导出读取 DOM 前补齐当前编辑器的屏幕外图表，避免导出混合主题。 */
+  static async flushThemeUpdates(root: HTMLElement): Promise<void> {
+    await Promise.all(
+      [...MermaidBlockNodeView.instances]
+        .filter((instance) => root.contains(instance.dom))
+        .map((instance) => instance.applyPendingTheme()),
+    );
+  }
+
+  /** 只读取最新主题；连续切换时屏幕外节点不积累中间主题的渲染任务。 */
+  private applyPendingTheme(): Promise<void> | null {
+    if (!this.themeDirty) return this.themeRender;
+    this.themeDirty = false;
+    const render = (this.editing ? this.updatePreview() : this.renderMermaid()).finally(() => {
+      if (this.themeRender === render) this.themeRender = null;
+    });
+    this.themeRender = render;
+    return render;
   }
 
   static enterEditAt(view: EditorView, pos: number, caret: 'start' | 'end' = 'start'): boolean {
@@ -144,6 +182,10 @@ export class MermaidBlockNodeView {
   }
 
   destroy(): void {
+    this.themeObserver?.disconnect();
+    this.themeDirty = false;
+    this.renderId += 1;
+    this.previewRenderId += 1;
     this.disposeFullscreen();
     this.cleanupEdit();
     this.unsubscribeLocale();

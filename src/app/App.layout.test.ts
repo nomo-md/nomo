@@ -1138,7 +1138,6 @@ describe('App outline layout', () => {
     expect(settingsWindowSource).toContain('syncDesktopIcons: appearanceChanged');
     expect(appSource).toContain('payload.effectiveScheme');
     expect(appSource).toContain('getBrowserSystemScheme');
-    expect(themeManagerSource).toContain('scheduleThemePaintFollowUp');
     expect(themeManagerSource).toContain('nativeColorScheme');
     expect(themeManagerSource).toContain('applyNativeColorScheme');
     expect(appSource).not.toContain(

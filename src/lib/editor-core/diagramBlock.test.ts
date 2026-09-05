@@ -402,3 +402,84 @@ function createPointerLikeEvent(type: string, pointerId: number): MouseEvent {
   Object.defineProperty(event, 'pointerId', { value: pointerId });
   return event;
 }
+
+describe('Mermaid theme refresh', () => {
+  let view: EditorView | undefined;
+  afterEach(() => {
+    view?.destroy();
+    view = undefined;
+    document.body.replaceChildren();
+    vi.unstubAllGlobals();
+  });
+
+  // 模拟真实滚动可见性，检验屏幕外主题合并和导出补齐，而非依赖 jsdom 的布局。
+  function setupDiagram() {
+    let notify: IntersectionObserverCallback;
+    const disconnect = vi.fn();
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(callback: IntersectionObserverCallback) {
+          notify = callback;
+        }
+        observe() {}
+        disconnect = disconnect;
+      },
+    );
+    const render = vi.fn(async (_code, { theme }) => ({
+      svg: `<svg viewBox="0 0 100 50" data-test-theme="${theme.theme}"></svg>`,
+    }));
+    setCodeBlockDiagramRenderer({ renderMermaid: render });
+    const target = document.createElement('div');
+    document.body.append(target);
+    view = new EditorView(target, {
+      state: EditorState.create({
+        doc: schema.nodes.doc.create(null, [
+          schema.nodes.mermaid_block.create({ code: 'flowchart TD\nA --> B' }),
+        ]),
+      }),
+      nodeViews: {
+        mermaid_block: (node, editor, getPos) =>
+          new MermaidBlockNodeView(node, editor, getPos as () => number),
+      },
+    });
+    return {
+      target,
+      render,
+      disconnect,
+      visible(value: boolean) {
+        notify!(
+          [{ isIntersecting: value } as IntersectionObserverEntry],
+          {} as IntersectionObserver,
+        );
+      },
+    };
+  }
+
+  it('coalesces offscreen changes and renders the latest theme before entering the viewport', async () => {
+    const diagram = setupDiagram();
+    await Promise.resolve();
+    diagram.render.mockClear();
+    diagram.visible(false);
+    MermaidBlockNodeView.updateTheme({ theme: 'dark' });
+    MermaidBlockNodeView.updateTheme({ theme: 'default' });
+    expect(diagram.render).not.toHaveBeenCalled();
+
+    diagram.visible(true);
+    await MermaidBlockNodeView.flushThemeUpdates(diagram.target);
+    expect(diagram.render).toHaveBeenCalledTimes(1);
+    expect(diagram.target.querySelector('svg')?.getAttribute('data-test-theme')).toBe('default');
+    view!.destroy();
+    view = undefined;
+    expect(diagram.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('flushes offscreen themes before an export snapshot', async () => {
+    const diagram = setupDiagram();
+    await Promise.resolve();
+    diagram.visible(false);
+    MermaidBlockNodeView.updateTheme({ theme: 'dark' });
+    await MermaidBlockNodeView.flushThemeUpdates(diagram.target);
+    expect(diagram.target.querySelector('svg')?.getAttribute('data-test-theme')).toBe('dark');
+  });
+});

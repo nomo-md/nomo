@@ -871,7 +871,13 @@
 
     draftSettings = nextSettings;
     const appearanceChanged = changedKeys.some(isAppearancePreferenceKey);
-    const resolved = applyThemeRuntime(nextSettings, {
+    // 先广播解析结果，再写本窗 CSS，避免本窗样式更新占用主窗消息的发送时机。
+    const resolved = resolveTheme(nextSettings, effectiveSystemScheme);
+    void emitSettingsUpdated(
+      normalizedPatch,
+      appearanceChanged ? resolved.effectiveScheme : undefined,
+    );
+    applyThemeRuntime(nextSettings, {
       systemScheme: effectiveSystemScheme,
       desktopEnabled,
       syncDesktopIcons: appearanceChanged,
@@ -880,10 +886,6 @@
     applyTypographySettings(nextSettings.fontSize, nextSettings.lineHeight);
     applyEditorLayoutSettings(nextSettings.contentWidthPercent);
     markDirtyPreferences(normalizedPatch);
-    void emitSettingsUpdated(
-      normalizedPatch,
-      appearanceChanged ? resolved.effectiveScheme : undefined,
-    );
     scheduleAutoSave();
   }
 

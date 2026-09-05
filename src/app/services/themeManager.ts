@@ -91,15 +91,9 @@ export interface ApplyThemeRuntimeOptions {
    * 默认在传入 `desktopEnabled` 时为 `true`；设置窗应先广播再同步，此时传 `false`。
    */
   syncDesktopIcons?: boolean;
-  /**
-   * 是否等当前帧画完再更新编辑器高亮和 Dock 图标。
-   * 默认 `true`。`color-scheme` 与 CSS 变量始终同步提交，避免半新半旧。
-   * 测试需要同步收尾时传 `false`。
-   */
-  deferPaintFollowUp?: boolean;
 }
 
-let themePaintFollowUpId = 0;
+let themeEffectsId = 0;
 
 function isThemeMode(value: unknown): value is ThemeMode {
   return value === 'system' || value === 'light' || value === 'dark';
@@ -225,47 +219,41 @@ function applyNativeColorScheme(root: HTMLElement, scheme: ColorScheme) {
 /**
  * 取消尚未执行的主题收尾（编辑器高亮、Dock 图标）。
  *
- * 测试在用例之间调用，避免上一例的 rAF 泄漏到下一例。运行时由
- * `scheduleThemePaintFollowUp` 在新提交时自动作废旧任务。
+ * 测试在用例之间调用，避免上一例的微任务泄漏到下一例。运行时由
+ * `scheduleThemeEffects` 在新提交时自动作废旧任务。
  */
-export function cancelThemePaintFollowUp() {
-  themePaintFollowUpId += 1;
+export function cancelPendingThemeEffects() {
+  themeEffectsId += 1;
 }
 
 /**
- * 等浏览器画出当前帧后再执行任务。
+ * 在本轮提交结束后启动编辑器高亮和图标更新，同一轮只应用最新主题。
  *
- * 双 `requestAnimationFrame`：第一次排在即将绘制的帧之前，第二次排在该帧提交之后。
- * 连点主题时只保留最后一次，避免旧的 Shiki / Dock 收尾覆盖较新的外观。
+ * WKWebView 可以推迟失焦窗口的 rAF；主题正确性不能依赖窗口是否绘制。
+ * 微任务让调用方先发出跨窗广播，又不额外等待两帧。高亮和图表内部仍负责
+ * 丢弃已经启动但过期的异步渲染结果。
  *
- * @param task 第一帧画完后执行的收尾；允许同步，不得再改已经提交的 CSS token。
+ * @param task 本轮 CSS 提交后的收尾，不得回写旧的 CSS token。
  */
-function scheduleThemePaintFollowUp(task: () => void) {
-  const id = ++themePaintFollowUpId;
-  const run = () => {
-    if (id !== themePaintFollowUpId) {
+function scheduleThemeEffects(task: () => void) {
+  const id = ++themeEffectsId;
+  queueMicrotask(() => {
+    if (id !== themeEffectsId) {
       return;
     }
     task();
-  };
-  if (typeof requestAnimationFrame === 'function') {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(run);
-    });
-    return;
-  }
-  queueMicrotask(run);
+  });
 }
 
 /**
  * 把偏好解析成已解析主题，并一次性写入可见外观。
  *
- * dataset、CSS 变量和 inline `color-scheme` 同步提交，保证 chrome 与正文同一帧翻转。
+ * dataset、CSS 变量和 inline `color-scheme` 同步提交，避免本窗 CSS 分阶段换色。
  * 不启用颜色过渡，避免 160ms 分元素动画造成「先变一部分」。
- * Shiki / Mermaid 和 Dock 图标仍排到第一帧之后，它们不参与正文 CSS 上色。
+ * Shiki / Mermaid 和 Dock 图标在本轮微任务启动，不等待失焦窗口的绘制回调。
  *
  * @param preferences 本次要落地的外观偏好；允许缺字段，缺省走注册表默认主题。
- * @param options 系统深浅色提示、编辑器实例、是否同步原生图标，以及是否推迟高亮/图标。
+ * @param options 系统深浅色提示、编辑器实例及是否同步原生图标。
  *   `transition` 会被忽略，运行时切主题始终瞬间切换。
  * @returns 本次写入根节点的已解析主题，可供调用方写快照或广播 `effectiveScheme`。
  */
@@ -278,19 +266,14 @@ export function applyThemeRuntime(
     transition: false,
     nativeColorScheme: true,
   });
-  const shouldSyncDesktopIcons =
-    options?.syncDesktopIcons ?? options?.desktopEnabled !== undefined;
+  const shouldSyncDesktopIcons = options?.syncDesktopIcons ?? options?.desktopEnabled !== undefined;
   const followUp = () => {
     options?.editor?.updateTheme(resolved.editorTheme);
     if (shouldSyncDesktopIcons) {
       syncDesktopThemeChrome(options?.desktopEnabled, resolved);
     }
   };
-  if (options?.deferPaintFollowUp === false) {
-    followUp();
-  } else {
-    scheduleThemePaintFollowUp(followUp);
-  }
+  scheduleThemeEffects(followUp);
   return resolved;
 }
 
