@@ -779,12 +779,14 @@ describe('App outline layout', () => {
     expect(tauriMenuSource).toContain('"toggle-task-list",');
     expect(tauriMenuSource).toContain('"open-settings"');
     expect(tauriMenuSource).toContain('tr(locale, "menu_preferences")');
+    expect(tauriMenuSource).toContain('Some("CmdOrCtrl+,")');
     expect(tauriMenuSource).toContain('Some("CmdOrCtrl+N")');
     expect(tauriMenuSource).toContain('"Cmd+Q"');
     expect(tauriMenuSource).toContain('"Alt+F4"');
     expect(appCommandsSource).toContain("command === 'close-current-file'");
     expect(appCommandsSource).toContain("command === 'close-current-window'");
     expect(appCommandsSource).toContain("command === 'open-settings'");
+    expect(appCommandsSource).toContain("event.code === 'Comma'");
   });
 
   it('wires YAML Front Matter to the semantic metadata card flow', () => {

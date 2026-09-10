@@ -139,6 +139,7 @@ The table uses Windows defaults. Native macOS menus use `CmdOrCtrl` semantics, w
 | <kbd>Ctrl</kbd> + <kbd>S</kbd> | Save |
 | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd> | Save as |
 | <kbd>Ctrl</kbd> + <kbd>W</kbd> | Close the current file |
+| <kbd>Ctrl</kbd> + <kbd>,</kbd> | Open preferences |
 
 ### Editing and Formatting
 
