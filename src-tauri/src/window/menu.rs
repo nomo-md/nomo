@@ -597,7 +597,7 @@ fn build_settings_menu<R: Runtime>(app: &AppHandle<R>) -> Result<tauri::menu::Su
             app,
             "open-settings",
             tr(locale, "menu_preferences"),
-            None,
+            Some("CmdOrCtrl+,"),
         )?)
         .build()
         .map_err(|e| e.to_string())

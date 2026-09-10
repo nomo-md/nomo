@@ -205,6 +205,17 @@ export function handleGlobalShortcut(
     return;
   }
 
+  if (
+    event.ctrlKey &&
+    !event.shiftKey &&
+    !event.altKey &&
+    (event.code === 'Comma' || event.key === ',')
+  ) {
+    event.preventDefault();
+    handlers.openSettings();
+    return;
+  }
+
   const customCommand = findShortcutCommand(event, shortcuts);
   if (customCommand) {
     event.preventDefault();

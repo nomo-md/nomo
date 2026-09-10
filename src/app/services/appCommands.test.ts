@@ -103,6 +103,22 @@ describe('appCommands', () => {
     expect(handlers.openSettings).toHaveBeenCalledTimes(1);
   });
 
+  it('通过 Ctrl + , 打开偏好设置', () => {
+    const handlers = createHandlers();
+    const event = new KeyboardEvent('keydown', {
+      ctrlKey: true,
+      key: ',',
+      code: 'Comma',
+      bubbles: true,
+      cancelable: true,
+    });
+
+    handleGlobalShortcut(event, handlers);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(handlers.openSettings).toHaveBeenCalledTimes(1);
+  });
+
   it('通过桌面菜单命令触发段落列表和提示块', () => {
     const handlers = createHandlers();
 

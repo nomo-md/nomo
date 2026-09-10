@@ -140,6 +140,7 @@ Windows NSIS 安装版与 macOS App 会向系统声明 `.md`、`.markdown`、`.t
 | <kbd>Ctrl</kbd> + <kbd>S</kbd> | 保存 |
 | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd> | 另存为 |
 | <kbd>Ctrl</kbd> + <kbd>W</kbd> | 关闭当前文件 |
+| <kbd>Ctrl</kbd> + <kbd>,</kbd> | 打开偏好设置 |
 
 ### 编辑与格式
 
