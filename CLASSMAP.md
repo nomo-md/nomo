@@ -55,7 +55,7 @@
 
 | Responsibility | Primary code | Related code | Change when |
 |---|---|---|---|
-| 代码块 NodeView | `src/lib/editor-core/nodeViews/CodeBlockNodeView.ts` | `src/lib/services/shikiCodeTokenizer.ts`, `renderers.ts` | 代码块展示/编辑/高亮行为变更 |
+| 代码块 NodeView | `src/lib/editor-core/nodeViews/CodeBlockNodeView.ts` | `src/lib/services/shikiCodeTokenizer.ts`, `renderers.ts`, `ProseMirrorEditorCore.ts` | 代码块展示/编辑/高亮、滚动位置保留及同文档刷新恢复 |
 | 图片 NodeView | `src/lib/editor-core/nodeViews/ImageNodeView.ts` | `src/app/services/desktopImageLoader.ts` | 图片加载/对齐/尺寸/右键行为变更 |
 | 公式 NodeView | `src/lib/editor-core/nodeViews/MathBlockNodeView.ts`, `MathInlineNodeView.ts` | `src/lib/services/katexMathRenderer.ts` | 公式渲染/编辑体验变更 |
 | 图表 NodeView | `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts` | `src/lib/services/mermaidDiagramRenderer.ts` | Mermaid 图表渲染变更 |
@@ -839,7 +839,7 @@
 
 **Kind:** controller
 
-**Owns:** 滚动主栏与编辑意图区分、30%参考线插值、光标15%～85%安全区、程序滚动抑制、修订切换与单帧任务取消。
+**Owns:** 滚动主栏与编辑意图区分、代码块局部操作接管并取消旧定位、30%参考线插值、光标15%～85%安全区、程序滚动抑制、修订切换与单帧任务取消。
 
 **Does not own:** 不解析 Markdown，不访问 ProseMirror 内部，不改正文高度、选区、焦点或历史。
 

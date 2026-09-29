@@ -176,6 +176,46 @@ describe('code_block markdown 解析', () => {
 });
 
 describe('code_block 展开与收起', () => {
+  it('退出编辑后保留代码内容的横纵滚动位置', () => {
+    const mounted = mountCodeBlock(createCodeLines(80));
+    try {
+      mounted.card.querySelector<HTMLElement>('.code-content')!.click();
+      const textarea = mounted.card.querySelector<HTMLTextAreaElement>('.code-input')!;
+      textarea.scrollTop = 640;
+      textarea.scrollLeft = 120;
+      textarea.dispatchEvent(new Event('scroll'));
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      const display = mounted.card.querySelector<HTMLElement>('.code-content')!;
+      expect(display.scrollTop).toBe(640);
+      expect(display.scrollLeft).toBe(120);
+      expect(mounted.card.querySelector<HTMLElement>('.line-numbers-wrapper')!.style.transform)
+        .toBe('translateY(-640px)');
+    } finally {
+      mounted.destroy();
+    }
+  });
+
+  it('同文档重建仅恢复唯一且未改变的代码块', () => {
+    const code = createCodeLines(80);
+    const mounted = mountCodeBlock(code);
+    try {
+      mounted.card.querySelector<HTMLElement>('.code-content')!.scrollTop = 540;
+      const nextDoc = parseMarkdown(`# Added heading\n\n\`\`\`ts\n${code}\n\`\`\``);
+      CodeBlockNodeView.preserveViewports(mounted.view, nextDoc, () => {
+        mounted.view.updateState(EditorState.create({ doc: nextDoc }));
+      });
+      expect(mounted.target.querySelector<HTMLElement>('.code-content')!.scrollTop).toBe(540);
+      const duplicateDoc = parseMarkdown(`\`\`\`ts\n${code}\n\`\`\`\n\n\`\`\`ts\n${code}\n\`\`\``);
+      CodeBlockNodeView.preserveViewports(mounted.view, duplicateDoc, () => {
+        mounted.view.updateState(EditorState.create({ doc: duplicateDoc }));
+      });
+      expect([...mounted.target.querySelectorAll<HTMLElement>('.code-content')].map(e => e.scrollTop))
+        .toEqual([0, 0]);
+    } finally {
+      mounted.destroy();
+    }
+  });
+
   it('仅为超过 24 行的代码块显示展开按钮', () => {
     const shortBlock = mountCodeBlock(createCodeLines(24));
     expect(shortBlock.expandButton.hidden).toBe(true);

@@ -410,6 +410,8 @@ export class ProseMirrorEditorCore implements EditorCore {
   getScrollSyncCaret(): EditorSyncCaret | null {
     if (!this.view) return null;
     const active = this.view.dom.ownerDocument.activeElement;
+    if (active instanceof HTMLTextAreaElement && this.view.dom.contains(active) &&
+        active.classList.contains('code-input')) return null;
     if (active instanceof HTMLTextAreaElement && this.view.dom.contains(active)) {
       try {
         return { head: this.view.posAtDOM(active, 0), blockOnly: true };
@@ -527,7 +529,7 @@ export class ProseMirrorEditorCore implements EditorCore {
     if (!this.semanticViewDirty) {
       return;
     }
-    this.replaceViewState(this.markdown);
+    this.replaceViewState(this.markdown, undefined, true);
   }
 
   setDirty(dirty: boolean): void {
@@ -1091,7 +1093,7 @@ export class ProseMirrorEditorCore implements EditorCore {
       ...options,
     };
     if (this.semanticViewDirty && this.runtime.mode === 'semantic' && options.mode === 'semantic') {
-      this.replaceViewState(this.markdown);
+      this.replaceViewState(this.markdown, undefined, true);
     }
     this.view?.setProps({
       editable: () => this.isEditable(),
@@ -1464,7 +1466,7 @@ export class ProseMirrorEditorCore implements EditorCore {
     return true;
   }
 
-  private replaceViewState(markdown: string, selection?: { anchor: number; head: number }): void {
+  private replaceViewState(markdown: string, selection?: { anchor: number; head: number }, preserveCodeViewport = false): void {
     if (!this.view) {
       return;
     }
@@ -1476,7 +1478,9 @@ export class ProseMirrorEditorCore implements EditorCore {
     this.syncRenderRevision += 1;
     this.syncSnapshot = null;
     this.blockAlignmentGaps.clear();
-    this.view.updateState(selection ? this.restoreSelection(nextState, selection) : nextState);
+    const update = () => this.view!.updateState(selection ? this.restoreSelection(nextState, selection) : nextState);
+    if (preserveCodeViewport) CodeBlockNodeView.preserveViewports(this.view, nextState.doc, update);
+    else update();
     this.semanticViewDirty = false;
   }
 

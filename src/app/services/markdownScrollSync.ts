@@ -45,7 +45,7 @@ export function createMarkdownScrollSync(options: ScrollSyncOptions) {
   let paused = false;
   let documentId = '';
   let leader: SyncPane = 'semantic';
-  let intent: 'scroll' | 'caret' = 'scroll';
+  let intent: 'scroll' | 'caret' | 'local' = 'scroll';
   let frame = 0;
   let revision = '';
   let groups: MarkdownSyncAnchor[][] = [];
@@ -135,6 +135,8 @@ export function createMarkdownScrollSync(options: ScrollSyncOptions) {
   function run() {
     frame = 0;
     if (!enabled || paused || composing.has(leader) || dragging.has(leader)) return;
+    // 内嵌代码编辑器没有可靠的跨栏光标坐标；布局仍正常失效，但不能沿用旧意图。
+    if (intent === 'local') return;
     const snapshot = options.snapshot();
     if (!snapshot.ready) {
       report('waiting-for-content');
@@ -231,7 +233,7 @@ export function createMarkdownScrollSync(options: ScrollSyncOptions) {
       paused = next.paused;
       schedule();
     },
-    userIntent(pane: SyncPane, nextIntent: 'scroll' | 'caret') {
+    userIntent(pane: SyncPane, nextIntent: 'scroll' | 'caret' | 'local') {
       if (!enabled) return;
       if (frame) cancelFrame(frame);
       frame = 0;

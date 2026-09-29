@@ -232,6 +232,9 @@ export class CodeBlockNodeView {
   private view: EditorView;
   private getPos: () => number;
   private renderId = 0;
+  private viewport = { top: 0, left: 0 };
+  private editFrame = 0;
+  private destroyed = false;
 
   // 展示态相关
   private language: string;
@@ -334,6 +337,8 @@ export class CodeBlockNodeView {
     this.codeDisplay.appendChild(codeEl);
     // 展示态滚动时同步行号位置
     this.codeDisplay.addEventListener('scroll', () => {
+      if (this.editing) return;
+      this.captureViewport();
       this.lineNumbersWrapper.style.transform = `translateY(-${this.codeDisplay.scrollTop}px)`;
     });
     this.codeDisplay.addEventListener('mousedown', (event) => {
@@ -350,10 +355,10 @@ export class CodeBlockNodeView {
       event.stopPropagation();
       const clickOffset = this.getClickTextOffset(event);
       if (clickOffset !== null) {
-        this.enterEdit({ kind: 'offset', offset: clickOffset });
+        this.enterEdit({ kind: 'offset', offset: clickOffset }, true);
         return;
       }
-      this.enterEdit({ kind: 'line', line: this.getClickLine(event), edge: 'start' });
+      this.enterEdit({ kind: 'line', line: this.getClickLine(event), edge: 'start' }, true);
     });
 
     // 标记首次选中时自动进入编辑态（如 InputRule 从 ``` 创建 或快捷键插入）
@@ -437,6 +442,9 @@ export class CodeBlockNodeView {
   }
 
   destroy(): void {
+    this.destroyed = true;
+    this.renderId++;
+    if (this.editFrame) cancelAnimationFrame(this.editFrame);
     CodeBlockNodeView.instances.delete(this);
     this.unsubscribeLocale();
     this.cancelScheduledHighlight();
@@ -451,6 +459,58 @@ export class CodeBlockNodeView {
     const code = this.node.textContent;
     this.updateLineNumbers(countLines(code));
     this.renderHighlightFor(code, this.language, this.codeDisplay, DISPLAY_HIGHLIGHT_MAX_CHARS);
+  }
+
+  private captureViewport(): void {
+    const element = this.textarea ?? this.codeDisplay;
+    this.viewport = { top: element.scrollTop, left: element.scrollLeft };
+  }
+
+  private restoreViewport(): void {
+    if (this.destroyed) return;
+    const element = this.textarea ?? this.codeDisplay;
+    element.scrollTop = this.viewport.top;
+    element.scrollLeft = this.viewport.left;
+    // 浏览器按新的内容范围钳制，避免短内容恢复时留下过期偏移。
+    this.captureViewport();
+    if (this.editing) this.handleScroll();
+    else this.lineNumbersWrapper.style.transform = `translateY(-${element.scrollTop}px)`;
+  }
+
+  /** 只在同文档源码刷新边界调用；重复或已修改代码块不复用其他节点的阅读位置。 */
+  static preserveViewports(view: EditorView, nextDoc: ProseMirrorNode, update: () => void): void {
+    const key = (node: ProseMirrorNode) => JSON.stringify([node.type.name, node.attrs.params ?? '', node.textContent]);
+    const counts = (doc: ProseMirrorNode) => {
+      const result = new Map<string, number>();
+      doc.descendants((node) => {
+        if (node.type.name === 'code_block') result.set(key(node), (result.get(key(node)) ?? 0) + 1);
+      });
+      return result;
+    };
+    const before = counts(view.state.doc);
+    const after = counts(nextDoc);
+    const snapshots = new Map<string, { top: number; left: number; expanded: boolean }>();
+    for (const instance of this.instances) {
+      const id = key(instance.node);
+      if (instance.view !== view || before.get(id) !== 1 || after.get(id) !== 1) continue;
+      instance.captureViewport();
+      snapshots.set(id, { ...instance.viewport, expanded: instance.expanded });
+    }
+    update();
+    for (const instance of this.instances) {
+      if (instance.view !== view) continue;
+      const snapshot = snapshots.get(key(instance.node));
+      if (!snapshot) {
+        instance.viewport = { top: 0, left: 0 };
+        instance.restoreViewport();
+        continue;
+      }
+      instance.expanded = snapshot.expanded;
+      instance.applyExpandedState();
+      instance.syncTextareaRows(instance.lineCount);
+      instance.viewport = { top: snapshot.top, left: snapshot.left };
+      instance.restoreViewport();
+    }
   }
 
   private updateLineNumbers(lineCount: number): void {
@@ -487,15 +547,22 @@ export class CodeBlockNodeView {
   ): Promise<void> {
     const id = ++this.renderId;
     const codeEl = container.querySelector('code') ?? container;
+    // 先同步正文，展示层在异步高亮前就具有正确的滚动范围。
+    const setContent = (html: string | null) => {
+      if (this.destroyed || id !== this.renderId) return;
+      if (container === this.codeDisplay && !this.editing) this.captureViewport();
+      if (html === null) codeEl.textContent = code;
+      else codeEl.innerHTML = html;
+      if (container === this.codeDisplay && !this.editing) this.restoreViewport();
+    };
+    if (codeEl.textContent !== code) setContent(null);
     if (code.length > richHighlightMaxChars) {
-      codeEl.textContent = code;
       return;
     }
 
     const codeTokenizer = getCodeTokenizer();
     if (!codeTokenizer) {
       // 无 tokenizer 时降级为纯文本
-      codeEl.textContent = code;
       return;
     }
     try {
@@ -505,17 +572,18 @@ export class CodeBlockNodeView {
         theme: CodeBlockNodeView.currentTheme.shikiTheme,
       });
       if (id !== this.renderId) return; // 放弃过期渲染
-      codeEl.innerHTML = tokensToHtml(result.tokens);
+      setContent(tokensToHtml(result.tokens));
     } catch {
       if (id !== this.renderId) return;
-      codeEl.textContent = code;
+      setContent(null);
     }
   }
 
   // ---- 编辑态管理 ----
 
-  enterEdit(target: CodeEditTarget = { kind: 'default' }): void {
+  enterEdit(target: CodeEditTarget = { kind: 'default' }, preserveViewport = target.kind === 'range'): void {
     if (this.editing) return;
+    this.captureViewport();
 
     this.clearDisplaySelectionCapture();
 
@@ -586,7 +654,8 @@ export class CodeBlockNodeView {
     this.syncGutterWidth();
 
     // 步骤4：聚焦 textarea，尝试定位到点击的行
-    requestAnimationFrame(() => {
+    this.editFrame = requestAnimationFrame(() => {
+      this.editFrame = 0;
       if (!this.textarea) return;
       this.textarea.focus({ preventScroll: true });
       if (target.kind === 'offset') {
@@ -614,6 +683,7 @@ export class CodeBlockNodeView {
           this.textarea.value.length,
         );
       }
+      if (preserveViewport) this.restoreViewport();
     });
   }
 
@@ -659,6 +729,10 @@ export class CodeBlockNodeView {
   }
 
   private cleanupEdit(): void {
+    if (this.editFrame) cancelAnimationFrame(this.editFrame);
+    this.editFrame = 0;
+    if (this.textarea) this.captureViewport();
+    const viewport = { ...this.viewport };
     this.editing = false;
     if (CodeBlockNodeView.activeEditingView === this) {
       CodeBlockNodeView.activeEditingView = null;
@@ -679,6 +753,8 @@ export class CodeBlockNodeView {
     // 恢复展示态
     this.codeDisplay.style.display = '';
     this.renderDisplay();
+    this.viewport = viewport;
+    this.restoreViewport();
   }
 
   // ---- 编辑态事件处理 ----
@@ -902,6 +978,7 @@ export class CodeBlockNodeView {
 
   private handleScroll(): void {
     if (!this.textarea || !this.highlightLayer) return;
+    this.captureViewport();
     // 同步高亮层滚动位置
     this.highlightLayer.style.transform = `translate(-${this.textarea.scrollLeft}px, -${this.textarea.scrollTop}px)`;
     // 同步行号滚动位置（作用在 wrapper 上，gutter 作为裁剪容器）

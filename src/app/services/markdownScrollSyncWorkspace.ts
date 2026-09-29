@@ -218,17 +218,25 @@ export function syncEditorPanes(node: HTMLElement, initial: SyncWorkspaceParams)
   };
   const wheel = (event: WheelEvent) => {
     const pane = paneForEvent(event);
-    if (
-      !pane ||
-      event.ctrlKey ||
-      (event.target instanceof Element && event.target.closest('.code-content, .code-input'))
-    )
+    if (!pane || event.ctrlKey) return;
+    const inner = event.target instanceof Element
+      ? event.target.closest<HTMLElement>('.code-content, .code-input')
+      : null;
+    if (inner && (event.deltaX !== 0 ||
+        (event.deltaY < 0 && inner.scrollTop > 0) ||
+        (event.deltaY > 0 && inner.scrollTop < inner.scrollHeight - inner.clientHeight - 1))) {
+      controller.userIntent(pane, 'local');
       return;
+    }
     controller.userIntent(pane, 'scroll');
   };
   const pointerDown = (event: PointerEvent) => {
     const pane = paneForEvent(event);
     if (!pane || event.button !== 0) return;
+    if (event.target instanceof Element && event.target.closest('.code-card')) {
+      controller.userIntent(pane, 'local');
+      return;
+    }
     const element = getElement(pane);
     if (!element) return;
     const rect = element.getBoundingClientRect();
@@ -246,6 +254,10 @@ export function syncEditorPanes(node: HTMLElement, initial: SyncWorkspaceParams)
   };
   const keyDown = (event: KeyboardEvent) => {
     const pane = paneForEvent(event);
+    if (pane && event.target instanceof Element && event.target.closest('.code-card')) {
+      controller.userIntent(pane, 'local');
+      return;
+    }
     if (
       !pane ||
       event.isComposing ||
@@ -265,7 +277,8 @@ export function syncEditorPanes(node: HTMLElement, initial: SyncWorkspaceParams)
   };
   const input = (event: Event) => {
     const pane = paneForEvent(event);
-    if (pane) controller.userIntent(pane, 'caret');
+    if (pane) controller.userIntent(pane,
+      event.target instanceof Element && event.target.closest('.code-card') ? 'local' : 'caret');
   };
   const scroll = (event: Event) => {
     const pane = paneForEvent(event);
@@ -274,7 +287,8 @@ export function syncEditorPanes(node: HTMLElement, initial: SyncWorkspaceParams)
   const composition = (event: Event) => {
     const pane = paneForEvent(event);
     if (pane) {
-      controller.userIntent(pane, 'caret');
+      controller.userIntent(pane,
+        event.target instanceof Element && event.target.closest('.code-card') ? 'local' : 'caret');
       controller.composing(pane, event.type === 'compositionstart');
     }
   };

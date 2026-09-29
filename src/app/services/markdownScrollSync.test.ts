@@ -96,6 +96,23 @@ describe('continuous content scroll mapping', () => {
     f.sync.destroy();
   });
 
+  it('lets local code interaction cancel stale following without disabling subsequent layout sync', () => {
+    const f = fixture();
+    f.panes.source.scrollTop = 200;
+    f.panes.semantic.scrollTop = 600;
+    f.sync.userIntent('source', 'scroll');
+    f.sync.userIntent('semantic', 'local');
+    f.sync.layoutChanged();
+    f.sync.caretChanged('semantic');
+    f.flush();
+    expect(f.panes.source.scrollTop).toBe(200);
+    expect(f.panes.semantic.scrollTop).toBe(600);
+    f.sync.userIntent('semantic', 'scroll');
+    f.flush();
+    expect(f.panes.source.scrollTop).toBe(80);
+    f.sync.destroy();
+  });
+
   it('clamps document edges, skips invalid anchors and cancels disabled work', () => {
     const f = fixture();
     f.state.anchors.splice(1, 0, { ...anchor(2), key: 'missing' });

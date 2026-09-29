@@ -106,7 +106,7 @@
 
 .split-divider::after {
   position: absolute;
-  inset: 0 -8px;
+  inset: 0;
   content: '';
 }
 
