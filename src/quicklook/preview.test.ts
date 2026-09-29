@@ -1,10 +1,12 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   applyQuickLookAppearance,
   renderMarkdownPreview,
   renderQuickLookMermaidBlocks,
   resolvePreviewAssetSrc,
 } from './preview';
+
+afterEach(() => vi.restoreAllMocks());
 
 describe('quicklook preview renderer', () => {
   it('renders markdown with callouts, task lists, tables and math', () => {
@@ -34,6 +36,8 @@ describe('quicklook preview renderer', () => {
   });
 
   it('renders Mermaid fences to themed SVG diagrams', async () => {
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600);
     const root = document.createElement('div');
     root.innerHTML = renderMarkdownPreview(
       '```mermaid\nflowchart TB\n  A["项目台账"] --> B["项目验收"]\n```',
@@ -42,11 +46,7 @@ describe('quicklook preview renderer', () => {
       svg: '<svg viewBox="0 0 100 40" data-diagram="ready"></svg>',
     }));
 
-    const bindings = await renderQuickLookMermaidBlocks(
-      root,
-      { theme: 'dark' },
-      { renderMermaid },
-    );
+    const bindings = await renderQuickLookMermaidBlocks(root, { theme: 'dark' }, { renderMermaid });
 
     expect(renderMermaid).toHaveBeenCalledWith('flowchart TB\n  A["项目台账"] --> B["项目验收"]', {
       theme: { theme: 'dark' },
@@ -58,11 +58,11 @@ describe('quicklook preview renderer', () => {
     expect(bindings).toHaveLength(1);
     root.querySelector<HTMLButtonElement>('.mermaid-block-fullscreen-button')?.click();
     expect(document.body.querySelector('.mermaid-fullscreen-overlay')).not.toBeNull();
-    expect(document.body.querySelector('.mermaid-fullscreen-zoom-badge')?.textContent).toBe('125%');
+    expect(document.body.querySelector('.mermaid-fullscreen-zoom-badge')?.textContent).toBe('100%');
     document.body
       .querySelector<HTMLButtonElement>('.mermaid-fullscreen-control-button:last-child')
       ?.click();
-    expect(document.body.querySelector('.mermaid-fullscreen-zoom-badge')?.textContent).toBe('135%');
+    expect(document.body.querySelector('.mermaid-fullscreen-zoom-badge')?.textContent).toBe('110%');
     bindings[0]?.dispose();
     expect(document.body.querySelector('.mermaid-fullscreen-overlay')).toBeNull();
   });

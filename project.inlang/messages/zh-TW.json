@@ -162,5 +162,10 @@
   "exitCancelled": "已取消結束應用程式",
   "exitTimedOut": "等待視窗回應逾時，已取消結束",
   "exitSaveFailed": "儲存失敗，已取消結束",
-  "exitWindowLost": "視窗意外關閉，已取消結束"
+  "exitWindowLost": "視窗意外關閉，已取消結束",
+  "mermaidViewMode": "圖表檢視模式",
+  "mermaidReadable": "可讀適配",
+  "mermaidFit": "適應全圖",
+  "mermaidOriginal": "原始尺寸",
+  "mermaidCustom": "自訂"
 }

@@ -6,6 +6,10 @@ import { getDiagramRenderer } from '../renderers';
 import type { MermaidThemeDefinition } from '../../theme/types';
 import {
   bindMermaidFullscreen,
+  bindMermaidViewport,
+  type MermaidViewportBinding,
+  type MermaidViewMode,
+  type MermaidViewPosition,
   normalizeMermaidSvgSize,
   normalizeRenderedMermaidViewport,
   type MermaidFullscreenBinding,
@@ -39,6 +43,11 @@ export class MermaidBlockNodeView {
   private previewSnapshotEl: HTMLElement | null = null;
   private editSurfaceEl: HTMLElement | null = null;
   private fullscreenBinding: MermaidFullscreenBinding | null = null;
+  private viewportBinding: MermaidViewportBinding | null = null;
+  private viewMode: Exclude<MermaidViewMode, 'custom'> = 'readable';
+  private viewPosition: MermaidViewPosition | undefined;
+  private previewToolbar: HTMLElement | null = null;
+  private destroyed = false;
   private unsubscribeLocale: () => void = () => undefined;
   private themeObserver: IntersectionObserver | null = null;
   private themeVisible = true;
@@ -71,7 +80,9 @@ export class MermaidBlockNodeView {
     }
 
     this.dom.addEventListener('click', (event) => {
-      if (this.editing) return;
+      if (this.editing || (event.target as Element).closest?.('.mermaid-view-toolbar')) return;
+      const target = event.target as Element;
+      if (target.closest?.('.mermaid-managed-viewport') && !target.closest?.('svg')) return;
       event.preventDefault();
       event.stopPropagation();
       this.enterEdit();
@@ -81,6 +92,8 @@ export class MermaidBlockNodeView {
       this.closeFullscreen();
       if (!this.editing) {
         void this.renderMermaid();
+      } else {
+        void this.updatePreview();
       }
     });
     this.renderMermaid();
@@ -154,8 +167,10 @@ export class MermaidBlockNodeView {
 
   update(node: ProseMirrorNode): boolean {
     if (node.type !== this.node.type) return false;
+    const codeChanged = node.attrs.code !== this.node.attrs.code;
     this.node = node;
-    if (!this.editing) {
+    // 焦点和选区事务不应重建查看器，否则全屏打开后会立即被销毁。
+    if (!this.editing && codeChanged) {
       this.renderMermaid();
     }
     return true;
@@ -173,6 +188,12 @@ export class MermaidBlockNodeView {
   }
 
   stopEvent(event: Event): boolean {
+    if (
+      (event.target as Element).closest?.(
+        '.mermaid-view-toolbar, .mermaid-block-fullscreen-button, .mermaid-managed-viewport',
+      )
+    )
+      return true;
     if (this.editing && this.dom.contains(event.target as Node)) return true;
     return false;
   }
@@ -182,6 +203,7 @@ export class MermaidBlockNodeView {
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.themeObserver?.disconnect();
     this.themeDirty = false;
     this.renderId += 1;
@@ -193,6 +215,7 @@ export class MermaidBlockNodeView {
   }
 
   private async renderMermaid(): Promise<void> {
+    if (this.destroyed) return;
     const id = ++this.renderId;
     const code = this.node.attrs.code as string;
     this.dom.setAttribute('data-code', code);
@@ -252,6 +275,7 @@ export class MermaidBlockNodeView {
     this.editSurfaceEl.appendChild(this.previewEl);
     if (this.previewSnapshotEl) {
       this.previewEl.appendChild(this.previewSnapshotEl);
+      if (this.previewEl.querySelector('svg')) this.bindPreviewViewport();
     }
 
     this.textarea.addEventListener('input', () => {
@@ -259,8 +283,11 @@ export class MermaidBlockNodeView {
       this.schedulePreviewUpdate();
     });
     this.textarea.addEventListener('keydown', (event) => this.handleKeyDown(event));
-    this.textarea.addEventListener('blur', () => {
-      this.exitEdit(true);
+    this.textarea.addEventListener('blur', (event) => {
+      if (!this.dom.contains(event.relatedTarget as Node)) this.exitEdit(true);
+    });
+    this.editSurfaceEl.addEventListener('focusout', (event) => {
+      if (this.editing && !this.dom.contains(event.relatedTarget as Node)) this.exitEdit(true);
     });
 
     requestAnimationFrame(() => {
@@ -301,6 +328,7 @@ export class MermaidBlockNodeView {
   }
 
   private cleanupEdit(): void {
+    this.disposeViewport();
     this.editing = false;
     this.clearPreviewDebounce();
     this.previewRenderId += 1;
@@ -457,32 +485,59 @@ export class MermaidBlockNodeView {
   ): void {
     if (!this.previewEl || options.renderId !== this.previewRenderId) return;
 
-    const snapshotEl = this.previewSnapshotEl;
+    this.disposeViewport();
     this.previewEl.classList.toggle('is-error', options.error);
-
-    if (!snapshotEl) {
-      this.previewEl.textContent = '';
-      if (options.html) {
-        this.previewEl.innerHTML = content;
-        normalizeRenderedMermaidViewport(this.previewEl);
-      } else {
-        this.previewEl.textContent = content;
-      }
-      return;
-    }
-
     const renderedEl = document.createElement('div');
     renderedEl.className = 'mermaid-block-preview-render';
-    if (options.html) {
-      renderedEl.innerHTML = content;
-    } else {
-      renderedEl.textContent = content;
-    }
+    if (options.html) renderedEl.innerHTML = content;
+    else renderedEl.textContent = content;
     this.previewEl.replaceChildren(renderedEl);
-    if (options.html) {
-      normalizeRenderedMermaidViewport(renderedEl);
-    }
     this.previewSnapshotEl = null;
+    if (options.html && renderedEl.querySelector('svg')) {
+      normalizeRenderedMermaidViewport(renderedEl);
+      this.bindPreviewViewport();
+    }
+  }
+
+  private viewLabels() {
+    return {
+      mode: t.mermaidViewMode(),
+      readable: t.mermaidReadable(),
+      fit: t.mermaidFit(),
+      original: t.mermaidOriginal(),
+      custom: t.mermaidCustom(),
+    };
+  }
+
+  private bindViewport(
+    viewport: HTMLElement,
+    toolbar: HTMLElement,
+    kind: 'card' | 'preview',
+  ): void {
+    this.viewportBinding = bindMermaidViewport(viewport, toolbar, this.viewLabels(), {
+      kind,
+      mode: this.viewMode,
+      position: this.viewPosition,
+      onModeChange: (mode) => {
+        this.viewMode = mode;
+      },
+    });
+  }
+
+  private bindPreviewViewport(): void {
+    if (!this.previewEl) return;
+    this.previewToolbar = document.createElement('div');
+    this.previewToolbar.className = 'mermaid-view-toolbar';
+    this.previewEl.before(this.previewToolbar);
+    this.bindViewport(this.previewEl, this.previewToolbar, 'preview');
+  }
+
+  private disposeViewport(): void {
+    this.viewPosition = this.viewportBinding?.position() ?? this.viewPosition;
+    this.viewportBinding?.dispose();
+    this.viewportBinding = null;
+    this.previewToolbar?.remove();
+    this.previewToolbar = null;
   }
 
   private renderError(error: string, code: string): void {
@@ -515,7 +570,12 @@ export class MermaidBlockNodeView {
     this.dom.appendChild(renderedEl);
     normalizeRenderedMermaidViewport(renderedEl);
 
-    this.fullscreenBinding = bindMermaidFullscreen(this.dom, renderedEl, {
+    const toolbar = document.createElement('div');
+    toolbar.className = 'mermaid-view-toolbar';
+    renderedEl.before(toolbar);
+    this.bindViewport(renderedEl, toolbar, 'card');
+    this.fullscreenBinding = bindMermaidFullscreen(toolbar, renderedEl, {
+      ...this.viewLabels(),
       open: t.fullscreenDiagram(),
       dialog: t.fullscreenDiagramPreview(),
       close: t.closeFullscreenDiagram(),
@@ -530,6 +590,7 @@ export class MermaidBlockNodeView {
   }
 
   private disposeFullscreen(): void {
+    this.disposeViewport();
     this.fullscreenBinding?.dispose();
     this.fullscreenBinding = null;
   }

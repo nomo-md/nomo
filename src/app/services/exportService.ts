@@ -1,3 +1,4 @@
+import { restoreMermaidExportSize } from '../../lib/services/mermaidDiagramView';
 import {
   exportHtmlFile,
   exportPdfFromHtml,
@@ -218,6 +219,8 @@ export function cleanEditorArtifacts(htmlFragment: string): string {
   if (!root.children.length) {
     return htmlFragment;
   }
+
+  restoreMermaidExportSize(root);
 
   // 移除 ProseMirror 选区高亮、挂件、光标等编辑器痕迹。
   const selectorsToRemove = [

@@ -1,5 +1,13 @@
 /** Mermaid 图表放大查看器所需的界面文案。 */
-export interface MermaidFullscreenLabels {
+export interface MermaidViewLabels {
+  mode: string;
+  readable: string;
+  fit: string;
+  original: string;
+  custom: string;
+}
+
+export interface MermaidFullscreenLabels extends MermaidViewLabels {
   /** 图表卡片上“放大查看”按钮的无障碍名称。 */
   open: string;
   /** 全屏对话框的无障碍名称。 */
@@ -24,10 +32,264 @@ export interface MermaidFullscreenBinding {
   dispose(): void;
 }
 
-const FULLSCREEN_DEFAULT_SCALE = 1.25;
-const FULLSCREEN_MIN_SCALE = 0.5;
+const FULLSCREEN_MIN_SCALE = 0.1;
 const FULLSCREEN_MAX_SCALE = 3;
 const FULLSCREEN_SCALE_STEP = 0.1;
+
+export type MermaidViewMode = 'readable' | 'fit' | 'original' | 'custom';
+type SvgSize = { width: number; height: number };
+export interface MermaidViewPosition {
+  x: number;
+  y: number;
+  startX: boolean;
+  startY: boolean;
+}
+
+/** 只属于视图的缩放状态，不写入 Markdown 或编辑器事务。 */
+export interface MermaidViewportBinding {
+  update(): void;
+  position(): MermaidViewPosition | undefined;
+  zoomBy(delta: number, point?: { x: number; y: number }): void;
+  reset(): void;
+  dispose(): void;
+}
+
+/** 高度只影响全图概览；日常阅读最多缩小到 85%。 */
+export function calculateMermaidScale(
+  mode: Exclude<MermaidViewMode, 'custom'>,
+  size: SvgSize,
+  available: SvgSize,
+): number {
+  if (mode === 'original') return 1;
+  if (mode === 'fit')
+    return Math.min(1, available.width / size.width, available.height / size.height);
+  return Math.max(0.85, Math.min(1, available.width / size.width));
+}
+
+/** 将视图控件和尺寸管理绑定到已有 SVG；调用方在替换 DOM 前保存 position。 */
+export function bindMermaidViewport(
+  viewport: HTMLElement,
+  toolbar: HTMLElement,
+  labels: MermaidViewLabels,
+  options: {
+    kind: 'card' | 'preview' | 'fullscreen';
+    mode?: Exclude<MermaidViewMode, 'custom'>;
+    position?: MermaidViewPosition;
+    onModeChange?: (mode: Exclude<MermaidViewMode, 'custom'>) => void;
+    badge?: HTMLElement;
+  },
+): MermaidViewportBinding {
+  const select = document.createElement('select');
+  select.className = 'mermaid-view-mode';
+  select.setAttribute('aria-label', labels.mode);
+  for (const mode of [
+    'readable',
+    'fit',
+    'original',
+    ...(options.kind === 'fullscreen' ? ['custom'] : []),
+  ] as MermaidViewMode[]) {
+    const option = document.createElement('option');
+    option.value = mode;
+    option.textContent = labels[mode];
+    option.disabled = mode === 'custom';
+    select.appendChild(option);
+  }
+  const badge = options.badge ?? document.createElement('span');
+  if (!options.badge) badge.className = 'mermaid-view-scale';
+  toolbar.prepend(select);
+  if (!options.badge) toolbar.appendChild(badge);
+  viewport.classList.add('mermaid-managed-viewport');
+  viewport.dataset.mermaidView = options.kind;
+  if (options.kind !== 'fullscreen') viewport.tabIndex = 0;
+  let mode: MermaidViewMode = options.mode ?? 'readable';
+  let scale = 1;
+  let svg: SVGSVGElement | null = null;
+  let size: SvgSize | null = null;
+  let pendingPosition = options.position;
+  let frame = 0;
+  let disposed = false;
+  let lastWidth = 0;
+  let lastHeight = 0;
+  let lastClientHeight = 0;
+  const heightBudget = () =>
+    options.kind === 'fullscreen'
+      ? viewport.clientHeight
+      : Math.max(
+          160,
+          Math.min(
+            options.kind === 'card' ? 420 : 360,
+            window.innerHeight * (options.kind === 'card' ? 0.52 : 0.42),
+          ),
+        );
+
+  const position = (point?: { x: number; y: number }): MermaidViewPosition | undefined => {
+    if (!svg || !size || !viewport.clientWidth) return pendingPosition;
+    const bounds = svg.getBoundingClientRect();
+    const parent = viewport.getBoundingClientRect();
+    return {
+      x:
+        (parent.left + viewport.clientLeft + (point?.x ?? viewport.clientWidth / 2) - bounds.left) /
+        scale,
+      y:
+        (parent.top + viewport.clientTop + (point?.y ?? viewport.clientHeight / 2) - bounds.top) /
+        scale,
+      startX: !point && viewport.scrollLeft === 0,
+      startY: !point && viewport.scrollTop === 0,
+    };
+  };
+  const syncControls = () => {
+    select.value = mode;
+    select.disabled = !size;
+    badge.textContent = size ? `${Number((scale * 100).toFixed(1))}%` : '—';
+  };
+  const apply = (reset = false, anchor = position(), point?: { x: number; y: number }) => {
+    if (!svg || !size || !viewport.clientWidth) {
+      syncControls();
+      return;
+    }
+    const style = getComputedStyle(viewport);
+    const horizontal = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+    const vertical = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+    const budget = heightBudget();
+    const available = {
+      width: Math.max(1, viewport.clientWidth - horizontal),
+      height: Math.max(1, budget - vertical),
+    };
+    if (mode !== 'custom') scale = calculateMermaidScale(mode, size, available);
+    const width = Math.ceil(size.width * scale - 1e-8);
+    const height = Math.ceil(size.height * scale - 1e-8);
+    for (const [key, value] of [
+      ['width', width],
+      ['height', height],
+    ] as const) {
+      if (svg.getAttribute(key) !== String(value)) svg.setAttribute(key, String(value));
+      if (svg.style[key] !== `${value}px`) svg.style[key] = `${value}px`;
+    }
+    svg.style.marginLeft = `${Math.max(0, (available.width - width) / 2)}px`;
+    svg.style.marginTop = `${options.kind === 'fullscreen' ? Math.max(0, (available.height - height) / 2) : 0}px`;
+    if (reset) {
+      viewport.scrollLeft = 0;
+      viewport.scrollTop = 0;
+    } else if (anchor) {
+      const bounds = svg.getBoundingClientRect();
+      const parent = viewport.getBoundingClientRect();
+      viewport.scrollLeft = anchor.startX
+        ? 0
+        : viewport.scrollLeft +
+          bounds.left +
+          anchor.x * scale -
+          parent.left -
+          viewport.clientLeft -
+          (point?.x ?? viewport.clientWidth / 2);
+      viewport.scrollTop = anchor.startY
+        ? 0
+        : viewport.scrollTop +
+          bounds.top +
+          anchor.y * scale -
+          parent.top -
+          viewport.clientTop -
+          (point?.y ?? viewport.clientHeight / 2);
+    }
+    pendingPosition = undefined;
+    lastWidth = viewport.clientWidth;
+    lastHeight = budget;
+    lastClientHeight = viewport.clientHeight;
+    syncControls();
+  };
+  const update = () => {
+    pendingPosition ??= position();
+    const next = viewport.querySelector<SVGSVGElement>('svg');
+    if (next !== svg) {
+      svg = next;
+      size = svg ? readSvgIntrinsicSize(svg) : null;
+      if (svg && size) {
+        svg.dataset.mermaidNaturalWidth = String(size.width);
+        svg.dataset.mermaidNaturalHeight = String(size.height);
+      }
+    }
+    apply(!pendingPosition, pendingPosition);
+  };
+  const resize = () => {
+    if (disposed || frame) return;
+    // ResizeObserver 通知时容器已变宽，用上次视口中心恢复原有阅读位置。
+    const anchor = lastWidth ? position({ x: lastWidth / 2, y: lastClientHeight / 2 }) : position();
+    if (anchor) {
+      anchor.startX = viewport.scrollLeft === 0;
+      anchor.startY = viewport.scrollTop === 0;
+    }
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      const height = heightBudget();
+      if (viewport.clientWidth !== lastWidth || height !== lastHeight)
+        apply(false, pendingPosition ?? anchor);
+    });
+  };
+  const change = () => {
+    mode = select.value as Exclude<MermaidViewMode, 'custom'>;
+    options.onModeChange?.(mode);
+    apply(true);
+  };
+  select.addEventListener('change', change);
+  const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(resize) : null;
+  observer?.observe(viewport);
+  window.addEventListener('resize', resize);
+  update();
+  return {
+    update,
+    position,
+    zoomBy(delta, point) {
+      if (!size) return;
+      const pivot = point ?? { x: viewport.clientWidth / 2, y: viewport.clientHeight / 2 };
+      const anchor = position(pivot);
+      mode = 'custom';
+      scale = Number(clampScale(scale + delta).toFixed(4));
+      apply(false, anchor, pivot);
+    },
+    reset() {
+      mode = 'readable';
+      apply(true);
+    },
+    dispose() {
+      disposed = true;
+      observer?.disconnect();
+      window.removeEventListener('resize', resize);
+      if (frame) cancelAnimationFrame(frame);
+      select.removeEventListener('change', change);
+      select.remove();
+      if (!options.badge) badge.remove();
+    },
+  };
+}
+
+/** 导出恢复完整 SVG，避免把当前屏幕缩放带到打印页面。 */
+export function restoreMermaidExportSize(root: HTMLElement): void {
+  root
+    .querySelectorAll('.mermaid-view-toolbar, .mermaid-fullscreen-overlay')
+    .forEach((el) => el.remove());
+  root.querySelectorAll<SVGSVGElement>('.mermaid-block svg').forEach((svg) => {
+    const size = readSvgIntrinsicSize(svg);
+    if (size) {
+      svg.setAttribute('width', String(size.width));
+      svg.setAttribute('height', String(size.height));
+    }
+    for (const property of [
+      'width',
+      'height',
+      'margin-left',
+      'margin-top',
+      'max-width',
+      'max-height',
+    ])
+      svg.style.removeProperty(property);
+    delete svg.dataset.mermaidNaturalWidth;
+    delete svg.dataset.mermaidNaturalHeight;
+  });
+  root.querySelectorAll<HTMLElement>('.mermaid-managed-viewport').forEach((el) => {
+    el.classList.remove('mermaid-managed-viewport');
+    delete el.dataset.mermaidView;
+    el.removeAttribute('tabindex');
+  });
+}
 
 /**
  * 规范化 Mermaid SVG 的内在尺寸，使卡片和全屏查看器使用同一个几何基准。
@@ -206,7 +468,11 @@ function openMermaidFullscreen(
   viewportEl.className = 'mermaid-fullscreen-viewport';
   const zoomSurfaceEl = document.createElement('div');
   zoomSurfaceEl.className = 'mermaid-fullscreen-zoom-surface';
-  zoomSurfaceEl.appendChild(renderedContent.cloneNode(true));
+  const fullContent = document.createElement('div');
+  fullContent.className = 'mermaid-block-rendered';
+  const sourceSvg = renderedContent.querySelector('svg');
+  if (sourceSvg) fullContent.appendChild(sourceSvg.cloneNode(true));
+  zoomSurfaceEl.appendChild(fullContent);
   viewportEl.appendChild(zoomSurfaceEl);
 
   const controlsEl = document.createElement('div');
@@ -236,63 +502,26 @@ function openMermaidFullscreen(
   panelEl.append(closeButton, viewportEl, controlsEl, zoomBadgeEl);
   overlayEl.appendChild(panelEl);
 
-  let scale = FULLSCREEN_DEFAULT_SCALE;
-  let svgBaseSize: { width: number; height: number } | null = null;
+  let viewportBinding: MermaidViewportBinding;
+  let focusFrame = 0;
   let closed = false;
-  let drag:
-    | {
-        pointerId: number;
-        startX: number;
-        startY: number;
-        scrollLeft: number;
-        scrollTop: number;
-      }
-    | null = null;
+  let drag: {
+    pointerId: number;
+    startX: number;
+    startY: number;
+    scrollLeft: number;
+    scrollTop: number;
+  } | null = null;
 
-  const centerContent = () => {
-    viewportEl.scrollLeft = Math.max(0, (viewportEl.scrollWidth - viewportEl.clientWidth) / 2);
-    viewportEl.scrollTop = Math.max(0, (viewportEl.scrollHeight - viewportEl.clientHeight) / 2);
-  };
-  const setScale = (nextScale: number) => {
-    scale = clampScale(nextScale);
-    const roundedScale = Number(scale.toFixed(2));
-    const svgEl = zoomSurfaceEl.querySelector<SVGElement>('svg');
-    if (svgEl) {
-      svgBaseSize ??= readSvgIntrinsicSize(svgEl);
-      if (svgBaseSize) {
-        svgEl.setAttribute('width', String(Math.ceil(svgBaseSize.width * roundedScale)));
-        svgEl.setAttribute('height', String(Math.ceil(svgBaseSize.height * roundedScale)));
-      }
-    }
-    zoomBadgeEl.textContent = `${Math.round(roundedScale * 100)}%`;
-  };
-  const zoomAt = (nextScale: number, pointerX: number, pointerY: number) => {
-    const oldScale = scale;
-    const clampedScale = clampScale(nextScale);
-    if (clampedScale === oldScale) return;
-    const contentX = viewportEl.scrollLeft + pointerX;
-    const contentY = viewportEl.scrollTop + pointerY;
-    const scaleRatio = clampedScale / oldScale;
-    setScale(clampedScale);
-    viewportEl.scrollLeft = contentX * scaleRatio - pointerX;
-    viewportEl.scrollTop = contentY * scaleRatio - pointerY;
-  };
-  const zoomFromCenter = (nextScale: number) => {
-    zoomAt(nextScale, viewportEl.clientWidth / 2, viewportEl.clientHeight / 2);
-  };
-  const reset = () => {
-    setScale(FULLSCREEN_DEFAULT_SCALE);
-    requestAnimationFrame(centerContent);
-  };
+  const reset = () => viewportBinding.reset();
   const onWheel = (event: WheelEvent) => {
     if (!event.ctrlKey && !event.metaKey) return;
     event.preventDefault();
     const viewportRect = viewportEl.getBoundingClientRect();
-    zoomAt(
-      scale + (event.deltaY < 0 ? FULLSCREEN_SCALE_STEP : -FULLSCREEN_SCALE_STEP),
-      event.clientX - viewportRect.left,
-      event.clientY - viewportRect.top,
-    );
+    viewportBinding.zoomBy(event.deltaY < 0 ? FULLSCREEN_SCALE_STEP : -FULLSCREEN_SCALE_STEP, {
+      x: event.clientX - viewportRect.left - viewportEl.clientLeft,
+      y: event.clientY - viewportRect.top - viewportEl.clientTop,
+    });
   };
   const onPointerDown = (event: PointerEvent) => {
     if (event.button !== 0) return;
@@ -327,6 +556,8 @@ function openMermaidFullscreen(
       if (closed) return;
       closed = true;
       document.removeEventListener('keydown', onKeydown);
+      viewportBinding.dispose();
+      cancelAnimationFrame(focusFrame);
       overlayEl.remove();
       document.body.classList.remove('has-mermaid-fullscreen');
       if (triggerButton.isConnected) triggerButton.focus({ preventScroll: true });
@@ -334,15 +565,28 @@ function openMermaidFullscreen(
     },
   };
   const onKeydown = (event: KeyboardEvent) => {
-    if (event.key === 'Escape') {
+    if (event.key === 'Tab') {
+      const controls = Array.from(
+        panelEl.querySelectorAll<HTMLElement>('button:not(:disabled), select:not(:disabled)'),
+      );
+      const index = controls.indexOf(document.activeElement as HTMLElement);
+      if (
+        index < 0 ||
+        (event.shiftKey && index === 0) ||
+        (!event.shiftKey && index === controls.length - 1)
+      ) {
+        event.preventDefault();
+        controls[event.shiftKey ? controls.length - 1 : 0]?.focus();
+      }
+    } else if (event.key === 'Escape') {
       event.preventDefault();
       viewer.close();
     } else if (event.key === '+' || event.key === '=') {
       event.preventDefault();
-      zoomFromCenter(scale + FULLSCREEN_SCALE_STEP);
+      viewportBinding.zoomBy(FULLSCREEN_SCALE_STEP);
     } else if (event.key === '-') {
       event.preventDefault();
-      zoomFromCenter(scale - FULLSCREEN_SCALE_STEP);
+      viewportBinding.zoomBy(-FULLSCREEN_SCALE_STEP);
     } else if (event.key === '0') {
       event.preventDefault();
       reset();
@@ -350,9 +594,9 @@ function openMermaidFullscreen(
   };
 
   closeButton.addEventListener('click', viewer.close);
-  zoomOutButton.addEventListener('click', () => zoomFromCenter(scale - FULLSCREEN_SCALE_STEP));
+  zoomOutButton.addEventListener('click', () => viewportBinding.zoomBy(-FULLSCREEN_SCALE_STEP));
   resetButton.addEventListener('click', reset);
-  zoomInButton.addEventListener('click', () => zoomFromCenter(scale + FULLSCREEN_SCALE_STEP));
+  zoomInButton.addEventListener('click', () => viewportBinding.zoomBy(FULLSCREEN_SCALE_STEP));
   overlayEl.addEventListener('click', (event) => {
     if (event.target === overlayEl) viewer.close();
   });
@@ -364,10 +608,12 @@ function openMermaidFullscreen(
   document.addEventListener('keydown', onKeydown);
   document.body.appendChild(overlayEl);
   document.body.classList.add('has-mermaid-fullscreen');
-  setScale(FULLSCREEN_DEFAULT_SCALE);
+  viewportBinding = bindMermaidViewport(viewportEl, controlsEl, labels, {
+    kind: 'fullscreen',
+    badge: zoomBadgeEl,
+  });
 
-  requestAnimationFrame(() => {
-    centerContent();
+  focusFrame = requestAnimationFrame(() => {
     closeButton.focus({ preventScroll: true });
   });
   return viewer;
@@ -394,7 +640,8 @@ function createIconButton(
   button.setAttribute('aria-label', ariaLabel);
   button.title = title;
   const paths: Record<typeof icon, string> = {
-    maximize: '<path d="M15 3h6v6"/><path d="M21 3l-7 7"/><path d="M9 21H3v-6"/><path d="M3 21l7-7"/>',
+    maximize:
+      '<path d="M15 3h6v6"/><path d="M21 3l-7 7"/><path d="M9 21H3v-6"/><path d="M3 21l7-7"/>',
     close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
     plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
     minus: '<path d="M5 12h14"/>',
@@ -411,17 +658,28 @@ function clampScale(scale: number): number {
 
 /** 从 SVG 的 `viewBox` 或数值宽高读取稳定的缩放基准。 */
 function readSvgIntrinsicSize(svgEl: SVGElement): { width: number; height: number } | null {
-  return readSvgViewBoxSize(svgEl) ?? readSvgAttributeSize(svgEl);
+  const cached = {
+    width: Number(svgEl.dataset.mermaidNaturalWidth),
+    height: Number(svgEl.dataset.mermaidNaturalHeight),
+  };
+  return (
+    readSvgViewBoxSize(svgEl) ??
+    (Number.isFinite(cached.width) &&
+    Number.isFinite(cached.height) &&
+    cached.width > 0 &&
+    cached.height > 0
+      ? cached
+      : readSvgAttributeSize(svgEl))
+  );
 }
 
 /** 从 SVG `viewBox` 读取正数宽高；格式无效时返回 `null`。 */
 function readSvgViewBoxSize(svgEl: Element): { width: number; height: number } | null {
   const viewBox = svgEl.getAttribute('viewBox');
   if (!viewBox) return null;
-  const [, , width, height] = viewBox
-    .trim()
-    .split(/\s+/)
-    .map((value) => Number.parseFloat(value));
+  const values = viewBox.trim().split(/\s+/).map(Number);
+  if (values.length !== 4 || !values.every(Number.isFinite)) return null;
+  const [, , width, height] = values;
   return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
     ? { width, height }
     : null;
@@ -429,8 +687,8 @@ function readSvgViewBoxSize(svgEl: Element): { width: number; height: number } |
 
 /** 从 SVG 数值 `width`/`height` 属性读取正数宽高；格式无效时返回 `null`。 */
 function readSvgAttributeSize(svgEl: Element): { width: number; height: number } | null {
-  const width = Number.parseFloat(svgEl.getAttribute('width') ?? '');
-  const height = Number.parseFloat(svgEl.getAttribute('height') ?? '');
+  const width = Number(svgEl.getAttribute('width'));
+  const height = Number(svgEl.getAttribute('height'));
   return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
     ? { width, height }
     : null;

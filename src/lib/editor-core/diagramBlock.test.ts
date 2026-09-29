@@ -11,6 +11,7 @@ import { schema } from './schema';
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe('mermaid_block markdown', () => {
@@ -293,6 +294,8 @@ describe('MermaidBlockNodeView', () => {
   });
 
   it('opens rendered Mermaid diagrams in a fullscreen preview', async () => {
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600);
     setCodeBlockDiagramRenderer({
       async renderMermaid() {
         return {
@@ -324,17 +327,17 @@ describe('MermaidBlockNodeView', () => {
     expect(overlay).not.toBeNull();
     expect(overlay?.querySelector('[data-fullscreen-source="diagram"]')).not.toBeNull();
     expect(overlay?.querySelector('.mermaid-fullscreen-header')).toBeNull();
-    expect(overlay?.querySelector('.mermaid-fullscreen-zoom-badge')?.textContent).toBe('125%');
+    expect(overlay?.querySelector('.mermaid-fullscreen-zoom-badge')?.textContent).toBe('100%');
     expect(
       overlay
         ?.querySelector('.mermaid-fullscreen-viewport .mermaid-block-rendered > svg')
         ?.getAttribute('width'),
-    ).toBe('125');
+    ).toBe('100');
     expect(
       overlay
         ?.querySelector('.mermaid-fullscreen-viewport .mermaid-block-rendered > svg')
         ?.getAttribute('height'),
-    ).toBe('63');
+    ).toBe('50');
     expect(overlay?.textContent).not.toContain('图表预览');
     expect(target.querySelector('.mermaid-block-textarea')).toBeNull();
 
@@ -346,17 +349,17 @@ describe('MermaidBlockNodeView', () => {
         cancelable: true,
       }),
     );
-    expect(overlay?.querySelector('.mermaid-fullscreen-zoom-badge')?.textContent).toBe('135%');
+    expect(overlay?.querySelector('.mermaid-fullscreen-zoom-badge')?.textContent).toBe('110%');
     expect(
       overlay
         ?.querySelector('.mermaid-fullscreen-viewport .mermaid-block-rendered > svg')
         ?.getAttribute('width'),
-    ).toBe('135');
+    ).toBe('110');
     expect(
       overlay
         ?.querySelector('.mermaid-fullscreen-viewport .mermaid-block-rendered > svg')
         ?.getAttribute('height'),
-    ).toBe('68');
+    ).toBe('55');
 
     overlay
       ?.querySelector('.mermaid-fullscreen-viewport')
@@ -468,7 +471,9 @@ describe('Mermaid theme refresh', () => {
     diagram.visible(true);
     await MermaidBlockNodeView.flushThemeUpdates(diagram.target);
     expect(diagram.render).toHaveBeenCalledTimes(1);
-    expect(diagram.target.querySelector('svg')?.getAttribute('data-test-theme')).toBe('default');
+    expect(
+      diagram.target.querySelector('.mermaid-block-rendered svg')?.getAttribute('data-test-theme'),
+    ).toBe('default');
     view!.destroy();
     view = undefined;
     expect(diagram.disconnect).toHaveBeenCalledOnce();
@@ -480,6 +485,8 @@ describe('Mermaid theme refresh', () => {
     diagram.visible(false);
     MermaidBlockNodeView.updateTheme({ theme: 'dark' });
     await MermaidBlockNodeView.flushThemeUpdates(diagram.target);
-    expect(diagram.target.querySelector('svg')?.getAttribute('data-test-theme')).toBe('dark');
+    expect(
+      diagram.target.querySelector('.mermaid-block-rendered svg')?.getAttribute('data-test-theme'),
+    ).toBe('dark');
   });
 });

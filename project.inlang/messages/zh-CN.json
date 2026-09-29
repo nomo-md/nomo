@@ -162,5 +162,10 @@
   "exitCancelled": "退出已取消",
   "exitTimedOut": "等待窗口响应超时，已取消退出",
   "exitSaveFailed": "保存失败，已取消退出",
-  "exitWindowLost": "窗口意外关闭，已取消退出"
+  "exitWindowLost": "窗口意外关闭，已取消退出",
+  "mermaidViewMode": "图表查看模式",
+  "mermaidReadable": "可读适配",
+  "mermaidFit": "适应全图",
+  "mermaidOriginal": "原始尺寸",
+  "mermaidCustom": "自定义"
 }

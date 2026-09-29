@@ -165,6 +165,11 @@ export async function renderQuickLookMermaidBlocks(
         block.classList.add('is-rendered');
         normalizeRenderedMermaidViewport(target);
         return bindMermaidFullscreen(block, target, {
+          mode: '图表查看模式',
+          readable: '可读适配',
+          fit: '适应全图',
+          original: '原始尺寸',
+          custom: '自定义',
           open: '放大查看图表',
           dialog: '图表放大预览',
           close: '关闭图表预览',

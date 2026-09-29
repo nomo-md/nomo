@@ -142,6 +142,7 @@
 | 代码高亮 | `src/lib/services/shikiCodeTokenizer.ts` | `src/lib/editor-core/nodeViews/CodeBlockNodeView.ts` | Shiki 代码 token 化 |
 | 公式渲染 | `src/lib/services/katexMathRenderer.ts` | `src/lib/editor-core/nodeViews/MathBlockNodeView.ts`, `MathInlineNodeView.ts` | KaTeX 公式渲染 |
 | 图表渲染 | `src/lib/services/mermaidDiagramRenderer.ts` | `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts` | Mermaid 图表渲染 |
+| 图表查看与缩放 | `src/lib/services/mermaidDiagramView.ts` | `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts`, `src/quicklook/preview.ts`, `src/app/services/exportService.ts` | 可读适配、全图/原始尺寸、全屏交互、导出尺寸还原 |
 | 图片加载器 | `src/app/services/desktopImageLoader.ts` | `src/lib/editor-core/nodeViews/ImageNodeView.ts` | 本地/asset/远程图片解析 |
 
 ### 设置与偏好

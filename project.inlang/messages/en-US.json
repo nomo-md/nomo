@@ -162,5 +162,10 @@
   "exitCancelled": "Exit cancelled",
   "exitTimedOut": "A window did not respond in time. Exit cancelled.",
   "exitSaveFailed": "Saving failed. Exit cancelled.",
-  "exitWindowLost": "A window closed unexpectedly. Exit cancelled."
+  "exitWindowLost": "A window closed unexpectedly. Exit cancelled.",
+  "mermaidViewMode": "Diagram view",
+  "mermaidReadable": "Readable fit",
+  "mermaidFit": "Fit diagram",
+  "mermaidOriginal": "Original size",
+  "mermaidCustom": "Custom"
 }

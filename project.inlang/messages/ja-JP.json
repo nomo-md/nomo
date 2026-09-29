@@ -162,5 +162,10 @@
   "exitCancelled": "終了をキャンセルしました",
   "exitTimedOut": "ウィンドウの応答がタイムアウトしたため終了をキャンセルしました",
   "exitSaveFailed": "保存に失敗したため終了をキャンセルしました",
-  "exitWindowLost": "ウィンドウが予期せず閉じたため終了をキャンセルしました"
+  "exitWindowLost": "ウィンドウが予期せず閉じたため終了をキャンセルしました",
+  "mermaidViewMode": "図の表示モード",
+  "mermaidReadable": "読みやすく表示",
+  "mermaidFit": "全体を表示",
+  "mermaidOriginal": "元のサイズ",
+  "mermaidCustom": "カスタム"
 }
