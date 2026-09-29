@@ -232,7 +232,7 @@
 | Responsibility | Primary code | Related code | Change when |
 |---|---|---|---|
 | 原生菜单 | `src-tauri/src/window/menu.rs` | `src-tauri/src/i18n.rs` | 菜单构建/快捷键/事件处理 |
-| 系统托盘 | `src-tauri/src/window/tray.rs` | `src-tauri/src/window/commands.rs` | 托盘安装/刷新/关闭到托盘 |
+| 系统托盘与平台图标 | `src-tauri/src/window/tray.rs` | `src-tauri/src/window/commands.rs` | 托盘安装/刷新/关闭到托盘；仅 macOS 随主题替换窗口和 Dock 图标，其他平台保留打包图标 |
 | 外部打开路由 | `src-tauri/src/window/external_open.rs` | `src-tauri/src/lib.rs` | 单实例/启动参数/macOS open 事件 |
 | Windows 文件关联 | `src-tauri/src/window/file_association.rs` | — | 注册/注销默认打开方式和右键菜单 |
 | 平台适配 | `src-tauri/src/window/os/macos.rs`, `os/windows.rs` | `src-tauri/src/window/os/mod.rs` | macOS/Windows 窗口行为差异与 Windows 无边框/阴影设置 |

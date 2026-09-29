@@ -21,8 +21,10 @@ const TRAY_LIGHT_ACTIVE_ICON_BYTES: &[u8] =
     include_bytes!("../../icons/nomo/tray/nomo-tray-light-active-24-preview.png");
 const TRAY_LIGHT_INACTIVE_ICON_BYTES: &[u8] =
     include_bytes!("../../icons/nomo/tray/nomo-tray-light-inactive-24-preview.png");
+#[cfg(target_os = "macos")]
 const WINDOW_LIGHT_ICON_BYTES: &[u8] =
     include_bytes!("../../icons/nomo/macos/nomo-app-light-256.png");
+#[cfg(target_os = "macos")]
 const WINDOW_DARK_ICON_BYTES: &[u8] =
     include_bytes!("../../icons/nomo/macos/nomo-app-dark-256.png");
 
@@ -372,6 +374,7 @@ fn apply_tray_icon<R: Runtime>(app: &AppHandle<R>, state: TrayVisualState) -> Re
         .map_err(|error| format!("设置 Nomo 托盘图标失败：{error}"))
 }
 
+#[cfg(target_os = "macos")]
 fn apply_window_icons<R: Runtime>(app: &AppHandle<R>, theme: TrayTheme) -> Result<(), String> {
     let icon = window_theme_icon(theme)?;
     for (_label, window) in app.webview_windows() {
@@ -415,7 +418,9 @@ fn apply_dock_icon_on_main_thread(theme: TrayTheme) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn apply_dock_icon<R: Runtime>(_app: &AppHandle<R>, _theme: TrayTheme) -> Result<(), String> {
+fn apply_window_icons<R: Runtime>(_app: &AppHandle<R>, _theme: TrayTheme) -> Result<(), String> {
+    // 其他平台保留打包图标，避免 macOS 留白和主题切换影响 Windows 任务栏。
+    // 托盘图标仍由 apply_tray_icon 独立跟随主题更新。
     Ok(())
 }
 
@@ -432,6 +437,7 @@ fn tray_state_icon(state: TrayVisualState) -> Result<Image<'static>, String> {
         .map_err(|error| format!("读取 Nomo 托盘图标失败：{error}"))
 }
 
+#[cfg(target_os = "macos")]
 fn window_theme_icon(theme: TrayTheme) -> Result<Image<'static>, String> {
     let bytes = window_theme_icon_bytes(theme);
 
@@ -440,6 +446,7 @@ fn window_theme_icon(theme: TrayTheme) -> Result<Image<'static>, String> {
         .map_err(|error| format!("读取 Nomo 窗口图标失败：{error}"))
 }
 
+#[cfg(target_os = "macos")]
 fn window_theme_icon_bytes(theme: TrayTheme) -> &'static [u8] {
     match theme {
         TrayTheme::Light => WINDOW_LIGHT_ICON_BYTES,
