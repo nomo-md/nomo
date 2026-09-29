@@ -157,7 +157,6 @@
       type="button"
       class="front-matter-main"
       disabled={readonly}
-      on:focus={enterEdit}
       on:click={enterEdit}
     >
       <span class="front-matter-kicker">
