@@ -178,11 +178,7 @@
       const appWindow = getCurrentWindow();
       const fullscreen = await appWindow.isFullscreen();
 
-      if (
-        canSyncWindowState &&
-        platformCapabilities.isMac &&
-        requestId === windowStateRequestId
-      ) {
+      if (canSyncWindowState && platformCapabilities.isMac && requestId === windowStateRequestId) {
         isFullscreen = fullscreen;
       }
     } catch {
@@ -517,30 +513,42 @@
                   <div class="dropdown-menu nested recent-submenu" use:keepDropdownInViewport>
                     {#each recentFiles.slice(0, 10) as recent}
                       {@const isMissing = missingRecentPaths.has(recent.path)}
-                      <button
-                        class="recent-entry"
-                        class:recent-folder={recent.entryType === 'folder'}
-                        class:recent-missing={isMissing}
-                        disabled={isMissing}
-                        title={isMissing
-                          ? `${recent.path} (${t.pathInvalidRemove()})`
-                          : recent.path}
-                        on:click={() =>
-                          isMissing
-                            ? finish(() => removeRecentEntry(recent.path), 'file')
-                            : finish(() => openRecentEntry(recent.path, recent.entryType), 'file')}
-                      >
-                        <span class="recent-icon">
-                          {#if recent.entryType === 'folder'}
-                            📁
-                          {:else}
-                            📄
-                          {/if}
-                        </span>
-                        <span class="recent-label" data-missing-label={t.unavailableSuffix()}>
-                          {recent.title ?? getCompactPath(recent.path)}
-                        </span>
-                      </button>
+                      <div class="recent-menu-row">
+                        <button
+                          class="recent-entry"
+                          class:recent-folder={recent.entryType === 'folder'}
+                          class:recent-missing={isMissing}
+                          disabled={isMissing}
+                          title={isMissing
+                            ? `${recent.path} (${t.pathInvalidRemove()})`
+                            : recent.path}
+                          on:click={() =>
+                            isMissing
+                              ? finish(() => removeRecentEntry(recent.path), 'file')
+                              : finish(
+                                  () => openRecentEntry(recent.path, recent.entryType),
+                                  'file',
+                                )}
+                        >
+                          <span class="recent-icon">
+                            {#if recent.entryType === 'folder'}
+                              📁
+                            {:else}
+                              📄
+                            {/if}
+                          </span>
+                          <span class="recent-label" data-missing-label={t.unavailableSuffix()}>
+                            {recent.title ?? getCompactPath(recent.path)}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          class="recent-remove"
+                          aria-label={`${t.removeRecentLabel()} ${recent.path}`}
+                          title={t.removeRecentLabel()}
+                          on:click={() => removeRecentEntry(recent.path)}>×</button
+                        >
+                      </div>
                     {/each}
                     {#if recentFiles.length === 0}
                       <span class="disabled-item">{t.noRecentFiles()}</span>
@@ -938,9 +946,7 @@
           {/if}
         </button>
       </div>
-      {#if
-        desktopEnabled && platformCapabilities.usesCustomWindowsTitlebar && !markdownMiniActive
-      }
+      {#if desktopEnabled && platformCapabilities.usesCustomWindowsTitlebar && !markdownMiniActive}
         <WindowsCaptionControls onClose={closeCurrentWindow} />
       {/if}
     </div>

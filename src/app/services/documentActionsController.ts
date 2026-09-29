@@ -333,6 +333,10 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     markdownToSave: string,
     message: string,
   ) {
+    const previousPath = options
+      .getTabs()
+      .find((tab) => tab.id === options.getActiveTabId())?.nativePath;
+    const isNewPath = !previousPath || !sameNativePath(previousPath, document.path);
     const isLargeDocument =
       document.markdown.length > options.getLargeDocumentLimit() ||
       document.sizeBytes > options.getLargeDocumentLimit();
@@ -384,8 +388,10 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     options.setTabs([...options.getTabs()]);
 
     options.setStatusMessage(message);
-    await rememberNativeDocument(document, calculateDocumentStats(markdownToSave).words);
-    await refreshRecentFiles();
+    if (isNewPath) {
+      await rememberNativeDocument(document, calculateDocumentStats(markdownToSave).words);
+      await refreshRecentFiles();
+    }
     if (isLargeDocument) {
       options.setStatusMessage(t.largeDocumentReadonlyOpened());
     }
@@ -502,8 +508,11 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     }
   }
 
+  let recentRefreshGeneration = 0;
   async function refreshRecentFiles() {
-    options.setRecentFiles(await loadRecentEntries(options.getDesktopEnabled()));
+    const generation = ++recentRefreshGeneration;
+    const entries = await loadRecentEntries(options.getDesktopEnabled());
+    if (generation === recentRefreshGeneration) options.setRecentFiles(entries);
   }
 
   async function reloadExternalFile() {

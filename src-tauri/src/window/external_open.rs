@@ -140,6 +140,16 @@ pub(crate) fn take_early_external_open_paths() -> Result<Vec<String>, String> {
 }
 
 pub(crate) fn route_external_open(app: &AppHandle, paths: Vec<String>) -> Result<(), String> {
+    if super::workspace_lifecycle::is_exiting() {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            super::workspace_lifecycle::wait_until_idle().await;
+            if let Err(error) = route_external_open(&app, paths) {
+                crate::app_logger::error("ExternalOpen", &error);
+            }
+        });
+        return Ok(());
+    }
     if paths.is_empty() {
         return Ok(());
     }
@@ -180,6 +190,17 @@ pub(crate) fn route_external_folder_open(
     app: &AppHandle,
     folder_path: String,
 ) -> Result<(), String> {
+    if super::workspace_lifecycle::is_exiting() {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            super::workspace_lifecycle::wait_until_idle().await;
+            if let Err(error) = route_external_folder_open(&app, folder_path) {
+                crate::app_logger::error("ExternalOpen", &error);
+            }
+        });
+        return Ok(());
+    }
+
     if folder_path.is_empty() {
         return Ok(());
     }

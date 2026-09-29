@@ -12,7 +12,7 @@ use std::{
     hash::{Hash, Hasher},
     time::UNIX_EPOCH,
 };
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 #[tauri::command]
 pub(crate) fn remember_recent_entry(app: AppHandle, input: RecentEntryInput) -> Result<(), String> {
@@ -33,10 +33,15 @@ pub(crate) fn remember_recent_entry(app: AppHandle, input: RecentEntryInput) -> 
 
     config::with_manager(&app, |manager| {
         manager.update(|config| {
-            config.recent.entries.retain(|item| item.path != entry.path);
+            config
+                .recent
+                .entries
+                .retain(|item| !same_recent_path(&item.path, &entry.path));
             config.recent.entries.insert(0, entry);
         })
-    })
+    })?;
+    notify_recent_changed(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -48,7 +53,40 @@ pub(crate) fn list_recent_entries(app: AppHandle) -> Result<Vec<RecentEntry>, St
 pub(crate) fn clear_recent_entries(app: AppHandle) -> Result<(), String> {
     config::with_manager(&app, |manager| {
         manager.update(|config| config.recent.entries.clear())
-    })
+    })?;
+    notify_recent_changed(&app);
+    Ok(())
+}
+
+fn same_recent_path(left: &str, right: &str) -> bool {
+    let normalize = crate::window::open_targets::normalize_target_path;
+    match (normalize(left), normalize(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => left == right,
+    }
+}
+fn notify_recent_changed(app: &AppHandle) {
+    let _ = app.emit("nomo://recent-entries-changed", ());
+    for window in app.webview_windows().values() {
+        if crate::window::external_open::is_document_window_label(window.label()) {
+            if let Err(error) = crate::window::menu::install_window_menu(app, window) {
+                crate::app_logger::warn("Recent", &error);
+            }
+        }
+    }
+}
+#[tauri::command]
+pub(crate) fn remove_recent_entry(app: AppHandle, path: String) -> Result<(), String> {
+    config::with_manager(&app, |manager| {
+        manager.update(|config| {
+            config
+                .recent
+                .entries
+                .retain(|entry| !same_recent_path(&entry.path, &path));
+        })
+    })?;
+    notify_recent_changed(&app);
+    Ok(())
 }
 
 #[tauri::command]

@@ -126,19 +126,24 @@ impl ConfigManager {
     where
         F: FnOnce(&mut AppConfig),
     {
-        let next_config = {
-            let mut config = self
-                .config
-                .write()
-                .map_err(|error| format!("更新配置状态失败：{error}"))?;
-            updater(&mut config);
-            config.clone()
-        };
-        self.save_config(&next_config)
+        // 锁覆盖磁盘提交：多窗口更新不能用较旧副本覆盖较新的磁盘内容。
+        // 先写候选配置，成功后才替换内存；失败不能留下“已保存”的假状态。
+        let mut config = self
+            .config
+            .write()
+            .map_err(|error| format!("更新配置状态失败：{error}"))?;
+        let mut next_config = config.clone();
+        updater(&mut next_config);
+        self.save_config(&next_config)?;
+        *config = next_config;
+        Ok(())
     }
 
     pub(crate) fn save(&self) -> Result<(), String> {
-        let config = self.get_config()?;
+        let config = self
+            .config
+            .read()
+            .map_err(|error| format!("读取配置状态失败：{error}"))?;
         self.save_config(&config)
     }
 

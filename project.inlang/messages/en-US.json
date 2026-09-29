@@ -153,5 +153,14 @@
   "applyLink": "Apply link",
   "removeLink": "Remove link",
   "closeLinkEditor": "Close link editor",
-  "interfaceLanguageJaJp": "Japanese"
+  "interfaceLanguageJaJp": "Japanese",
+  "recentOpenLabel": "Recent",
+  "noRecentEntries": "No recently opened items",
+  "removeRecentLabel": "Remove entry",
+  "clearRecentConfirm": "Clear all recent entries? Files will not be deleted.",
+  "recentUpdateFailed": "Failed to update recent entries",
+  "exitCancelled": "Exit cancelled",
+  "exitTimedOut": "A window did not respond in time. Exit cancelled.",
+  "exitSaveFailed": "Saving failed. Exit cancelled.",
+  "exitWindowLost": "A window closed unexpectedly. Exit cancelled."
 }

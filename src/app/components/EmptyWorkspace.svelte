@@ -1,6 +1,14 @@
 <script lang="ts">
   import { FilePlus2, FileText, FolderOpen } from '@lucide/svelte';
   import { t } from '../i18n';
+  import RecentOpenPopover from './RecentOpenPopover.svelte';
+  import type { RecentEntry } from '../../lib/desktop/tauriStorage';
+  export let recentFiles: RecentEntry[];
+  export let missingRecentPaths: Set<string>;
+  export let openRecentEntry: (path: string, type: 'file' | 'folder') => void;
+  export let removeRecentEntry: (path: string) => void;
+  export let clearRecentEntriesList: () => void;
+  export let refreshRecentFiles: () => Promise<void>;
 
   export let interfaceLocale: string;
   export let createNewFile: () => void;
@@ -35,6 +43,14 @@
           <FolderOpen size={16} />
           <span>{t.openFolder()}</span>
         </button>
+        <RecentOpenPopover
+          {recentFiles}
+          {missingRecentPaths}
+          {openRecentEntry}
+          {removeRecentEntry}
+          {clearRecentEntriesList}
+          {refreshRecentFiles}
+        />
       </div>
     </div>
   </section>

@@ -1173,3 +1173,18 @@
     transform: rotate(360deg);
   }
 }
+
+.recent-menu-row {
+  display: flex;
+  align-items: center;
+}
+.recent-menu-row .recent-entry {
+  flex: 1;
+  min-width: 0;
+}
+.recent-menu-row .recent-remove {
+  flex: 0 0 28px;
+  width: 28px;
+  padding: 4px;
+  text-align: center;
+}

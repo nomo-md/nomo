@@ -144,6 +144,8 @@
   export let openPreviewFile: (path: string) => void | boolean | Promise<void | boolean>;
   export let pinPreviewFile: () => void;
   export let clearRecentEntriesList: () => void;
+  export let exitInProgress = false;
+  export let refreshRecentFiles: () => Promise<void>;
   export let removeRecentEntry: (path: string) => void;
   export let closeCurrentFile: () => void;
   export let closeCurrentWindow: () => void;
@@ -277,6 +279,7 @@
 <svelte:window on:contextmenu={suppressUnhandledContextMenu} />
 
 <div
+  inert={exitInProgress}
   class="app-layout"
   class:focus-mode={focusMode}
   class:markdown-mini-mode={markdownMiniActive}
@@ -585,7 +588,18 @@
           {/if}
         </div>
       {:else}
-        <EmptyWorkspace {interfaceLocale} {createNewFile} {openFileDialog} {openFolderDialog} />
+        <EmptyWorkspace
+          {interfaceLocale}
+          {createNewFile}
+          {openFileDialog}
+          {openFolderDialog}
+          {recentFiles}
+          {missingRecentPaths}
+          {openRecentEntry}
+          {removeRecentEntry}
+          {clearRecentEntriesList}
+          {refreshRecentFiles}
+        />
       {/if}
     </section>
 

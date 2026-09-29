@@ -94,6 +94,8 @@
 | 文档操作控制器 | `src/app/services/documentActionsController.ts` | `src/app/services/documentFiles.ts`, `tabs.ts`, `recoveryDraft.ts` | 打开/保存/另存/自动保存/外部变更 |
 | 编辑器链接目标解析 | `src/app/services/documentLinkNavigation.ts` | `src/app/App.svelte`, `src-tauri/src/external_link.rs` | 相对路径、标题锚点、应用内文档与本地附件导航规则变更 |
 | 标签页状态管理 | `src/app/services/tabs.ts` | `src/app/types.ts` | 标签页创建/复用/状态写入 |
+| 启动工作区与统一退出 | `src-tauri/src/window/workspace_lifecycle.rs` | `src/app/App.svelte`, `src-tauri/src/window/commands.rs`, `src-tauri/src/lib.rs` | 最后实际关闭窗口快照、跨窗口退出确认、保存失败与超时取消 |
+| 最近打开与空白页入口 | `src/app/components/RecentOpenPopover.svelte` | `src/app/components/EmptyWorkspace.svelte`, `src/app/components/AppTitleBar.svelte`, `src-tauri/src/config/commands.rs` | 最近记录浮层、原子删除、跨窗口同步与主动打开排序 |
 | 工作区持久化 | `src/app/services/workspacePersistence.ts` | `src/app/App.svelte`, `src/lib/desktop/tauriStorage.ts` | 工作区 v2 元数据、草稿引用、旧 workspaceTabs 迁移 |
 | 阅读位置持久化 | `src/app/services/readingPosition.ts` | `src/app/App.svelte`, `src/app/services/outlineNavigation.ts` | Markdown 文件按路径保存/恢复统一阅读语义锚点 |
 | 恢复草稿 | `src/app/services/recoveryDraft.ts` | `src/app/services/documentActionsController.ts` | 异常退出后草稿写入/恢复 |

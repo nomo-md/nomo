@@ -153,5 +153,14 @@
   "linkHref": "リンク先",
   "applyLink": "リンクを適用",
   "removeLink": "リンクを削除",
-  "closeLinkEditor": "リンクエディターを閉じる"
+  "closeLinkEditor": "リンクエディターを閉じる",
+  "recentOpenLabel": "最近開いた項目",
+  "noRecentEntries": "最近開いた項目はありません",
+  "removeRecentLabel": "履歴から削除",
+  "clearRecentConfirm": "最近開いた履歴をすべて消去しますか？ファイルは削除されません。",
+  "recentUpdateFailed": "履歴の更新に失敗しました",
+  "exitCancelled": "終了をキャンセルしました",
+  "exitTimedOut": "ウィンドウの応答がタイムアウトしたため終了をキャンセルしました",
+  "exitSaveFailed": "保存に失敗したため終了をキャンセルしました",
+  "exitWindowLost": "ウィンドウが予期せず閉じたため終了をキャンセルしました"
 }

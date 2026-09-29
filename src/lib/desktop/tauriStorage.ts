@@ -356,6 +356,11 @@ export async function listRecentFiles(): Promise<RecentDocument[]> {
   return listRecentEntries();
 }
 
+export async function removeRecentEntryByPath(path: string): Promise<void> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('remove_recent_entry', { path });
+}
+
 export async function clearRecentEntries(): Promise<void> {
   logInfo('tauriStorage', '清空最近打开项');
   const { invoke } = await import('@tauri-apps/api/core');

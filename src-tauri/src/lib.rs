@@ -76,6 +76,7 @@ pub fn run() {
             }
             WindowEvent::Destroyed => {
                 let label = window.label();
+                crate::window::workspace_lifecycle::destroyed(window.app_handle(), label);
                 crate::app_logger::debug("Window", &format!("窗口销毁前持久化状态：{label}"));
                 crate::window::state::persist_window_state_before_destroy(window);
                 if label == crate::window::commands::SETTINGS_WINDOW_LABEL {
@@ -101,7 +102,9 @@ pub fn run() {
                             }
                         }
                         Some(crate::window::commands::DeferredSettingsAction::ExitApp) => {
-                            window.app_handle().exit(0);
+                            if let Err(error) = crate::window::workspace_lifecycle::finish(window.app_handle()) {
+                                crate::app_logger::error("Workspace", &error);
+                            }
                         }
                         None => {}
                     }
@@ -167,6 +170,10 @@ pub fn run() {
                                     );
                                 }
                                 Err(error) => {
+                                    if crate::window::workspace_lifecycle::is_exiting() {
+                                        api.prevent_close();
+                                        crate::window::workspace_lifecycle::cancel(window.app_handle(), "exitSaveFailed");
+                                    }
                                     crate::window::commands::clear_pending_settings_close_request();
                                     crate::app_logger::warn(
                                         "Settings",
@@ -310,6 +317,8 @@ pub fn run() {
             crate::config::commands::remember_recent_entry,
             crate::config::commands::list_recent_entries,
             crate::config::commands::clear_recent_entries,
+            crate::config::commands::remove_recent_entry,
+            crate::window::workspace_lifecycle::acknowledge_workspace_exit,
             crate::config::commands::create_document_snapshot,
             crate::config::commands::list_document_snapshots,
             crate::config::commands::write_workspace_draft,
@@ -378,6 +387,9 @@ pub fn run() {
         .build(context)
         .expect("error while building Nomo")
         .run(|_app, _event| {
+            if matches!(&_event, tauri::RunEvent::Exit) {
+                crate::window::workspace_lifecycle::committed_exit(_app);
+            }
             #[cfg(target_os = "macos")]
             match _event {
                 tauri::RunEvent::Opened { urls } => {

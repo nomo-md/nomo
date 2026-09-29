@@ -300,10 +300,11 @@ fn theme_payload(theme: Theme) -> &'static str {
 }
 
 #[tauri::command]
-pub(crate) fn create_new_window(
+pub(crate) async fn create_new_window(
     app: AppHandle,
     pending_folder: Option<String>,
 ) -> Result<String, String> {
+    super::workspace_lifecycle::wait_until_idle().await;
     let timer = std::time::Instant::now();
     let id = app
         .state::<crate::window::open_targets::OpenTargetRegistry>()
@@ -454,8 +455,16 @@ pub(crate) fn set_markdown_mini_mode_pinned(
 }
 
 #[tauri::command]
-pub(crate) fn close_window(window: tauri::WebviewWindow) -> Result<(), String> {
+pub(crate) fn close_window(
+    window: tauri::WebviewWindow,
+    sessions: Option<Vec<super::workspace_lifecycle::ClosingSession>>,
+) -> Result<(), String> {
     let label = window.label().to_string();
+    super::workspace_lifecycle::prepare_close(
+        window.app_handle(),
+        &label,
+        sessions.unwrap_or_default(),
+    )?;
     crate::app_logger::info("Window", &format!("关闭窗口：{label}"));
     if label == SETTINGS_WINDOW_LABEL {
         clear_pending_settings_close_request();
@@ -494,6 +503,7 @@ pub(crate) fn cancel_settings_close_request(
         .is_ok()
     {
         ACKNOWLEDGED_SETTINGS_CLOSE_REQUEST.store(0, Ordering::Release);
+        super::workspace_lifecycle::cancel(window.app_handle(), "exitSaveFailed");
         if let Some(DeferredSettingsAction::CloseOwner(owner_label)) =
             take_deferred_settings_action()
         {
@@ -531,15 +541,7 @@ pub(crate) fn hide_window_to_tray(window: tauri::WebviewWindow) -> Result<(), St
 
 #[tauri::command]
 pub(crate) fn exit_app(app: AppHandle) {
-    crate::app_logger::info("App", "退出应用");
-    match request_app_exit_after_settings(&app) {
-        Ok(true) => crate::app_logger::info("Settings", "退出应用前先保存并关闭偏好设置窗口"),
-        Ok(false) => app.exit(0),
-        Err(error) => crate::app_logger::warn(
-            "Settings",
-            &format!("退出应用前关闭偏好设置窗口失败，已取消退出：{error}"),
-        ),
-    }
+    let _ = super::workspace_lifecycle::begin(&app);
 }
 
 #[tauri::command]
@@ -549,8 +551,7 @@ pub(crate) fn request_exit_app(app: AppHandle) -> Result<(), String> {
 }
 
 pub(crate) fn emit_exit_request<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    app.emit("nomo://request-exit-app", ())
-        .map_err(|error| format!("请求退出应用失败：{error}"))
+    super::workspace_lifecycle::begin(app)
 }
 
 pub(crate) fn consume_next_close(label: &str) -> bool {
@@ -594,6 +595,9 @@ pub(crate) fn schedule_settings_close_fallback<R: Runtime>(
 ) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(8));
+        if super::workspace_lifecycle::is_exiting() {
+            return;
+        }
         if ACKNOWLEDGED_SETTINGS_CLOSE_REQUEST.load(Ordering::Acquire) == request_id {
             return;
         }
@@ -637,6 +641,9 @@ pub(crate) fn request_settings_close_before_owner<R: Runtime>(
         forget_settings_owner();
         return Ok(false);
     };
+    if !settings_close_handler_ready() {
+        return Err("偏好设置窗口尚未准备好保存".into());
+    }
     let should_request_close = {
         let mut deferred = deferred_settings_action()
             .lock()
@@ -686,10 +693,15 @@ pub(crate) fn forget_settings_owner() {
     remember_settings_owner_label(None);
 }
 
-fn request_app_exit_after_settings<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> {
+pub(crate) fn request_app_exit_after_settings<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<bool, String> {
     let Some(settings_window) = app.get_webview_window(SETTINGS_WINDOW_LABEL) else {
         return Ok(false);
     };
+    if !settings_close_handler_ready() {
+        return Err("偏好设置窗口尚未准备好保存".into());
+    }
     let should_request_close = {
         let mut deferred = deferred_settings_action()
             .lock()
@@ -732,6 +744,7 @@ fn allow_next_close(label: &str) -> Result<(), String> {
 }
 
 fn clear_next_close(label: &str) {
+    super::workspace_lifecycle::forget_close(label);
     let _ = force_close_labels().lock().map(|mut labels| {
         labels.remove(label);
     });

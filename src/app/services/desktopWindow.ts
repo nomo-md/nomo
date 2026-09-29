@@ -46,7 +46,11 @@ function getNewWindowChromeOptions() {
   };
 }
 
-export async function closeAppWindow(desktopEnabled: boolean, closeToTrayEnabled = false) {
+export async function closeAppWindow(
+  desktopEnabled: boolean,
+  closeToTrayEnabled = false,
+  sessions: Array<{ sessionId: string; discardChanges: boolean }> = [],
+) {
   if (!desktopEnabled) {
     return;
   }
@@ -54,9 +58,10 @@ export async function closeAppWindow(desktopEnabled: boolean, closeToTrayEnabled
   try {
     logInfo('DesktopWindow', closeToTrayEnabled ? '隐藏窗口到托盘' : '关闭窗口');
     const { invoke } = await import('@tauri-apps/api/core');
-    await invoke(closeToTrayEnabled ? 'hide_window_to_tray' : 'close_window');
+    await invoke(closeToTrayEnabled ? 'hide_window_to_tray' : 'close_window', { sessions });
   } catch (error) {
     logError('DesktopWindow', 'Failed to close window', { error: formatError(error) });
+    throw error;
   }
 }
 

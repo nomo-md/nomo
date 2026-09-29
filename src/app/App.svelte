@@ -23,6 +23,7 @@
     type RecentEntry,
     type RecentEntryType,
     clearRecentEntries,
+    removeRecentEntryByPath,
   } from '../lib/desktop/tauriStorage';
   import {
     createEditorCore,
@@ -89,7 +90,6 @@
     activateDocumentWindow,
     createAppWindow,
     enterMarkdownMiniMode,
-    exitApp as exitDesktopApp,
     exitMarkdownMiniMode,
     openSettingsWindow,
     refreshInterfaceLanguageChrome,
@@ -318,6 +318,8 @@
   let statusMessage = '';
   let desktopEnabled = false;
   let recentFiles: RecentEntry[] = [];
+  let exitRequestId: number | null = null;
+  let exitConfirmPending = false;
   let missingRecentPaths = new Set<string>();
   let outline: OutlineItem[] = [];
   let outlineVisible = DEFAULT_APP_PREFERENCES.outlineVisible,
@@ -718,7 +720,14 @@
     await persistWorkspaceStateNow({ ensureDraftIds: false });
   }
 
-  async function persistWorkspaceStateNow(options?: { ensureDraftIds?: boolean }) {
+  let workspacePersistenceQueue: Promise<void> = Promise.resolve();
+  function persistWorkspaceStateNow(options?: { ensureDraftIds?: boolean }) {
+    const pending = workspacePersistenceQueue.then(() => persistWorkspaceStateImmediately(options));
+    workspacePersistenceQueue = pending.catch(() => undefined);
+    return pending;
+  }
+
+  async function persistWorkspaceStateImmediately(options?: { ensureDraftIds?: boolean }) {
     if (!desktopEnabled || !windowLabel) return;
     await workspaceRestorePreparation;
     await deferredWorkspaceRestore;
@@ -794,11 +803,9 @@
       policy,
       preservedDraftIds: getPendingStartupConflictDraftIds(),
       cache: workspaceDraftPersistenceCache,
-    })
-      .then((value) => {
-        result = value;
-      })
-      .catch(() => undefined);
+    }).then((value) => {
+      result = value;
+    });
 
     try {
       await _workspaceDraftWritePromise;
@@ -825,11 +832,7 @@
       return;
     }
 
-    try {
-      await updateAppSettings(changedEntries);
-    } catch {
-      return;
-    }
+    await updateAppSettings(changedEntries);
     for (const [key, json] of changedJsonByKey.entries()) {
       lastPersistedWorkspaceJsonByKey.set(key, json);
     }
@@ -2072,26 +2075,27 @@
   }
 
   async function clearRecentEntriesList() {
-    if (!desktopEnabled) return;
-    await clearRecentEntries().catch(() => undefined);
-    await refreshRecentFiles();
+    if (
+      !desktopEnabled ||
+      !(await confirmAction(t.clearRecentConfirm(), { okLabel: t.clearRecentFiles() }))
+    )
+      return;
+    try {
+      await clearRecentEntries();
+      await refreshRecentFiles();
+    } catch (error) {
+      showVisibleError(error, t.recentUpdateFailed());
+    }
   }
 
   async function removeRecentEntry(path: string) {
     if (!desktopEnabled) return;
-    // 当前后端没有单条删除命令，通过清除全部 + 重新写入保留条目实现
-    const current = recentFiles.filter((entry) => entry.path !== path);
-    await clearRecentEntries().catch(() => undefined);
-    for (const entry of current) {
-      if (entry.entryType === 'file') {
-        await rememberRecentEntry(entry.path, 'file', entry.title ?? null, entry.wordCount).catch(
-          () => undefined,
-        );
-      } else {
-        await rememberRecentEntry(entry.path, 'folder', null, 0).catch(() => undefined);
-      }
+    try {
+      await removeRecentEntryByPath(path);
+      await refreshRecentFiles();
+    } catch (error) {
+      showVisibleError(error, t.recentUpdateFailed());
     }
-    await refreshRecentFiles();
   }
 
   async function closeCurrentFile() {
@@ -2102,6 +2106,7 @@
   }
 
   async function closeCurrentWindow() {
+    if (exitRequestId !== null) return;
     if (!(await requestMarkdownMiniReturn({ showExternalChange: false }))) return;
     const closeBehavior = await resolveCloseWindowBehaviorForCloseRequest();
     if (!closeBehavior) {
@@ -2134,7 +2139,8 @@
     if (closeBehavior === 'close-window') {
       invalidatePendingPreviewOpen();
       await cancelDeferredWorkspaceRestore();
-      await closeAllSegmentedSessions(discardDirtySegmented);
+      await flushAllSegmentedSessions();
+      await flushPersistWorkspaceState();
     } else {
       await workspaceRestorePreparation;
       await deferredWorkspaceRestore;
@@ -2143,7 +2149,9 @@
     await flushPersistWorkspaceState();
     await flushCurrentReadingPosition();
     const shouldHideToTray = closeBehavior === 'close-to-tray';
-    await closeDesktopWindow(desktopEnabled, shouldHideToTray);
+    await closeDesktopWindow(desktopEnabled, shouldHideToTray,
+      tabs.filter(isSegmentedTextTab).map(tab => ({ sessionId: tab.sessionId, discardChanges: discardDirtySegmented && tab.dirty })),
+    );
   }
 
   async function resolveCloseWindowBehaviorForCloseRequest(): Promise<CloseWindowAction | null> {
@@ -2426,22 +2434,53 @@
   }
 
   async function requestExitApp() {
-    if (!(await requestMarkdownMiniReturn({ showExternalChange: false }))) return;
-    const dirtyTabs = getDirtyTabs(tabs);
-    let discardDirtySegmented = false;
-    if (dirtyTabs.length > 0) {
-      const names = dirtyTabs.map((t) => t.fileName).join('、');
-      const ok = await confirmAction(t.unsavedChangesExitApp({ names }));
-      if (ok === false) return;
-      discardDirtySegmented = true;
+    if (!desktopEnabled) return;
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('request_exit_app').catch(error => showVisibleError(error, t.exitSaveFailed()));
+  }
+
+  async function prepareWorkspaceExit(requestId: number) {
+    if (exitRequestId !== null) return;
+    exitRequestId = requestId;
+    const { invoke } = await import('@tauri-apps/api/core');
+    try {
+      if (!(await requestMarkdownMiniReturn({ showExternalChange: false }))) {
+        await invoke('acknowledge_workspace_exit', { requestId, approved: false });
+        return;
+      }
+      const dirtyTabs = getDirtyTabs(tabs);
+      if (dirtyTabs.length > 0) {
+        await invoke('activate_document_window');
+        exitConfirmPending = true;
+        const ok = await confirmAction(
+          t.unsavedChangesExitApp({ names: dirtyTabs.map((tab) => tab.fileName).join('、') }),
+        );
+        exitConfirmPending = false;
+        if (exitRequestId !== requestId) return;
+        if (ok === false) {
+          await invoke('acknowledge_workspace_exit', { requestId, approved: false });
+          return;
+        }
+      }
+      // 确认阶段仅刷新数据，取消退出后编辑会话仍然可用。
+      await openTargetOperationQueue;
+      if (exitRequestId !== requestId) return;
+      await workspaceRestorePreparation;
+      await deferredWorkspaceRestore;
+      await flushAllSegmentedSessions();
+      await flushPersistWorkspaceState();
+      await flushCurrentReadingPosition();
+      if (exitRequestId !== requestId) return;
+      await invoke('acknowledge_workspace_exit', { requestId, approved: true,
+        sessions: tabs.filter(isSegmentedTextTab).map(tab => ({ sessionId: tab.sessionId, discardChanges: tab.dirty })),
+      });
+    } catch (error) {
+      showVisibleError(error, t.exitSaveFailed());
+      await invoke('acknowledge_workspace_exit', { requestId, approved: false }).catch(
+        () => undefined,
+      );
+      if (exitRequestId === requestId) exitRequestId = null;
     }
-    // 退出与关闭窗口共享相同的恢复收口边界，确保没有迟到 session 留在后端。
-    invalidatePendingPreviewOpen();
-    await cancelDeferredWorkspaceRestore();
-    await closeAllSegmentedSessions(discardDirtySegmented);
-    await flushPersistWorkspaceState();
-    await flushCurrentReadingPosition();
-    await exitDesktopApp(desktopEnabled);
   }
 
   async function approveSoftwareUpdateInstall(requestId: string) {
@@ -2743,10 +2782,12 @@
   // 步骤：recentFiles 变化时异步检测路径是否存在，用于灰显失效条目
   $: if (desktopEnabled && recentFiles.length > 0) {
     void (async () => {
-      const paths = recentFiles.map((entry) => entry.path);
+      const entries = recentFiles;
+      const paths = entries.map((entry) => entry.path);
       const exists = await checkPathsExist(paths).catch(() => paths.map(() => true));
+      if (recentFiles !== entries) return;
       const nextMissing = new Set<string>();
-      recentFiles.forEach((entry, index) => {
+      entries.forEach((entry, index) => {
         if (!exists[index]) {
           nextMissing.add(entry.path);
         }
@@ -4196,6 +4237,7 @@
       await switchTab(existingTab.id);
       if (existingTab.id === previewTabId) previewTabId = null;
       statusMessage = t.switchedToOpenedTab();
+      await rememberRecentEntry(path, 'file', existingTab.fileName, 0);
       return activeTabId === existingTab.id;
     }
 
@@ -4289,6 +4331,7 @@
       return saveMarkdownDocument(saveAs);
     }
 
+    const previousNativePath = activeTab.nativePath;
     const savingTabId = activeTab.id;
     const savingSessionId = activeTab.sessionId;
     const preparedSave = await segmentedWorkspace?.prepareSave();
@@ -4356,10 +4399,8 @@
       tabs = [...tabs];
       persistWorkspaceState();
       if (activeTabId === savingTabId) statusMessage = t.saved();
-      if (targetTab.nativePath) {
-        await rememberRecentEntry(targetTab.nativePath, 'file', targetTab.fileName, 0).catch(
-          () => undefined,
-        );
+      if (targetPath && !sameNativePath(previousNativePath ?? '', targetPath)) {
+        await rememberRecentEntry(targetPath, 'file', targetTab.fileName, 0).catch(() => undefined);
         await refreshRecentFiles();
       }
       return true;
@@ -5265,7 +5306,7 @@
           ) {
             await expandAncestors(nativePath, currentFolderPath);
           }
-          await rememberNativeFolder(folderPath);
+          // 自动恢复不改变最近打开顺序。
           await refreshRecentFiles();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -5290,6 +5331,7 @@
     if (!desktopEnabled || !windowLabel) return;
     const workspaceTabsKey = windowLabel ? `workspaceTabs:${windowLabel}` : 'workspaceTabs';
     const workspaceTabsSetting =
+      (windowLabel === 'main' ? settings.find((s) => s.key === 'startupWorkspace') : undefined) ??
       settings.find((s) => s.key === workspaceTabsKey) ??
       settings.find((s) => s.key === 'workspaceTabs');
     if (!workspaceTabsSetting) return;
@@ -5380,7 +5422,7 @@
           // 双击 md 文件启动：不恢复上次工作区，稍后单独加载文件所在目录并打开该文件
           restoredWorkspaceTabs = false;
         } else {
-          await restoreWindowWorkspaceState(settings);
+          if (!pendingFolderPath) await restoreWindowWorkspaceState(settings);
           restoredWorkspaceTabs = tabs.length > 0;
 
           // 若待打开文件夹与恢复的工作区不同，先清除旧标签页
@@ -5405,6 +5447,8 @@
           if (pendingFolderPath) {
             currentFolderPath = pendingFolderPath;
             startupFolderPath = pendingFolderPath;
+            await restoreFolderWorkspaceState(pendingFolderPath);
+            await rememberNativeFolder(pendingFolderPath);
           }
         }
 
@@ -5431,7 +5475,10 @@
       const startupExternalOpenPaths = pendingExternalOpenPaths;
       pendingExternalOpenPaths = [];
       logInfo('ExternalOpen', '处理冷启动文件队列', { paths: startupExternalOpenPaths });
-      if (startupExternalOpenPaths.length === 0) {
+      if (
+        startupExternalOpenPaths.length === 0 &&
+        !settings.some((s) => s.key === 'startupWorkspace')
+      ) {
         await maybeOpenFirstRunSample({
           settings,
           recentFilesCount: recentFiles.length,
@@ -5481,7 +5528,7 @@
     systemThemeListenerReady = false;
     // 组件销毁前立即持久化工作区状态和阅读位置
     void flushAllSegmentedSessions().catch(() => undefined);
-    void flushPersistWorkspaceState();
+    void flushPersistWorkspaceState().catch(() => undefined);
     saveCurrentReadingPositionToMemoryOnly();
     void flushReadingPositions();
     _unsubConfirmStore();
@@ -5925,9 +5972,8 @@
     const { exportHtml, exportPdf } = await import('./services/exportService');
     if (editorHost) {
       // 屏幕外图表平时按需换肤，导出快照必须先补齐同一主题。
-      const { MermaidBlockNodeView } = await import(
-        '../lib/editor-core/nodeViews/MermaidBlockNodeView'
-      );
+      const { MermaidBlockNodeView } =
+        await import('../lib/editor-core/nodeViews/MermaidBlockNodeView');
       await MermaidBlockNodeView.flushThemeUpdates(editorHost);
     }
     const renderedHtml = editorHost?.innerHTML ?? '';
@@ -5994,14 +6040,35 @@
     }
 
     const { listen } = await import('@tauri-apps/api/event');
+    desktopUnlisteners.push(
+      await listen<{ requestId: number; reason: string }>('nomo://exit-cancelled', (event) => {
+        if (exitRequestId !== event.payload.requestId) return;
+        exitRequestId = null;
+        if (exitConfirmPending) {
+          exitConfirmPending = false;
+          resolveConfirmDialog(false);
+        }
+        statusMessage = t[event.payload.reason]();
+      }),
+    );
+    desktopUnlisteners.push(
+      await listen('nomo://recent-entries-changed', () => {
+        void refreshRecentFiles();
+      }),
+    );
+    desktopUnlisteners.push(
+      await listen<string>('nomo://workspace-error', (event) => {
+        showVisibleError(event.payload, t.exitSaveFailed());
+      }),
+    );
     const [
       exitRequestUnlisten,
       closeRequestUnlisten,
       markdownMiniReturnUnlisten,
       openDocumentUnlisten,
     ] = await Promise.all([
-      listen('nomo://request-exit-app', () => {
-        requestExitApp().catch(() => undefined);
+      listen<number>('nomo://request-exit-app', (event) => {
+        void prepareWorkspaceExit(event.payload);
       }).catch(() => null),
       listen<{ windowLabel?: string; window_label?: string }>(
         'nomo://request-close-window',
@@ -6009,7 +6076,7 @@
           // 多窗口场景下过滤只响应当前窗口的关闭请求，避免所有窗口同时弹出确认
           const requestedWindowLabel = event.payload?.windowLabel ?? event.payload?.window_label;
           if (requestedWindowLabel !== windowLabel) return;
-          closeCurrentWindow().catch(() => undefined);
+          closeCurrentWindow().catch((error) => showVisibleError(error, t.exitSaveFailed()));
         },
       ).catch(() => null),
       listen('nomo://markdown-mini-request-return', () => {
@@ -6059,6 +6126,7 @@
       openFolderUnlisten,
     ] = await Promise.all([
       listenDesktopMenuCommands((command) => {
+        if (exitRequestId !== null) return;
         executeDesktopCommand(command);
       }).catch(() => null),
       listenDesktopFileDrops((paths) => {
@@ -6143,6 +6211,7 @@
   }
 
   function handleGlobalShortcut(event: KeyboardEvent) {
+    if (exitRequestId !== null) return;
     handleGlobalAppShortcut(event, commandHandlers, shortcutPreferences);
   }
 
@@ -6361,6 +6430,7 @@
 </svelte:head>
 
 <AppShell
+  exitInProgress={exitRequestId !== null}
   {interfaceLocale}
   {appBootState}
   bind:segmentedWorkspace
@@ -6459,6 +6529,7 @@
   {openPreviewFile}
   pinPreviewFile={pinPreviewTab}
   {clearRecentEntriesList}
+  {refreshRecentFiles}
   {removeRecentEntry}
   {closeCurrentFile}
   {closeCurrentWindow}

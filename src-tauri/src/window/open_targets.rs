@@ -103,7 +103,7 @@ pub(crate) fn sync_window_open_targets(
 }
 
 #[tauri::command]
-pub(crate) fn prepare_open_target_window(
+pub(crate) async fn prepare_open_target_window(
     app: AppHandle,
     window: WebviewWindow,
     registry: State<'_, OpenTargetRegistry>,
@@ -111,6 +111,8 @@ pub(crate) fn prepare_open_target_window(
     create_if_missing: bool,
     reuse_directory_window: Option<bool>,
 ) -> Result<OpenTargetRouteDecision, String> {
+    super::workspace_lifecycle::wait_until_idle().await;
+    let requested_target = target.clone();
     let current_label = window.label().to_string();
     let (existing_documents, current_target, remaining_target) = {
         let alive_labels = app.webview_windows().into_keys().collect::<HashSet<_>>();
@@ -153,6 +155,17 @@ pub(crate) fn prepare_open_target_window(
         });
     }
     if remaining_target.is_none() {
+        if let OpenTargetInput::Folder { path } = requested_target {
+            crate::config::commands::remember_recent_entry(
+                app.clone(),
+                crate::models::RecentEntryInput {
+                    path,
+                    entry_type: crate::models::RecentEntryType::Folder,
+                    title: None,
+                    word_count: 0,
+                },
+            )?;
+        }
         return Ok(OpenTargetRouteDecision::Handled);
     }
     let Some(remaining_target) = remaining_target else {
@@ -369,7 +382,7 @@ fn target_keys(target: &OpenTargetInput) -> HashSet<String> {
     }
 }
 
-fn normalize_target_path(path: &str) -> Option<String> {
+pub(crate) fn normalize_target_path(path: &str) -> Option<String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return None;

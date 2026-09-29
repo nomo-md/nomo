@@ -153,5 +153,14 @@
   "applyLink": "套用連結",
   "removeLink": "移除連結",
   "closeLinkEditor": "關閉連結編輯器",
-  "interfaceLanguageJaJp": "日本語"
+  "interfaceLanguageJaJp": "日本語",
+  "recentOpenLabel": "最近開啟",
+  "noRecentEntries": "尚無最近開啟記錄",
+  "removeRecentLabel": "移除記錄",
+  "clearRecentConfirm": "清空所有最近開啟記錄？此操作不會刪除檔案。",
+  "recentUpdateFailed": "更新最近開啟記錄失敗",
+  "exitCancelled": "已取消結束應用程式",
+  "exitTimedOut": "等待視窗回應逾時，已取消結束",
+  "exitSaveFailed": "儲存失敗，已取消結束",
+  "exitWindowLost": "視窗意外關閉，已取消結束"
 }
