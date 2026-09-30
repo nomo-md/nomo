@@ -140,6 +140,8 @@
   export let startResize: (event: MouseEvent) => void;
   export let openContextMenu: (request: ContextMenuRequest) => void = () => undefined;
   export let copyContextText: (text: string) => void | Promise<void> = () => undefined;
+  export let copyContextFile: (path: string) => void | Promise<void> = () => undefined;
+  export let canCopyFile = false;
 
   const dispatch = createEventDispatcher<{
     createNode: { parentPath: string; type: 'folder' | 'file'; name: string };
@@ -537,6 +539,7 @@
     const path = nativePath || filePath;
     if (!path) return [];
     return [
+      { label: t.copyFile(), icon: 'copy', disabled: !canCopyFile || !nativePath, action: () => copyContextFile(path) },
       { label: t.copyPath(), icon: 'copy', action: () => copyContextText(path) },
       { label: t.revealInFolder(), icon: 'folder', action: () => revealPathInFolder(path) },
       menuSeparator(),
@@ -580,6 +583,12 @@
     });
 
     items.push({ label: '', action: () => {}, separator: true });
+    items.push({
+      label: t.copyFile(),
+      icon: 'copy',
+      disabled: !canCopyFile,
+      action: () => copyContextFile(node.path),
+    });
     items.push({
       label: t.copyPath(),
       icon: 'copy',

@@ -1,4 +1,6 @@
 {
+  "copyFile": "Copy File",
+  "fileCopied": "File copied. Paste it into your chat app to send.",
   "$schema": "https://inlang.com/schema/inlang-message-format",
   "appName": "Nomo",
   "settingsTitle": "Preferences",

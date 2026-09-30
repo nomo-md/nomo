@@ -14,6 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+arboard = { version = "3.6.1", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 encoding_rs = "0.8"
 tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }

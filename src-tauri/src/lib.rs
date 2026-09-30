@@ -2,6 +2,7 @@ mod app_logger;
 mod config;
 mod export;
 mod external_link;
+mod file_clipboard;
 mod file_system;
 mod i18n;
 mod models;
@@ -45,6 +46,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .manage(file_clipboard::FileClipboard::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             crate::app_logger::info("App", "收到单实例启动参数");
             let targets = crate::window::external_open::collect_external_open_targets_from_args(
@@ -293,6 +295,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            crate::file_clipboard::copy_file_to_clipboard,
             crate::export::export_html,
             crate::export::export_pdf_from_html,
             crate::export::read_file_as_base64,

@@ -1,4 +1,6 @@
 {
+  "copyFile": "複製檔案",
+  "fileCopied": "檔案已複製，可在聊天軟體中貼上傳送",
   "$schema": "https://inlang.com/schema/inlang-message-format",
   "appName": "Nomo",
   "settingsTitle": "偏好設定",

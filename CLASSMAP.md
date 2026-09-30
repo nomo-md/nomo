@@ -101,7 +101,8 @@
 | 恢复草稿 | `src/app/services/recoveryDraft.ts` | `src/app/services/documentActionsController.ts` | 异常退出后草稿写入/恢复 |
 | Markdown 桥接 | `src/lib/markdown/MarkdownBridge.ts` | `src/lib/markdown/frontMatter.ts` | front matter 与正文分离/合并规则变更 |
 | 图片插入协调 | `src/app/services/imageInsertion.ts` | `src/app/services/imageMarkdown.ts`, `src/lib/editor-core/renderers.ts` | 粘贴/拖放图片导入、策略选择、源码插入 |
-| 剪贴板协调 | `src/app/services/clipboard.ts` | `src/app/App.svelte`, `@tauri-apps/plugin-clipboard-manager` | 文本/安全 HTML/图片的 Web Clipboard 与 Tauri 读写、降级和 RGBA 转 PNG |
+| 剪贴板协调 | `src/app/services/clipboard.ts` | `src/app/App.svelte`, `@tauri-apps/plugin-clipboard-manager`, `src-tauri/src/file_clipboard.rs` | 文本/安全 HTML/图片的 Web Clipboard 与 Tauri 读写、降级和 RGBA 转 PNG，以及原生文件复制 IPC |
+| 原生文件剪贴板 | `src-tauri/src/file_clipboard.rs` | `src/app/services/clipboard.ts`, `src-tauri/src/lib.rs`, `arboard` | 校验已保存文件路径、写入系统文件列表并保持剪贴板实例存活 |
 | 图片 Markdown 路径 | `src/app/services/imageMarkdown.ts` | `src/app/services/imageInsertion.ts` | 图片文件过滤、路径/Markdown 语法生成 |
 | 文件存储与文档仓库接口 | `src/lib/services/storage.ts` | `src/lib/desktop/tauriStorage.ts` | FileStorage、DocumentRepository、Markdown 源编码契约变更 |
 | 渲染服务类型接口 | `src/lib/services/render.ts` | `src/lib/services/shikiCodeTokenizer.ts`, `katexMathRenderer.ts`, `mermaidDiagramRenderer.ts` | ImageLoader、CodeTokenizer、MathRenderer、DiagramRenderer 接口变更 |
@@ -513,6 +514,7 @@
 **Owns:**
 - 资源管理器侧边栏 UI
 - 目录树、最近文件、行内重命名、创建文件/文件夹，以及节点、根目录、单文件和空白区域菜单项
+- 文件节点与单文件视图提供“复制文件”，经 App.svelte 调用原生文件剪贴板；浏览器和未保存文件禁用
 - 当前文件选中底板及其虚拟树坐标滑动动画
 - 侧边栏 resize 逻辑
 

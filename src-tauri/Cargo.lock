@@ -2478,6 +2478,7 @@ dependencies = [
 name = "nomo"
 version = "0.5.3"
 dependencies = [
+ "arboard",
  "block2",
  "chrono",
  "encoding_rs",

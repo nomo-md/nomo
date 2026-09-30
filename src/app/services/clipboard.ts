@@ -7,6 +7,11 @@ export type ClipboardReadResult =
 
 export type ClipboardReadPreference = 'rich' | 'text';
 
+export async function writeFileClipboard(path: string): Promise<void> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('copy_file_to_clipboard', { path });
+}
+
 export async function writeEditorClipboard(
   payload: EditorClipboardPayload,
   desktopEnabled: boolean,

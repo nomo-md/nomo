@@ -211,6 +211,7 @@
   export let handleWorkspaceContextMenu: (event: MouseEvent) => void;
   export let openContextMenu: (request: ContextMenuRequest) => void;
   export let copyContextText: (text: string) => void | Promise<void>;
+  export let copyContextFile: (path: string) => void | Promise<void>;
   export let revealContextPath: (path: string) => void | Promise<void>;
   export let isOutlineItemExpandable: (index: number) => boolean;
   export let toggleOutlineItemExpanded: (item: OutlineItem) => void;
@@ -379,6 +380,8 @@
       {startResize}
       {openContextMenu}
       copyContextText={copyContextText}
+      {copyContextFile}
+      canCopyFile={desktopEnabled}
       on:createNode
       on:renameNode
       on:refreshFolder

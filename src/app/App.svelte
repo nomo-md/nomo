@@ -101,7 +101,7 @@
   } from './services/desktopWindow';
   import { routeOpenTarget } from './services/openTargetRouting';
   import { createImageInsertionHandlers } from './services/imageInsertion';
-  import { readEditorClipboard, writeEditorClipboard } from './services/clipboard';
+  import { readEditorClipboard, writeEditorClipboard, writeFileClipboard } from './services/clipboard';
   import { createDesktopImageLoader } from './services/desktopImageLoader';
   import { isOutlineItemVisible as getOutlineItemVisible } from './services/outlineState';
   import { writeRecoveryDraft as writeRecoveryDraftToStorage } from './services/recoveryDraft';
@@ -3171,6 +3171,15 @@
       await revealInExplorer(path);
     } catch (error) {
       showVisibleError(error, t.openFolderFailed());
+    }
+  }
+
+  async function copyContextFile(path: string) {
+    try {
+      await writeFileClipboard(path);
+      statusMessage = t.fileCopied();
+    } catch (error) {
+      showVisibleError(error, t.copyFailed());
     }
   }
 
@@ -6591,6 +6600,7 @@
   {handleWorkspaceContextMenu}
   openContextMenu={openApplicationContextMenu}
   copyContextText={copyPlainText}
+  {copyContextFile}
   {revealContextPath}
   {isOutlineItemExpandable}
   {toggleOutlineItemExpanded}
