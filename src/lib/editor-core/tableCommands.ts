@@ -5,9 +5,11 @@ import {
   addColumnBefore,
   addRowAfter,
   addRowBefore,
+  CellSelection,
   deleteColumn,
   deleteRow,
   deleteTable,
+  selectedRect,
   TableMap,
 } from 'prosemirror-tables';
 import { schema, type TableColumnAlignment } from './schema';
@@ -102,13 +104,25 @@ export function setTableColumnAlignment(align: TableColumnAlignment): Command {
     const context = findTableContext(state);
     if (!context) return false;
 
+    const columns =
+      state.selection instanceof CellSelection
+        ? selectedRect(state)
+        : { left: context.columnIndex, right: context.columnIndex + 1 };
     const tr = state.tr;
+    const touched = new Set<number>();
+
+    // Markdown 对齐属于整列；部分行的单元格选区也需要更新对应列的所有行。
     for (let rowIndex = 0; rowIndex < context.map.height; rowIndex += 1) {
-      const cellPosition =
-        context.tableStart + context.map.positionAt(rowIndex, context.columnIndex, context.table);
-      const cell = tr.doc.nodeAt(cellPosition);
-      if (cell) {
-        tr.setNodeMarkup(cellPosition, undefined, { ...cell.attrs, align });
+      for (let columnIndex = columns.left; columnIndex < columns.right; columnIndex += 1) {
+        const cellPosition =
+          context.tableStart + context.map.map[rowIndex * context.map.width + columnIndex];
+        if (touched.has(cellPosition)) continue;
+        touched.add(cellPosition);
+
+        const cell = state.doc.nodeAt(cellPosition);
+        if (cell && cell.attrs.align !== align) {
+          tr.setNodeMarkup(cellPosition, undefined, { ...cell.attrs, align });
+        }
       }
     }
     dispatch?.(tr.scrollIntoView());
