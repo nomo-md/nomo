@@ -301,13 +301,19 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       const fileName = path
         ? activeTab.fileName
         : suggestFileNameFromH1(markdownToSave, activeTab.fileName);
+      const currentFolderPath = options.getCurrentFolderPath();
+      // 保存对话框使用当前窗口的目录，避免沿用其他窗口的历史保存位置。
+      const suggestedPath =
+        !path && currentFolderPath
+          ? `${currentFolderPath.replace(/[\\/]+$/, '')}/${fileName}`
+          : fileName;
       if (options.getActiveTabId() === targetTabId) {
         options.writeRecoveryDraft(saveAsTarget ? 'before-save-as' : 'before-save');
       }
       const { document, error } = await saveMarkdownWithSourceEncoding(
         path,
         markdownToSave,
-        fileName,
+        suggestedPath,
         options.getCreateSnapshotBeforeSave() ? activeTab.nativePath : null,
         activeTab.encoding,
       );
