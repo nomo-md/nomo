@@ -1,7 +1,7 @@
 import { normalizeHeadingTitle, type OutlineItem } from '../outline/outlineService';
 
-export const TOC_START_MARKER = '<!-- toc -->';
-export const TOC_END_MARKER = '<!-- /toc -->';
+import { TOC_START_MARKER, TOC_END_MARKER } from './tocMarkers';
+export { TOC_START_MARKER, TOC_END_MARKER } from './tocMarkers';
 
 export interface TocBlockRange {
   start: number;
