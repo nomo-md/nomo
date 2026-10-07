@@ -25,6 +25,7 @@
 | 桌面窗口生命周期 | `src/app/services/desktopWindow.ts` | `src-tauri/src/window/` | 窗口事件、关闭行为、托盘交互变更 |
 | Rust 后端入口 | `src-tauri/src/lib.rs` | `src-tauri/src/main.rs` | 新增 IPC 命令、插件、窗口事件 |
 | 自定义标题栏菜单 | `src/app/components/AppTitleBar.svelte` | `src/app/App.svelte`, `src/app/services/appCommands.ts` | 添加/移除菜单项、修改菜单文案 |
+| 工作区与选中标签联合轮廓 | `src/app/components/WorkspaceSurface.svelte` | `src/app/components/AppShell.svelte`, `src/app/components/DocumentTabs.svelte`, `src/app/actions/motion.ts`, `src/app/styles/app-chrome.css` | 修改连续外轮廓、主题描边、柔和投影或活动标签几何同步 |
 | Markdown 工具栏显示与响应式布局 | `src/app/components/EditorToolbar.svelte` | `src/app/components/AppShell.svelte`, `src/app/actions/motion.ts`, `src/app/styles/app-chrome.css`, `src/app/styles/app-responsive.css`, `src/app/services/settings.ts` | 修改工具栏收展、窄宽度隐藏优先级或内容宽度控件 |
 | 窗口状态持久化 | `src-tauri/src/window/state.rs` | `src-tauri/src/lib.rs`, `src-tauri/src/models.rs` | 窗口位置/尺寸/最大化状态恢复逻辑变更 |
 | Markdown 文档小窗 | `src/app/App.svelte` | `src/app/components/AppShell.svelte`, `src/app/components/AppTitleBar.svelte`, `src/app/components/MarkdownMiniLargePreview.svelte`, `src/app/services/desktopWindow.ts`, `src-tauri/src/window/state.rs` | 修改小窗进入/返回、置顶、只读降级、快捷键或窗口几何恢复 |
@@ -384,6 +385,7 @@
 - 应用顶层布局：标题栏、侧边栏、标签栏、编辑区、状态栏、对话框
 - 通过 props 和回调将 App.svelte 的状态下发给子组件
 - Markdown 工具栏的收展区域和右侧展开柄
+- 装配工作区联合轮廓，并转发活动标签几何与主题更新键
 - 在 Markdown 小窗模式下隐藏常规 chrome，并在可编辑编辑器与大文档只读预览之间选择内容视图
 - 挂载全窗口右键菜单兜底策略，并把统一菜单入口下发给标题栏、文件树、标签栏和大纲
 
@@ -393,7 +395,7 @@
 
 **Called by:** `src/app/App.svelte`
 
-**Depends on:** `AppTitleBar.svelte`, `MarkdownMiniLargePreview.svelte`, `ExplorerSidebar.svelte`, `DocumentTabs.svelte`, `EditorToolbar.svelte`, `EditorWorkspace.svelte`, `StatusBar.svelte`, `ConfirmDialog.svelte`, `CloseWindowBehaviorDialog.svelte`, `FolderOpenDialog.svelte`, `EmptyWorkspace.svelte`, `SearchReplacePanel.svelte`
+**Depends on:** `AppTitleBar.svelte`, `MarkdownMiniLargePreview.svelte`, `ExplorerSidebar.svelte`, `DocumentTabs.svelte`, `WorkspaceSurface.svelte`, `EditorToolbar.svelte`, `EditorWorkspace.svelte`, `StatusBar.svelte`, `ConfirmDialog.svelte`, `CloseWindowBehaviorDialog.svelte`, `FolderOpenDialog.svelte`, `EmptyWorkspace.svelte`, `SearchReplacePanel.svelte`
 
 **Change this when:**
 - 调整整体应用布局结构
@@ -686,13 +688,38 @@
 
 ---
 
+### `src/app/components/WorkspaceSurface.svelte`
+
+**Kind:** component (SVG decoration)
+
+**Owns:**
+- 工作区与活动标签共用的闭合外轮廓、主题描边及两层柔和投影
+- 工作区尺寸与圆角测量，以及凹圆角靠近边缘时的收缩
+- 空工作区普通面板轮廓与减少动画偏好下的颜色过渡降级
+
+**Does not own:**
+- 不拥有标签业务状态、切换动画或编辑内容裁剪
+- 不修改公共主题契约或持久化设置
+
+**Called by:** `src/app/components/AppShell.svelte`
+
+**Depends on:** `TabIndicatorGeometry`（`src/app/actions/motion.ts` 的类型）、现有主题 CSS 变量
+
+**Change this when:** 修改联合轮廓、描边、投影或装饰层尺寸同步
+
+**Related tests:** —；视觉效果需实窗验收
+
+**Confidence:** high
+
+---
+
 ### `src/app/components/DocumentTabs.svelte`
 
 **Kind:** component
 
 **Owns:**
 - 标签页 UI：展示打开文档、切换标签、关闭标签
-- 活动标签完整底板的定位与 GSAP 滑动动画
+- 活动标签指示器的定位与 GSAP 滑动动画，以及相对工作区的逐帧几何回调
 - 固定预览标签状态
 - 标签项及标签栏空白区域的菜单项，并通过应用级菜单入口显示
 
@@ -2724,6 +2751,7 @@
 **Owns:**
 - Svelte 过渡动画工具：`motionIn`、`transitionDuration`、`pulseOnChange`
 - 工具栏收展、侧边栏、标签/目录选中底板和模式切换的 GSAP 动画
+- 活动标签共用插值的几何通知，供工作区轮廓同步填充、描边和阴影
 - 统一的 fade/slide 动画配置与 reduced-motion 降级
 
 **Does not own:**

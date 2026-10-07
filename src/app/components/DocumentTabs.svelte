@@ -1,7 +1,12 @@
 <script lang="ts">
   import { ChevronDown, FileJson2, FileText, FileType2, Plus, X } from '@lucide/svelte';
   import { createEventDispatcher, onMount, tick } from 'svelte';
-  import { motionIn, pulseOnChange, tabIndicator } from '../actions/motion';
+  import {
+    motionIn,
+    pulseOnChange,
+    tabIndicator,
+    type TabIndicatorGeometry,
+  } from '../actions/motion';
   import type {
     ContextMenuItem,
     ContextMenuRequest,
@@ -23,6 +28,10 @@
   export let copyContextText: (text: string) => void | Promise<void> = () => undefined;
   export let revealContextPath: (path: string) => void | Promise<void> = () => undefined;
   export let currentFolderPath: string = '';
+  export let appearanceKey = '';
+  export let onIndicatorGeometry:
+    | ((geometry: TabIndicatorGeometry | null) => void)
+    | undefined = undefined;
 
   const dispatch = createEventDispatcher<{
     closeOtherTabs: { tabId: string };
@@ -353,12 +362,11 @@
         activeTabId: visualActiveTabId,
         visibleStart: visibleRange.start,
         visibleEnd: visibleRange.end,
-        layoutKey: tabMeasureKey,
+        layoutKey: `${tabMeasureKey}|${appearanceKey}`,
+        onGeometry: onIndicatorGeometry,
       }}
     >
-      <span class="tab-active-indicator" aria-hidden="true">
-        <span class="tab-top-shadow"></span>
-      </span>
+      <span class="tab-active-indicator" aria-hidden="true"></span>
       {#each tabs.slice(visibleRange.start, visibleRange.end) as tab (tab.id)}
         <button
           type="button"

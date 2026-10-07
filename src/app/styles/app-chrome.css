@@ -8,21 +8,13 @@
   min-height: 0;
   border-top-left-radius: var(--md-editor-radius-lg);
   background: var(--md-editor-surface);
-  box-shadow:
-    -1px -1px 0 color-mix(in srgb, var(--md-editor-border) 76%, transparent),
-    -6px -3px 16px color-mix(in srgb, var(--md-editor-border) 34%, transparent);
 }
 
 .editor-shell.has-open-document {
   --editor-card-surface: var(--md-editor-surface);
-  --editor-card-edge-color: color-mix(in srgb, var(--md-editor-border) 76%, transparent);
-  --editor-card-shadow-color: color-mix(in srgb, var(--md-editor-border) 34%, transparent);
-  --editor-card-top-shadow-color: color-mix(in srgb, #000000 12%, transparent);
-  --editor-tab-shadow-color: color-mix(in srgb, #000000 16%, transparent);
   grid-template-rows: auto minmax(0, 1fr);
   border-top-left-radius: 0;
   background: var(--md-editor-rail);
-  box-shadow: none;
 }
 
 .editor-card {
@@ -34,9 +26,6 @@
   min-height: 0;
   border-top-left-radius: var(--md-editor-radius-lg);
   background: var(--editor-card-surface);
-  box-shadow:
-    -1px 0 0 var(--editor-card-edge-color),
-    -6px -3px 16px var(--editor-card-shadow-color);
   overflow: hidden;
 }
 
@@ -48,31 +37,14 @@
   overflow: visible;
 }
 
-.editor-shell.has-open-document > .topbar::after {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  z-index: 0;
-  height: var(--md-editor-radius-lg);
-  border-radius: var(--md-editor-radius-lg) 0 0 0;
-  box-shadow: 0 -1px 4px -1px var(--editor-card-top-shadow-color);
-  clip-path: inset(-4px -4px 0 -4px);
-  pointer-events: none;
-  content: '';
-}
-
 .editor-shell > .topbar {
   border-top-left-radius: inherit;
 }
 
 .editor-shell.no-open-document {
-  --editor-card-edge-color: color-mix(in srgb, var(--md-editor-border) 76%, transparent);
-  --editor-card-shadow-color: color-mix(in srgb, var(--md-editor-border) 34%, transparent);
   grid-template-rows: auto minmax(0, 1fr);
   border-top-left-radius: 0;
   background: var(--md-editor-rail);
-  box-shadow: none;
 }
 
 .editor-shell.no-open-document::before {
@@ -83,6 +55,8 @@
 }
 
 .empty-workspace {
+  position: relative;
+  z-index: 1;
   grid-row: 2;
   align-self: stretch;
   justify-self: stretch;
@@ -93,9 +67,6 @@
   padding: clamp(28px, 6cqw, 80px);
   border-top-left-radius: var(--md-editor-radius-lg);
   background: var(--md-editor-surface);
-  box-shadow:
-    -1px 0 0 var(--editor-card-edge-color),
-    -6px -3px 16px var(--editor-card-shadow-color);
   overflow: hidden;
   -webkit-user-select: none;
   user-select: none;
@@ -283,47 +254,9 @@
   z-index: 1;
   width: 0;
   height: var(--md-editor-tab-height);
-  border-radius: 10px 10px 0 0;
-  background: var(--editor-card-surface, var(--md-editor-surface));
-  box-shadow: 0 1px 0 var(--editor-card-surface, var(--md-editor-surface));
   opacity: 0;
   pointer-events: none;
   will-change: transform, width;
-}
-
-.tab-top-shadow {
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  box-shadow: 0 -1px 2px -1px var(--editor-tab-shadow-color);
-  clip-path: inset(-3px -3px calc(100% - 10px) -3px);
-  pointer-events: none;
-}
-
-.tabs-container[data-indicator-ready='true'] .tab-active-indicator {
-  opacity: 1;
-}
-
-.tab-active-indicator::before,
-.tab-active-indicator::after {
-  position: absolute;
-  bottom: 0;
-  width: 10px;
-  height: 10px;
-  background: transparent;
-  content: '';
-}
-
-.tab-active-indicator::before {
-  left: -10px;
-  border-radius: 0 0 10px 0;
-  box-shadow: 5px 5px 0 5px var(--editor-card-surface, var(--md-editor-surface));
-}
-
-.tab-active-indicator::after {
-  right: -10px;
-  border-radius: 0 0 0 10px;
-  box-shadow: -5px 5px 0 5px var(--editor-card-surface, var(--md-editor-surface));
 }
 
 .tab-measure-area {

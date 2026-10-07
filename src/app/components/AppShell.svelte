@@ -28,6 +28,7 @@
   import AppTitleBar from './AppTitleBar.svelte';
   import type { MarkdownSourceEditorHandle } from './markdownSourceEditor';
   import DocumentTabs from './DocumentTabs.svelte';
+  import WorkspaceSurface from './WorkspaceSurface.svelte';
   import EmptyWorkspace from './EmptyWorkspace.svelte';
   import EditorToolbar from './EditorToolbar.svelte';
   import EditorWorkspace from './EditorWorkspace.svelte';
@@ -41,6 +42,7 @@
     toolbarVisibilityMotion,
     transitionDuration,
     workspaceSidebarMotion,
+    type TabIndicatorGeometry,
   } from '../actions/motion';
   import { t, type EffectiveInterfaceLocale } from '../i18n';
   import { suppressUnhandledContextMenu } from '../services/contextMenuPolicy';
@@ -240,6 +242,12 @@
   const toolbarRevealDelay = Math.round(toolbarTransitionDuration * 0.8);
   let toolbarOverflowVisible = !effectiveToolbarHidden;
   let toolbarOverflowFrame = 0;
+  let indicatorGeometry: TabIndicatorGeometry | null = null;
+  $: surfaceAppearanceKey = `${theme}:${editorTheme.colorThemeId}`;
+
+  function handleIndicatorGeometry(geometry: TabIndicatorGeometry | null) {
+    indicatorGeometry = geometry;
+  }
 
   $: if (effectiveToolbarHidden) {
     toolbarOverflowVisible = false;
@@ -400,8 +408,19 @@
       style={`--toolbar-transition-duration: ${toolbarTransitionDuration}ms; --toolbar-reveal-delay: ${toolbarRevealDelay}ms`}
       aria-label={t.semanticEditorArea()}
     >
+      {#if appBootState === 'ready' && !markdownMiniActive}
+        <WorkspaceSurface
+          indicatorGeometry={hasOpenDocument ? indicatorGeometry : null}
+          {hasOpenDocument}
+          appearanceKey={surfaceAppearanceKey}
+          scheme={theme}
+        />
+      {/if}
+
       {#if hasOpenDocument}
         <DocumentTabs
+          appearanceKey={surfaceAppearanceKey}
+          onIndicatorGeometry={handleIndicatorGeometry}
           {interfaceLocale}
           {tabs}
           {activeTabId}

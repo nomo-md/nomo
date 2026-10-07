@@ -262,11 +262,19 @@ export function toolbarVisibilityMotion(node: HTMLElement, params: ToolbarVisibi
   };
 }
 
+export type TabIndicatorGeometry = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 type TabIndicatorParams = {
   activeTabId: string;
   visibleStart: number;
   visibleEnd: number;
   layoutKey: string;
+  onGeometry?: (geometry: TabIndicatorGeometry | null) => void;
 };
 
 export function tabIndicator(node: HTMLElement, params: TabIndicatorParams) {
@@ -274,6 +282,22 @@ export function tabIndicator(node: HTMLElement, params: TabIndicatorParams) {
   let initialized = false;
   let tween: gsap.core.Tween | null = null;
   let currentParams = params;
+  const position = { x: 0, width: 0 };
+  let originX = 0;
+  let originY = 0;
+  let indicatorHeight = 0;
+  const shell = node.closest<HTMLElement>('.editor-shell');
+  const motionQuery = getMotionQuery();
+
+  function publishGeometry(indicator: HTMLElement) {
+    gsap.set(indicator, { x: position.x, width: position.width });
+    currentParams.onGeometry?.({
+      x: originX + position.x,
+      y: originY,
+      width: position.width,
+      height: indicatorHeight,
+    });
+  }
 
   function measure(animate: boolean) {
     frame = 0;
@@ -283,22 +307,38 @@ export function tabIndicator(node: HTMLElement, params: TabIndicatorParams) {
       tween?.kill();
       node.dataset.indicatorReady = 'false';
       initialized = false;
+      currentParams.onGeometry?.(null);
       return;
     }
 
-    const x = activeTab.offsetLeft;
-    const width = activeTab.offsetWidth;
+    const containerBounds = node.getBoundingClientRect();
+    const activeBounds = activeTab.getBoundingClientRect();
+    const shellBounds = (shell ?? node).getBoundingClientRect();
+    const x = activeBounds.left - containerBounds.left;
+    const width = activeBounds.width;
+    indicatorHeight = indicator.getBoundingClientRect().height;
+    originX = containerBounds.left - shellBounds.left;
+    originY = containerBounds.bottom - shellBounds.top - indicatorHeight;
 
     tween?.kill();
+    if (width <= 0 || indicatorHeight <= 0) {
+      node.dataset.indicatorReady = 'false';
+      initialized = false;
+      currentParams.onGeometry?.(null);
+      return;
+    }
     if (!initialized || !animate || prefersReducedMotion()) {
-      gsap.set(indicator, { x, width });
+      gsap.set(position, { x, width });
+      publishGeometry(indicator);
     } else {
-      tween = gsap.to(indicator, {
+      // 填充、描边和阴影共用当前插值，动画帧不再读取 DOM 布局。
+      tween = gsap.to(position, {
         x,
         width,
         duration: motionDuration('row'),
         ease,
         overwrite: true,
+        onUpdate: () => publishGeometry(indicator),
       });
     }
 
@@ -312,7 +352,11 @@ export function tabIndicator(node: HTMLElement, params: TabIndicatorParams) {
   }
 
   const resizeObserver = new ResizeObserver(() => queue(false));
+  const onMotionPreferenceChange = () => queue(false);
   resizeObserver.observe(node);
+  if (node.parentElement) resizeObserver.observe(node.parentElement);
+  if (shell) resizeObserver.observe(shell);
+  motionQuery?.addEventListener('change', onMotionPreferenceChange);
   queue(false);
 
   return {
@@ -327,7 +371,9 @@ export function tabIndicator(node: HTMLElement, params: TabIndicatorParams) {
     destroy() {
       if (frame) cancelAnimationFrame(frame);
       resizeObserver.disconnect();
+      motionQuery?.removeEventListener('change', onMotionPreferenceChange);
       tween?.kill();
+      currentParams.onGeometry?.(null);
     },
   };
 }
