@@ -41,6 +41,7 @@
   export let interfaceLocale: string;
   export let mode: EditorViewMode;
   export let largeDocumentMode = false;
+  export let splitModeDisabled = false;
   export let contentWidthPercent: number;
   export let outlineVisible: boolean;
   export let toolbarShortcut: string;
@@ -440,7 +441,7 @@
           </div>
         {/if}
       </div>
-      <div class="mode-switch" aria-label={t.mode()} use:modeSwitchIndicator={{ mode }}>
+      <div class="mode-switch" class:two-modes={splitModeDisabled} aria-label={t.mode()} use:modeSwitchIndicator={{ mode }}>
         <button
           title={largeDocumentMode
             ? t.largeDocumentStayReadonlySource()
@@ -462,18 +463,20 @@
         >
           <CodeXml size={17} />
         </button>
-        <button
-          title={largeDocumentMode ? t.largeDocumentStayReadonlySource() : t.splitMode()}
-          aria-label={t.splitMode()}
-          aria-pressed={mode === 'split'}
-          class:active={mode === 'split'}
-          disabled={largeDocumentMode}
-          on:click={() => setMode('split')}
-        >
-          <Columns2 size={17} />
-        </button>
+        {#if !splitModeDisabled}
+          <button
+            title={largeDocumentMode ? t.largeDocumentStayReadonlySource() : t.splitMode()}
+            aria-label={t.splitMode()}
+            aria-pressed={mode === 'split'}
+            class:active={mode === 'split'}
+            disabled={largeDocumentMode}
+            on:click={() => setMode('split')}
+          >
+            <Columns2 size={17} />
+          </button>
+        {/if}
       </div>
-      {#if mode === 'split' && !largeDocumentMode}
+      {#if mode === 'split' && !largeDocumentMode && !splitModeDisabled}
         <button
           class="icon-button"
           class:active={splitAlignmentGuideVisible}

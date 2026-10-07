@@ -7,6 +7,8 @@ import { registerActiveEdit, unregisterActiveEdit } from './activeEditRegistry';
 export class MathInlineNodeView {
   private static nextKeyboardCursorSide: 'start' | 'end' | null = null;
   private static instantEditMode = false;
+  private static keyboardEntries = new WeakMap<EditorView, 'start' | 'end'>();
+  private static instantEditViews = new WeakSet<EditorView>();
 
   dom: HTMLElement;
 
@@ -14,6 +16,8 @@ export class MathInlineNodeView {
   private view: EditorView;
   private getPos: () => number;
   private editing = false;
+  private destroyed = false;
+  private suppressNextSelectAutoEdit = false;
   private originalTex = '';
   private renderId = 0;
   private previewRenderId = 0;
@@ -28,10 +32,11 @@ export class MathInlineNodeView {
   // 滚动/窗口大小监听句柄
   private positionHandler: (() => void) | null = null;
 
-  constructor(node: ProseMirrorNode, view: EditorView, getPos: () => number) {
+  constructor(node: ProseMirrorNode, view: EditorView, getPos: () => number, suppressInitialEdit = false) {
     this.node = node;
     this.view = view;
     this.getPos = getPos;
+    this.suppressNextSelectAutoEdit = suppressInitialEdit;
 
     this.dom = document.createElement('span');
     this.dom.className = 'math-inline';
@@ -55,7 +60,8 @@ export class MathInlineNodeView {
     this.renderKaTeX();
 
     // 检查是否需要立即进入编辑态
-    if (MathInlineNodeView.instantEditMode) {
+    if (MathInlineNodeView.instantEditViews.has(view) || MathInlineNodeView.instantEditMode) {
+      MathInlineNodeView.instantEditViews.delete(view);
       MathInlineNodeView.instantEditMode = false;
       this.pendingPointerRatio = 1; // 光标在末尾
       // 延迟一帧确保 DOM 已渲染
@@ -65,12 +71,14 @@ export class MathInlineNodeView {
     }
   }
 
-  static requestKeyboardEntry(cursorSide: 'start' | 'end'): void {
-    MathInlineNodeView.nextKeyboardCursorSide = cursorSide;
+  static requestKeyboardEntry(cursorSide: 'start' | 'end', view?: EditorView): void {
+    if (view) this.keyboardEntries.set(view, cursorSide);
+    else this.nextKeyboardCursorSide = cursorSide;
   }
 
-  static requestInstantEdit(): void {
-    MathInlineNodeView.instantEditMode = true;
+  static requestInstantEdit(view?: EditorView): void {
+    if (view) this.instantEditViews.add(view);
+    else this.instantEditMode = true;
   }
 
   update(node: ProseMirrorNode): boolean {
@@ -84,9 +92,15 @@ export class MathInlineNodeView {
 
   selectNode(): void {
     this.dom.classList.add('ProseMirror-selectednode');
-    if (MathInlineNodeView.nextKeyboardCursorSide === 'start') {
+    if (this.suppressNextSelectAutoEdit) {
+      this.suppressNextSelectAutoEdit = false;
+      return;
+    }
+    const cursorSide = MathInlineNodeView.keyboardEntries.get(this.view) ?? MathInlineNodeView.nextKeyboardCursorSide;
+    MathInlineNodeView.keyboardEntries.delete(this.view);
+    if (cursorSide === 'start') {
       this.pendingPointerRatio = 0;
-    } else if (MathInlineNodeView.nextKeyboardCursorSide === 'end') {
+    } else if (cursorSide === 'end') {
       this.pendingPointerRatio = 1;
     }
     MathInlineNodeView.nextKeyboardCursorSide = null;
@@ -113,6 +127,7 @@ export class MathInlineNodeView {
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.cleanupEdit();
   }
 
@@ -145,11 +160,11 @@ export class MathInlineNodeView {
   // ---- 编辑态管理 ----
 
   private enterEdit(): void {
-    if (this.editing) return;
+    if (this.editing || this.destroyed || this.view.isDestroyed) return;
 
     this.editing = true;
-    this.activeEditExitFn = () => this.exitEdit(true);
-    registerActiveEdit(this.activeEditExitFn);
+    this.activeEditExitFn = () => this.exitEdit(true, 'preserve');
+    registerActiveEdit(this.view, this.activeEditExitFn);
 
     this.originalTex = this.node.attrs.tex as string;
     this.dom.classList.add('is-editing');
@@ -224,7 +239,7 @@ export class MathInlineNodeView {
     });
   }
 
-  private exitEdit(save: boolean, cursorSide: 'before' | 'after' = 'after'): void {
+  private exitEdit(save: boolean, cursorSide: 'before' | 'after' | 'preserve' = 'after'): void {
     if (!this.editing) return;
 
     const newTex = save && this.input ? this.input.value : this.originalTex;
@@ -239,19 +254,21 @@ export class MathInlineNodeView {
       tr = tr.setNodeMarkup(pos, null, { tex: newTex });
     }
 
-    const cursorPos = cursorSide === 'before' ? pos : pos + 1;
-    const bias = cursorSide === 'before' ? -1 : 1;
-    tr = tr.setSelection(TextSelection.near(tr.doc.resolve(cursorPos), bias));
-    this.view.dispatch(tr);
+    if (cursorSide !== 'preserve') {
+      const cursorPos = cursorSide === 'before' ? pos : pos + 1;
+      const bias = cursorSide === 'before' ? -1 : 1;
+      tr = tr.setSelection(TextSelection.near(tr.doc.resolve(cursorPos), bias));
+    }
+    if (tr.docChanged || cursorSide !== 'preserve') this.view.dispatch(tr);
 
     // 恢复编辑器焦点，否则光标不可见
-    this.view.focus();
+    if (cursorSide !== 'preserve') this.view.focus();
   }
 
   private cleanupEdit(): void {
     this.editing = false;
     if (this.activeEditExitFn) {
-      unregisterActiveEdit(this.activeEditExitFn);
+      unregisterActiveEdit(this.view, this.activeEditExitFn);
       this.activeEditExitFn = null;
     }
     this.dom.classList.remove('is-editing');

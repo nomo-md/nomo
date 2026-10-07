@@ -15,6 +15,7 @@
 
   export let interfaceLocale: EffectiveInterfaceLocale;
   export let stats: DocumentStats;
+  export let statsStatus: 'pending' | 'ready' | 'error' = 'ready';
   export let writingStatsVisible: boolean;
   export let activeMetric: StatsMetric = 'words';
   export let readingTimeVisible = false;
@@ -303,11 +304,14 @@
           aria-expanded={statsOpen}
           aria-controls="writing-stats-popover"
           title={t.wordCountStats()}
-          use:pulseOnChange={activeStatsOption.value}
           on:click={toggleStats}
           on:keydown={handleStatsKeydown}
         >
-          {activeStatsOption.value}{activeStatsOption.unit}
+          {#if statsStatus === 'error'}
+            {t.writingStatsUnavailable()}
+          {:else}
+            {statsStatus === 'pending' ? '—' : activeStatsOption.value}{activeStatsOption.unit}
+          {/if}
         </button>
         {#if statsOpen}
           <div
@@ -317,9 +321,11 @@
             aria-labelledby="writing-stats-title"
           >
             <h2 id="writing-stats-title">{t.documentStats()}</h2>
-            {#if readingTimeVisible}<div class="reading-time">
+            {#if readingTimeVisible && statsStatus === 'ready'}
+              <div class="reading-time">
                 {t.estimatedReadingMinutes({ minutes: stats.readingMinutes })}
-              </div>{/if}
+              </div>
+            {/if}
             <div class="writing-stats-options" role="group" aria-label={t.selectStatsMetric()}>
               {#each statsOptions as option (option.key)}
                 <button
@@ -329,7 +335,7 @@
                   aria-pressed={activeMetric === option.key}
                   on:click={() => selectMetric(option.key)}
                 >
-                  <span>{option.label}</span><strong>{option.value}</strong>
+                  <span>{option.label}</span><strong>{statsStatus === 'ready' ? option.value : '—'}</strong>
                 </button>
               {/each}
             </div>

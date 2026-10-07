@@ -17,8 +17,15 @@ import {
   type SegmentedSessionOpenData,
   type SegmentedTextTabState,
   type Tab,
+  type WorkspaceItem,
 } from '../types';
 import { getDocumentKindFromPath, isMarkdownTab, isSegmentedTextTab } from './tabs';
+import {
+  findWorkspaceItemForTab,
+  getWorkspaceItemFocusedTabId,
+  getWorkspaceItemTabIds,
+  normalizeWorkspaceItems,
+} from './workspaceItems';
 import {
   DEFAULT_MARKDOWN_ENCODING,
   normalizeMarkdownEncoding,
@@ -96,16 +103,25 @@ export interface SegmentedRuntimeTabOptions {
   externalFileChange?: ExternalFileChangeState;
 }
 
-/** 首屏只恢复活动标签；其余标签统一延迟，避免先串行全量读取非活动 Markdown。 */
+/** 首屏恢复活动项全部成员；其余文档延迟，避免组合的一侧首屏显示为空。 */
 export function partitionPersistedWorkspaceTabsForRestore(
   tabs: PersistedWorkspaceTab[],
   activeTabId: string,
+  items?: readonly WorkspaceItem[],
+  activeItemId?: string,
 ) {
-  const active = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
-  if (!active) return { immediateTabs: [], deferredTabs: [] };
+  const normalizedItems = normalizeWorkspaceItems(tabs, items);
+  const activeItem = normalizedItems.find((item) => item.id === activeItemId) ??
+    findWorkspaceItemForTab(normalizedItems, activeTabId) ?? normalizedItems[0];
+  if (!activeItem) return { immediateTabs: [], deferredTabs: [] };
+  const activeTabIds = getWorkspaceItemTabIds(activeItem);
+  const immediateTabs = activeTabIds.flatMap((tabId) => {
+    const tab = tabs.find((candidate) => candidate.id === tabId);
+    return tab ? [tab] : [];
+  });
   return {
-    immediateTabs: [active],
-    deferredTabs: tabs.filter((tab) => tab !== active),
+    immediateTabs,
+    deferredTabs: tabs.filter((tab) => !activeTabIds.includes(tab.id)),
   };
 }
 
@@ -115,7 +131,7 @@ function isPersistedWorkspaceState(value: unknown): value is PersistedWorkspaceS
   }
   const state = value as Partial<PersistedWorkspaceState>;
   return (
-    state.version === 3 &&
+    (state.version === 3 || state.version === 4) &&
     Array.isArray(state.tabs) &&
     state.tabs.every(isPersistedWorkspaceTab) &&
     typeof state.activeTabId === 'string'
@@ -125,6 +141,8 @@ function isPersistedWorkspaceState(value: unknown): value is PersistedWorkspaceS
 export async function createPersistedWorkspaceState(input: {
   tabs: Tab[];
   activeTabId: string;
+  items?: readonly WorkspaceItem[];
+  activeItemId?: string;
   currentFolderPath: string;
   desktopEnabled: boolean;
   preservedDraftIds?: ReadonlySet<string>;
@@ -163,12 +181,14 @@ export async function createPersistedWorkspaceState(input: {
     persistedTabs.push(toPersistedMarkdownWorkspaceTab(tab, draftId));
   }
 
-  return {
-    version: 3,
+  return normalizePersistedWorkspaceState({
+    version: 4,
     tabs: persistedTabs,
     activeTabId: input.activeTabId,
+    items: input.items ? [...input.items] : undefined,
+    activeItemId: input.activeItemId,
     currentFolderPath: input.currentFolderPath || undefined,
-  };
+  });
 }
 
 export async function persistWorkspaceDrafts(input: {
@@ -244,7 +264,13 @@ export async function migrateWorkspaceSetting(
     const correctedKind = parsed.tabs.some(
       (tab) => resolvePersistedDocumentKind(tab) !== tab.documentKind,
     );
-    return { state: normalizePersistedWorkspaceState(parsed), migrated: correctedKind };
+    const state = normalizePersistedWorkspaceState(parsed);
+    const correctedItems = JSON.stringify(parsed.items) !== JSON.stringify(state.items) ||
+      parsed.activeItemId !== state.activeItemId || parsed.activeTabId !== state.activeTabId;
+    return {
+      state,
+      migrated: parsed.version !== 4 || correctedKind || correctedItems,
+    };
   }
 
   if (isPersistedWorkspaceStateV2(parsed)) {
@@ -291,14 +317,14 @@ export async function migrateWorkspaceSetting(
 
   return {
     migrated: true,
-    state: {
-      version: 3,
+    state: normalizePersistedWorkspaceState({
+      version: 4,
       tabs,
       activeTabId:
         typeof legacy.activeTabId === 'string' ? legacy.activeTabId : (tabs[0]?.id ?? ''),
       currentFolderPath:
         typeof legacy.currentFolderPath === 'string' ? legacy.currentFolderPath : undefined,
-    },
+    }),
   };
 }
 
@@ -400,10 +426,16 @@ function toPersistedSegmentedWorkspaceTab(
 }
 
 function normalizePersistedWorkspaceState(state: PersistedWorkspaceState): PersistedWorkspaceState {
+  const tabs = state.tabs.map(normalizePersistedWorkspaceTabByPath);
+  const items = normalizeWorkspaceItems(tabs, state.items);
+  const activeItem = items.find((item) => item.id === state.activeItemId) ??
+    findWorkspaceItemForTab(items, state.activeTabId) ?? items[0];
   return {
-    version: 3,
-    tabs: state.tabs.map(normalizePersistedWorkspaceTabByPath),
-    activeTabId: state.activeTabId,
+    version: 4,
+    tabs,
+    items,
+    activeItemId: activeItem?.id ?? '',
+    activeTabId: activeItem ? getWorkspaceItemFocusedTabId(activeItem) : '',
     currentFolderPath:
       typeof state.currentFolderPath === 'string' ? state.currentFolderPath : undefined,
   };
@@ -412,13 +444,13 @@ function normalizePersistedWorkspaceState(state: PersistedWorkspaceState): Persi
 function migratePersistedWorkspaceStateV2(
   state: PersistedWorkspaceStateV2,
 ): PersistedWorkspaceState {
-  return {
-    version: 3,
+  return normalizePersistedWorkspaceState({
+    version: 4,
     tabs: state.tabs.map(normalizePersistedWorkspaceTabByPath),
     activeTabId: state.activeTabId,
     currentFolderPath:
       typeof state.currentFolderPath === 'string' ? state.currentFolderPath : undefined,
-  };
+  });
 }
 
 function normalizePersistedWorkspaceTabByPath(

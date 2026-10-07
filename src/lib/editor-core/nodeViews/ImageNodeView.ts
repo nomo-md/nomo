@@ -3,6 +3,7 @@ import type { EditorView } from 'prosemirror-view';
 import type { ImageContext, ImageResolveResult } from '../../services/render';
 import { onInterfaceLocaleChanged, t } from '../../../app/i18n';
 import { getImageLoader } from '../renderers';
+import { registerActiveEdit, unregisterActiveEdit } from './activeEditRegistry';
 import {
   mountContextMenuFactory,
   type ContextMenuItem,
@@ -43,6 +44,7 @@ export class ImageNodeView {
       }
     | null = null;
   private sizeEditorEl: HTMLElement | null = null;
+  private sizeEditorCommitFn: (() => void) | null = null;
   /** 最近一次右键菜单的鼠标位置，用于尺寸编辑器定位 */
   private lastContextMenuX = 0;
   private lastContextMenuY = 0;
@@ -149,6 +151,10 @@ export class ImageNodeView {
     }
 
     const img = document.createElement('img');
+    if (/^https?:/i.test(result.src.trim())) {
+      // 避免应用来源触发远程图床的防盗链限制，须在设置 src 前生效。
+      img.referrerPolicy = 'no-referrer';
+    }
     img.src = result.displaySrc;
     img.alt = String(this.node.attrs.alt ?? '');
     if (this.node.attrs.title) {
@@ -467,6 +473,8 @@ export class ImageNodeView {
     this.sizeEditorEl = overlay;
 
     // 定位浮层到鼠标位置
+    this.sizeEditorCommitFn = () => confirmBtn.click();
+    registerActiveEdit(this.view, this.sizeEditorCommitFn);
     popover.style.position = 'fixed';
     popover.style.left = `${this.lastContextMenuX}px`;
     popover.style.top = `${this.lastContextMenuY}px`;
@@ -480,6 +488,10 @@ export class ImageNodeView {
   }
 
   private closeSizeEditor(): void {
+    if (this.sizeEditorCommitFn) {
+      unregisterActiveEdit(this.view, this.sizeEditorCommitFn);
+      this.sizeEditorCommitFn = null;
+    }
     this.sizeEditorEl?.remove();
     this.sizeEditorEl = null;
   }
@@ -541,6 +553,8 @@ export class ImageNodeView {
     document.body.appendChild(overlay);
     this.sizeEditorEl = overlay;
     popover.style.position = 'fixed';
+    this.sizeEditorCommitFn = () => confirmBtn.click();
+    registerActiveEdit(this.view, this.sizeEditorCommitFn);
     popover.style.left = `${this.lastContextMenuX}px`;
     popover.style.top = `${this.lastContextMenuY}px`;
     popover.style.transform = 'translateX(-50%)';

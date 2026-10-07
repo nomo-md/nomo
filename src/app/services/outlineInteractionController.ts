@@ -40,6 +40,8 @@ interface OutlineInteractionOptions {
   getReadonly(): boolean;
   setStatusMessage(value: string): void;
   onExplicitJumpIntent?(): void;
+  /** 文档视图已挂起或替换时，取消其延迟定位，避免操作其他文档。 */
+  isActive?(): boolean;
 }
 
 export function createOutlineInteractionController(options: OutlineInteractionOptions) {
@@ -81,11 +83,13 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
   }
 
   function jumpToOutlineItem(item: OutlineItem) {
+    if (options.isActive?.() === false) return;
     options.setActiveOutlineId(item.id);
     options.setSuppressOutlineScrollUntil(Date.now() + 800);
     options.onExplicitJumpIntent?.();
 
     requestAnimationFrame(() => {
+      if (options.isActive?.() === false) return;
       if (options.getMode() === 'semantic') {
         scrollSemanticToAnchor(options.getOutline(), options.getSemanticPane(), {
           outlineId: item.id,
@@ -109,6 +113,7 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
   }
 
   function moveOutlineSection(request: OutlineSectionMoveRequest): boolean {
+    if (options.isActive?.() === false) return false;
     if (options.getReadonly()) {
       options.setStatusMessage(t.outlineMoveReadonly());
       return false;
@@ -129,7 +134,7 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
         t.outlineSectionMoved({ title: previousOutline[request.sourceIndex].title }),
       );
       window.setTimeout(() => {
-        if (generation !== outlineMoveGeneration) return;
+        if (generation !== outlineMoveGeneration || options.isActive?.() === false) return;
         restoreOutlineMoveState(
           previousOutline,
           previousCollapsedOutlineIds,
@@ -170,6 +175,7 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
     movedHeadingIndex: number,
     jumpInSource: boolean,
   ) {
+    if (options.isActive?.() === false) return;
     const nextCollapsedIds = new Set<string>();
     previousOutline.forEach((item, originalIndex) => {
       if (!previousCollapsedOutlineIds.has(item.id)) return;
@@ -186,6 +192,7 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
   }
 
   function updateActiveOutlineFromSourceScroll() {
+    if (options.isActive?.() === false) return;
     if (Date.now() < options.getSuppressOutlineScrollUntil()) {
       return;
     }
@@ -206,6 +213,7 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
   }
 
   function updateActiveOutlineFromSemanticScroll() {
+    if (options.isActive?.() === false) return;
     if (Date.now() < options.getSuppressOutlineScrollUntil()) {
       return;
     }

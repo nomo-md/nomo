@@ -17,13 +17,17 @@
   } from '@codemirror/view';
   import { onDestroy, onMount } from 'svelte';
   import type { BlockAlignmentAnchor } from '../services/markdownBlockAlignment';
-  import { getSourceTextChanges, type MarkdownSourceEditorHandle } from './markdownSourceEditor';
+  import { getSourceTextChanges, type MarkdownSourceEditorHandle, type MarkdownSourceRuntimeState, type MarkdownSourceSelectionSnapshot } from './markdownSourceEditor';
 
   export let markdown: string;
   export let documentId = '';
+  export let runtimeState: MarkdownSourceRuntimeState | undefined = undefined;
+  export let onRuntimeStateChange: (state: MarkdownSourceRuntimeState) => void = () => undefined;
   export let readonlyDocumentMode = false;
   export let onMarkdownChange: (markdown: string) => void = () => undefined;
-  export let onSelectionChange: (selectedMarkdown: string) => void = () => undefined;
+  export let onSelectionChange: ((selectedMarkdown: string) => void) | undefined = undefined;
+  export let onSelectionSnapshotChange: (range: MarkdownSourceSelectionSnapshot) => void = () => undefined;
+  let contentRevision = 0;
   export let onPaste: (event: ClipboardEvent) => void = () => undefined;
   export let onDrop: (event: DragEvent) => void = () => undefined;
   export let onScroll: () => void = () => undefined;
@@ -99,12 +103,8 @@
   const readonlyCompartment = new Compartment();
   const historyCompartment = new Compartment();
 
-  onMount(() => {
-    view = new EditorView({
-      parent: host,
-      state: EditorState.create({
-        doc: markdown,
-        extensions: [
+  function createEditorExtensions() {
+    return [
           historyCompartment.of(history()),
           keymap.of([...defaultKeymap, ...historyKeymap]),
           EditorView.lineWrapping,
@@ -128,6 +128,7 @@
           EditorView.updateListener.of((update) => {
             if (update.geometryChanged || update.viewportChanged) onLayoutChange();
             if (update.docChanged) {
+              contentRevision++;
               cachedSourceMarkdown = update.state.doc.toString();
               measureChangedContent(update.view);
             }
@@ -158,33 +159,67 @@
               backgroundColor: 'color-mix(in srgb, var(--md-editor-accent) 22%, transparent)',
             },
           }),
-        ],
-      }),
+    ];
+  }
+
+  function createDocumentState(saved: MarkdownSourceRuntimeState | undefined) {
+    if (saved?.documentId === documentId) {
+      // 复用历史字段，重新配置组件回调，避免挂回后回调旧文档实例。
+      // 文档隐藏期间可能完成图片导入或语义编辑；映射新正文仍保留源码历史。
+      return saved.state.update({
+        changes: getSourceTextChanges(saved.state.doc.toString(), saved.state.toText(markdown).toString()),
+        effects: StateEffect.reconfigure.of(createEditorExtensions()),
+        annotations: Transaction.addToHistory.of(false),
+      }).state;
+    }
+    return EditorState.create({ doc: markdown, extensions: createEditorExtensions() });
+  }
+
+  function restoredContentRevision(saved: MarkdownSourceRuntimeState | undefined) {
+    if (saved?.documentId !== documentId) return 0;
+    return saved.contentRevision + (saved.state.doc.toString() === saved.state.toText(markdown).toString() ? 0 : 1);
+  }
+
+  function restoreScroll(saved: MarkdownSourceRuntimeState | undefined) {
+    const editorView = view;
+    if (!editorView || saved?.documentId !== documentId) return;
+    void requestEditorMeasure(editorView).then(() => {
+      if (view !== editorView) return;
+      editorView.scrollDOM.scrollTop = saved.scrollTop;
+      editorView.scrollDOM.scrollLeft = saved.scrollLeft;
     });
+  }
+
+  onMount(() => {
+    view = new EditorView({ parent: host, state: createDocumentState(runtimeState) });
+    contentRevision = restoredContentRevision(runtimeState);
     cachedSourceMarkdown = view.state.doc.toString();
     measureChangedContent(view);
     sourceEditor = createHandle();
     onReady(sourceEditor);
+    notifySelectionChange(view.state);
+    restoreScroll(runtimeState);
   });
 
   onDestroy(() => {
+    if (view) onRuntimeStateChange(captureRuntimeState());
     currentGaps.clear();
     view?.destroy();
     view = null;
   });
 
   $: if (view && documentId !== mountedDocumentId) {
+    onRuntimeStateChange(captureRuntimeState());
     externalDispatchDepth += 1;
     try {
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: markdown },
-        selection: { anchor: 0 },
-        effects: [historyCompartment.reconfigure([]), setSourceSpacers.of([])],
-        annotations: Transaction.addToHistory.of(false),
-      });
-      view.dispatch({ effects: historyCompartment.reconfigure(history()) });
+      view.setState(createDocumentState(runtimeState));
+      cachedSourceMarkdown = view.state.doc.toString();
+      contentRevision = restoredContentRevision(runtimeState);
       currentGaps.clear();
       mountedDocumentId = documentId;
+      measureChangedContent(view);
+      notifySelectionChange(view.state);
+      restoreScroll(runtimeState);
     } finally {
       externalDispatchDepth -= 1;
     }
@@ -202,6 +237,19 @@
 
   function createHandle(): MarkdownSourceEditorHandle {
     return {
+      getRuntimeState: captureRuntimeState,
+      getSelectionStatsSnapshot: () => selectionSnapshot(getView().state),
+      restoreRuntimeState(saved) {
+        if (saved.documentId !== documentId) return;
+        const editorView = getView();
+        editorView.setState(createDocumentState(saved));
+        cachedSourceMarkdown = editorView.state.doc.toString();
+        contentRevision = restoredContentRevision(saved);
+        currentGaps.clear();
+        measureChangedContent(editorView);
+        notifySelectionChange(editorView.state);
+        restoreScroll(saved);
+      },
       // 滚动同步每帧读取快照，不重复拼接整个 CodeMirror 文档。
       getMarkdown: () => {
         getView();
@@ -226,7 +274,7 @@
       },
       getSelection() {
         const selection = getView().state.selection.main;
-        return { from: selection.from, to: selection.to };
+        return { from: selection.from, to: selection.to, anchor: selection.anchor, head: selection.head };
       },
       setSelection(from, to = from) {
         const editorView = getView();
@@ -441,6 +489,17 @@
     };
   }
 
+  function captureRuntimeState(): MarkdownSourceRuntimeState {
+    const editorView = getView();
+    return {
+      documentId: mountedDocumentId,
+      state: editorView.state,
+      scrollTop: editorView.scrollDOM.scrollTop,
+      scrollLeft: editorView.scrollDOM.scrollLeft,
+      contentRevision,
+    };
+  }
+
   function getView() {
     if (!view) throw new Error('Markdown source editor is not mounted.');
     return view;
@@ -448,7 +507,13 @@
 
   function notifySelectionChange(state: EditorState) {
     const selection = state.selection.main;
-    onSelectionChange(state.sliceDoc(selection.from, selection.to));
+    onSelectionSnapshotChange(selectionSnapshot(state));
+    if (onSelectionChange) onSelectionChange(state.sliceDoc(selection.from, selection.to));
+  }
+
+  function selectionSnapshot(state: EditorState): MarkdownSourceSelectionSnapshot {
+    const { from, to } = state.selection.main;
+    return { documentId: mountedDocumentId, from, to, contentRevision };
   }
 
   function getAnchorTop(editorView: EditorView, anchor: BlockAlignmentAnchor) {

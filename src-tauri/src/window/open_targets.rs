@@ -23,6 +23,10 @@ pub(crate) struct WindowOpenTargetsInput {
     pub(crate) folder_path: Option<String>,
     #[serde(default)]
     pub(crate) file_paths: Vec<String>,
+    #[serde(default)]
+    pub(crate) ownership_epoch: u64,
+    #[serde(default)]
+    pub(crate) revision: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,6 +94,9 @@ pub(crate) fn sync_window_open_targets(
     registry: State<'_, OpenTargetRegistry>,
     input: WindowOpenTargetsInput,
 ) -> Result<(), String> {
+    if !super::external_open::is_document_window_label(window.label()) {
+        return Err("只有文档窗口可以登记文件归属".into());
+    }
     let folder_key = input.folder_path.as_deref().and_then(normalize_target_path);
     let file_keys = input
         .file_paths
@@ -97,19 +104,26 @@ pub(crate) fn sync_window_open_targets(
         .filter_map(|path| normalize_target_path(path))
         .collect::<HashSet<_>>();
 
-    let mut state = registry
-        .state
-        .lock()
-        .map_err(|_| "锁定窗口目标注册表失败".to_string())?;
-    state.reservations.remove(window.label());
-    state.windows.insert(
-        window.label().to_string(),
-        WindowTargetSnapshot {
-            folder_key,
-            file_keys,
+    super::tab_transfer::with_open_targets_guard(
+        window.label(),
+        input.ownership_epoch,
+        input.revision,
+        || {
+            let mut state = registry
+                .state
+                .lock()
+                .map_err(|_| "锁定窗口目标注册表失败".to_string())?;
+            state.reservations.remove(window.label());
+            state.windows.insert(
+                window.label().to_string(),
+                WindowTargetSnapshot {
+                    folder_key,
+                    file_keys,
+                },
+            );
+            Ok(())
         },
-    );
-    Ok(())
+    )
 }
 
 #[tauri::command]
@@ -235,6 +249,51 @@ pub(crate) fn release_open_target_reservation(
 }
 
 impl OpenTargetRegistry {
+    /// 锁覆盖配置磁盘提交，路由与同步不能看到移交一半的文件归属。
+    pub(crate) fn commit_transfer(
+        &self,
+        source: &str,
+        target: &str,
+        source_targets: &super::tab_transfer::TransferOpenTargets,
+        target_targets: &super::tab_transfer::TransferOpenTargets,
+        persist: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|_| "锁定窗口目标注册表失败")?;
+        let to_snapshot =
+            |targets: &super::tab_transfer::TransferOpenTargets| WindowTargetSnapshot {
+                folder_key: targets
+                    .folder_path
+                    .as_deref()
+                    .and_then(normalize_target_path),
+                file_keys: targets
+                    .file_paths
+                    .iter()
+                    .filter_map(|path| normalize_target_path(path))
+                    .collect(),
+            };
+        let source_snapshot = to_snapshot(source_targets);
+        let target_snapshot = to_snapshot(target_targets);
+        if !source_snapshot
+            .file_keys
+            .is_disjoint(&target_snapshot.file_keys)
+        {
+            return Err("移交后的两个窗口包含重复文件".into());
+        }
+        for (label, window) in &state.windows {
+            if label != source
+                && label != target
+                && !window.file_keys.is_disjoint(&target_snapshot.file_keys)
+            {
+                return Err("移交文件已由其他窗口打开".into());
+            }
+        }
+        persist()?;
+        state.windows.insert(source.into(), source_snapshot);
+        state.windows.insert(target.into(), target_snapshot);
+        state.reservations.remove(target);
+        Ok(())
+    }
+
     pub(crate) fn forget_window(&self, label: &str) {
         if let Ok(mut state) = self.state.lock() {
             state.windows.remove(label);

@@ -78,6 +78,8 @@ pub fn run() {
             }
             WindowEvent::Destroyed => {
                 let label = window.label();
+                crate::window::tab_drag::forget_window(label);
+                crate::window::tab_transfer::forget_window(window.app_handle(), label);
                 crate::window::workspace_lifecycle::destroyed(window.app_handle(), label);
                 crate::app_logger::debug("Window", &format!("窗口销毁前持久化状态：{label}"));
                 crate::window::state::persist_window_state_before_destroy(window);
@@ -220,6 +222,8 @@ pub fn run() {
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             app.manage(config);
             app.manage(crate::window::open_targets::OpenTargetRegistry::default());
+            crate::window::tab_transfer::recover_journals(app.handle())
+                .map_err(std::io::Error::other)?;
             let segmented_root = app
                 .path()
                 .app_data_dir()
@@ -349,6 +353,17 @@ pub fn run() {
             crate::file_system::image_assets::test_picgo_connection,
             crate::window::commands::create_new_window,
             crate::window::open_targets::sync_window_open_targets,
+            crate::window::tab_transfer::get_window_workspace_stamp,
+            crate::window::tab_transfer::prepare_tab_transfer,
+            crate::window::tab_transfer::get_tab_transfer_bootstrap,
+            crate::window::tab_transfer::target_ready_tab_transfer,
+            crate::window::tab_transfer::commit_tab_transfer,
+            crate::window::tab_transfer::cancel_tab_transfer,
+            crate::window::tab_transfer::query_tab_transfer,
+            crate::window::tab_transfer::close_empty_transferred_window,
+            crate::window::tab_drag::register_tab_drop_zones,
+            crate::window::tab_drag::begin_native_tab_drag,
+            crate::window::tab_drag::cancel_native_tab_drag,
             crate::window::open_targets::open_documents_in_directory_window,
             crate::window::open_targets::prepare_open_target_window,
             crate::window::open_targets::release_open_target_reservation,

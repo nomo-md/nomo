@@ -5,5 +5,7 @@ pub mod menu;
 pub mod open_targets;
 pub mod os;
 pub mod state;
+pub mod tab_drag;
+pub mod tab_transfer;
 pub mod tray;
 pub mod workspace_lifecycle;

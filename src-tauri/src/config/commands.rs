@@ -247,19 +247,21 @@ fn update_settings<R: Runtime>(app: AppHandle<R>, inputs: Vec<SettingInput>) -> 
     }
 
     let now = now_ts();
-    config::with_manager(&app, |manager| {
-        manager.update(|config| {
-            for input in inputs {
-                route_setting_to_section(config, &input.key, &input.value_json);
-                config.app.settings.insert(
-                    input.key.clone(),
-                    SettingRecord {
-                        key: input.key,
-                        value_json: input.value_json,
-                        updated_at: now,
-                    },
-                );
-            }
+    crate::window::tab_transfer::with_guarded_settings(inputs, |inputs| {
+        config::with_manager(&app, |manager| {
+            manager.update(|config| {
+                for input in inputs {
+                    route_setting_to_section(config, &input.key, &input.value_json);
+                    config.app.settings.insert(
+                        input.key.clone(),
+                        SettingRecord {
+                            key: input.key,
+                            value_json: input.value_json,
+                            updated_at: now,
+                        },
+                    );
+                }
+            })
         })
     })
 }

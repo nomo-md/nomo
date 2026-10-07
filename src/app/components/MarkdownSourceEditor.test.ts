@@ -1,4 +1,4 @@
-import { StateEffect } from '@codemirror/state';
+import { EditorState as SourceState, StateEffect } from '@codemirror/state';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { EditorState as SemanticState } from 'prosemirror-state';
@@ -15,6 +15,26 @@ afterEach(() => {
 });
 
 describe('MarkdownSourceEditor', () => {
+  it('reports only ranges and revisions without slicing text for snapshot subscribers', () => {
+    let handle!: MarkdownSourceEditorHandle;
+    const onSelectionSnapshotChange = vi.fn();
+    const rendered = render(MarkdownSourceEditor, {
+      props: {
+        markdown: '中文 hello', documentId: 'a',
+        sourceEditor: undefined as unknown as MarkdownSourceEditorHandle,
+        onReady: (value) => (handle = value), onSelectionSnapshotChange,
+      },
+    });
+    const view = EditorView.findFromDOM(rendered.container.querySelector('.cm-editor')!)!;
+    const slice = vi.spyOn(SourceState.prototype, 'sliceDoc');
+    handle.setSelection(0, 5);
+    expect(onSelectionSnapshotChange).toHaveBeenLastCalledWith({
+      documentId: 'a', from: 0, to: 5, contentRevision: 0,
+    });
+    expect(slice).not.toHaveBeenCalled();
+    view.dispatch({ changes: { from: 0, insert: '新' } });
+    expect(onSelectionSnapshotChange.mock.lastCall?.[0].contentRevision).toBe(1);
+  });
   it.each(['README.md', 'sample.md'])(
     'preserves unchanged viewport anchors through the first semantic edit of %s',
     (file) => {
@@ -74,7 +94,7 @@ describe('MarkdownSourceEditor', () => {
           next.indexOf(line) + 3,
         );
       }
-      expect(handle.getSelection()).toEqual({
+      expect(handle.getSelection()).toMatchObject({
         from: next.indexOf(selected) + 3,
         to: next.indexOf(selected) + 8,
       });
@@ -82,7 +102,7 @@ describe('MarkdownSourceEditor', () => {
       expect(handle.undo()).toBe(false);
       handle.setMarkdown(markdown, { addToHistory: false });
       expect(handle.getMarkdown()).toBe(original);
-      expect(handle.getSelection()).toEqual({
+      expect(handle.getSelection()).toMatchObject({
         from: original.indexOf(selected) + 3,
         to: original.indexOf(selected) + 8,
       });
@@ -113,7 +133,7 @@ describe('MarkdownSourceEditor', () => {
       onReady: (value) => (handle = value),
     });
     expect(view.state.doc).toBe(doc);
-    expect(handle.getSelection()).toEqual({ from: 300, to: 310 });
+    expect(handle.getSelection()).toMatchObject({ from: 300, to: 310 });
     expect(handle.getMarkdown()).toBe(view.state.doc.toString());
     expect(onMarkdownChange).not.toHaveBeenCalled();
     expect(handle.undo()).toBe(false);
@@ -145,7 +165,7 @@ describe('MarkdownSourceEditor', () => {
     const next = markdown.slice(0, insertion) + '中文😀' + markdown.slice(insertion);
     handle.setMarkdown(next, { addToHistory: false });
     expect(handle.getMarkdown()).toBe(next);
-    expect(handle.getSelection()).toEqual({ from: 300, to: 310 });
+    expect(handle.getSelection()).toMatchObject({ from: 300, to: 310 });
     expect(updates).toHaveLength(1);
     expect(updates[0].changes.mapPos(280, -1)).toBe(280);
     expect(updates[0].changes.mapPos(500, -1)).toBe(504);
@@ -235,7 +255,7 @@ describe('MarkdownSourceEditor', () => {
         ['node:1', 40],
       ]),
     );
-    expect(handle?.getSelection()).toEqual({ from: 10, to: 14 });
+    expect(handle?.getSelection()).toMatchObject({ from: 10, to: 14 });
     expect(handle?.getMarkdown()).toBe('# Title\n\nBody!');
     expect(container.querySelectorAll('.source-block-alignment-spacer')).toHaveLength(1);
     expect(

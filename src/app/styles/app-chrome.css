@@ -293,6 +293,11 @@
   user-select: none;
 }
 
+.doc-tab.comparison {
+  min-width: 200px;
+  max-width: 320px;
+}
+
 .doc-tab:hover {
   background: rgba(128, 128, 128, 0.06);
   color: var(--md-editor-fg);
@@ -499,6 +504,10 @@
   border: 1px solid var(--md-editor-border);
   border-radius: var(--md-editor-radius-sm);
   background: var(--md-editor-chrome);
+}
+
+.mode-switch.two-modes {
+  grid-template-columns: repeat(2, 34px);
 }
 
 .mode-switch::before {

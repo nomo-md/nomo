@@ -3,9 +3,11 @@ import type { EditorView } from 'prosemirror-view';
 import { NodeSelection, TextSelection } from 'prosemirror-state';
 import { getCodeTokenizer } from '../renderers';
 import type { CodeTokenLine } from '../../services/render';
+import { logWarn } from '../../services/logger';
 import { escapeHtml } from '../utils/html';
 import { onInterfaceLocaleChanged, t } from '../../../app/i18n';
 import type { EditorThemeOptions } from '../../theme/types';
+import { registerActiveEdit, unregisterActiveEdit } from './activeEditRegistry';
 
 /**
  * code_block 节点的 NodeView —— 展示态 / 编辑态
@@ -146,6 +148,68 @@ function getCodeBlockIndentText(): string {
   return '  ';
 }
 
+/** 只改变行首缩进，并将原选区映射到同一段代码；选区末端的下一行行首不参与。 */
+function getCodeIndentEdit(
+  value: string,
+  selectionStart: number,
+  selectionEnd: number,
+  indentText: string,
+  outdent: boolean,
+): {
+  from: number;
+  to: number;
+  insert: string;
+  selectionStart: number;
+  selectionEnd: number;
+} | null {
+  if (!outdent && selectionStart === selectionEnd) {
+    return {
+      from: selectionStart,
+      to: selectionEnd,
+      insert: indentText,
+      selectionStart: selectionStart + indentText.length,
+      selectionEnd: selectionEnd + indentText.length,
+    };
+  }
+
+  const from = selectionStart === 0 ? 0 : value.lastIndexOf('\n', selectionStart - 1) + 1;
+  const lastSelectedOffset = selectionEnd > selectionStart ? selectionEnd - 1 : selectionStart;
+  const nextNewline = value.indexOf('\n', lastSelectedOffset);
+  const to = nextNewline === -1 ? value.length : nextNewline;
+  const before = value.slice(from, to);
+  const spaceWidth = indentText === '\t' ? 2 : indentText.length;
+  let lineStart = from;
+  let mappedStart = selectionStart;
+  let mappedEnd = selectionEnd;
+  const insert = before
+    .split('\n')
+    .map((line) => {
+      let removed = 0;
+      const added = outdent ? 0 : indentText.length;
+      if (outdent) {
+        if (line.startsWith('\t')) {
+          removed = 1;
+        } else {
+          while (removed < spaceWidth && line[removed] === ' ') removed++;
+        }
+      }
+
+      // 删除覆盖端点时钳制到行首，避免反缩进将选区移入上一行。
+      if (selectionStart >= lineStart) {
+        mappedStart += added - Math.min(removed, selectionStart - lineStart);
+      }
+      if (selectionEnd >= lineStart) {
+        mappedEnd += added - Math.min(removed, selectionEnd - lineStart);
+      }
+      lineStart += line.length + 1;
+      return outdent ? line.slice(removed) : indentText + line;
+    })
+    .join('\n');
+
+  if (insert === before) return null;
+  return { from, to, insert, selectionStart: mappedStart, selectionEnd: mappedEnd };
+}
+
 function createCopyIcon(): SVGSVGElement {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', '0 0 24 24');
@@ -223,7 +287,6 @@ export class CodeBlockNodeView {
     shikiTheme: 'github-light',
     mermaid: { theme: 'default' },
   };
-  private static activeEditingView: CodeBlockNodeView | null = null;
   private static instances = new Set<CodeBlockNodeView>();
 
   dom: HTMLElement;
@@ -249,6 +312,8 @@ export class CodeBlockNodeView {
 
   // 编辑态相关
   private editing = false;
+  private readonly activeEditExitFn = () => this.exitEdit(true);
+  private readonly activeEditCommitFn = () => this.commitContent();
   private originalCode = '';
   private originalLanguage = '';
   private textarea: HTMLTextAreaElement | null = null;
@@ -260,7 +325,7 @@ export class CodeBlockNodeView {
   private cancelDisplaySelectionCapture: (() => void) | null = null;
   private unsubscribeLocale: () => void = () => undefined;
 
-  constructor(node: ProseMirrorNode, view: EditorView, getPos: () => number) {
+  constructor(node: ProseMirrorNode, view: EditorView, getPos: () => number, suppressInitialEdit = false) {
     this.node = node;
     this.view = view;
     this.getPos = getPos;
@@ -362,7 +427,7 @@ export class CodeBlockNodeView {
     });
 
     // 标记首次选中时自动进入编辑态（如 InputRule 从 ``` 创建 或快捷键插入）
-    this.needsAutoEdit = true;
+    this.needsAutoEdit = !suppressInitialEdit;
     this.unsubscribeLocale = onInterfaceLocaleChanged(() => {
       this.hideLangSelector();
       this.updateLocalizedChrome();
@@ -582,17 +647,14 @@ export class CodeBlockNodeView {
   // ---- 编辑态管理 ----
 
   enterEdit(target: CodeEditTarget = { kind: 'default' }, preserveViewport = target.kind === 'range'): void {
-    if (this.editing) return;
+    if (this.editing || this.destroyed || this.view.isDestroyed) return;
     this.captureViewport();
 
     this.clearDisplaySelectionCapture();
 
-    if (CodeBlockNodeView.activeEditingView && CodeBlockNodeView.activeEditingView !== this) {
-      CodeBlockNodeView.activeEditingView.exitEdit(true);
-    }
+    registerActiveEdit(this.view, this.activeEditExitFn, this.activeEditCommitFn);
 
     this.editing = true;
-    CodeBlockNodeView.activeEditingView = this;
     this.originalCode = this.node.textContent;
     this.originalLanguage = this.language;
     this.dom.classList.add('is-editing');
@@ -714,6 +776,21 @@ export class CodeBlockNodeView {
     return false;
   }
 
+  /** 后台保存只回写代码内容，保留 textarea、焦点、原生历史和选区。 */
+  private commitContent(): void {
+    if (!this.editing || !this.textarea || this.destroyed || this.view.isDestroyed) return;
+    const code = this.textarea.value;
+    const pos = this.getPos();
+    const node = this.view.state.doc.nodeAt(pos);
+    if (!node || node.type !== this.node.type) return;
+    if (code !== node.textContent) {
+      // 保留代码块边界，避免整节点替换使 NodeSelection 失效并触发 deselectNode。
+      this.view.dispatch(this.view.state.tr.insertText(code, pos + 1, pos + node.nodeSize - 1));
+    }
+    // 已提交的内容成为取消编辑的基线，后续 Escape 只放弃尚未提交的输入。
+    this.originalCode = code;
+  }
+
   private exitEdit(save: boolean): void {
     if (!this.editing) return;
 
@@ -734,9 +811,7 @@ export class CodeBlockNodeView {
     if (this.textarea) this.captureViewport();
     const viewport = { ...this.viewport };
     this.editing = false;
-    if (CodeBlockNodeView.activeEditingView === this) {
-      CodeBlockNodeView.activeEditingView = null;
-    }
+    unregisterActiveEdit(this.view, this.activeEditExitFn);
     this.dom.classList.remove('is-editing');
     this.cancelScheduledHighlight();
     this.hideLangSelector();
@@ -953,23 +1028,39 @@ export class CodeBlockNodeView {
       return;
     }
 
-    // Tab：按用户偏好的缩进插入（用 execCommand 保留浏览器 undo 栈）
-    if (e.key === 'Tab' && !e.shiftKey) {
+    // 用一次原生编辑完成整段缩进，保留 textarea 的撤销栈和原选区方向。
+    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing) {
       e.preventDefault();
-      document.execCommand('insertText', false, getCodeBlockIndentText());
-      return;
-    }
+      const textarea = this.textarea;
+      const { selectionStart, selectionEnd, selectionDirection, value, scrollTop, scrollLeft } =
+        textarea;
+      const edit = getCodeIndentEdit(
+        value,
+        selectionStart,
+        selectionEnd,
+        getCodeBlockIndentText(),
+        e.shiftKey,
+      );
+      if (!edit) return;
 
-    // Shift+Tab：当前行减少一级缩进
-    if (e.key === 'Tab' && e.shiftKey) {
-      e.preventDefault();
-      const { selectionStart, value } = this.textarea;
-      const lineStart = value.lastIndexOf('\n', selectionStart - 1) + 1;
-      const indentText = getCodeBlockIndentText();
-      if (value.slice(lineStart, lineStart + indentText.length) === indentText) {
-        this.textarea.setSelectionRange(lineStart, lineStart + indentText.length);
-        document.execCommand('insertText', false, '');
+      let applied = false;
+      try {
+        textarea.setSelectionRange(edit.from, edit.to);
+        applied = document.execCommand('insertText', false, edit.insert);
+      } catch {
+        // 不直接赋值绕过原生历史，也不把代码正文写入失败日志。
       }
+      if (!applied) {
+        logWarn('CodeBlockNodeView', '代码块缩进编辑失败，已恢复原选区');
+      }
+      textarea.setSelectionRange(
+        applied ? edit.selectionStart : selectionStart,
+        applied ? edit.selectionEnd : selectionEnd,
+        selectionDirection,
+      );
+      textarea.scrollTop = scrollTop;
+      textarea.scrollLeft = scrollLeft;
+      this.handleScroll();
       return;
     }
 

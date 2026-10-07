@@ -169,10 +169,35 @@ impl ConfigManager {
                 .map_err(|error| format!("同步临时配置失败：{error}"))?;
         }
 
-        if cfg!(windows) && self.config_path.exists() {
-            fs::remove_file(&self.config_path)
-                .map_err(|error| format!("替换旧配置文件失败：{error}"))?;
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            };
+            let source: Vec<u16> = temp_path.as_os_str().encode_wide().chain(Some(0)).collect();
+            let target: Vec<u16> = self
+                .config_path
+                .as_os_str()
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+            // 同目录替换不能先删除旧文件：进程中断时至少保留完整的旧事务或新事务。
+            if unsafe {
+                MoveFileExW(
+                    source.as_ptr(),
+                    target.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            } == 0
+            {
+                return Err(format!(
+                    "原子替换配置文件失败：{}",
+                    std::io::Error::last_os_error()
+                ));
+            }
         }
+        #[cfg(not(target_os = "windows"))]
         fs::rename(&temp_path, &self.config_path)
             .map_err(|error| format!("替换配置文件失败：{error}"))?;
         Ok(())

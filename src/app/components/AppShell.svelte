@@ -6,6 +6,7 @@
     EditorThemeOptions,
     InlinePendingMarks,
     ContextMenuRequest,
+    ContextMenuItem,
     EditorCore,
   } from '../../lib/editor-core';
   import type { FrontMatterBlock } from '../../lib/markdown/frontMatter';
@@ -16,17 +17,23 @@
     MarkdownLintState,
   } from '../../lib/markdown-lint/types';
   import { ChevronDown } from '@lucide/svelte';
-  import { onDestroy } from 'svelte';
+  import { onDestroy, type ComponentProps } from 'svelte';
   import type {
     EditorViewMode,
+    ComparisonWorkspaceItem,
     ExternalFileChangeState,
     FileTreeNode,
+    MarkdownTabState,
     SplitActivePane,
     SplitViewLayout,
     Tab,
+    WorkspaceItem,
   } from '../types';
   import AppTitleBar from './AppTitleBar.svelte';
-  import type { MarkdownSourceEditorHandle } from './markdownSourceEditor';
+  import type { MarkdownSourceEditorHandle, MarkdownSourceRuntimeState, MarkdownSourceSelectionSnapshot } from './markdownSourceEditor';
+  import type { MarkdownDocumentRuntime, MarkdownWorkspaceRuntimeBinding } from '../services/markdownDocumentRuntime';
+  import type { NativeTabDragEvent, TabDropZone } from '../services/tabTransfer';
+  import ComparisonWorkspace from './ComparisonWorkspace.svelte';
   import DocumentTabs from './DocumentTabs.svelte';
   import WorkspaceSurface from './WorkspaceSurface.svelte';
   import EmptyWorkspace from './EmptyWorkspace.svelte';
@@ -89,9 +96,29 @@
   export let sidebarWidth: number;
   export let tabs: Tab[];
   export let activeTabId: string;
+  export let workspaceItems: WorkspaceItem[] = [];
+  export let activeItemId = '';
+  export let selectWorkspaceItem: ((itemId: string) => void | Promise<void>) | undefined = undefined;
+  export let closeWorkspaceItem: ((itemId: string, event?: Event) => void | Promise<void>) | undefined = undefined;
+  export let getWorkspaceItemActions: (itemId: string) => ContextMenuItem[] = () => [];
+  export let onWorkspaceItemPointerDown: ((itemId: string, event: PointerEvent) => void) | undefined = undefined;
+  export let onDropZones: (zones: TabDropZone[]) => void = () => undefined;
+  export let dropHighlight: NativeTabDragEvent | null = null;
+  export let workspaceInteractionDisabled = false;
+  export let workspaceItemFeaturesEnabled = false;
+  export let comparisonItem: ComparisonWorkspaceItem | null = null;
+  export let comparisonTabs: MarkdownTabState[] = [];
+  export let comparisonRuntimes: MarkdownDocumentRuntime[] = [];
+  export let comparisonPaneProps: ComponentProps<ComparisonWorkspace>['paneProps'] | null = null;
+  export let onComparisonResize: (itemId: string, percent: number, persist: boolean) => void = () => undefined;
+  export let onComparisonMemberPointerDown: ((tabId: string, event: PointerEvent) => void) | undefined = undefined;
   export let previewTabId: string | null;
   export let markdown: string;
   export let sourceDocumentId: string;
+  export let sourceRuntimeState: MarkdownSourceRuntimeState | undefined = undefined;
+  export let onSourceRuntimeStateChange: (state: MarkdownSourceRuntimeState) => void = () => undefined;
+  export let onRuntimeReady: (binding: MarkdownWorkspaceRuntimeBinding) => void = () => undefined;
+  export let onRuntimeDestroy: (binding: MarkdownWorkspaceRuntimeBinding) => void = () => undefined;
   export let largeDocumentMode: boolean;
   export let frontMatter: FrontMatterBlock | null;
   export let frontMatterEditing: boolean;
@@ -103,6 +130,7 @@
   export let collapsedOutlineIds: Set<string>;
   export let visibleOutlineIds: Set<string>;
   export let stats: DocumentStats;
+  export let statsStatus: 'pending' | 'ready' | 'error' = 'ready';
   export let writingStatsVisible: boolean;
   export let writingStatsMetric: StatsMetric;
   export let readingTimeVisible: boolean;
@@ -201,7 +229,7 @@
   export let pinPreviewTab: () => void;
   export let updateContentWidth: (event: Event) => void;
   export let updateMarkdown: (markdown: string) => void;
-  export let onSourceSelectionChange: (selectedMarkdown: string) => void;
+  export let onSourceSelectionChange: (range: MarkdownSourceSelectionSnapshot) => void;
   export let enterFrontMatterEdit: () => void;
   export let leaveFrontMatterEdit: () => void;
   export let updateFrontMatterContent: (content: string) => void;
@@ -237,6 +265,13 @@
 
   $: hasOpenDocument = appBootState === 'ready' && tabs.length > 0 && Boolean(activeTabId);
   $: activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
+  $: comparisonActive = workspaceItemFeaturesEnabled && comparisonItem !== null;
+  $: comparisonHasLargeDocument = comparisonActive && comparisonTabs.some((tab) => tab.largeDocumentMode);
+  $: effectiveComparisonPaneProps = comparisonPaneProps ? {
+    ...comparisonPaneProps,
+    disabled: workspaceInteractionDisabled || comparisonPaneProps.disabled,
+    onMemberPointerDown: onComparisonMemberPointerDown ?? comparisonPaneProps.onMemberPointerDown,
+  } : null;
   $: effectiveToolbarHidden = toolbarHidden;
   const toolbarTransitionDuration = transitionDuration('panel');
   const toolbarRevealDelay = Math.round(toolbarTransitionDuration * 0.8);
@@ -288,7 +323,7 @@
 <svelte:window on:contextmenu={suppressUnhandledContextMenu} />
 
 <div
-  inert={exitInProgress}
+  inert={exitInProgress || workspaceInteractionDisabled}
   class="app-layout"
   class:focus-mode={focusMode}
   class:markdown-mini-mode={markdownMiniActive}
@@ -316,14 +351,14 @@
       toolbarHidden={effectiveToolbarHidden}
       {toolbarShortcut}
       {markdownMiniShortcut}
-      markdownMiniAvailable={activeTab?.documentKind === 'markdown'}
+      markdownMiniAvailable={activeTab?.documentKind === 'markdown' && !comparisonActive}
       {markdownMiniActive}
       {markdownMiniPinned}
       {markdownMiniExternalChanged}
       {fileName}
       {filePath}
       {dirty}
-      {largeDocumentMode}
+      largeDocumentMode={largeDocumentMode || comparisonHasLargeDocument}
       {outlineVisible}
       {getCompactPath}
       {toggleMenu}
@@ -346,6 +381,7 @@
       {editFrontMatter}
       {showUnavailableFeature}
       {setMode}
+      splitModeDisabled={comparisonActive}
       {toggleOutlineVisible}
       {toggleFocusMode}
       {toggleToolbar}
@@ -404,6 +440,7 @@
       class:markdown-mini-large={markdownMiniActive && largeDocumentMode}
       class:has-open-document={appBootState === 'ready' && hasOpenDocument}
       class:no-open-document={appBootState === 'ready' && !hasOpenDocument}
+      class:has-drop-tabstrip={appBootState === 'ready' && desktopEnabled && workspaceItemFeaturesEnabled}
       class:toolbar-hidden={effectiveToolbarHidden}
       style={`--toolbar-transition-duration: ${toolbarTransitionDuration}ms; --toolbar-reveal-delay: ${toolbarRevealDelay}ms`}
       aria-label={t.semanticEditorArea()}
@@ -417,13 +454,22 @@
         />
       {/if}
 
-      {#if hasOpenDocument}
+      {#if hasOpenDocument || (appBootState === 'ready' && desktopEnabled && workspaceItemFeaturesEnabled)}
         <DocumentTabs
           appearanceKey={surfaceAppearanceKey}
           onIndicatorGeometry={handleIndicatorGeometry}
           {interfaceLocale}
           {tabs}
           {activeTabId}
+          {workspaceItems}
+          {activeItemId}
+          {selectWorkspaceItem}
+          {closeWorkspaceItem}
+          {getWorkspaceItemActions}
+          {onWorkspaceItemPointerDown}
+          {onDropZones}
+          {dropHighlight}
+          {workspaceInteractionDisabled}
           {previewTabId}
           {switchTab}
           {closeTab}
@@ -462,7 +508,8 @@
                 <EditorToolbar
                   {interfaceLocale}
                   {mode}
-                  {largeDocumentMode}
+                  largeDocumentMode={largeDocumentMode || comparisonHasLargeDocument}
+                  splitModeDisabled={comparisonActive}
                   {contentWidthPercent}
                   {outlineVisible}
                   {toolbarShortcut}
@@ -479,7 +526,7 @@
                   {toggleSplitAlignmentGuide}
                   {toggleOutlineVisible}
                   {toggleToolbar}
-                  inactive={!toolbarOverflowVisible || markdownMiniActive}
+                  inactive={!toolbarOverflowVisible || markdownMiniActive || workspaceInteractionDisabled}
                   openSearchPanel={() => openSearchPanel(false)}
                 />
               </div>
@@ -525,6 +572,18 @@
               close={closeSearchPanel}
             />
 
+            {#if comparisonActive && comparisonItem && effectiveComparisonPaneProps && comparisonTabs.length === 2 && comparisonRuntimes.length === 2}
+              <ComparisonWorkspace
+                item={comparisonItem}
+                leftTab={comparisonTabs[0]}
+                rightTab={comparisonTabs[1]}
+                leftRuntime={comparisonRuntimes[0]}
+                rightRuntime={comparisonRuntimes[1]}
+                paneProps={effectiveComparisonPaneProps}
+                onResize={onComparisonResize}
+              />
+            {:else}
+            {#key sourceDocumentId}
             <EditorWorkspace
               {interfaceLocale}
               bind:sourcePane
@@ -539,6 +598,10 @@
               {splitAlignmentGuideVisible}
               {markdown}
               {sourceDocumentId}
+              {sourceRuntimeState}
+              {onSourceRuntimeStateChange}
+              {onRuntimeReady}
+              {onRuntimeDestroy}
               {largeDocumentMode}
               {frontMatter}
               {frontMatterEditing}
@@ -576,6 +639,8 @@
               {jumpToOutlineItem}
               {moveOutlineSection}
             />
+            {/key}
+            {/if}
 
             {#if markdownMiniActive && largeDocumentMode}
               <MarkdownMiniLargePreview {markdown} {nativePath} {editorTheme} />
@@ -629,6 +694,7 @@
       <StatusBar
         {interfaceLocale}
         {stats}
+        {statsStatus}
         {writingStatsVisible}
         activeMetric={writingStatsMetric}
         {readingTimeVisible}
@@ -646,6 +712,14 @@
 </div>
 
 <style>
+  .editor-shell.has-drop-tabstrip.no-open-document::before {
+    content: none;
+  }
+
+  .editor-shell.has-drop-tabstrip.no-open-document > :global(.topbar) {
+    grid-row: 1;
+  }
+
   .startup-loading {
     grid-row: 1 / -1;
     display: flex;

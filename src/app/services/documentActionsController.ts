@@ -1,7 +1,12 @@
 import type { NativeDocument, RecentEntry } from '../../lib/desktop/tauriStorage';
 import type { EditorCore } from '../../lib/editor-core';
 import { calculateDocumentStats } from '../../lib/outline/outlineService';
-import { createEmptyExternalFileChange, type ExternalFileChangeState, type Tab } from '../types';
+import {
+  createEmptyExternalFileChange,
+  type ExternalFileChangeState,
+  type MarkdownTabState,
+  type Tab,
+} from '../types';
 import { getDirectoryLabel, sameNativePath } from '../utils/pathLabels';
 import {
   exportMarkdownInBrowser,
@@ -87,10 +92,15 @@ interface DocumentActionsOptions {
   getCurrentFolderPath(): string;
   getFileInput(): HTMLInputElement;
   getEditor(): EditorCore;
+  getEditorForTab?(tabId: string): EditorCore | undefined;
+  flushTabRuntime?(tabId: string): void;
+  onTabRuntimeSaved?(tabId: string): void;
   beforeMarkdownCommit?(): void;
   getTabs(): Tab[];
   setTabs(value: Tab[]): void;
   getActiveTabId(): string;
+  canReuseTab?(tabId: string): boolean;
+  getNextTabIdAfterClose?(tabId: string): string | undefined;
   setActiveTabId(value: string): void;
   getPreviewTabId(): string | null;
   setPreviewTabId(value: string | null): void;
@@ -106,6 +116,78 @@ interface DocumentActionsOptions {
 }
 
 export function createDocumentActionsController(options: DocumentActionsOptions) {
+  const pendingSaveOperations = new Set<Promise<unknown>>();
+
+  function trackPendingSave<T>(operation: () => Promise<T>): Promise<T> {
+    const promise = operation();
+    pendingSaveOperations.add(promise);
+    void promise.then(
+      () => pendingSaveOperations.delete(promise),
+      () => pendingSaveOperations.delete(promise),
+    );
+    return promise;
+  }
+
+  /** 移交快照必须等待已有磁盘写入结束；自动保存递归归同一个外层操作追踪。 */
+  async function awaitPendingSaves(): Promise<void> {
+    cancelPendingAutoSaves();
+    while (pendingSaveOperations.size > 0) {
+      await Promise.allSettled([...pendingSaveOperations]);
+    }
+    cancelPendingAutoSaves();
+  }
+
+  function getDocumentEditor(tabId: string) {
+    if (options.getEditorForTab) return options.getEditorForTab(tabId);
+    return options.getActiveTabId() === tabId ? options.getEditor() : undefined;
+  }
+
+  /** 异步操作开始和完成时只提交目标文档，焦点变化不改变操作归属。 */
+  function flushDocumentRuntime(tabId: string) {
+    if (options.flushTabRuntime) options.flushTabRuntime(tabId);
+    else if (options.getActiveTabId() === tabId) options.beforeMarkdownCommit?.();
+    const tab = options.getTabs().find((candidate) => candidate.id === tabId);
+    const core = getDocumentEditor(tabId);
+    if (isMarkdownTab(tab) && core) {
+      const currentMarkdown = core.flushMarkdown();
+      // 独立运行时由文档 ID 路由正文；旧单编辑器调用保留其 onChange 写入标签的方式。
+      if (options.getEditorForTab || options.flushTabRuntime) {
+        tab.markdown = currentMarkdown;
+        tab.dirty = normalizeMarkdownForSave(tab.markdown) !== normalizeMarkdownForSave(tab.savedMarkdown);
+      }
+    }
+    return core;
+  }
+
+  function updateFocusedDocumentState(tab: MarkdownTabState) {
+    if (options.getActiveTabId() !== tab.id) return;
+    options.setFileName(tab.fileName);
+    options.setFilePath(tab.filePath);
+    options.setNativePath(tab.nativePath);
+    options.setMarkdown(tab.markdown);
+    options.setSavedMarkdown(tab.savedMarkdown);
+    options.setDirty(tab.dirty);
+    options.setLastKnownModifiedAt(tab.lastKnownModifiedAt);
+    options.setLargeDocumentMode(tab.largeDocumentMode);
+    options.setReadonlyDocumentMode(tab.readonlyDocumentMode);
+    options.setDiskReadonly(tab.diskReadonly);
+    options.setExternalFileChange(tab.externalFileChange);
+  }
+
+  function updateDocumentSavedBaseline(tabId: string, markdownToSave: string) {
+    const core = flushDocumentRuntime(tabId);
+    const tab = options.getTabs().find((candidate) => candidate.id === tabId);
+    if (!isMarkdownTab(tab)) return;
+    const changedWhileSaving = normalizeMarkdownForSave(tab.markdown) !== markdownToSave;
+    core?.setSavedMarkdownBaseline?.(markdownToSave);
+    // 保存补齐的尾换行只属于磁盘基线，不回写正文触发 setMarkdown 或重建编辑历史。
+    tab.savedMarkdown = markdownToSave;
+    tab.dirty = changedWhileSaving;
+    if (!changedWhileSaving) tab.draftId = null;
+    core?.setDirty(changedWhileSaving);
+    return tab;
+  }
+
   async function openDroppedMarkdown(paths: string[]) {
     const target = findDroppedMarkdownPath(paths);
     if (!target) {
@@ -161,7 +243,9 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     const text = await file.text();
     options.saveActiveTabState();
 
-    const browserFileTarget = getOrCreateReusableTab(options.getTabs(), options.getActiveTabId());
+    const activeTabId = options.getActiveTabId();
+    const browserFileTarget = getOrCreateReusableTab(options.getTabs(),
+      options.canReuseTab?.(activeTabId) === false ? '' : activeTabId);
     options.setTabs(browserFileTarget.tabs);
     options.setActiveTabId(browserFileTarget.activeTabId);
     const targetTab = browserFileTarget.targetTab;
@@ -186,8 +270,8 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     input.value = '';
   }
 
-  async function saveMarkdownFile(saveAs = false): Promise<boolean> {
-    const activeTab = options.getTabs().find((tab) => tab.id === options.getActiveTabId());
+  async function saveMarkdownFile(saveAs = false, targetTabId = options.getActiveTabId()): Promise<boolean> {
+    const activeTab = options.getTabs().find((tab) => tab.id === targetTabId);
     if (!isMarkdownTab(activeTab)) {
       // TXT/JSON 由分段会话保存，绝不能回退到 EditorCore 的 Markdown 全量保存链路。
       return false;
@@ -197,12 +281,14 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       return false;
     }
 
-    options.beforeMarkdownCommit?.();
-    const markdownToSave = normalizeMarkdownForSave(options.getEditor().getMarkdown());
+    const core = flushDocumentRuntime(targetTabId);
+    const currentMarkdown = core?.getMarkdown() ?? activeTab.markdown;
+    activeTab.markdown = currentMarkdown;
+    const markdownToSave = normalizeMarkdownForSave(currentMarkdown);
 
     if (options.getDesktopEnabled()) {
       const saveAsTarget = saveAs || activeTab.diskReadonly;
-      if (!saveAsTarget && hasExternalFileChange()) {
+      if (!saveAsTarget && activeTab.externalFileChange.type !== 'none') {
         options.setStatusMessage(t.externalChangeChooseAction());
         return false;
       }
@@ -210,17 +296,19 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
         options.setStatusMessage(t.readonlySourceSaveAsRequired());
       }
 
-      const path = saveAsTarget ? null : options.getNativePath();
+      const path = saveAsTarget ? null : activeTab.nativePath;
       // 步骤1：新文件保存时，尝试用文档第一个 H1 标题作为建议文件名
       const fileName = path
-        ? options.getFileName()
-        : suggestFileNameFromH1(markdownToSave, options.getFileName());
-      options.writeRecoveryDraft(saveAsTarget ? 'before-save-as' : 'before-save');
+        ? activeTab.fileName
+        : suggestFileNameFromH1(markdownToSave, activeTab.fileName);
+      if (options.getActiveTabId() === targetTabId) {
+        options.writeRecoveryDraft(saveAsTarget ? 'before-save-as' : 'before-save');
+      }
       const { document, error } = await saveMarkdownWithSourceEncoding(
         path,
         markdownToSave,
         fileName,
-        options.getCreateSnapshotBeforeSave() ? options.getNativePath() : null,
+        options.getCreateSnapshotBeforeSave() ? activeTab.nativePath : null,
         activeTab.encoding,
       );
       if (error) {
@@ -228,27 +316,22 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
         return false;
       }
       if (document) {
-        localStorage.removeItem(options.recoveryKey);
-        await applySavedNativeDocument(document, markdownToSave, t.savedByTauri());
+        if (options.getActiveTabId() === targetTabId) localStorage.removeItem(options.recoveryKey);
+        await applySavedNativeDocument(document, markdownToSave, t.savedByTauri(), targetTabId);
         return true;
       }
       return false;
     }
 
     // 浏览器模式下同样用 H1 作为建议文件名
-    const fileName = suggestFileNameFromH1(markdownToSave, options.getFileName());
+    const fileName = suggestFileNameFromH1(markdownToSave, activeTab.fileName);
     exportMarkdownInBrowser(markdownToSave, fileName);
     options.setStatusMessage(t.markdownExported());
-    options.setMarkdown(markdownToSave);
-    options.setSavedMarkdown(markdownToSave);
-    options.setDirty(false);
-    options.getEditor().setDirty(false);
-    const browserSavedTab = options.getTabs().find((tab) => tab.id === options.getActiveTabId());
-    if (isMarkdownTab(browserSavedTab)) {
-      browserSavedTab.markdown = markdownToSave;
-      browserSavedTab.savedMarkdown = markdownToSave;
-      browserSavedTab.dirty = false;
+    const browserSavedTab = updateDocumentSavedBaseline(targetTabId, markdownToSave);
+    if (browserSavedTab) {
+      updateFocusedDocumentState(browserSavedTab);
       options.setTabs([...options.getTabs()]);
+      options.onTabRuntimeSaved?.(targetTabId);
     }
     return true;
   }
@@ -292,7 +375,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
 
     const nativeDocumentTarget = getNativeDocumentTargetTab(
       options.getTabs(),
-      options.getActiveTabId(),
+      !saved && options.canReuseTab?.(options.getActiveTabId()) === false ? '' : options.getActiveTabId(),
       existingTab,
       saved,
     );
@@ -332,60 +415,32 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     document: NativeDocument,
     markdownToSave: string,
     message: string,
+    targetTabId: string,
   ) {
-    const previousPath = options
-      .getTabs()
-      .find((tab) => tab.id === options.getActiveTabId())?.nativePath;
+    const ownedTab = options.getTabs().find((tab) => tab.id === targetTabId);
+    // 标签已关闭或移交其他窗口时，迟到的磁盘结果不重新创建标签。
+    if (!isMarkdownTab(ownedTab)) return;
+    const previousPath = ownedTab.nativePath;
     const isNewPath = !previousPath || !sameNativePath(previousPath, document.path);
     const isLargeDocument =
       document.markdown.length > options.getLargeDocumentLimit() ||
       document.sizeBytes > options.getLargeDocumentLimit();
-    const existingTab = options
-      .getTabs()
-      .find(
-        (tab) =>
-          isMarkdownTab(tab) && tab.nativePath && sameNativePath(tab.nativePath, document.path),
-      );
-
-    options.saveActiveTabState();
-
-    const nativeDocumentTarget = getNativeDocumentTargetTab(
-      options.getTabs(),
-      options.getActiveTabId(),
-      existingTab,
-      true,
-    );
-    options.setTabs(nativeDocumentTarget.tabs);
-    options.setActiveTabId(nativeDocumentTarget.activeTabId);
-    const targetTab = nativeDocumentTarget.targetTab;
+    const targetTab = updateDocumentSavedBaseline(targetTabId, markdownToSave);
+    if (!targetTab) return;
 
     targetTab.fileName = document.fileName;
     targetTab.filePath = document.path;
     targetTab.nativePath = document.path;
-    targetTab.draftId = null;
-    targetTab.markdown = markdownToSave;
-    targetTab.savedMarkdown = markdownToSave;
     targetTab.encoding = normalizeMarkdownEncoding(document.encoding);
-    targetTab.dirty = false;
     targetTab.lastKnownModifiedAt = document.modifiedAt;
     targetTab.largeDocumentMode = isLargeDocument;
     targetTab.readonlyDocumentMode = isLargeDocument;
     targetTab.diskReadonly = document.readonly;
     targetTab.externalFileChange = createEmptyExternalFileChange();
 
-    options.setFileName(targetTab.fileName);
-    options.setFilePath(targetTab.filePath);
-    options.setNativePath(targetTab.nativePath);
-    options.setMarkdown(markdownToSave);
-    options.setSavedMarkdown(markdownToSave);
-    options.setDirty(false);
-    options.getEditor().setDirty(false);
-    options.setLastKnownModifiedAt(targetTab.lastKnownModifiedAt);
-    options.setLargeDocumentMode(targetTab.largeDocumentMode);
-    options.setReadonlyDocumentMode(targetTab.readonlyDocumentMode);
-    options.setDiskReadonly(targetTab.diskReadonly);
-    options.setExternalFileChange(targetTab.externalFileChange);
+    updateFocusedDocumentState(targetTab);
     options.setTabs([...options.getTabs()]);
+    options.onTabRuntimeSaved?.(targetTabId);
 
     options.setStatusMessage(message);
     if (isNewPath) {
@@ -444,6 +499,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       // 分段会话关闭前需要 flush journal/close session，由其工作区统一编排。
       return;
     }
+    flushDocumentRuntime(tabId);
 
     logCloseDiagnostics('documentActions.closeTab: 进入关闭流程', {
       tabId,
@@ -477,8 +533,8 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
 
       // 用户选择保存后再关闭
       if (confirmClose === 'save') {
-        const saved = await saveMarkdownFile(false);
-        if (!saved) {
+        const saved = await trackPendingSave(() => saveMarkdownFile(false, tabId));
+        if (!saved || options.getTabs().find((tab) => tab.id === tabId)?.dirty) {
           logCloseDiagnostics('documentActions.closeTab: 保存失败或取消，停止关闭标签', {
             tabId,
             fileName: tabToClose.fileName,
@@ -493,15 +549,21 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       });
     }
 
-    const index = options.getTabs().findIndex((tab) => tab.id === tabId);
-    const nextTabs = options.getTabs().filter((tab) => tab.id !== tabId);
+    const currentTabs = options.getTabs();
+    const index = currentTabs.findIndex((tab) => tab.id === tabId);
+    if (index < 0) return;
+    // 移除前读取可见外层项的邻接文档；关闭确认期间焦点变化时不接管新焦点。
+    const preferredNextTabId = options.getActiveTabId() === tabId
+      ? options.getNextTabIdAfterClose?.(tabId) : undefined;
+    const nextTabs = currentTabs.filter((tab) => tab.id !== tabId);
     options.setTabs(nextTabs);
 
     if (options.getActiveTabId() === tabId) {
       if (nextTabs.length > 0) {
         const newActiveIndex = Math.min(index, nextTabs.length - 1);
-        options.setActiveTabId(nextTabs[newActiveIndex].id);
-        options.loadTabState(nextTabs[newActiveIndex]);
+        const nextTab = nextTabs.find((tab) => tab.id === preferredNextTabId) ?? nextTabs[newActiveIndex];
+        options.setActiveTabId(nextTab.id);
+        options.loadTabState(nextTab);
       } else {
         options.setActiveTabId('');
       }
@@ -520,10 +582,13 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     if (!isMarkdownTab(activeTab)) {
       return;
     }
-    const path = options.getNativePath();
-    if (!options.getDesktopEnabled() || !path || !hasExternalFileChange()) {
+    const tabId = activeTab.id;
+    const path = activeTab.nativePath;
+    if (!options.getDesktopEnabled() || !path || activeTab.externalFileChange.type === 'none') {
       return;
     }
+    flushDocumentRuntime(tabId);
+    const markdownBeforeReload = activeTab.markdown;
 
     const { document, error } = await readMarkdownFromPath(path, t.reloadExternalFailed());
     if (error) {
@@ -531,7 +596,36 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       return;
     }
     if (document) {
-      await applyNativeDocument(document, t.reloadedExternalVersion(), true);
+      const targetTab = options.getTabs().find((tab) => tab.id === tabId);
+      if (!isMarkdownTab(targetTab) || !sameNativePath(targetTab.nativePath ?? '', path)) return;
+      const core = flushDocumentRuntime(tabId);
+      // 磁盘读取期间新产生的输入不属于此前的“重新加载”决定，保留它等待再次选择。
+      if (targetTab.markdown !== markdownBeforeReload) {
+        if (options.getActiveTabId() === tabId) options.setStatusMessage(t.externalChangeChooseAction());
+        return;
+      }
+      const largeDocumentMode = document.markdown.length > options.getLargeDocumentLimit() ||
+        document.sizeBytes > options.getLargeDocumentLimit();
+      Object.assign(targetTab, {
+        fileName: document.fileName,
+        filePath: document.path,
+        nativePath: document.path,
+        draftId: null,
+        markdown: document.markdown,
+        savedMarkdown: document.markdown,
+        encoding: normalizeMarkdownEncoding(document.encoding),
+        dirty: false,
+        lastKnownModifiedAt: document.modifiedAt,
+        largeDocumentMode,
+        readonlyDocumentMode: largeDocumentMode,
+        diskReadonly: document.readonly,
+        externalFileChange: createEmptyExternalFileChange(),
+      });
+      core?.setMarkdown(document.markdown, { reason: 'open-file', dirty: false, savedMarkdown: document.markdown });
+      updateFocusedDocumentState(targetTab);
+      options.setTabs([...options.getTabs()]);
+      options.onTabRuntimeSaved?.(tabId);
+      if (options.getActiveTabId() === tabId) options.setStatusMessage(t.reloadedExternalVersion());
     }
   }
 
@@ -540,11 +634,12 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     if (!isMarkdownTab(activeTab)) {
       return;
     }
-    const path = options.getNativePath();
+    const tabId = activeTab.id;
+    const path = activeTab.nativePath;
     if (!options.getDesktopEnabled() || !path) {
       return;
     }
-    const externalChangeType = options.getExternalFileChange().type;
+    const externalChangeType = activeTab.externalFileChange.type;
     if (activeTab.diskReadonly && externalChangeType !== 'deleted') {
       options.setStatusMessage(t.readonlySourceSaveAsRequired());
       return;
@@ -554,13 +649,15 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       return;
     }
 
-    options.beforeMarkdownCommit?.();
-    const markdownToSave = normalizeMarkdownForSave(options.getEditor().getMarkdown());
-    options.writeRecoveryDraft('before-overwrite-external');
+    const core = flushDocumentRuntime(tabId);
+    const currentMarkdown = core?.getMarkdown() ?? activeTab.markdown;
+    activeTab.markdown = currentMarkdown;
+    const markdownToSave = normalizeMarkdownForSave(currentMarkdown);
+    if (options.getActiveTabId() === tabId) options.writeRecoveryDraft('before-overwrite-external');
     const { document, error } = await saveMarkdownWithSourceEncoding(
       path,
       markdownToSave,
-      options.getFileName(),
+      activeTab.fileName,
       options.getCreateSnapshotBeforeSave() ? path : null,
       activeTab.encoding,
     );
@@ -568,8 +665,8 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       options.setStatusMessage(error);
     }
     if (document) {
-      localStorage.removeItem(options.recoveryKey);
-      await applySavedNativeDocument(document, markdownToSave, t.overwrittenExternalVersion());
+      if (options.getActiveTabId() === tabId) localStorage.removeItem(options.recoveryKey);
+      await applySavedNativeDocument(document, markdownToSave, t.overwrittenExternalVersion(), tabId);
     }
   }
 
@@ -601,7 +698,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
 
     saveTimers[tabId] = setTimeout(async () => {
       delete saveTimers[tabId];
-      await autoSaveLatestTab(tabId);
+      await trackPendingSave(() => autoSaveLatestTab(tabId));
     }, options.getAutoSaveDelayMs());
   }
 
@@ -617,7 +714,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       return;
     }
 
-    flushActiveAutoSaveTab(tabId);
+    flushDocumentRuntime(tabId);
     const targetTab = options.getTabs().find((tab) => tab.id === tabId);
     if (!isMarkdownTab(targetTab) || !targetTab.nativePath) return;
     if (!force && !targetTab.dirty) return;
@@ -660,18 +757,14 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     }
     if (!document) return;
 
-    flushActiveAutoSaveTab(tabId);
+    flushDocumentRuntime(tabId);
     const tabs = options.getTabs();
     const latestTab = tabs.find((tab) => tab.id === tabId);
     if (!isMarkdownTab(latestTab) || latestTab.nativePath !== path) return;
 
     const latestMarkdownToSave = normalizeMarkdownForSave(latestTab.markdown);
     if (latestMarkdownToSave !== markdownToSave) {
-      latestTab.lastKnownModifiedAt = document.modifiedAt;
-      if (options.getActiveTabId() === tabId) {
-        options.setLastKnownModifiedAt(document.modifiedAt);
-      }
-      options.setTabs([...tabs]);
+      applyAutoSaveDiskBaseline(tabId, { markdown: markdownToSave, modifiedAt: document.modifiedAt });
       cancelPendingAutoSave(tabId);
       await autoSaveLatestTab(tabId, true, {
         markdown: markdownToSave,
@@ -680,29 +773,18 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       return;
     }
 
-    latestTab.markdown = markdownToSave;
-    latestTab.savedMarkdown = markdownToSave;
+    updateDocumentSavedBaseline(tabId, markdownToSave);
     latestTab.encoding = normalizeMarkdownEncoding(document.encoding);
-    latestTab.dirty = false;
-    latestTab.draftId = null;
     latestTab.lastKnownModifiedAt = document.modifiedAt;
     cancelPendingAutoSave(tabId);
 
     if (options.getActiveTabId() === tabId) {
-      options.setDirty(false);
-      options.getEditor().setDirty(false);
-      options.setSavedMarkdown(markdownToSave);
-      options.setLastKnownModifiedAt(document.modifiedAt);
+      updateFocusedDocumentState(latestTab);
       options.setStatusMessage(t.saved());
     }
     options.setTabs([...tabs]);
+    options.onTabRuntimeSaved?.(tabId);
     // 自动保存只更新当前文件内容，不隐式重命名文件，避免用户未确认时改变磁盘路径。
-  }
-
-  function flushActiveAutoSaveTab(tabId: string) {
-    if (options.getActiveTabId() === tabId) {
-      options.getEditor().flushMarkdown();
-    }
   }
 
   function applyAutoSaveDiskBaseline(
@@ -710,26 +792,15 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     diskBaseline: { markdown: string; modifiedAt: number },
   ) {
     const tabs = options.getTabs();
-    const targetTab = tabs.find((tab) => tab.id === tabId);
-    if (!isMarkdownTab(targetTab)) return;
-
-    targetTab.savedMarkdown = diskBaseline.markdown;
-    targetTab.dirty = normalizeMarkdownForSave(targetTab.markdown) !== diskBaseline.markdown;
+    const targetTab = updateDocumentSavedBaseline(tabId, diskBaseline.markdown);
+    if (!targetTab) return;
     targetTab.lastKnownModifiedAt = diskBaseline.modifiedAt;
 
     if (options.getActiveTabId() === tabId) {
-      options.setSavedMarkdown(diskBaseline.markdown);
-      options.setDirty(targetTab.dirty);
-      options.setLastKnownModifiedAt(diskBaseline.modifiedAt);
-      if (targetTab.dirty) {
-        options.getEditor().setMarkdown(targetTab.markdown, {
-          reason: 'programmatic-update',
-          dirty: true,
-          savedMarkdown: diskBaseline.markdown,
-        });
-      }
+      updateFocusedDocumentState(targetTab);
     }
     options.setTabs([...tabs]);
+    options.onTabRuntimeSaved?.(tabId);
   }
 
   function cancelPendingAutoSave(tabId: string) {
@@ -747,16 +818,25 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
   }
 
   async function checkExternalFileChange() {
+    const tabId = options.getActiveTabId();
+    const targetTab = options.getTabs().find((tab) => tab.id === tabId);
+    if (!isMarkdownTab(targetTab)) return;
+    const path = targetTab.nativePath;
+    flushDocumentRuntime(tabId);
     const nextChange = await getExternalFileChange(
       options.getDesktopEnabled(),
-      options.getNativePath(),
-      options.getLastKnownModifiedAt(),
-      options.getDirty(),
+      path,
+      targetTab.lastKnownModifiedAt,
+      targetTab.dirty,
     );
-    options.setExternalFileChange(nextChange);
+    const ownedTab = options.getTabs().find((tab) => tab.id === tabId);
+    if (!isMarkdownTab(ownedTab) || ownedTab.nativePath !== path) return;
+    ownedTab.externalFileChange = nextChange;
+    if (options.getActiveTabId() === tabId) options.setExternalFileChange(nextChange);
+    options.setTabs([...options.getTabs()]);
     if (nextChange.type !== 'none') {
-      cancelPendingAutoSaves();
-      if (options.getDirty()) {
+      cancelPendingAutoSave(tabId);
+      if (options.getActiveTabId() === tabId && ownedTab.dirty) {
         options.setStatusMessage(t.externalChangeAutoSavePaused());
       }
     }
@@ -770,14 +850,16 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     openDroppedMarkdown,
     openFileDialog,
     openMarkdownFile,
-    saveMarkdownFile,
+    saveMarkdownFile: (saveAs = false, targetTabId = options.getActiveTabId()) =>
+      trackPendingSave(() => saveMarkdownFile(saveAs, targetTabId)),
     openRecentFile,
     applyNativeDocument,
     createNewFile,
     closeTab,
     refreshRecentFiles,
-    reloadExternalFile,
-    overwriteExternalFile,
+    reloadExternalFile: () => trackPendingSave(reloadExternalFile),
+    overwriteExternalFile: () => trackPendingSave(overwriteExternalFile),
+    awaitPendingSaves,
     checkExternalFileChange,
     debouncedAutoSave,
     cancelPendingAutoSave,

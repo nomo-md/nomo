@@ -2,10 +2,27 @@ import type {
   BlockAlignmentAnchor,
   BlockNaturalGeometry,
 } from '../services/markdownBlockAlignment';
+import type { EditorState } from '@codemirror/state';
+
+/** 仅在本窗口按文档缓存，不序列化到工作区或跨窗口移交。 */
+export interface MarkdownSourceRuntimeState {
+  readonly documentId: string;
+  readonly state: EditorState;
+  readonly scrollTop: number;
+  readonly scrollLeft: number;
+  readonly contentRevision: number;
+}
 
 export interface MarkdownSourceSelection {
   from: number;
   to: number;
+  anchor?: number;
+  head?: number;
+}
+
+export interface MarkdownSourceSelectionSnapshot extends MarkdownSourceSelection {
+  documentId: string;
+  contentRevision: number;
 }
 
 /**
@@ -119,9 +136,12 @@ function matchingTokens(before: string[], after: string[]): Array<[number, numbe
 }
 
 export interface MarkdownSourceEditorHandle {
+  getRuntimeState?(): MarkdownSourceRuntimeState;
+  restoreRuntimeState?(state: MarkdownSourceRuntimeState): void;
   getMarkdown(): string;
   setMarkdown(markdown: string, options?: { addToHistory?: boolean }): void;
   getSelection(): MarkdownSourceSelection;
+  getSelectionStatsSnapshot?(): MarkdownSourceSelectionSnapshot;
   setSelection(from: number, to?: number): void;
   getSelectedMarkdown(): string;
   focus(options?: FocusOptions): void;

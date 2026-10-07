@@ -18,8 +18,9 @@
   } from '../actions/motion';
   import FrontMatterCard from './FrontMatterCard.svelte';
   import MarkdownSourceEditor from './MarkdownSourceEditor.svelte';
-  import type { MarkdownSourceEditorHandle } from './markdownSourceEditor';
+  import type { MarkdownSourceEditorHandle, MarkdownSourceRuntimeState, MarkdownSourceSelectionSnapshot } from './markdownSourceEditor';
   import { syncEditorPanes } from '../services/markdownScrollSyncWorkspace';
+  import type { MarkdownWorkspaceRuntimeBinding } from '../services/markdownDocumentRuntime';
   import { t } from '../i18n';
   import type { EditorViewMode, SplitActivePane, SplitViewLayout } from '../types';
 
@@ -31,6 +32,10 @@
   export let splitAlignmentGuideVisible = false;
   export let markdown: string;
   export let sourceDocumentId = '';
+  export let sourceRuntimeState: MarkdownSourceRuntimeState | undefined = undefined;
+  export let onSourceRuntimeStateChange: (state: MarkdownSourceRuntimeState) => void = () => undefined;
+  export let onRuntimeReady: (binding: MarkdownWorkspaceRuntimeBinding) => void = () => undefined;
+  export let onRuntimeDestroy: (binding: MarkdownWorkspaceRuntimeBinding) => void = () => undefined;
   export let largeDocumentMode: boolean;
   export let frontMatter: FrontMatterBlock | null;
   export let frontMatterEditing: boolean;
@@ -50,7 +55,7 @@
   export let updateMarkdown: (markdown: string) => void;
   export let setSplitActivePane: (pane: SplitActivePane) => void = () => undefined;
   export let updateSplitLeftPercent: (percent: number, persist: boolean) => void = () => undefined;
-  export let onSourceSelectionChange: (selectedMarkdown: string) => void = () => undefined;
+  export let onSourceSelectionChange: (range: MarkdownSourceSelectionSnapshot) => void = () => undefined;
   export let enterFrontMatterEdit: () => void;
   export let leaveFrontMatterEdit: () => void;
   export let updateFrontMatterContent: (content: string) => void;
@@ -105,6 +110,52 @@
   let outlinePointerY = 0;
   let hasExpandableOutline = false;
   let hasCollapsedExpandableOutline = false;
+  let runtimeLifetimeEnded = false;
+  let registeredSourceHandle: MarkdownSourceEditorHandle | null = null;
+  let registeredSourceContent: HTMLElement | null = null;
+  let registeredSourceDocumentId = '';
+  let ownedRuntime: {
+    binding: MarkdownWorkspaceRuntimeBinding;
+    destroy: (binding: MarkdownWorkspaceRuntimeBinding) => void;
+  } | null = null;
+
+  $: publishRuntime(sourceDocumentId, editorCore, editorHost, sourceEditor, sourcePane, semanticPane, mode);
+
+  function publishRuntime(documentId: string, core: EditorCore, host: HTMLDivElement,
+    source: MarkdownSourceEditorHandle, sourceScrollPane: HTMLElement, semanticScrollPane: HTMLElement,
+    visibleMode: EditorViewMode) {
+    if (runtimeLifetimeEnded || !host?.isConnected || !semanticScrollPane?.isConnected ||
+      !sourceScrollPane?.isConnected || source !== registeredSourceHandle ||
+      registeredSourceDocumentId !== documentId || !registeredSourceContent?.isConnected) return;
+    const previous = ownedRuntime?.binding;
+    if (previous?.documentId === documentId && previous.editorCore === core && previous.host === host &&
+      previous.sourceEditor === source && previous.sourcePane === sourceScrollPane && previous.semanticPane === semanticScrollPane) {
+      previous.mode = visibleMode;
+      return;
+    }
+    releaseRuntime();
+    const binding = {
+      documentId, editorCore: core, host, sourceEditor: source, sourcePane: sourceScrollPane,
+      semanticPane: semanticScrollPane, mode: visibleMode, sourceRuntimeState: source.getRuntimeState?.(),
+    };
+    ownedRuntime = { binding, destroy: onRuntimeDestroy };
+    onRuntimeReady(binding);
+  }
+
+  function releaseRuntime(captureSourceState = true) {
+    const owner = ownedRuntime;
+    if (!owner) return;
+    ownedRuntime = null;
+    if (captureSourceState && owner.binding.sourceEditor === registeredSourceHandle && registeredSourceContent?.isConnected) {
+      owner.binding.sourceRuntimeState = owner.binding.sourceEditor.getRuntimeState?.() ?? owner.binding.sourceRuntimeState;
+    }
+    owner.destroy(owner.binding);
+  }
+
+  function handleSourceRuntimeStateChange(state: MarkdownSourceRuntimeState) {
+    if (ownedRuntime?.binding.documentId === state.documentId) ownedRuntime.binding.sourceRuntimeState = state;
+    onSourceRuntimeStateChange(state);
+  }
 
   $: hasExpandableOutline = outline.some((_item, index) => isOutlineItemExpandable(index));
   $: hasCollapsedExpandableOutline = outline.some(
@@ -177,6 +228,9 @@
   }
 
   function handleSourceEditorReady(handle: MarkdownSourceEditorHandle) {
+    registeredSourceHandle = handle;
+    registeredSourceContent = handle.getContentElement();
+    registeredSourceDocumentId = sourceDocumentId;
     sourceEditor = handle;
     sourcePane = handle.getScrollElement();
     requestAnimationFrame(() => {
@@ -689,6 +743,9 @@
   }
 
   onDestroy(() => {
+    runtimeLifetimeEnded = true;
+    // 子组件销毁回调已通过 onRuntimeStateChange 提交最后状态，旧 handle 不再可用。
+    releaseRuntime(false);
     outlineDragPreview?.remove();
     clearOutlineExpandTimer();
     if (outlineAutoScrollFrame) cancelAnimationFrame(outlineAutoScrollFrame);
@@ -805,7 +862,7 @@
     use:modePaneMotion={{ mode, disabled: largeDocumentMode }}
   >
     <section
-      id="source-editor-pane"
+      id={`source-editor-pane-${sourceDocumentId}`}
       bind:this={sourcePaneContainer}
       class="editor-pane source-pane"
       class:split-pane-left={splitViewLayout === 'source-semantic'}
@@ -821,9 +878,11 @@
           bind:sourceEditor
           {markdown}
           documentId={sourceDocumentId}
+          runtimeState={sourceRuntimeState}
+          onRuntimeStateChange={handleSourceRuntimeStateChange}
           {readonlyDocumentMode}
           onMarkdownChange={updateMarkdown}
-          onSelectionChange={(selected) => {
+          onSelectionSnapshotChange={(selected) => {
             onSourceSelectionChange(selected);
             editorGrid?.dispatchEvent(new Event('nomo:source-caret-change'));
           }}
@@ -847,7 +906,7 @@
       aria-label={t.splitDivider()}
       aria-hidden={mode !== 'split'}
       aria-orientation="vertical"
-      aria-controls="semantic-editor-pane source-editor-pane"
+      aria-controls={`semantic-editor-pane-${sourceDocumentId} source-editor-pane-${sourceDocumentId}`}
       aria-valuemin="25"
       aria-valuemax="75"
       aria-valuenow={Math.round(splitLeftPercent)}
@@ -869,7 +928,7 @@
     {/if}
 
     <section
-      id="semantic-editor-pane"
+      id={`semantic-editor-pane-${sourceDocumentId}`}
       bind:this={semanticPane}
       class="semantic-pane"
       class:split-pane-left={splitViewLayout === 'semantic-source'}

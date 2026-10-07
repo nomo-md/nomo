@@ -2,6 +2,7 @@ import type { Node as ProseMirrorNode } from 'prosemirror-model';
 import { NodeSelection, TextSelection } from 'prosemirror-state';
 import type { EditorView } from 'prosemirror-view';
 import { getMathRenderer } from '../renderers';
+import { registerActiveEdit, unregisterActiveEdit } from './activeEditRegistry';
 
 /**
  * math_block 节点的 NodeView —— 渲染态
@@ -12,9 +13,9 @@ import { getMathRenderer } from '../renderers';
  * 3. Ctrl+Enter 保存退出 / Esc 放弃退出
  */
 export class MathBlockNodeView {
-  private static activeEditingView: MathBlockNodeView | null = null;
   private static instances = new Set<MathBlockNodeView>();
   private static pendingKeyboardEntry: { caret: 'start' | 'end'; expiresAt: number } | null = null;
+  private static keyboardEntries = new WeakMap<EditorView, { caret: 'start' | 'end'; expiresAt: number }>();
 
   dom: HTMLElement;
 
@@ -25,6 +26,8 @@ export class MathBlockNodeView {
 
   // 编辑态相关
   private editing = false;
+  private destroyed = false;
+  private readonly activeEditExitFn = () => this.exitEdit(true, 'preserve');
   private originalTex = '';
   private textarea: HTMLTextAreaElement | null = null;
   private previewEl: HTMLElement | null = null;
@@ -32,10 +35,11 @@ export class MathBlockNodeView {
   // 首次创建时自动进入编辑态（如 InputRule 从 $$ 创建的空公式块）
   private needsAutoEdit = false;
 
-  constructor(node: ProseMirrorNode, view: EditorView, getPos: () => number) {
+  constructor(node: ProseMirrorNode, view: EditorView, getPos: () => number, suppressInitialEdit = false) {
     this.node = node;
     this.view = view;
     this.getPos = getPos;
+    this.suppressNextSelectAutoEdit = suppressInitialEdit;
     MathBlockNodeView.instances.add(this);
 
     this.dom = document.createElement('div');
@@ -84,7 +88,7 @@ export class MathBlockNodeView {
 
     // 公式块没有有意义的“只选中”中间态：键盘导航到达后立即进入编辑态，避免需要再按第二下。
     this.needsAutoEdit = false;
-    const keyboardEntry = MathBlockNodeView.consumeKeyboardEntry();
+    const keyboardEntry = MathBlockNodeView.consumeKeyboardEntry(this.view);
     this.enterEdit(keyboardEntry ?? 'start');
   }
 
@@ -108,6 +112,7 @@ export class MathBlockNodeView {
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.cleanupEdit();
     MathBlockNodeView.instances.delete(this);
   }
@@ -151,15 +156,12 @@ export class MathBlockNodeView {
   // ---- 编辑态管理 ----
 
   private enterEdit(caret: 'start' | 'end' = 'start'): void {
-    if (this.editing) return;
+    if (this.editing || this.destroyed || this.view.isDestroyed) return;
 
-    if (MathBlockNodeView.activeEditingView && MathBlockNodeView.activeEditingView !== this) {
-      MathBlockNodeView.activeEditingView.exitEdit(true, 'preserve');
-    }
+    registerActiveEdit(this.view, this.activeEditExitFn);
 
     this.editing = true;
     this.renderId += 1;
-    MathBlockNodeView.activeEditingView = this;
     this.originalTex = this.node.attrs.tex as string;
     this.dom.classList.add('is-editing');
     this.dom.classList.remove('ProseMirror-selectednode');
@@ -238,16 +240,19 @@ export class MathBlockNodeView {
     attempt(4);
   }
 
-  static prepareKeyboardEntry(caret: 'start' | 'end'): void {
-    MathBlockNodeView.pendingKeyboardEntry = {
+  static prepareKeyboardEntry(caret: 'start' | 'end', view?: EditorView): void {
+    const entry = {
       caret,
       expiresAt: Date.now() + 600,
     };
+    if (view) this.keyboardEntries.set(view, entry);
+    else this.pendingKeyboardEntry = entry;
   }
 
-  private static consumeKeyboardEntry(): 'start' | 'end' | null {
-    const entry = MathBlockNodeView.pendingKeyboardEntry;
-    MathBlockNodeView.pendingKeyboardEntry = null;
+  private static consumeKeyboardEntry(view: EditorView): 'start' | 'end' | null {
+    const entry = this.keyboardEntries.get(view) ?? this.pendingKeyboardEntry;
+    this.keyboardEntries.delete(view);
+    this.pendingKeyboardEntry = null;
     if (!entry || entry.expiresAt < Date.now()) return null;
     return entry.caret;
   }
@@ -291,9 +296,7 @@ export class MathBlockNodeView {
 
   private cleanupEdit(): void {
     this.editing = false;
-    if (MathBlockNodeView.activeEditingView === this) {
-      MathBlockNodeView.activeEditingView = null;
-    }
+    unregisterActiveEdit(this.view, this.activeEditExitFn);
     this.dom.classList.remove('is-editing');
     this.textarea = null;
     this.previewEl = null;

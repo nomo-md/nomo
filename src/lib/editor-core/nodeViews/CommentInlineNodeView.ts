@@ -13,6 +13,8 @@ const COMMENT_INLINE_EDIT_CARET_PADDING_PX = 6;
 export class CommentInlineNodeView {
   private static nextKeyboardCursorSide: 'start' | 'end' | null = null;
   private static instantEditMode = false;
+  private static keyboardEntries = new WeakMap<EditorView, 'start' | 'end'>();
+  private static instantEditViews = new WeakSet<EditorView>();
 
   dom: HTMLElement;
 
@@ -20,15 +22,18 @@ export class CommentInlineNodeView {
   private view: EditorView;
   private getPos: () => number;
   private editing = false;
+  private destroyed = false;
+  private suppressNextSelectAutoEdit = false;
   private originalContent = '';
   private input: HTMLInputElement | null = null;
   private activeEditExitFn: (() => void) | null = null;
   private unsubscribeLocale: () => void = () => undefined;
 
-  constructor(node: ProseMirrorNode, view: EditorView, getPos: () => number) {
+  constructor(node: ProseMirrorNode, view: EditorView, getPos: () => number, suppressInitialEdit = false) {
     this.node = node;
     this.view = view;
     this.getPos = getPos;
+    this.suppressNextSelectAutoEdit = suppressInitialEdit;
 
     this.dom = document.createElement('span');
     this.dom.className = 'comment-inline';
@@ -66,18 +71,21 @@ export class CommentInlineNodeView {
 
     this.renderDisplay();
 
-    if (CommentInlineNodeView.instantEditMode) {
+    if (CommentInlineNodeView.instantEditViews.has(view) || CommentInlineNodeView.instantEditMode) {
+      CommentInlineNodeView.instantEditViews.delete(view);
       CommentInlineNodeView.instantEditMode = false;
       requestAnimationFrame(() => this.enterEdit());
     }
   }
 
-  static requestKeyboardEntry(cursorSide: 'start' | 'end'): void {
-    CommentInlineNodeView.nextKeyboardCursorSide = cursorSide;
+  static requestKeyboardEntry(cursorSide: 'start' | 'end', view?: EditorView): void {
+    if (view) this.keyboardEntries.set(view, cursorSide);
+    else this.nextKeyboardCursorSide = cursorSide;
   }
 
-  static requestInstantEdit(): void {
-    CommentInlineNodeView.instantEditMode = true;
+  static requestInstantEdit(view?: EditorView): void {
+    if (view) this.instantEditViews.add(view);
+    else this.instantEditMode = true;
   }
 
   update(node: ProseMirrorNode): boolean {
@@ -90,7 +98,10 @@ export class CommentInlineNodeView {
 
   selectNode(): void {
     this.dom.classList.add('ProseMirror-selectednode');
-    CommentInlineNodeView.nextKeyboardCursorSide = null;
+    if (this.suppressNextSelectAutoEdit) {
+      this.suppressNextSelectAutoEdit = false;
+      return;
+    }
     this.enterEdit();
   }
 
@@ -108,6 +119,7 @@ export class CommentInlineNodeView {
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.unsubscribeLocale();
     this.cleanupEdit();
   }
@@ -126,11 +138,11 @@ export class CommentInlineNodeView {
   }
 
   private enterEdit(): void {
-    if (this.editing) return;
+    if (this.editing || this.destroyed || this.view.isDestroyed) return;
 
     this.editing = true;
-    this.activeEditExitFn = () => this.exitEdit(true);
-    registerActiveEdit(this.activeEditExitFn);
+    this.activeEditExitFn = () => this.exitEdit(true, 'preserve');
+    registerActiveEdit(this.view, this.activeEditExitFn);
 
     this.originalContent = this.getContent();
     this.dom.classList.add('is-editing');
@@ -153,14 +165,15 @@ export class CommentInlineNodeView {
     requestAnimationFrame(() => {
       if (!this.input) return;
       this.input.focus({ preventScroll: true });
-      const cursorPos =
-        CommentInlineNodeView.nextKeyboardCursorSide === 'start' ? 0 : this.input.value.length;
+      const cursorSide = CommentInlineNodeView.keyboardEntries.get(this.view) ?? CommentInlineNodeView.nextKeyboardCursorSide;
+      CommentInlineNodeView.keyboardEntries.delete(this.view);
+      const cursorPos = cursorSide === 'start' ? 0 : this.input.value.length;
       CommentInlineNodeView.nextKeyboardCursorSide = null;
       this.input.setSelectionRange(cursorPos, cursorPos);
     });
   }
 
-  private exitEdit(save: boolean, cursorSide: 'before' | 'after' = 'after'): void {
+  private exitEdit(save: boolean, cursorSide: 'before' | 'after' | 'preserve' = 'after'): void {
     if (!this.editing) return;
 
     const nextContent =
@@ -175,17 +188,19 @@ export class CommentInlineNodeView {
       tr = tr.setNodeMarkup(pos, null, { content: nextContent });
     }
 
-    const cursorPos = cursorSide === 'before' ? pos : pos + 1;
-    const bias = cursorSide === 'before' ? -1 : 1;
-    tr = tr.setSelection(TextSelection.near(tr.doc.resolve(cursorPos), bias));
-    this.view.dispatch(tr);
-    this.view.focus();
+    if (cursorSide !== 'preserve') {
+      const cursorPos = cursorSide === 'before' ? pos : pos + 1;
+      const bias = cursorSide === 'before' ? -1 : 1;
+      tr = tr.setSelection(TextSelection.near(tr.doc.resolve(cursorPos), bias));
+    }
+    if (tr.docChanged || cursorSide !== 'preserve') this.view.dispatch(tr);
+    if (cursorSide !== 'preserve') this.view.focus();
   }
 
   private cleanupEdit(): void {
     this.editing = false;
     if (this.activeEditExitFn) {
-      unregisterActiveEdit(this.activeEditExitFn);
+      unregisterActiveEdit(this.view, this.activeEditExitFn);
       this.activeEditExitFn = null;
     }
     this.dom.classList.remove('is-editing');

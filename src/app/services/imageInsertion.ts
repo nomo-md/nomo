@@ -1,7 +1,8 @@
 import type { EditorCore, EditorMode } from '../../lib/editor-core';
 import { getImageLoader } from '../../lib/editor-core/renderers';
 import type { ImageContext } from '../../lib/services/render';
-import type { MarkdownSourceEditorHandle } from '../components/markdownSourceEditor';
+import { Transaction } from '@codemirror/state';
+import { getSourceTextChanges, type MarkdownSourceEditorHandle, type MarkdownSourceRuntimeState } from '../components/markdownSourceEditor';
 import { createPerfTimer, logError, logInfo } from '../../lib/services/logger';
 import { t } from '../i18n';
 import { createImageMarkdown, getImageFiles } from './imageMarkdown';
@@ -11,7 +12,11 @@ interface ImageInsertionOptions {
   getMode(): EditorMode;
   getFileName(): string;
   getNativePath(): string | null;
-  getSourceEditor(): MarkdownSourceEditorHandle;
+  getSourceEditor(): MarkdownSourceEditorHandle | undefined;
+  isDocumentOpen?(): boolean;
+  isDocumentFocused?(): boolean;
+  getSourceRuntimeState?(): MarkdownSourceRuntimeState | undefined;
+  setSourceRuntimeState?(state: MarkdownSourceRuntimeState): void;
   getImageContext(): ImageContext;
   saveMarkdownFile(saveAs?: boolean): Promise<boolean | void> | boolean | void;
   setMarkdown(markdown: string): void;
@@ -20,6 +25,34 @@ interface ImageInsertionOptions {
 }
 
 export function createImageInsertionHandlers(options: ImageInsertionOptions) {
+  const pendingInsertions = new Set<Promise<void>>();
+
+  function insertImageFiles(files: File[]): Promise<void> {
+    const insertion = performImageInsertion(files);
+    pendingInsertions.add(insertion);
+    void insertion.then(
+      () => pendingInsertions.delete(insertion),
+      (error) => {
+        pendingInsertions.delete(insertion);
+        logError('ImageInsertion', 'Failed to insert images', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        options.setStatusMessage(t.imagesInsertedWithFailures({ inserted: 0, failed: files.length }));
+      },
+    );
+    return insertion;
+  }
+
+  /** 迁移捕获正文前等候整笔导入，避免销毁来源后丢失已经开始的图片插入。 */
+  async function awaitPendingInsertions(): Promise<void> {
+    let failure: PromiseRejectedResult | undefined;
+    while (pendingInsertions.size > 0) {
+      const results = await Promise.allSettled([...pendingInsertions]);
+      failure ??= results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    }
+    if (failure) throw failure.reason;
+  }
+
   function handleEditorDrop(event: DragEvent) {
     const files = getImageFiles(event.dataTransfer?.files);
     if (files.length === 0) {
@@ -40,8 +73,16 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
     void insertImageFiles(files);
   }
 
-  async function insertImageFiles(files: File[]) {
+  async function performImageInsertion(files: File[]) {
     const timer = createPerfTimer('ImageInsertion', '插入图片');
+    const editor = options.getEditor();
+    const documentOpen = () => options.isDocumentOpen?.() !== false && options.getEditor() === editor;
+    const cancelIfClosed = () => {
+      if (documentOpen()) return false;
+      timer.end({ cancelled: true, reason: 'source-document-closed' });
+      return true;
+    };
+    if (cancelIfClosed()) return;
     logInfo('ImageInsertion', '开始插入图片', { count: files.length });
     const loader = getImageLoader();
     if (!loader) {
@@ -55,6 +96,7 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
     if (strategy !== 'upload' && !options.getNativePath()) {
       options.setStatusMessage(t.saveBeforeInsertLocalImage());
       await options.saveMarkdownFile(true);
+      if (cancelIfClosed()) return;
       if (!options.getNativePath()) {
         timer.end({ cancelled: true, reason: 'document-not-saved' });
         options.setStatusMessage(t.imageInsertCancelled());
@@ -62,13 +104,13 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
       }
     }
 
-    const editor = options.getEditor();
     const imported: Array<{ src: string; alt: string }> = [];
     let failed = 0;
 
     for (const file of files) {
       try {
         const bytes = new Uint8Array(await file.arrayBuffer());
+        if (cancelIfClosed()) return;
         const result = await loader.import(
           {
             fileName: getInsertFileName(file, imported.length),
@@ -76,6 +118,7 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
           },
           options.getImageContext(),
         );
+        if (cancelIfClosed()) return;
         imported.push({ src: result.markdownSrc, alt: file.name || 'image' });
       } catch (error) {
         failed += 1;
@@ -86,9 +129,10 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
       }
     }
 
+    if (cancelIfClosed()) return;
     if (imported.length > 0) {
       if (options.getMode() === 'source') {
-        insertSourceMarkdown(imported);
+        insertSourceMarkdown(imported, editor);
       } else {
         for (const item of imported) {
           const imageSettings = context.settings;
@@ -104,7 +148,7 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
             align: defaultAlign,
           });
         }
-        editor.focus();
+        if (options.isDocumentFocused?.() !== false) editor.focus();
       }
     }
 
@@ -126,10 +170,19 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
       .replace(/>/g, '&gt;');
   }
 
-  function insertSourceMarkdown(items: Array<{ src: string; alt: string }>) {
+  function insertSourceMarkdown(items: Array<{ src: string; alt: string }>, editor: EditorCore) {
     const sourceEditor = options.getSourceEditor();
-    const markdown = options.getEditor().getMarkdown();
-    const selection = sourceEditor?.getSelection();
+    const markdown = editor.flushMarkdown();
+    const cachedRuntime = options.getSourceRuntimeState?.();
+    // 隐藏标签没有 DOM；直接在同一文档缓存的 CodeMirror State 上提交，保留撤销历史。
+    const cachedState = cachedRuntime?.state;
+    const detachedState = cachedState
+      ? cachedState.update({
+          changes: getSourceTextChanges(cachedState.doc.toString(), markdown),
+          annotations: Transaction.addToHistory.of(false),
+        }).state
+      : undefined;
+    const selection = sourceEditor?.getSelection() ?? detachedState?.selection.main;
     const start = selection?.from ?? markdown.length;
     const end = selection?.to ?? start;
     const imageSettings = options.getImageContext().settings;
@@ -157,13 +210,28 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
     const nextMarkdown = `${prefix}${before}${snippet}${after}${suffix}`;
     const nextSelection = prefix.length + before.length + snippet.length;
 
-    sourceEditor.setMarkdown(nextMarkdown, { addToHistory: true });
+    if (sourceEditor) {
+      sourceEditor.setMarkdown(nextMarkdown, { addToHistory: true });
+      sourceEditor.setSelection(nextSelection);
+    } else {
+      if (detachedState && cachedRuntime) {
+        options.setSourceRuntimeState?.({
+          ...cachedRuntime,
+          state: detachedState.update({
+            changes: { from: start, to: end, insert: `${before}${snippet}${after}` },
+            selection: { anchor: nextSelection },
+          }).state,
+          contentRevision: cachedRuntime.contentRevision + 1,
+        });
+      }
+      editor.setMarkdown(nextMarkdown, { reason: 'source-input', sourceInput: true });
+    }
     requestAnimationFrame(() => {
-      if (!sourceEditor) {
+      if (!sourceEditor || options.isDocumentOpen?.() === false || options.isDocumentFocused?.() === false ||
+        options.getEditor() !== editor || options.getSourceEditor() !== sourceEditor) {
         return;
       }
       sourceEditor.focus();
-      sourceEditor.setSelection(nextSelection);
       options.syncSourceTextareaHeight();
     });
   }
@@ -179,5 +247,6 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
     handleEditorDrop,
     handleEditorPaste,
     insertImageFiles,
+    awaitPendingInsertions,
   };
 }

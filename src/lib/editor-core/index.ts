@@ -29,6 +29,7 @@ export type {
   EditorSearchMatch,
   EditorSearchOptions,
   EditorSelectionEvent,
+  EditorSelectionSnapshotEvent,
   EditorSelectionSnapshot,
   EditorSnapshot,
   EditorThemeOptions,

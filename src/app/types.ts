@@ -55,6 +55,25 @@ export interface SegmentedTextTabState extends CommonTabState {
 
 export type Tab = MarkdownTabState | SegmentedTextTabState;
 
+/** 标签栏中的一个工作区项；组合只引用文档状态，不复制正文或编辑历史。 */
+export type WorkspaceItem = SingleWorkspaceItem | ComparisonWorkspaceItem;
+
+export interface SingleWorkspaceItem {
+  kind: 'single';
+  id: string;
+  tabId: string;
+}
+
+export interface ComparisonWorkspaceItem {
+  kind: 'comparison';
+  id: string;
+  leftTabId: string;
+  rightTabId: string;
+  focusedTabId: string;
+  mode: EditorMode;
+  leftPercent: number;
+}
+
 /** Rust 打开或恢复文件后返回的新会话数据；旧 sessionId 不得跨应用启动复用。 */
 export interface SegmentedSessionOpenData {
   sessionId: string;
@@ -122,6 +141,8 @@ export interface FileTreeNode {
 export interface WorkspaceState {
   tabs: Tab[];
   activeTabId: string;
+  items?: WorkspaceItem[];
+  activeItemId?: string;
   currentFolderPath?: string;
 }
 
@@ -155,8 +176,11 @@ export interface PersistedSegmentedWorkspaceTab extends PersistedCommonWorkspace
 export type PersistedWorkspaceTab = PersistedMarkdownWorkspaceTab | PersistedSegmentedWorkspaceTab;
 
 export interface PersistedWorkspaceState {
-  version: 3;
+  /** v3 只用于兼容既有输入；持久化写入统一生成 v4。 */
+  version: 3 | 4;
   tabs: PersistedWorkspaceTab[];
   activeTabId: string;
+  items?: WorkspaceItem[];
+  activeItemId?: string;
   currentFolderPath?: string;
 }

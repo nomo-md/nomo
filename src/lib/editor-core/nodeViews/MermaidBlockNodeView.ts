@@ -4,6 +4,7 @@ import type { EditorView } from 'prosemirror-view';
 import { onInterfaceLocaleChanged, t } from '../../../app/i18n';
 import { getDiagramRenderer } from '../renderers';
 import type { MermaidThemeDefinition } from '../../theme/types';
+import { registerActiveEdit, unregisterActiveEdit } from './activeEditRegistry';
 import {
   bindMermaidFullscreen,
   bindMermaidViewport,
@@ -37,6 +38,7 @@ export class MermaidBlockNodeView {
   private previewRenderId = 0;
   private previewDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private editing = false;
+  private readonly activeEditExitFn = () => this.exitEdit(true, 'preserve');
   private originalCode = '';
   private textarea: HTMLTextAreaElement | null = null;
   private previewEl: HTMLElement | null = null;
@@ -249,7 +251,8 @@ export class MermaidBlockNodeView {
   }
 
   private enterEdit(caret: 'start' | 'end' = 'start'): void {
-    if (this.editing) return;
+    if (this.editing || this.destroyed || this.view.isDestroyed) return;
+    registerActiveEdit(this.view, this.activeEditExitFn);
     this.editing = true;
     this.renderId += 1;
     this.previewRenderId += 1;
@@ -328,6 +331,7 @@ export class MermaidBlockNodeView {
   }
 
   private cleanupEdit(): void {
+    unregisterActiveEdit(this.view, this.activeEditExitFn);
     this.disposeViewport();
     this.editing = false;
     this.clearPreviewDebounce();

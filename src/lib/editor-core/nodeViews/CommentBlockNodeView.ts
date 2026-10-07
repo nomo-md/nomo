@@ -7,6 +7,7 @@ import { registerActiveEdit, unregisterActiveEdit } from './activeEditRegistry';
 /** 块级 Markdown 注释 NodeView：展示为低调卡片，点击后编辑完整注释内容。 */
 export class CommentBlockNodeView {
   private static instantEditMode = false;
+  private static instantEditViews = new WeakSet<EditorView>();
 
   dom: HTMLElement;
 
@@ -14,6 +15,7 @@ export class CommentBlockNodeView {
   private view: EditorView;
   private getPos: () => number;
   private editing = false;
+  private destroyed = false;
   private originalContent = '';
   private textarea: HTMLTextAreaElement | null = null;
   private activeEditExitFn: (() => void) | null = null;
@@ -60,14 +62,16 @@ export class CommentBlockNodeView {
 
     this.renderDisplay();
 
-    if (CommentBlockNodeView.instantEditMode) {
+    if (CommentBlockNodeView.instantEditViews.has(view) || CommentBlockNodeView.instantEditMode) {
+      CommentBlockNodeView.instantEditViews.delete(view);
       CommentBlockNodeView.instantEditMode = false;
       requestAnimationFrame(() => this.enterEdit());
     }
   }
 
-  static requestInstantEdit(): void {
-    CommentBlockNodeView.instantEditMode = true;
+  static requestInstantEdit(view?: EditorView): void {
+    if (view) this.instantEditViews.add(view);
+    else this.instantEditMode = true;
   }
 
   update(node: ProseMirrorNode): boolean {
@@ -96,6 +100,7 @@ export class CommentBlockNodeView {
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.unsubscribeLocale();
     this.cleanupEdit();
   }
@@ -117,11 +122,11 @@ export class CommentBlockNodeView {
   }
 
   private enterEdit(): void {
-    if (this.editing) return;
+    if (this.editing || this.destroyed || this.view.isDestroyed) return;
 
     this.editing = true;
-    this.activeEditExitFn = () => this.exitEdit(true);
-    registerActiveEdit(this.activeEditExitFn);
+    this.activeEditExitFn = () => this.exitEdit(true, true);
+    registerActiveEdit(this.view, this.activeEditExitFn);
 
     this.originalContent = this.getContent();
     this.dom.classList.add('is-editing');
@@ -146,7 +151,7 @@ export class CommentBlockNodeView {
     });
   }
 
-  private exitEdit(save: boolean): void {
+  private exitEdit(save: boolean, preserveSelection = false): void {
     if (!this.editing) return;
 
     const nextContent =
@@ -161,15 +166,15 @@ export class CommentBlockNodeView {
       tr = tr.setNodeMarkup(pos, null, { content: nextContent });
     }
 
-    tr = tr.setSelection(NodeSelection.create(tr.doc, pos));
-    this.view.dispatch(tr);
-    this.view.focus();
+    if (!preserveSelection) tr = tr.setSelection(NodeSelection.create(tr.doc, pos));
+    if (tr.docChanged || !preserveSelection) this.view.dispatch(tr);
+    if (!preserveSelection) this.view.focus();
   }
 
   private cleanupEdit(): void {
     this.editing = false;
     if (this.activeEditExitFn) {
-      unregisterActiveEdit(this.activeEditExitFn);
+      unregisterActiveEdit(this.view, this.activeEditExitFn);
       this.activeEditExitFn = null;
     }
     this.dom.classList.remove('is-editing');

@@ -3,6 +3,7 @@ import { Plugin } from 'prosemirror-state';
 import { schema } from '../schema';
 import { MathInlineNodeView } from '../nodeViews/MathInlineNodeView';
 import { isPlainTextPaste } from '../clipboardMarkdown';
+import type { EditorView } from 'prosemirror-view';
 
 interface InlineMathMatch {
   from: number;
@@ -11,7 +12,7 @@ interface InlineMathMatch {
   isNew?: boolean; // 标记是否是新创建的行公式
 }
 
-export function mathInlineInputPlugin(): Plugin {
+export function mathInlineInputPlugin(getView?: () => EditorView | null): Plugin {
   return new Plugin({
     appendTransaction(transactions, _oldState, newState) {
       if (isPlainTextPaste(transactions)) return null;
@@ -37,7 +38,7 @@ export function mathInlineInputPlugin(): Plugin {
       // 如果有新创建的行公式，触发立即编辑
       if (newMatchPos !== null) {
         // 请求立即进入编辑态
-        MathInlineNodeView.requestInstantEdit();
+        MathInlineNodeView.requestInstantEdit(getView?.() ?? undefined);
       }
 
       return tr;

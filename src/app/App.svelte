@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createWritingStatsController } from './services/writingStatsController';
   import { onDestroy, onMount, tick } from 'svelte';
   import {
     listenDesktopFileDrops,
@@ -40,12 +41,12 @@
     type EditorMode,
     type EditorPasteMode,
     type EditorSearchMatch,
-    type EditorSelectionEvent,
+    type EditorSelectionSnapshotEvent,
     type EditorThemeOptions,
+    type EditorCore,
   } from '../lib/editor-core';
   import {
-    analyzeMarkdown,
-    calculateDocumentStats,
+    extractOutline,
     type DocumentStats,
     type OutlineItem,
   } from '../lib/outline/outlineService';
@@ -57,7 +58,8 @@
     type FrontMatterBlock,
   } from '../lib/markdown/frontMatter';
   import AppShell from './components/AppShell.svelte';
-  import type { MarkdownSourceEditorHandle } from './components/markdownSourceEditor';
+  import TabDragGhost from './components/TabDragGhost.svelte';
+  import type { MarkdownSourceEditorHandle, MarkdownSourceSelectionSnapshot } from './components/markdownSourceEditor';
   import type SegmentedTextEditorWorkspaceComponent from './components/SegmentedTextEditorWorkspace.svelte';
   import FolderOpenDialog from './components/FolderOpenDialog.svelte';
   import {
@@ -72,6 +74,8 @@
     type SplitActivePane,
     type SplitViewLayout,
     type Tab,
+    type WorkspaceItem,
+    type ComparisonWorkspaceItem,
   } from './types';
   import {
     getCompactPath,
@@ -102,6 +106,20 @@
     type OpenDirectoryWindow,
   } from './services/desktopWindow';
   import { routeOpenTarget } from './services/openTargetRouting';
+  import {
+    normalizeWorkspaceItems, createSingleWorkspaceItem, createComparisonWorkspaceItem,
+    findWorkspaceItemForTab, getWorkspaceItemTabIds, getWorkspaceItemFocusedTabId,
+    removeWorkspaceItemMember, ungroupWorkspaceItem, swapComparisonMembers,
+  } from './services/workspaceItems';
+  import type { MarkdownDocumentRuntime, MarkdownWorkspaceRuntimeBinding } from './services/markdownDocumentRuntime';
+  import { createWorkspaceTransferController } from './services/workspaceTransferController';
+  import type { MarkdownSourceRuntimeState } from './components/markdownSourceEditor';
+  import {
+    getTabTransferBootstrap, registerTabDropZones, beginNativeTabDrag, cancelNativeTabDrag,
+    onNativeTabDrag, onTabTransfer, takeWorkspaceWriteStamp, cancelTabTransfer,
+    type TabTransferSnapshot, type NativeTabDragEvent,
+    type TabDropPlacement, type TabDropZone,
+  } from './services/tabTransfer';
   import { createImageInsertionHandlers } from './services/imageInsertion';
   import { readEditorClipboard, writeEditorClipboard, writeFileClipboard } from './services/clipboard';
   import { createDesktopImageLoader } from './services/desktopImageLoader';
@@ -330,7 +348,9 @@
   let collapsedOutlineIds = new Set<string>();
   let visibleOutlineIds = new Set(outline.map((item) => item.id));
   let suppressOutlineScrollUntil = 0;
-  let stats: DocumentStats = analyzeMarkdown('').stats;
+  let stats: DocumentStats = { chars: 0, words: 0, visibleChars: 0, lines: 1, headings: 0, readingMinutes: 1 };
+  let statsStatus: 'pending' | 'ready' | 'error' = 'pending';
+  let statsContentRevision = 0;
   let selectedStats: DocumentStats | null = null;
   $: effectiveStats = selectedStats ?? stats;
   let writingStatsVisible = DEFAULT_APP_PREFERENCES.writingStatsVisible;
@@ -518,6 +538,39 @@
 
   let tabs: Tab[] = [];
   let activeTabId = '';
+  let workspaceItems: WorkspaceItem[] = [];
+  let activeItemId = '';
+  let activeComparison: ComparisonWorkspaceItem | null = null;
+  const documentRuntimes = new Map<string, MarkdownDocumentRuntime>();
+  const mountedDocumentRuntimes = new WeakSet<MarkdownDocumentRuntime>();
+  let comparisonRuntimes: MarkdownDocumentRuntime[] = [];
+  let comparisonTabs: MarkdownTabState[] = [];
+  let workspaceInteractionDisabled = false;
+  let closingWorkspaceItemId: string | null = null;
+  let workspaceTransferFlushing = false;
+  let tabDropZones: TabDropZone[] = [];
+  let lastDropZoneSignature = '';
+  let lastTabDragFinishedAt = 0;
+  let dropHighlight: NativeTabDragEvent | null = null;
+  let pendingDrag: { pointerId: number; x: number; y: number; itemId: string; tabId?: string; target: HTMLElement } | null = null;
+  let nativeDragId: string | null = null;
+  let tabDragGhost: { title: string; x: number; y: number; comparison: boolean } | null = null;
+  let transferBootstrap: TabTransferSnapshot | null = null;
+  const pendingTransferReceives = new Map<string, TabTransferSnapshot>();
+  const pendingDocumentOpens = new Set<Promise<boolean>>();
+  const pendingEditorOperations = new Set<Promise<unknown>>();
+  const deferredWorkspaceOperations: Array<() => Promise<unknown>> = [];
+  const deferredOpenTargets: OpenTarget[] = [];
+  let transferredOpenTargetWindowLabel: string | undefined;
+  let deferredOpenForwarding: Promise<void> | undefined;
+  let drainingDeferredWorkspaceOperations = false;
+  const workspaceItemFeaturesEnabled = getPlatformCapabilities().isWindows;
+  $: reconcileWorkspaceItems(tabs, activeTabId);
+  $: activeComparison = workspaceItems.find((item): item is ComparisonWorkspaceItem => item.id === activeItemId && item.kind === 'comparison') ?? null;
+  $: comparisonRuntimes = activeComparison
+    ? getWorkspaceItemTabIds(activeComparison).map((id) => getDocumentRuntime(tabs.find((tab) => tab.id === id) as MarkdownTabState))
+    : [];
+  $: comparisonTabs = activeComparison ? getWorkspaceItemTabIds(activeComparison).map((id) => tabs.find((tab) => tab.id === id) as MarkdownTabState) : [];
   let previewTabId: string | null = null;
   let previewOpenGeneration = 0;
   let lastMarkdownLintSignature = '';
@@ -666,7 +719,7 @@
     lastWindowOpenTargetsSignature = signature;
   }
 
-  $: if (desktopEnabled && windowLabel && appBootState === 'ready') {
+  $: if (desktopEnabled && windowLabel && appBootState === 'ready' && !workspaceInteractionDisabled) {
     const snapshot = getCurrentWindowOpenTargetsSnapshot(tabs);
     const filePaths = snapshot.filePaths;
     const signature = JSON.stringify([currentFolderPath || null, filePaths]);
@@ -695,6 +748,7 @@
 
   function persistWorkspaceState() {
     pruneSessionReadingPositions();
+    if (workspaceInteractionDisabled && !workspaceTransferFlushing) return;
     if (!desktopEnabled || !windowLabel) return;
     // 延迟会话尚未加入 tabs 时不得写回残缺工作区；完成后会统一触发一次持久化。
     if (workspaceRestorePreparation || deferredWorkspaceRestore) {
@@ -735,6 +789,8 @@
 
   async function persistWorkspaceStateImmediately(options?: { ensureDraftIds?: boolean }) {
     if (!desktopEnabled || !windowLabel) return;
+    if (workspaceInteractionDisabled && !workspaceTransferFlushing) return;
+    const writeStamp = await takeWorkspaceWriteStamp();
     await workspaceRestorePreparation;
     await deferredWorkspaceRestore;
     syncActiveTabMarkdownFromEditor();
@@ -744,11 +800,14 @@
     const state = await createPersistedWorkspaceState({
       tabs,
       activeTabId,
+      items: workspaceItems,
+      activeItemId,
       currentFolderPath,
       desktopEnabled,
       preservedDraftIds: getPendingStartupConflictDraftIds(),
       draftWritePolicy: 'skip',
     });
+    Object.assign(state, writeStamp, { writerWindowLabel: windowLabel });
     const workspaceEntries: Record<string, unknown> = {
       [`workspaceTabs:${windowLabel}`]: state,
     };
@@ -764,19 +823,25 @@
     folderActiveTabId: string,
   ) {
     if (!desktopEnabled || !folderPath || !windowLabel) return;
+    const writeStamp = await takeWorkspaceWriteStamp();
+    const folderItems = normalizeWorkspaceItems(folderTabs, workspaceItems);
     const state = await createPersistedWorkspaceState({
       tabs: folderTabs,
       activeTabId: folderActiveTabId,
+      items: folderItems,
+      activeItemId: findWorkspaceItemForTab(folderItems, folderActiveTabId)?.id,
       currentFolderPath: folderPath,
       desktopEnabled,
       preservedDraftIds: getPendingStartupConflictDraftIds(),
       draftWritePolicy: 'missing-only',
     });
+    Object.assign(state, writeStamp, { writerWindowLabel: windowLabel });
     await updateWorkspaceStateSettings({ [`workspaceTabs:folder:${folderPath}`]: state });
   }
 
   function schedulePersistWorkspaceDrafts() {
     if (!desktopEnabled || !windowLabel) return;
+    if (workspaceInteractionDisabled) return;
     if (_workspaceDraftTimer !== null) {
       window.clearTimeout(_workspaceDraftTimer);
     }
@@ -864,11 +929,12 @@
   }
 
   async function restorePersistedWorkspaceState(state: PersistedWorkspaceState) {
+    restoringWorkspaceItems = state.items ?? null;
     if (typeof state.currentFolderPath === 'string' && state.currentFolderPath.length > 0) {
       currentFolderPath = state.currentFolderPath;
       startupFolderPath = state.currentFolderPath;
     }
-    if (state.tabs.length === 0) return;
+    if (state.tabs.length === 0) { restoringWorkspaceItems = null; return; }
 
     const generation = ++workspaceRestoreGeneration;
     let resolveRestore: () => void = () => undefined;
@@ -881,6 +947,8 @@
     const { immediateTabs, deferredTabs } = partitionPersistedWorkspaceTabsForRestore(
       state.tabs,
       state.activeTabId,
+      state.items,
+      state.activeItemId,
     );
     const restoredTabs: Tab[] = [];
     try {
@@ -907,6 +975,7 @@
       const order = new Map(state.tabs.map((tab, index) => [tab.id, index]));
       restoredTabs.sort((left, right) => order.get(left.id)! - order.get(right.id)!);
       tabs = restoredTabs;
+      workspaceItems = normalizeWorkspaceItems(tabs, state.items);
       activeTabId = tabs.some((tab) => tab.id === state.activeTabId)
         ? state.activeTabId
         : tabs[0].id;
@@ -941,6 +1010,11 @@
     resolveRestore();
     if (deferredWorkspaceRestore !== restoreBarrier) return;
     deferredWorkspaceRestore = null;
+    if (restoringWorkspaceItems) {
+      workspaceItems = normalizeWorkspaceItems(tabs, restoringWorkspaceItems);
+      restoringWorkspaceItems = null;
+      reconcileWorkspaceItems(tabs, activeTabId);
+    }
     if (generation === workspaceRestoreGeneration || persistAfterWorkspaceRestore) {
       persistAfterWorkspaceRestore = false;
       // 即使没有 deferred tab，也要以完整恢复结果纠正恢复期间被请求的持久化。
@@ -1226,6 +1300,7 @@
       return markdown;
     }
     flushActiveEditorView();
+    editor.commitPendingEdits();
     const currentMarkdown = editor.flushMarkdown();
     if (currentMarkdown !== markdown) {
       markdown = currentMarkdown;
@@ -1243,6 +1318,7 @@
 
   async function enterCurrentWindowMarkdownMini() {
     if (markdownMiniActive || markdownMiniTransitioning || !desktopEnabled || !windowLabel) return;
+    if (findWorkspaceItemForTab(workspaceItems, activeTabId)?.kind === 'comparison') return;
 
     const activeTab = tabs.find((tab) => tab.id === activeTabId);
     if (!isMarkdownTab(activeTab)) return;
@@ -1329,6 +1405,7 @@
   // 保存当前活跃 Tab 的状态
   function saveActiveTabState() {
     if (!activeTabId) return;
+    rememberFocusedRuntime();
 
     const activeTab = tabs.find((tab) => tab.id === activeTabId);
     if (isSegmentedTextTab(activeTab)) {
@@ -1502,6 +1579,7 @@
 
   // 加载指定 Tab 的状态并更新编辑器
   function loadTabState(tab: Tab) {
+    reconcileWorkspaceItems(tabs, tab.id);
     clearSplitSemanticRefreshTimer();
     splitSemanticRefreshGeneration += 1;
     clearReadingPositionSaveTimer();
@@ -1538,7 +1616,18 @@
       version = tab.version;
       largeDocumentMode = tab.largeDocumentMode;
       readonlyDocumentMode = tab.readonlyDocumentMode;
-      const nextViewMode: EditorViewMode = largeDocumentMode ? 'source' : preferredEditorMode;
+      const owner = findWorkspaceItemForTab(workspaceItems, tab.id);
+      const comparisonHasLargeDocument = owner?.kind === 'comparison' && getWorkspaceItemTabIds(owner).some((id) => (tabs.find((candidate) => candidate.id === id) as MarkdownTabState | undefined)?.largeDocumentMode);
+      const runtime = getDocumentRuntime(tab);
+      editor = runtime.editor;
+      editorHost = runtime.host!;
+      sourceEditor = runtime.sourceEditor!;
+      semanticPane = runtime.semanticPane!;
+      sourcePane = runtime.sourcePane!;
+      const nextViewMode: EditorViewMode = owner?.kind === 'comparison'
+        ? comparisonHasLargeDocument ? 'source' : owner.mode
+        : largeDocumentMode ? 'source' : preferredEditorMode;
+      runtime.mode = nextViewMode;
       const nextReadingMode: ReadingPositionMode =
         nextViewMode === 'split' ? splitActivePane : nextViewMode;
       const storedPosition = getReadingPositionForTab(tab, nextReadingMode);
@@ -1550,27 +1639,25 @@
           mode: getCoreModeForView(nextViewMode),
         });
         mode = nextViewMode;
-        editor.setMarkdown(markdown, {
-          reason: 'switch-tab',
-          dirty: tab.dirty,
-          savedMarkdown,
-        });
+        if (editor.flushMarkdown() !== markdown) {
+          runtime.sourceState = undefined;
+          editor.setMarkdown(markdown, { reason: 'open-file', dirty: tab.dirty, savedMarkdown });
+        }
       }
 
       // 步骤：先归零，避免新标签继承旧标签超出范围的 scrollTop；布局稳定后再恢复自身锚点。
       // editor.setMarkdown() 更新了 DOM 内容，但 scrollTop 仍保留旧标签页的值。
       // 若 scrollTop 远超新内容的 scrollHeight，macOS WebKit 会渲染空白页，
       // Windows Chromium 则显示在底部。
-      setProgrammaticReadingScrollTop('semantic', semanticPane, 0);
-      setProgrammaticReadingScrollTop('source', sourcePane, 0);
+      setProgrammaticReadingScrollTop('semantic', semanticPane, runtime.semanticScrollTop);
+      setProgrammaticReadingScrollTop('source', sourcePane, runtime.sourceScrollTop);
 
-      const analysis = analyzeMarkdown(markdown);
+      const analysis = { outline: extractOutline(markdown) };
       outline = analysis.outline;
       activeOutlineId = outline[0]?.id ?? '';
       applyOutlineDefaultExpansion();
-      stats = analysis.stats;
       syncSourceTextareaHeight();
-      scheduleReadingPositionRestore(tab, nextReadingMode, storedPosition, restoreGeneration);
+      if (owner?.kind !== 'comparison' && !mountedDocumentRuntimes.has(runtime)) scheduleReadingPositionRestore(tab, nextReadingMode, storedPosition, restoreGeneration);
     } finally {
       isSwitchingTab = false;
     }
@@ -1581,6 +1668,7 @@
 
   async function switchTab(tabId: string) {
     invalidatePendingPreviewOpen();
+    if (workspaceInteractionDisabled) return;
     if (!tabId || activeTabId === tabId) return;
     if (tabSwitchInProgress) return;
     if (markdownMiniActive) {
@@ -1591,6 +1679,7 @@
     closeExternalChangeDialog();
     tabSwitchInProgress = true;
     try {
+      await awaitPendingEditorOperations();
       const currentTab = tabs.find((tab) => tab.id === activeTabId);
       // 切换前必须把当前 CodeMirror 增量和恢复日志都落到 Rust，不能让隐藏组件持有未提交正文。
       await flushSegmentedDocumentBeforeTransition(
@@ -1599,11 +1688,16 @@
         segmentedDocumentPort,
       );
       saveActiveTabState();
+      flushVisibleDocumentRuntimes();
       if (isMarkdownTab(currentTab)) {
         void flushReadingPositions();
       }
       const targetTab = tabs.find((tab) => tab.id === tabId);
       if (targetTab) {
+        const nextOwner = findWorkspaceItemForTab(workspaceItems, tabId);
+        if (nextOwner?.id !== activeItemId) {
+          suspendVisibleDocumentRuntimes();
+        }
         activeTabId = tabId;
         persistWorkspaceState();
         loadTabState(targetTab);
@@ -1839,6 +1933,8 @@
 
   // 步骤：关闭全部标签页前统一确认未保存内容，确认后不自动创建空白标签。
   async function closeAllTabsWithConfirmation(options?: { skipPersist?: boolean }) {
+    if (workspaceInteractionDisabled) return false;
+    flushVisibleDocumentRuntimes();
     invalidatePendingPreviewOpen();
     const dirtyTabs = getDirtyTabs(tabs);
     let discardChanges = false;
@@ -1899,6 +1995,8 @@
     isSwitchingTab = true;
     try {
       tabs = [];
+      workspaceItems = [];
+      activeItemId = '';
       activeTabId = '';
       previewTabId = null;
       markdown = '';
@@ -1982,6 +2080,10 @@
   }
 
   function enqueueOpenTargetOperation<T>(operation: () => Promise<T>) {
+    if (workspaceInteractionDisabled) {
+      deferredWorkspaceOperations.push(() => enqueueOpenTargetOperation(operation));
+      return Promise.resolve(undefined as T);
+    }
     const result = openTargetOperationQueue.then(operation);
     openTargetOperationQueue = result.then(
       () => undefined,
@@ -1991,6 +2093,10 @@
   }
 
   function openTargetWithBehavior(target: OpenTarget) {
+    if (workspaceInteractionDisabled) {
+      queueDeferredOpenTarget(target);
+      return Promise.resolve();
+    }
     return enqueueOpenTargetOperation(() =>
       routeOpenTarget(target, {
         syncTargets: syncCurrentWindowOpenTargetsNow,
@@ -2119,13 +2225,16 @@
   }
 
   async function closeCurrentFile() {
+    if (workspaceInteractionDisabled) return;
     if (!(await requestMarkdownMiniReturn({ showExternalChange: false }))) return;
     const activeTab = tabs.find((t) => t.id === activeTabId);
     if (!activeTab) return;
-    await closeTab(activeTab.id);
+    await closeWorkspaceItem(findWorkspaceItemForTab(workspaceItems, activeTab.id)?.id ?? activeTab.id);
   }
 
   async function closeCurrentWindow() {
+    if (workspaceInteractionDisabled) return;
+    flushVisibleDocumentRuntimes();
     if (exitRequestId !== null) return;
     if (!(await requestMarkdownMiniReturn({ showExternalChange: false }))) return;
     const closeBehavior = await resolveCloseWindowBehaviorForCloseRequest();
@@ -2148,7 +2257,9 @@
         if (result === false) return;
         // 用户选择保存：保存当前活动文件后继续关闭
         if (result === 'save') {
-          if (!(await saveMarkdownFile(false))) return;
+          for (const tab of dirtyTabs) {
+            if (isMarkdownTab(tab) ? !(await saveDocumentById(tab.id, false)) : !(await saveSegmentedDocumentById(tab.id))) return;
+          }
         } else {
           discardDirtySegmented = true;
         }
@@ -2454,13 +2565,18 @@
   }
 
   async function requestExitApp() {
-    if (!desktopEnabled) return;
+    if (!desktopEnabled || workspaceInteractionDisabled) return;
     const { invoke } = await import('@tauri-apps/api/core');
     await invoke('request_exit_app').catch(error => showVisibleError(error, t.exitSaveFailed()));
   }
 
   async function prepareWorkspaceExit(requestId: number) {
     if (exitRequestId !== null) return;
+    if (workspaceInteractionDisabled) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('acknowledge_workspace_exit', { requestId, approved: false });
+      return;
+    }
     exitRequestId = requestId;
     const { invoke } = await import('@tauri-apps/api/core');
     try {
@@ -2623,10 +2739,10 @@
     updateAppSetting('editorMode', nextMode).catch(() => undefined);
   }
 
-  function notifyModePaneReady(nextMode: EditorViewMode, generation: number) {
+  function notifyModePaneReady(nextMode: EditorViewMode, generation: number, runtime?: MarkdownDocumentRuntime) {
     const editorGrid =
-      sourcePane?.closest<HTMLElement>('.editor-grid') ??
-      semanticPane?.closest<HTMLElement>('.editor-grid');
+      (runtime ? runtime.sourcePane : sourcePane)?.closest<HTMLElement>('.editor-grid') ??
+      (runtime ? runtime.semanticPane : semanticPane)?.closest<HTMLElement>('.editor-grid');
     editorGrid?.dispatchEvent(
       new CustomEvent('nomo:mode-pane-ready', {
         detail: { mode: nextMode, generation },
@@ -2635,6 +2751,42 @@
   }
 
   async function changeEditorMode(nextMode: EditorViewMode, persistPreference: boolean) {
+    if (workspaceInteractionDisabled) return false;
+    await awaitPendingEditorOperations();
+    const comparison = findWorkspaceItemForTab(workspaceItems, activeTabId);
+    if (comparison?.kind === 'comparison') {
+      if (nextMode === 'split' || workspaceInteractionDisabled) return false;
+      const members = getWorkspaceItemTabIds(comparison).map((id) => tabs.find((tab) => tab.id === id)).filter(isMarkdownTab);
+      if (nextMode === 'semantic' && members.some((tab) => tab.largeDocumentMode)) { statusMessage = t.largeDocumentStayReadonlySource(); return false; }
+      flushVisibleDocumentRuntimes();
+      comparison.mode = nextMode;
+      mode = nextMode;
+      workspaceItems = [...workspaceItems];
+      await Promise.all(members.map(async (tab) => {
+        const runtime = getDocumentRuntime(tab);
+        const stillCurrent = () => !runtime.disposed && runtime.host?.isConnected &&
+          runtime.mode === nextMode && workspaceItems.some((item) =>
+            item.id === comparison.id && item.kind === 'comparison' && item.mode === nextMode);
+        try {
+          // 先按旧模式捕获阅读位置，再更新成员状态；左右各自完成显示就绪握手。
+          const pending = runtime.interaction.setMode(nextMode, undefined, true, nextMode);
+          runtime.mode = nextMode;
+          const result = await pending;
+          if (result.status === 'ready' && stillCurrent()) {
+            notifyModePaneReady(nextMode, result.generation, runtime);
+          }
+        } catch (error) {
+          await tick();
+          if (stillCurrent()) notifyModePaneReady(nextMode, -1, runtime);
+          throw error;
+        }
+      }));
+      if (mode !== nextMode || !workspaceItems.some((item) =>
+        item.id === comparison.id && item.kind === 'comparison' && item.mode === nextMode)) return false;
+      if (persistPreference) persistEditorModePreference(nextMode);
+      persistWorkspaceState();
+      return true;
+    }
     if (isSegmentedTextTab(tabs.find((tab) => tab.id === activeTabId))) {
       return false;
     }
@@ -2665,7 +2817,7 @@
         editor.refreshSemanticView();
       }
       const targetCoreMode = nextMode === 'split' ? splitActivePane : getCoreModeForView(nextMode);
-      const modeSwitchResult = await editorInteraction.setMode(
+      const modeSwitchResult = await (documentRuntimes.get(activeTabId)?.interaction ?? editorInteraction).setMode(
         targetCoreMode,
         anchor,
         true,
@@ -2776,14 +2928,14 @@
     getDefaultCodeBlockLanguage: () => defaultCodeBlockLanguage,
     getDefaultDiagramType: () => defaultDiagramType,
     switchToNextTab: () => {
-      const idx = tabs.findIndex((t) => t.id === activeTabId);
-      const nextIdx = idx >= 0 ? (idx + 1) % tabs.length : 0;
-      if (tabs[nextIdx]) switchTab(tabs[nextIdx].id);
+      const idx = workspaceItems.findIndex((item) => item.id === activeItemId);
+      const nextIdx = idx >= 0 ? (idx + 1) % workspaceItems.length : 0;
+      if (workspaceItems[nextIdx]) void switchTab(getWorkspaceItemFocusedTabId(workspaceItems[nextIdx]));
     },
     switchToPrevTab: () => {
-      const idx = tabs.findIndex((t) => t.id === activeTabId);
-      const prevIdx = idx >= 0 ? (idx - 1 + tabs.length) % tabs.length : tabs.length - 1;
-      if (tabs[prevIdx]) switchTab(tabs[prevIdx].id);
+      const idx = workspaceItems.findIndex((item) => item.id === activeItemId);
+      const prevIdx = idx >= 0 ? (idx - 1 + workspaceItems.length) % workspaceItems.length : workspaceItems.length - 1;
+      if (workspaceItems[prevIdx]) void switchTab(getWorkspaceItemFocusedTabId(workspaceItems[prevIdx]));
     },
     exportHtml: () => handleExport('html'),
     exportPdf: () => handleExport('pdf'),
@@ -3168,14 +3320,21 @@
   }
 
   async function cutSelection() {
-    const payload = editor.getClipboardPayload();
+    const sourceTabId = activeTabId;
+    const core = editor;
+    const runtime = documentRuntimes.get(sourceTabId);
+    const payload = core.getClipboardPayload();
+    const revision = core.getSnapshot().version;
     if (!payload || readonlyDocumentMode) return;
-    try {
-      await writeEditorClipboard(payload, desktopEnabled);
-      editor.deleteSelection();
-    } catch {
-      statusMessage = t.cutFailed();
-    }
+    return trackEditorOperation(async () => {
+      try {
+        await writeEditorClipboard(payload, desktopEnabled);
+        if (!runtime || runtime.disposed || documentRuntimes.get(sourceTabId) !== runtime || core.getSnapshot().version !== revision) return;
+        if (!core.deleteSelection()) statusMessage = t.cutFailed();
+      } catch {
+        statusMessage = t.cutFailed();
+      }
+    });
   }
 
   async function copyPlainText(text: string) {
@@ -3205,36 +3364,54 @@
 
   async function pasteFromContextMenu(mode: EditorPasteMode = 'auto') {
     if (readonlyDocumentMode) return;
-    try {
-      const content = await readEditorClipboard(desktopEnabled, mode === 'plain' ? 'text' : 'rich');
-      if (content.kind === 'image') {
-        await imageInsertion.insertImageFiles(content.files);
-      } else {
-        const input =
-          content.kind === 'html'
-            ? { html: content.html, text: content.text }
-            : { text: content.text };
-        const result = editor.pasteClipboard(input, { mode });
-        if (result.status === 'rejected' && result.reason === 'no-text') {
-          statusMessage = t.clipboardHasNoText();
+    const sourceTabId = activeTabId;
+    const core = editor;
+    const runtime = documentRuntimes.get(sourceTabId);
+    const revision = core.getSnapshot().version;
+    return trackEditorOperation(async () => {
+      try {
+        const content = await readEditorClipboard(desktopEnabled, mode === 'plain' ? 'text' : 'rich');
+        if (!runtime || runtime.disposed || documentRuntimes.get(sourceTabId) !== runtime || core.getSnapshot().version !== revision) return;
+        if (content.kind === 'image') {
+          await runtime.images.insertImageFiles(content.files);
+        } else {
+          const input =
+            content.kind === 'html'
+              ? { html: content.html, text: content.text }
+              : { text: content.text };
+          const result = core.pasteClipboard(input, { mode });
+          if (result.status === 'rejected' && result.reason === 'no-text') {
+            statusMessage = t.clipboardHasNoText();
+          }
         }
+        if (activeTabId === sourceTabId && !runtime.disposed) core.focus();
+      } catch {
+        statusMessage = t.pasteFailed();
       }
-      editor.focus();
-    } catch {
-      statusMessage = t.pasteFailed();
-    }
+    });
   }
 
   function chooseImageForContextMenu() {
+    const runtime = documentRuntimes.get(activeTabId);
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'image/*';
     input.multiple = true;
     input.addEventListener('change', () => {
       const files = Array.from(input.files ?? []);
-      if (files.length) void imageInsertion.insertImageFiles(files);
+      if (files.length && runtime && !runtime.disposed && documentRuntimes.get(runtime.tabId) === runtime) void runtime.images.insertImageFiles(files);
     });
     input.click();
+  }
+
+  function trackEditorOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = operation();
+    pendingEditorOperations.add(pending);
+    void pending.then(() => pendingEditorOperations.delete(pending), () => pendingEditorOperations.delete(pending));
+    return pending;
+  }
+  async function awaitPendingEditorOperations() {
+    while (pendingEditorOperations.size) await Promise.allSettled([...pendingEditorOperations]);
   }
 
   function handleWorkspaceContextMenu(event: MouseEvent) {
@@ -3300,29 +3477,631 @@
     contextMenuItems = [];
   }
 
-  const editor = createEditorCore({
+  let editor = createEditorCore({
     markdown,
     mode: getCoreModeForView(mode),
     inlineCodeRenderingEnabled,
     copyMarkdownSyntaxEnabled,
     theme: initialResolvedTheme.editorTheme,
-    onChange: syncFromEditor,
-    onSelectionChange: handleSemanticSelectionChange,
+    onSelectionSnapshotChange: handleSemanticSelectionChange,
     onLinkShortcut: () => openLinkPicker(),
     onOpenLink: (href) => openLinkFromEditor(href),
     getImageContext: () => getImageContext(),
     onImagesDeleted: (event) => handleDeletedImageResources(event),
     onContextMenuOpen: handleContextMenuOpen,
   });
+  const bootEditor = editor;
+  let restoringWorkspaceItems: WorkspaceItem[] | null = null;
 
-  function handleSemanticSelectionChange(event: EditorSelectionEvent) {
-    if (getActiveEditorMode() !== 'semantic') return;
-    selectedStats = event.selection ? calculateDocumentStats(event.selectedMarkdown) : null;
+  function reconcileWorkspaceItems(currentTabs: Tab[], focusedTabId: string) {
+    const next = normalizeWorkspaceItems(currentTabs, restoringWorkspaceItems ?? workspaceItems);
+    const owner = findWorkspaceItemForTab(next, focusedTabId);
+    if (owner?.kind === 'comparison' && owner.focusedTabId !== focusedTabId) owner.focusedTabId = focusedTabId;
+    if (JSON.stringify(next) !== JSON.stringify(workspaceItems)) workspaceItems = next;
+    const nextActiveId = owner?.id ?? next[0]?.id ?? '';
+    if (activeItemId !== nextActiveId) activeItemId = nextActiveId;
+    for (const [id, runtime] of documentRuntimes) {
+      if (!currentTabs.some((tab) => tab.id === id)) {
+        if (editor === runtime.editor) {
+          detachMountedEditorHostEvents();
+          editor = bootEditor;
+          editorHost = undefined!;
+          sourceEditor = undefined!;
+          sourcePane = undefined!;
+          semanticPane = undefined!;
+        }
+        runtime.disposed = true;
+        runtime.unsubscribe();
+        runtime.editor.destroy();
+        documentRuntimes.delete(id);
+      }
+    }
   }
 
-  function handleSourceSelectionChange(selectedMarkdown: string) {
-    if (getActiveEditorMode() !== 'source') return;
-    selectedStats = selectedMarkdown ? calculateDocumentStats(selectedMarkdown) : null;
+  function getDocumentRuntime(tab: MarkdownTabState): MarkdownDocumentRuntime {
+    const existing = documentRuntimes.get(tab.id);
+    if (existing) return existing;
+    const currentDocument = () => tabs.find((candidate) => candidate.id === tab.id) as MarkdownTabState | undefined;
+    const owner = findWorkspaceItemForTab(workspaceItems, tab.id);
+    const initialMode = tab.largeDocumentMode ? 'source' : owner?.kind === 'comparison' ? owner.mode : preferredEditorMode;
+    const core = createEditorCore({
+      markdown: tab.markdown, mode: getCoreModeForView(initialMode),
+      inlineCodeRenderingEnabled, copyMarkdownSyntaxEnabled, theme: currentEditorTheme,
+      onSelectionSnapshotChange: (event) => { if (activeTabId === tab.id) handleSemanticSelectionChange(event); },
+      onLinkShortcut: () => { void switchTab(tab.id).then(openLinkPicker); },
+      onOpenLink: (href) => openLinkFromEditor(href, tab.id),
+      getImageContext: () => getImageContext(tab.id),
+      onImagesDeleted: (event) => handleDeletedImageResources(event, tab.id),
+      onContextMenuOpen: (event) => { focusComparisonDocument(tab.id); handleContextMenuOpen(event); },
+    });
+    core.setMarkdown(tab.markdown, { dirty: tab.dirty, savedMarkdown: tab.savedMarkdown, reason: 'open-file' });
+    const runtime = {
+      tabId: tab.id, editor: core, mode: initialMode,
+      outline: extractOutline(tab.markdown), semanticScrollTop: 0, sourceScrollTop: 0,
+      pendingSourceScrollTop: null, disposed: false, unsubscribe: () => undefined,
+    } as MarkdownDocumentRuntime;
+    documentRuntimes.set(tab.id, runtime);
+    const readingPosition = getReadingPositionForTab(tab, initialMode === 'source' ? 'source' : 'semantic');
+    runtime.readingAnchor = readingPosition?.anchor;
+    runtime.readingAnchorMode = readingPosition?.anchorMode;
+    runtime.interaction = createEditorInteractionController({
+      getEditor: () => core, getLargeDocumentMode: () => currentDocument()?.largeDocumentMode ?? tab.largeDocumentMode,
+      getMode: () => runtime.mode === 'source' ? 'source' : runtime.mode === 'split' ? splitActivePane : 'semantic',
+      getSplitView: () => runtime.mode === 'split', getOutline: () => runtime.outline,
+      getSemanticPane: () => runtime.semanticPane, getSourcePane: () => runtime.sourcePane,
+      getSourceEditor: () => runtime.sourceEditor, getPendingSourceScrollTop: () => runtime.pendingSourceScrollTop,
+      setPendingSourceScrollTop: (value) => { runtime.pendingSourceScrollTop = value; },
+      setSuppressOutlineScrollUntil: (value) => { if (activeTabId === tab.id) suppressOutlineScrollUntil = value; },
+      setStatusMessage: (value) => { statusMessage = value; },
+      getSourceLineHeight: () => runtime.sourceEditor?.getLineHeight() ?? 24,
+    });
+    runtime.images = createImageInsertionHandlers({
+      getEditor: () => core, getMode: () => runtime.mode === 'source' ? 'source' : 'semantic',
+      getFileName: () => currentDocument()?.fileName ?? tab.fileName, getNativePath: () => currentDocument()?.nativePath ?? null,
+      getSourceEditor: () => runtime.sourceEditor, getImageContext: () => getImageContext(tab.id),
+      isDocumentOpen: () => !runtime.disposed && Boolean(currentDocument()),
+      isDocumentFocused: () => activeTabId === tab.id,
+      getSourceRuntimeState: () => runtime.sourceState,
+      setSourceRuntimeState: (value) => { runtime.sourceState = value; },
+      saveMarkdownFile: (saveAs) => saveDocumentById(tab.id, saveAs),
+      setMarkdown: (value) => core.setMarkdown(value), setStatusMessage: (value) => { statusMessage = value; },
+      syncSourceTextareaHeight: () => runtime.interaction.syncSourceTextareaHeight(),
+    });
+    runtime.unsubscribe = core.subscribe((event) => {
+      const target = currentDocument();
+      if (runtime.disposed || !target) return;
+      if (activeTabId === tab.id) {
+        syncFromEditor(event);
+      } else {
+        const changed = target.markdown !== event.markdown;
+        target.dirty = event.dirty;
+        target.version = event.version;
+        if (event.reason !== 'content-pending') target.markdown = event.markdown;
+        if (!event.dirty && event.reason !== 'content-pending') target.savedMarkdown = event.markdown;
+        if (changed) runtime.outline = extractOutline(event.markdown);
+        tabs = [...tabs];
+        if (event.reason !== 'content-pending' && changed) {
+          schedulePersistWorkspaceDrafts();
+          if (!workspaceInteractionDisabled && autoSaveEnabled && desktopEnabled && event.dirty && target.nativePath) documentActions.debouncedAutoSave(tab.id);
+        }
+        persistWorkspaceState();
+      }
+      runtime.outline = activeTabId === tab.id ? outline : runtime.outline;
+    });
+    return runtime;
+  }
+
+  function rememberFocusedRuntime() {
+    const runtime = documentRuntimes.get(activeTabId);
+    if (!runtime || runtime.disposed) return;
+    runtime.mode = mode;
+    runtime.sourceEditor = sourceEditor;
+    runtime.sourcePane = sourcePane;
+    runtime.semanticPane = semanticPane;
+    runtime.host = editorHost;
+    runtime.sourceState = sourceEditor?.getRuntimeState?.() ?? runtime.sourceState;
+    if (mode !== 'source') runtime.semanticScrollTop = semanticPane?.scrollTop ?? runtime.semanticScrollTop;
+    if (mode !== 'semantic') runtime.sourceScrollTop = sourcePane?.scrollTop ?? runtime.sourceScrollTop;
+    runtime.outline = outline;
+  }
+
+  function flushDocumentRuntime(tabId: string) {
+    const tab = tabs.find((candidate) => candidate.id === tabId);
+    const runtime = documentRuntimes.get(tabId);
+    if (!isMarkdownTab(tab) || !runtime || runtime.disposed) return;
+    runtime.editor.commitPendingEdits();
+    const current = runtime.editor.flushMarkdown();
+    tab.markdown = current;
+    tab.version = runtime.editor.getSnapshot().version;
+    if (tabId === activeTabId) markdown = current;
+    runtime.sourceState = runtime.sourceEditor?.getRuntimeState?.() ?? runtime.sourceState;
+    if (runtime.mode !== 'source') runtime.semanticScrollTop = runtime.semanticPane?.scrollTop ?? runtime.semanticScrollTop;
+    if (runtime.mode !== 'semantic') runtime.sourceScrollTop = runtime.sourcePane?.scrollTop ?? runtime.sourceScrollTop;
+  }
+
+  function flushVisibleDocumentRuntimes() {
+    rememberFocusedRuntime();
+    for (const id of activeComparison ? getWorkspaceItemTabIds(activeComparison) : [activeTabId]) flushDocumentRuntime(id);
+  }
+
+  function suspendVisibleDocumentRuntimes() {
+    flushVisibleDocumentRuntimes();
+    const owner = findWorkspaceItemForTab(workspaceItems, activeTabId);
+    for (const id of owner ? getWorkspaceItemTabIds(owner) : [activeTabId]) {
+      const runtime = documentRuntimes.get(id);
+      if (!runtime || runtime.disposed) continue;
+      const position = captureDocumentPosition(id);
+      runtime.readingAnchor = position.readingAnchor ?? runtime.readingAnchor;
+      runtime.readingAnchorMode = runtime.mode === 'source' ? 'source' : 'semantic';
+      const tab = tabs.find((candidate) => candidate.id === id);
+      if (isMarkdownTab(tab)) saveReadingPositionForTab(tab, runtime.readingAnchorMode, runtime.readingAnchor ?? null, false);
+      runtime.editor.unmount();
+      runtime.host = undefined;
+      runtime.sourceEditor = undefined;
+      runtime.sourcePane = undefined;
+      runtime.semanticPane = undefined;
+    }
+    detachMountedEditorHostEvents();
+    editorHost = undefined!;
+    sourceEditor = undefined!;
+    sourcePane = undefined!;
+    semanticPane = undefined!;
+  }
+
+  function handleDocumentPaneReady(runtime: MarkdownDocumentRuntime) {
+    mountedDocumentRuntimes.add(runtime);
+    if (runtime.tabId !== activeTabId) return;
+    editorHost = runtime.host!;
+    sourceEditor = runtime.sourceEditor!;
+    sourcePane = runtime.sourcePane!;
+    semanticPane = runtime.semanticPane!;
+  }
+
+  function rememberSourceRuntimeState(state: MarkdownSourceRuntimeState) {
+    const runtime = documentRuntimes.get(state.documentId);
+    // 已挂起文档的快照在切换前保存，旧组件迟到的销毁通知不能覆盖它。
+    if (!runtime || runtime.disposed || !runtime.sourceEditor) return;
+    runtime.sourceState = runtime.mode === 'semantic' ? { ...state, scrollTop: runtime.sourceScrollTop } : state;
+  }
+  function handleSingleRuntimeReady(binding: MarkdownWorkspaceRuntimeBinding) {
+    const runtime = documentRuntimes.get(binding.documentId);
+    if (!runtime || runtime.disposed || runtime.editor !== binding.editorCore) return;
+    const restoreScroll = mountedDocumentRuntimes.has(runtime) || Boolean(runtime.transferSelection || runtime.readingAnchor);
+    mountedDocumentRuntimes.add(runtime);
+    Object.assign(runtime, { host: binding.host, sourceEditor: binding.sourceEditor, sourcePane: binding.sourcePane, semanticPane: binding.semanticPane, mode: binding.mode });
+    if (activeTabId === binding.documentId) {
+      handleDocumentPaneReady(runtime);
+      mountEditorHostIfReady();
+    }
+    const selection = runtime.transferSelection;
+    if (selection?.semantic) runtime.editor.restoreSelectionSnapshot(selection.semantic);
+    if (selection?.source) binding.sourceEditor.setSelection(selection.source.anchor, selection.source.head);
+    runtime.transferSelection = undefined;
+    requestAnimationFrame(() => {
+      if (runtime.disposed || runtime.host !== binding.host || !binding.host.isConnected || activeTabId !== binding.documentId) return;
+      if (!restoreScroll) return;
+      const anchor = runtime.readingAnchor;
+      if (runtime.mode !== 'source') {
+        binding.semanticPane.scrollTop = runtime.semanticScrollTop;
+        if (anchor) restoreSemanticReadingPosition(runtime.outline, binding.semanticPane, anchor, { anchorMode: runtime.readingAnchorMode, behavior: 'instant' });
+      }
+      if (runtime.mode !== 'semantic') {
+        binding.sourcePane.scrollTop = runtime.sourceScrollTop;
+        if (anchor) restoreSourceReadingPosition(runtime.outline, binding.sourcePane, binding.sourceEditor, anchor, { anchorMode: runtime.readingAnchorMode, behavior: 'instant' });
+      }
+      runtime.readingAnchor = undefined;
+    });
+  }
+  function handleSingleRuntimeDestroy(binding: MarkdownWorkspaceRuntimeBinding) {
+    const runtime = documentRuntimes.get(binding.documentId);
+    if (!runtime || runtime.disposed || runtime.editor !== binding.editorCore || runtime.host !== binding.host || runtime.sourceEditor !== binding.sourceEditor) return;
+    runtime.sourceState = binding.sourceRuntimeState ?? runtime.sourceState;
+    if (binding.mode !== 'source') runtime.semanticScrollTop = binding.semanticPane.scrollTop;
+    if (binding.mode !== 'semantic') runtime.sourceScrollTop = binding.sourcePane.scrollTop;
+    // 源码子组件已保存状态并销毁，先解除引用，刷新时不能再调用旧 handle。
+    if (runtime.host === binding.host) runtime.host = undefined;
+    if (runtime.sourceEditor === binding.sourceEditor) runtime.sourceEditor = undefined;
+    if (runtime.sourcePane === binding.sourcePane) runtime.sourcePane = undefined;
+    if (runtime.semanticPane === binding.semanticPane) runtime.semanticPane = undefined;
+    flushDocumentRuntime(binding.documentId);
+    runtime.editor.unmount();
+    if (mountedEditorHost === binding.host) detachMountedEditorHostEvents();
+  }
+  function jumpDocumentOutline(tabId: string, item: OutlineItem) {
+    const runtime = documentRuntimes.get(tabId);
+    runtime?.outlineInteraction?.jumpToOutlineItem(item);
+  }
+  function moveDocumentOutline(tabId: string, request: { sourceIndex: number; targetIndex: number; placement: 'before' | 'inside' | 'after' }) {
+    return documentRuntimes.get(tabId)?.outlineInteraction?.moveOutlineSection(request) ?? false;
+  }
+
+  function focusComparisonDocument(tabId: string) {
+    if (workspaceInteractionDisabled || tabId === activeTabId) return;
+    const owner = findWorkspaceItemForTab(workspaceItems, tabId);
+    if (owner?.kind !== 'comparison' || owner.id !== activeItemId) return;
+    saveActiveTabState();
+    closeToolbarTransientPanels();
+    if (searchPanelOpen) closeSearchPanel();
+    closeExternalChangeDialog();
+    activeTabId = tabId;
+    owner.focusedTabId = tabId;
+    workspaceItems = [...workspaceItems];
+    const tab = tabs.find((candidate) => candidate.id === tabId);
+    if (isMarkdownTab(tab)) {
+      loadTabState(tab);
+      handleDocumentPaneReady(getDocumentRuntime(tab));
+    }
+    persistWorkspaceState();
+  }
+
+  async function selectWorkspaceItem(itemId: string) {
+    if (performance.now() - lastTabDragFinishedAt < 250) return;
+    if (workspaceInteractionDisabled) return;
+    const item = workspaceItems.find((candidate) => candidate.id === itemId);
+    if (item) await switchTab(getWorkspaceItemFocusedTabId(item));
+  }
+
+  async function combineWorkspaceItems(sourceItemId: string, targetItemId: string) {
+    if (!workspaceItemFeaturesEnabled || workspaceInteractionDisabled || sourceItemId === targetItemId) return;
+    await awaitPendingEditorOperations();
+    await deferredWorkspaceRestore;
+    if (workspaceInteractionDisabled) return;
+    const source = workspaceItems.find((item) => item.id === sourceItemId);
+    const target = workspaceItems.find((item) => item.id === targetItemId);
+    if (source?.kind !== 'single' || target?.kind !== 'single') return;
+    const left = tabs.find((tab) => tab.id === target.tabId);
+    const right = tabs.find((tab) => tab.id === source.tabId);
+    if (!isMarkdownTab(left) || !isMarkdownTab(right)) return;
+    if (left.nativePath && right.nativePath && sameNativePath(left.nativePath, right.nativePath)) {
+      showVisibleError(new Error('组合必须包含不同的 Markdown 文件'), t.openFileFailed());
+      return;
+    }
+    suspendVisibleDocumentRuntimes();
+    const comparison = createComparisonWorkspaceItem(left.id, right.id, mode === 'source' || left.largeDocumentMode || right.largeDocumentMode ? 'source' : 'semantic');
+    workspaceItems = workspaceItems.filter((item) => item.id !== source.id).map((item) => item.id === target.id ? comparison : item);
+    previewTabId = null;
+    activeItemId = comparison.id;
+    activeTabId = right.id;
+    loadTabState(right);
+    persistWorkspaceState();
+  }
+
+  async function cancelComparison(itemId: string) {
+    if (workspaceInteractionDisabled) return;
+    await awaitPendingEditorOperations();
+    await deferredWorkspaceRestore;
+    if (workspaceInteractionDisabled) return;
+    if (itemId === activeItemId) suspendVisibleDocumentRuntimes();
+    else flushVisibleDocumentRuntimes();
+    workspaceItems = ungroupWorkspaceItem(workspaceItems, itemId);
+    reconcileWorkspaceItems(tabs, activeTabId);
+    const tab = tabs.find((candidate) => candidate.id === activeTabId);
+    if (isMarkdownTab(tab)) loadTabState(tab);
+    persistWorkspaceState();
+  }
+
+  async function swapComparison(itemId: string) {
+    if (workspaceInteractionDisabled) return;
+    await awaitPendingEditorOperations();
+    await deferredWorkspaceRestore;
+    if (workspaceInteractionDisabled) return;
+    flushVisibleDocumentRuntimes();
+    workspaceItems = swapComparisonMembers(workspaceItems, itemId);
+    persistWorkspaceState();
+  }
+
+  function resizeComparison(itemId: string, percent: number, persist: boolean) {
+    workspaceItems = workspaceItems.map((item) => item.id === itemId && item.kind === 'comparison'
+      ? { ...item, leftPercent: Math.min(80, Math.max(20, percent)) } : item);
+    if (persist) persistWorkspaceState();
+  }
+
+  function getWorkspaceItemActions(itemId: string): ContextMenuItem[] {
+    if (!workspaceItemFeaturesEnabled) return [];
+    const item = workspaceItems.find((candidate) => candidate.id === itemId);
+    if (!item || getWorkspaceItemTabIds(item).some((id) => !isMarkdownTab(tabs.find((tab) => tab.id === id)))) return [];
+    const actions: ContextMenuItem[] = [];
+    if (item.kind === 'comparison') {
+      actions.push({ label: t.swapComparisonSides(), action: () => swapComparison(item.id) }, { label: t.ungroupComparison(), action: () => cancelComparison(item.id) });
+    } else {
+      const candidates = workspaceItems.filter((candidate) => candidate.kind === 'single' && candidate.id !== item.id && isMarkdownTab(tabs.find((tab) => tab.id === candidate.tabId)));
+      actions.push({ label: t.combineWithTab(), disabled: !candidates.length, children: candidates.map((candidate) => ({ label: tabs.find((tab) => tab.id === (candidate as { tabId: string }).tabId)!.fileName, action: () => combineWorkspaceItems(item.id, candidate.id) })) });
+    }
+    if (desktopEnabled) actions.push({ label: t.moveTabToNewWindow(), action: () => { void moveWorkspaceItemToWindow(item.id, undefined, { kind: 'insert', insertionIndex: 0 }); } });
+    return actions;
+  }
+
+  function captureDocumentPosition(tabId: string) {
+    const runtime = documentRuntimes.get(tabId);
+    if (!runtime) return {};
+    flushDocumentRuntime(tabId);
+    const semantic = runtime.editor.getSnapshot().selection;
+    const source = runtime.sourceEditor?.getSelection() ?? runtime.sourceState?.state.selection.main;
+    const readingAnchor = runtime.mode === 'source'
+      ? runtime.sourcePane && runtime.sourceEditor ? getSourceScrollAnchor(runtime.outline, runtime.sourcePane.scrollTop, runtime.sourceEditor.getLineHeight(), runtime.sourceEditor, runtime.sourcePane) : null
+      : runtime.semanticPane ? getSemanticScrollAnchor(runtime.outline, runtime.semanticPane, runtime.semanticPane.scrollTop) : null;
+    return { semantic, source: source ? { anchor: source.anchor ?? ('from' in source ? source.from : 0), head: source.head ?? ('to' in source ? source.to : 0) } : undefined,
+      semanticScrollTop: runtime.semanticScrollTop, sourceScrollTop: runtime.sourceScrollTop, readingAnchor };
+  }
+
+  async function flushWorkspaceForTransfer() {
+    if (closingWorkspaceItemId) throw new Error(t.cancel());
+    workspaceInteractionDisabled = true;
+    workspaceTransferFlushing = true;
+    try {
+      await workspaceRestorePreparation;
+      await deferredWorkspaceRestore;
+      await openTargetOperationQueue;
+      while (pendingDocumentOpens.size) await Promise.allSettled([...pendingDocumentOpens]);
+      await awaitPendingEditorOperations();
+      flushVisibleDocumentRuntimes();
+      await Promise.all([...documentRuntimes.values()].map((runtime) => runtime.images.awaitPendingInsertions()));
+      await documentActions.awaitPendingSaves();
+      flushVisibleDocumentRuntimes();
+      await flushPersistWorkspaceState();
+      await workspacePersistenceQueue;
+      await _workspaceDraftWritePromise;
+      await syncCurrentWindowOpenTargetsNow();
+    } finally { workspaceTransferFlushing = false; }
+  }
+
+  const workspaceTransfer = createWorkspaceTransferController({
+    getWindowLabel: () => windowLabel,
+    getWorkspace: () => ({ tabs, items: workspaceItems, activeTabId, activeItemId, currentFolderPath }),
+    flushWorkspace: flushWorkspaceForTransfer,
+    capturePosition: captureDocumentPosition,
+    setBusy: (value) => { workspaceInteractionDisabled = value; if (!value) void drainDeferredWorkspaceOperations(); },
+    applyWorkspace: (next, positions) => {
+      cancelPendingReadingPositionRestore();
+      flushVisibleDocumentRuntimes();
+      const oldOwner = findWorkspaceItemForTab(workspaceItems, activeTabId);
+      const newOwner = findWorkspaceItemForTab(next.items, next.activeTabId);
+      if (oldOwner?.id !== newOwner?.id || oldOwner?.kind !== newOwner?.kind || JSON.stringify(oldOwner && getWorkspaceItemTabIds(oldOwner)) !== JSON.stringify(newOwner && getWorkspaceItemTabIds(newOwner))) suspendVisibleDocumentRuntimes();
+      isSwitchingTab = true;
+      try {
+        workspaceItems = next.items;
+        tabs = next.tabs;
+        activeTabId = next.activeTabId;
+        activeItemId = next.activeItemId;
+        currentFolderPath = next.currentFolderPath;
+        previewTabId = null;
+        reconcileWorkspaceItems(tabs, activeTabId);
+        for (const [id, value] of Object.entries(positions ?? {})) {
+          const tab = tabs.find((candidate) => candidate.id === id);
+          if (!isMarkdownTab(tab) || !value || typeof value !== 'object') continue;
+          const position = value as ReturnType<typeof captureDocumentPosition>;
+          const runtime = getDocumentRuntime(tab);
+          runtime.transferSelection = { semantic: position.semantic, source: position.source };
+          runtime.semanticScrollTop = position.semanticScrollTop ?? 0;
+          runtime.sourceScrollTop = position.sourceScrollTop ?? 0;
+          runtime.readingAnchor = position.readingAnchor ?? undefined;
+          runtime.readingAnchorMode = runtime.mode === 'source' ? 'source' : 'semantic';
+        }
+        const active = tabs.find((tab) => tab.id === activeTabId);
+        if (active) loadTabState(active);
+        else { editor = bootEditor; clearAllTabsWithoutCreatingBlank({ skipPersist: true }); }
+      } finally { isSwitchingTab = false; }
+      lastWindowOpenTargetsSignature = JSON.stringify([currentFolderPath || null, getCurrentWindowOpenTargetsSnapshot().filePaths]);
+      void updateWindowTitle();
+    },
+    showError: (error) => showVisibleError(error, t.saveFileFailed()),
+    beforeCloseEmptySource: async (state) => {
+      transferredOpenTargetWindowLabel = state.targetWindowLabel;
+      await forwardDeferredOpenTargets();
+    },
+  });
+
+  async function moveWorkspaceItemToWindow(itemId: string, targetWindowLabel: string | undefined, placement: TabDropPlacement, position?: { x: number; y: number }, memberId?: string) {
+    if (!desktopEnabled || !workspaceItemFeaturesEnabled || workspaceInteractionDisabled) return;
+    await workspaceTransfer.transfer(itemId, targetWindowLabel, placement, position, memberId);
+  }
+  async function drainDeferredWorkspaceOperations() {
+    if (drainingDeferredWorkspaceOperations || workspaceInteractionDisabled) return;
+    drainingDeferredWorkspaceOperations = true;
+    try {
+      while (!workspaceInteractionDisabled && (deferredOpenTargets.length || deferredWorkspaceOperations.length)) {
+        try {
+          const target = deferredOpenTargets.shift();
+          if (target) await openTargetWithBehavior(target);
+          else await deferredWorkspaceOperations.shift()!();
+        }
+        catch (error) { showVisibleError(error, t.openFileFailed()); }
+      }
+    } finally { drainingDeferredWorkspaceOperations = false; }
+  }
+
+  function queueDeferredOpenTarget(target: OpenTarget) {
+    deferredOpenTargets.push(target.kind === 'documents'
+      ? { kind: 'documents', paths: [...target.paths] } : { ...target });
+    if (transferredOpenTargetWindowLabel) {
+      void forwardDeferredOpenTargets().catch((error) => showVisibleError(error, t.openFileFailed()));
+    }
+  }
+
+  async function forwardDeferredOpenTargets() {
+    if (deferredOpenForwarding) return deferredOpenForwarding;
+    const targetWindowLabel = transferredOpenTargetWindowLabel;
+    if (!targetWindowLabel) return;
+    const forwarding = (async () => {
+      const { emitTo } = await import('@tauri-apps/api/event');
+      while (deferredOpenTargets.length) {
+        const target = deferredOpenTargets[0];
+        // 空源窗口关闭前转交请求，并沿用原生打开的待处理记录。
+        if (target.kind === 'documents') {
+          await updateAppSetting(`pendingExternalOpen:${targetWindowLabel}`, target.paths);
+          await emitTo(targetWindowLabel, 'nomo://open-document', { windowLabel: targetWindowLabel, paths: target.paths });
+        } else {
+          await updateAppSetting(`pendingFolder:${targetWindowLabel}`, target.path);
+          await emitTo(targetWindowLabel, 'nomo://open-folder', { windowLabel: targetWindowLabel, folder_path: target.path });
+        }
+        deferredOpenTargets.shift();
+      }
+    })();
+    deferredOpenForwarding = forwarding;
+    try { await forwarding; }
+    finally { if (deferredOpenForwarding === forwarding) deferredOpenForwarding = undefined; }
+  }
+
+  function handleTabDropZones(zones: TabDropZone[]) { tabDropZones = zones; }
+  $: updateNativeDropZones(tabDropZones, desktopEnabled && workspaceItemFeaturesEnabled && appBootState === 'ready' && !workspaceInteractionDisabled && !markdownMiniActive);
+  function updateNativeDropZones(zones: TabDropZone[], ready: boolean) {
+    if (!desktopEnabled || !workspaceItemFeaturesEnabled) return;
+    const signature = JSON.stringify([zones, ready]);
+    if (signature === lastDropZoneSignature) return;
+    lastDropZoneSignature = signature;
+    void registerTabDropZones(zones, ready).catch(() => { if (lastDropZoneSignature === signature) lastDropZoneSignature = ''; });
+  }
+
+  function beginWorkspacePointerDrag(itemId: string, event: PointerEvent, tabId?: string) {
+    if (!desktopEnabled || !workspaceItemFeaturesEnabled || workspaceInteractionDisabled || nativeDragId || event.button !== 0) return;
+    const item = workspaceItems.find((candidate) => candidate.id === itemId);
+    if (!item || getWorkspaceItemTabIds(item).some((id) => !isMarkdownTab(tabs.find((tab) => tab.id === id)))) return;
+    pendingDrag = { itemId, tabId, pointerId: event.pointerId, x: event.clientX, y: event.clientY, target: event.currentTarget as HTMLElement };
+  }
+  function beginMemberPointerDrag(tabId: string, event: PointerEvent) {
+    const item = findWorkspaceItemForTab(workspaceItems, tabId);
+    if (item) beginWorkspacePointerDrag(item.id, event, tabId);
+  }
+  function handleWorkspacePointerMove(event: PointerEvent) {
+    if (!pendingDrag || event.pointerId !== pendingDrag.pointerId) return;
+    if (nativeDragId) {
+      event.preventDefault();
+      return;
+    }
+    if (Math.hypot(event.clientX - pendingDrag.x, event.clientY - pendingDrag.y) < 6) return;
+    event.preventDefault();
+    const drag = pendingDrag;
+    const item = workspaceItems.find((candidate) => candidate.id === drag.itemId);
+    if (!item) { pendingDrag = null; return; }
+    const memberIds = drag.tabId ? [drag.tabId] : getWorkspaceItemTabIds(item);
+    const title = memberIds.map((id) => tabs.find((tab) => tab.id === id)?.fileName ?? '').join('｜');
+    tabDragGhost = { title, x: event.clientX, y: event.clientY, comparison: !drag.tabId && item.kind === 'comparison' };
+    nativeDragId = `tab-drag-${crypto.randomUUID()}`;
+    const dragId = nativeDragId;
+    try { drag.target.setPointerCapture(drag.pointerId); } catch { /* Win32 continues tracking when WebView loses capture. */ }
+    void beginNativeTabDrag({ dragId, itemId: drag.itemId, tabId: drag.tabId, canCombine: Boolean(drag.tabId || item?.kind === 'single') }).catch((error) => {
+      if (nativeDragId === dragId) {
+        nativeDragId = null;
+        tabDragGhost = null;
+        pendingDrag = null;
+        if (drag.target.hasPointerCapture(drag.pointerId)) drag.target.releasePointerCapture(drag.pointerId);
+      }
+      showVisibleError(error, t.saveFileFailed());
+    });
+  }
+  function handleWorkspacePointerEnd(event: PointerEvent) {
+    if (pendingDrag?.pointerId !== event.pointerId) return;
+    tabDragGhost = null;
+    if (nativeDragId) return;
+    pendingDrag = null;
+  }
+  function handleWorkspacePointerCancel(event: PointerEvent) {
+    if (pendingDrag?.pointerId !== event.pointerId) return;
+    tabDragGhost = null;
+    if (nativeDragId) void cancelNativeTabDrag(nativeDragId);
+    pendingDrag = null;
+  }
+  function handleNativeWorkspaceDrag(event: NativeTabDragEvent) {
+    if (event.sourceWindowLabel === windowLabel && event.dragId !== nativeDragId) return;
+    if (event.phase === 'move' && event.sourceWindowLabel === windowLabel && tabDragGhost && event.sourceClientPosition) {
+      tabDragGhost = { ...tabDragGhost, ...event.sourceClientPosition };
+    }
+    dropHighlight = event.phase === 'move' && event.targetWindowLabel === windowLabel && event.placement ? event : null;
+    if (event.phase === 'move' || event.sourceWindowLabel !== windowLabel) return;
+    lastTabDragFinishedAt = performance.now();
+    nativeDragId = null;
+    tabDragGhost = null;
+    if (pendingDrag?.target.hasPointerCapture(pendingDrag.pointerId)) pendingDrag.target.releasePointerCapture(pendingDrag.pointerId);
+    pendingDrag = null;
+    if (event.phase === 'cancel' || event.targetWindowLabel && !event.placement) return;
+    if (event.targetWindowLabel === windowLabel && event.placement) {
+      applyLocalWorkspaceDrop(event.itemId, event.placement, event.tabId);
+    } else {
+      void moveWorkspaceItemToWindow(event.itemId, event.targetWindowLabel, event.placement ?? { kind: 'insert', insertionIndex: 0 }, event.screenPosition, event.tabId);
+    }
+  }
+  async function applyLocalWorkspaceDrop(itemId: string, placement: TabDropPlacement, memberId?: string) {
+    await awaitPendingEditorOperations();
+    await deferredWorkspaceRestore;
+    const item = workspaceItems.find((candidate) => candidate.id === itemId);
+    if (!item || workspaceInteractionDisabled || placement.kind === 'combine' && placement.targetItemId === itemId) return;
+    flushVisibleDocumentRuntimes();
+    if (memberId) {
+      if (!getWorkspaceItemTabIds(item).includes(memberId)) return;
+      if (item.id === activeItemId) suspendVisibleDocumentRuntimes();
+      workspaceItems = removeWorkspaceItemMember(workspaceItems, memberId);
+      const memberItem = createSingleWorkspaceItem(memberId);
+      if (placement.kind === 'combine') {
+        workspaceItems = [...workspaceItems, memberItem];
+        combineWorkspaceItems(memberItem.id, placement.targetItemId);
+        return;
+      }
+      workspaceItems.splice(Math.min(placement.insertionIndex, workspaceItems.length), 0, memberItem);
+    } else if (placement.kind === 'combine') {
+      combineWorkspaceItems(itemId, placement.targetItemId);
+      return;
+    } else {
+      const oldIndex = workspaceItems.indexOf(item);
+      workspaceItems = workspaceItems.filter((candidate) => candidate.id !== itemId);
+      workspaceItems.splice(Math.max(0, Math.min(workspaceItems.length, placement.insertionIndex - (oldIndex < placement.insertionIndex ? 1 : 0))), 0, item);
+    }
+    workspaceItems = [...workspaceItems];
+    tabs = [...tabs];
+    reconcileWorkspaceItems(tabs, activeTabId);
+    const focused = tabs.find((tab) => tab.id === activeTabId);
+    if (focused) loadTabState(focused);
+    persistWorkspaceState();
+  }
+
+  async function setupWorkspaceTransferEvents() {
+    if (!workspaceItemFeaturesEnabled) return;
+    desktopUnlisteners.push(await onNativeTabDrag(handleNativeWorkspaceDrag));
+    desktopUnlisteners.push(await onTabTransfer('prepared', (state) => {
+      if (closingWorkspaceItemId) { void cancelTabTransfer(state.token).catch((error) => showVisibleError(error, t.saveFileFailed())); return; }
+      if (appBootState !== 'ready') pendingTransferReceives.set(state.token, state);
+      else void workspaceTransfer.prepared(state);
+    }));
+    desktopUnlisteners.push(await onTabTransfer('ready', (state) => { void workspaceTransfer.ready(state); }));
+    desktopUnlisteners.push(await onTabTransfer('committed', (state) => { void workspaceTransfer.committed(state); }));
+    desktopUnlisteners.push(await onTabTransfer('cancelled', workspaceTransfer.cancelled));
+    transferBootstrap = await getTabTransferBootstrap();
+    window.addEventListener('pointermove', handleWorkspacePointerMove, { passive: false });
+    window.addEventListener('pointerup', handleWorkspacePointerEnd);
+    window.addEventListener('pointercancel', handleWorkspacePointerCancel);
+  }
+
+  const writingStatsController = createWritingStatsController((state) => {
+    statsStatus = state.status;
+    if (state.full) stats = state.full;
+    selectedStats = state.selected;
+  });
+  $: if (activeTabId && isMarkdownTab(tabs.find((tab) => tab.id === activeTabId))) {
+    const activeMode = mode === 'split' ? splitActivePane : mode;
+    writingStatsController.setDocument({
+      documentId: activeTabId, markdown, mode: activeMode, revision: statsContentRevision,
+      semanticSnapshot: () => editor.getDocumentStatsSnapshot(),
+    });
+    if (activeMode === 'source') {
+      const selection = sourceEditor?.getSelectionStatsSnapshot?.();
+      writingStatsController.setSelection(selection?.documentId === activeTabId
+        ? { from: selection.from, to: selection.to, sourceCoordinates: 'normalized' } : null);
+    } else {
+      const selection = editor.getSelectionStatsSnapshot();
+      writingStatsController.setSelection(selection
+        ? { from: selection.anchor, to: selection.head } : null);
+    }
+  } else {
+    writingStatsController.invalidate();
+  }
+
+  function handleSemanticSelectionChange(event: EditorSelectionSnapshotEvent) {
+    if (isSwitchingTab || getActiveEditorMode() !== 'semantic') return;
+    writingStatsController.setSelection(event.selection ? { from: event.selection.anchor, to: event.selection.head } : null);
+  }
+
+  function handleSourceSelectionChange(range: MarkdownSourceSelectionSnapshot) {
+    if (isSwitchingTab || range.documentId !== activeTabId || getActiveEditorMode() !== 'source') return;
+    writingStatsController.setSelection({ from: range.from, to: range.to, sourceCoordinates: 'normalized' });
   }
 
   function openSearchPanel(replaceVisible = false) {
@@ -3598,17 +4377,23 @@
   }
 
   function mountEditorHostIfReady() {
+    if (findWorkspaceItemForTab(workspaceItems, activeTabId)?.kind === 'comparison') return;
     if (!hasOpenDocument() || !editorHost || mountedEditorHost === editorHost) {
       return;
     }
+
+    // 切换期间 bind:this 可能仍指向旧组件，等待新文档的 ready 绑定后才能挂载。
+    const runtime = documentRuntimes.get(activeTabId);
+    if (!runtime || runtime.host !== editorHost || runtime.sourceEditor !== sourceEditor || !editorHost.isConnected) return;
 
     detachMountedEditorHostEvents();
     editor.mount(editorHost);
     editorHost.addEventListener('image-context-menu', handleImageContextMenu);
     mountedEditorHost = editorHost;
+    if (runtime) { runtime.host = editorHost; runtime.semanticPane = semanticPane; runtime.sourcePane = sourcePane; runtime.sourceEditor = sourceEditor; }
   }
 
-  $: if (tabs.length > 0 && activeTabId && editorHost) mountEditorHostIfReady();
+  $: if (tabs.length > 0 && activeTabId && editorHost && editor && !activeComparison) mountEditorHostIfReady();
   $: if ((tabs.length === 0 || !activeTabId) && mountedEditorHost) detachMountedEditorHostEvents();
 
   const editorSettings = createEditorSettingsController({
@@ -3632,6 +4417,10 @@
   }
 
   function openPreviewFile(path: string) {
+    if (workspaceInteractionDisabled) {
+      queueDeferredOpenTarget({ kind: 'documents', paths: [path] });
+      return Promise.resolve(false);
+    }
     return enqueueOpenTargetOperation(() => routePreviewFile(path));
   }
 
@@ -3667,12 +4456,12 @@
     }
     if (requestGeneration !== previewOpenGeneration) return;
 
-    // 已有固定标签页打开此文件 → 切换到它
-    const existingFixedTab = tabs.find(
-      (t) => t.nativePath && sameNativePath(t.nativePath, path) && t.id !== previewTabId,
+    // 已打开文件（含预览）只切换，保留编辑状态并避免重复标签。
+    const existingTab = tabs.find(
+      (tab) => tab.nativePath && sameNativePath(tab.nativePath, path),
     );
-    if (existingFixedTab) {
-      await switchTab(existingFixedTab.id);
+    if (existingTab) {
+      await switchTab(existingTab.id);
       return;
     }
 
@@ -3711,15 +4500,6 @@
       return;
     }
 
-    const segmentedPreview = previewTabId
-      ? tabs.find((tab) => tab.id === previewTabId && isSegmentedTextTab(tab))
-      : undefined;
-    if (isSegmentedTextTab(segmentedPreview)) {
-      await closeSegmentedTab(segmentedPreview);
-      if (requestGeneration !== previewOpenGeneration) return;
-      if (tabs.some((tab) => tab.id === segmentedPreview.id)) return;
-    }
-
     const { document, error } = await readMarkdownFromPath(path, t.previewOpenFailed());
     if (requestGeneration !== previewOpenGeneration) return;
     if (error) {
@@ -3732,25 +4512,13 @@
     }
     if (!document) return;
 
-    // 保存当前固定标签页状态（如果当前不是预览）
-    if (activeTabId !== previewTabId) {
-      saveActiveTabState();
-    }
+    saveActiveTabState();
 
-    // 复用现有预览标签页或按设置直接创建固定标签页
-    let targetTab: MarkdownTabState;
-    const existingPreview =
-      filePreviewEnabled && previewTabId
-        ? tabs.find((t): t is MarkdownTabState => t.id === previewTabId && isMarkdownTab(t))
-        : undefined;
-
-    if (existingPreview) {
-      targetTab = existingPreview;
-    } else {
-      targetTab = createBlankTab('', '');
-      tabs = [...tabs, targetTab];
-      previewTabId = filePreviewEnabled ? targetTab.id : null;
-    }
+    // 打开另一文件时自动固定上一预览，保留其文档及编辑历史。
+    suspendVisibleDocumentRuntimes();
+    const targetTab = createBlankTab('', '');
+    tabs = [...tabs, targetTab];
+    previewTabId = filePreviewEnabled ? targetTab.id : null;
 
     const isLargeDocument =
       document.markdown.length > largeDocumentLimit || document.sizeBytes > largeDocumentLimit;
@@ -3800,24 +4568,13 @@
     }
     segmentedSessionRegistry.register(opened);
 
-    if (activeTabId !== previewTabId) {
-      saveActiveTabState();
-    }
+    saveActiveTabState();
+    suspendVisibleDocumentRuntimes();
 
-    const reusableBlank = tabs.find((tab) => tab.id === activeTabId && isReusableUntitledTab(tab));
-    const existingPreview =
-      options.preview && filePreviewEnabled && previewTabId
-        ? tabs.find((tab) => tab.id === previewTabId)
-        : !options.preview && previewTabId === activeTabId
-          ? tabs.find((tab) => tab.id === previewTabId && !tab.dirty)
-          : undefined;
-    const replacedTab = existingPreview ?? reusableBlank;
-
-    if (isSegmentedTextTab(existingPreview)) {
-      // 预览标签被另一文件复用前先关闭旧 session，避免后台索引和日志继续占用资源。
-      void segmentedDocumentPort.closeSession(existingPreview.sessionId).catch(() => undefined);
-      segmentedSessionRegistry.delete(existingPreview.sessionId);
-    }
+    const reusableBlank = findWorkspaceItemForTab(workspaceItems, activeTabId)?.kind === 'comparison'
+      ? undefined : tabs.find((tab) => tab.id === activeTabId && isReusableUntitledTab(tab));
+    // TXT/JSON 同样保留上一预览及其 Rust session，只复用空白文档。
+    const replacedTab = reusableBlank;
 
     const targetTab = createTabForDocument({
       id: replacedTab?.id,
@@ -3870,6 +4627,16 @@
 
   // 步骤：关闭除指定标签外的所有标签页（保留标签自动固定）
   async function handleCloseOtherTabs(event: CustomEvent<{ tabId: string }>) {
+    const keepItem = workspaceItems.find((item) => item.id === event.detail.tabId);
+    if (keepItem) {
+      for (const item of [...workspaceItems]) {
+        if (item.id === keepItem.id) continue;
+        if (!(await closeWorkspaceItem(item.id))) return;
+      }
+      previewTabId = null;
+      await selectWorkspaceItem(keepItem.id);
+      return;
+    }
     invalidatePendingPreviewOpen();
     closeExternalChangeDialog();
     const keepTabId = event.detail.tabId;
@@ -3897,6 +4664,11 @@
 
   // 步骤：关闭指定标签页右侧的所有标签页
   async function handleCloseTabsToRight(event: CustomEvent<{ tabId: string }>) {
+    const itemIndex = workspaceItems.findIndex((item) => item.id === event.detail.tabId);
+    if (itemIndex >= 0) {
+      for (const item of workspaceItems.slice(itemIndex + 1)) if (!(await closeWorkspaceItem(item.id))) return;
+      return;
+    }
     invalidatePendingPreviewOpen();
     closeExternalChangeDialog();
     const tabId = event.detail.tabId;
@@ -3929,7 +4701,9 @@
 
   // 步骤：关闭全部标签页，清空状态不保留空白标签
   function handleCloseAllTabs() {
-    closeAllTabsWithConfirmation().catch(() => undefined);
+    void (async () => {
+      for (const item of [...workspaceItems]) if (!(await closeWorkspaceItem(item.id))) return;
+    })().catch((error) => showVisibleError(error, t.saveFileFailed()));
   }
 
   const documentActions = createDocumentActionsController({
@@ -3992,13 +4766,28 @@
     getFileInput: () => fileInput,
     getEditor: () => editor,
     beforeMarkdownCommit: flushActiveEditorView,
+    getEditorForTab: (id) => documentRuntimes.get(id)?.editor,
+    getNextTabIdAfterClose: getAdjacentWorkspaceTabId,
+    flushTabRuntime: flushDocumentRuntime,
+    onTabRuntimeSaved: (id) => {
+      const tab = tabs.find((candidate) => candidate.id === id);
+      if (activeTabId === id && isMarkdownTab(tab)) {
+        savedMarkdown = tab.savedMarkdown; dirty = tab.dirty; nativePath = tab.nativePath;
+        fileName = tab.fileName; filePath = tab.filePath; lastKnownModifiedAt = tab.lastKnownModifiedAt;
+        diskReadonly = tab.diskReadonly; externalFileChange = tab.externalFileChange;
+      }
+      tabs = [...tabs];
+      persistWorkspaceState();
+    },
     getTabs: () => tabs,
     setTabs: (value) => {
       tabs = value;
       persistWorkspaceState();
     },
     getActiveTabId: () => activeTabId,
+    canReuseTab: (id) => findWorkspaceItemForTab(workspaceItems, id)?.kind !== 'comparison',
     setActiveTabId: (value) => {
+      if (value !== activeTabId) suspendVisibleDocumentRuntimes();
       activeTabId = value;
       persistWorkspaceState();
     },
@@ -4093,14 +4882,16 @@
     },
     syncSourceTextareaHeight: () => syncSourceTextareaHeight(),
   });
-  const handleEditorDrop = imageInsertion.handleEditorDrop;
-  const handleEditorPaste = imageInsertion.handleEditorPaste;
+  function handleEditorDrop(event: DragEvent) { (documentRuntimes.get(activeTabId)?.images ?? imageInsertion).handleEditorDrop(event); }
+  function handleEditorPaste(event: ClipboardEvent) { (documentRuntimes.get(activeTabId)?.images ?? imageInsertion).handleEditorPaste(event); }
   function updateMarkdown(nextMarkdown: string) {
-    editorInteraction.updateMarkdown(nextMarkdown);
+    if (workspaceInteractionDisabled && !workspaceTransferFlushing) return;
+    (documentRuntimes.get(activeTabId)?.interaction ?? editorInteraction).updateMarkdown(nextMarkdown);
     scheduleSplitSemanticRefresh();
   }
-  const runMarkdownCommand = editorInteraction.runCommand;
+  function runMarkdownCommand(command: EditorCommand) { (documentRuntimes.get(activeTabId)?.interaction ?? editorInteraction).runCommand(command); }
   function runCommand(command: EditorCommand) {
+    if (workspaceInteractionDisabled) return;
     const activeTab = tabs.find((tab) => tab.id === activeTabId);
     if (isSegmentedTextTab(activeTab)) {
       if (command.type === 'undo') segmentedWorkspace?.undo();
@@ -4149,6 +4940,7 @@
     });
     theme = resolved.effectiveScheme;
     currentEditorTheme = resolved.editorTheme;
+    for (const runtime of documentRuntimes.values()) if (!runtime.disposed && runtime.editor !== editor) runtime.editor.updateTheme(resolved.editorTheme);
     themeMode = resolved.preferences.themeMode;
     colorThemeId = resolved.preferences.colorThemeId;
     documentStyleId = resolved.preferences.documentStyleId;
@@ -4239,7 +5031,94 @@
   const overwriteMarkdownExternalFile = documentActions.overwriteExternalFile;
   const checkMarkdownExternalFileChange = documentActions.checkExternalFileChange;
 
+  function getAdjacentWorkspaceTabId(tabId: string): string | undefined {
+    const owner = findWorkspaceItemForTab(workspaceItems, tabId);
+    if (!owner) return undefined;
+    const index = workspaceItems.indexOf(owner);
+    const remaining = workspaceItems.filter((item) => item.id !== owner.id);
+    const next = remaining[Math.min(index, remaining.length - 1)];
+    return next && getWorkspaceItemFocusedTabId(next);
+  }
+
+  async function saveDocumentById(tabId: string, saveAs = false): Promise<boolean> {
+    if (!tabs.some((tab) => tab.id === tabId)) return false;
+    flushDocumentRuntime(tabId);
+    return saveMarkdownDocument(saveAs, tabId);
+  }
+  async function saveSegmentedDocumentById(tabId: string): Promise<boolean> {
+    await switchTab(tabId);
+    return activeTabId === tabId && await saveMarkdownFile(false);
+  }
+
+  async function closeWorkspaceItem(itemId: string, event?: Event): Promise<boolean> {
+    event?.stopPropagation();
+    if (workspaceInteractionDisabled) return false;
+    const item = workspaceItems.find((candidate) => candidate.id === itemId) ?? findWorkspaceItemForTab(workspaceItems, itemId);
+    if (!item) return false;
+    if (item.kind === 'single') {
+      await closeTab(item.tabId, event);
+      return !tabs.some((tab) => tab.id === item.tabId);
+    }
+    workspaceInteractionDisabled = true;
+    closingWorkspaceItemId = item.id;
+    try {
+      const ids = getWorkspaceItemTabIds(item);
+      const savedMembers = new Set<string>();
+      workspaceTransferFlushing = true;
+      await awaitPendingEditorOperations();
+      flushVisibleDocumentRuntimes();
+      await Promise.all(ids.map((id) => documentRuntimes.get(id)?.images.awaitPendingInsertions()));
+      await documentActions.awaitPendingSaves();
+      workspaceTransferFlushing = false;
+      for (const id of ids) flushDocumentRuntime(id);
+      for (const id of ids) {
+        const tab = tabs.find((candidate) => candidate.id === id);
+        if (!isMarkdownTab(tab)) return false;
+        if (!tab.dirty) continue;
+        const choice = await confirmAction(t.unsavedChangesCloseTabs({ names: tab.fileName }), {
+          okLabel: t.discardChanges(), cancelLabel: t.cancel(), saveLabel: t.save(),
+        });
+        if (choice === false) return false;
+        if (choice === 'save' && (!(await saveDocumentById(id)) || tabs.find((candidate) => candidate.id === id)?.dirty)) return false;
+        if (choice === 'save') savedMembers.add(id);
+      }
+      for (const id of ids) flushDocumentRuntime(id);
+      if (workspaceItems.find((candidate) => candidate.id === item.id)?.kind !== 'comparison' || ids.some((id) => !tabs.some((tab) => tab.id === id)) || [...savedMembers].some((id) => tabs.find((tab) => tab.id === id)?.dirty)) return false;
+      // 两篇都完成确认后，才一次移除组合；取消或保存失败不会丢掉另一篇。
+      const index = workspaceItems.findIndex((candidate) => candidate.id === item.id);
+      const wasActive = activeItemId === item.id;
+      workspaceItems = workspaceItems.filter((candidate) => candidate.id !== item.id);
+      tabs = tabs.filter((tab) => !ids.includes(tab.id));
+      if (previewTabId && ids.includes(previewTabId)) previewTabId = null;
+      if (wasActive) {
+        const next = workspaceItems[Math.min(index, workspaceItems.length - 1)];
+        if (next) {
+          activeItemId = next.id;
+          activeTabId = getWorkspaceItemFocusedTabId(next);
+          loadTabState(tabs.find((tab) => tab.id === activeTabId)!);
+        } else {
+          editor = bootEditor;
+          clearAllTabsWithoutCreatingBlank();
+        }
+      }
+      reconcileWorkspaceItems(tabs, activeTabId);
+      void updateWindowTitle();
+      persistWorkspaceState();
+      return true;
+    } catch (error) {
+      showVisibleError(error, t.saveFileFailed());
+      return false;
+    } finally {
+      workspaceTransferFlushing = false;
+      closingWorkspaceItemId = null;
+      workspaceInteractionDisabled = false;
+      persistWorkspaceState();
+      void drainDeferredWorkspaceOperations();
+    }
+  }
+
   async function createNewFile() {
+    if (workspaceInteractionDisabled) return;
     try {
       if (!(await requestMarkdownMiniReturn({ showExternalChange: false }))) return;
       await flushSegmentedDocumentBeforeTransition(
@@ -4253,7 +5132,20 @@
     }
   }
 
-  async function openDocumentPath(
+  function openDocumentPath(
+    path: string,
+    options: { message: string; fallbackMessage: string },
+  ): Promise<boolean> {
+    if (workspaceInteractionDisabled) {
+      queueDeferredOpenTarget({ kind: 'documents', paths: [path] });
+      return Promise.resolve(false);
+    }
+    const pending = performOpenDocumentPath(path, options);
+    pendingDocumentOpens.add(pending);
+    void pending.then(() => pendingDocumentOpens.delete(pending), () => pendingDocumentOpens.delete(pending));
+    return pending;
+  }
+  async function performOpenDocumentPath(
     path: string,
     options: { message: string; fallbackMessage: string },
   ): Promise<boolean> {
@@ -4309,6 +5201,11 @@
   }
 
   async function openDroppedMarkdown(paths: string[]) {
+    if (workspaceInteractionDisabled) {
+      const path = findDroppedDocumentPath(paths);
+      if (path) queueDeferredOpenTarget({ kind: 'documents', paths: [path] });
+      return;
+    }
     const target = findDroppedDocumentPath(paths);
     if (!target) {
       statusMessage = t.dragDropNoMarkdown();
@@ -4442,6 +5339,7 @@
   }
 
   async function checkExternalFileChange() {
+    if (workspaceInteractionDisabled) return;
     const activeTab = tabs.find((tab) => tab.id === activeTabId);
     if (!isSegmentedTextTab(activeTab)) {
       await checkMarkdownExternalFileChange();
@@ -4677,13 +5575,13 @@
     }
     segmentedSessionRegistry.delete(tabToClose.sessionId);
     ignoredSegmentedExternalChanges.delete(tabToClose.sessionId);
-    const index = tabs.findIndex((tab) => tab.id === tabToClose.id);
+    const nextTabId = activeTabId === tabToClose.id ? getAdjacentWorkspaceTabId(tabToClose.id) : undefined;
     tabs = tabs.filter((tab) => tab.id !== tabToClose.id);
     if (previewTabId === tabToClose.id) previewTabId = null;
 
     if (wasActive) {
       if (tabs.length > 0) {
-        const nextTab = tabs[Math.min(index, tabs.length - 1)];
+        const nextTab = tabs.find((tab) => tab.id === nextTabId) ?? tabs[0];
         activeTabId = nextTab.id;
         loadTabState(nextTab);
       } else {
@@ -4701,6 +5599,9 @@
 
   // 包装 closeTab：预览标签页直接关闭无需确认
   async function closeTab(tabId: string, event?: Event, discardWithoutConfirmation = false) {
+    if (workspaceInteractionDisabled) return;
+    await awaitPendingEditorOperations();
+    flushDocumentRuntime(tabId);
     event?.stopPropagation();
     if (markdownMiniActive && activeTabId === tabId) {
       if (!(await requestMarkdownMiniReturn({ showExternalChange: false }))) return;
@@ -4774,6 +5675,7 @@
     if (tabId === previewTabId && !dirtyTabToClose) {
       logCloseDiagnostics('closeTab: 干净预览标签直接关闭', { tabId });
       const wasActive = activeTabId === tabId;
+      const preferredNextTabId = getAdjacentWorkspaceTabId(tabId);
       const index = tabs.findIndex((t) => t.id === tabId);
       tabs = tabs.filter((t) => t.id !== tabId);
       previewTabId = null;
@@ -4781,8 +5683,9 @@
       if (wasActive) {
         if (tabs.length > 0) {
           const newActiveIndex = Math.min(index, tabs.length - 1);
-          activeTabId = tabs[newActiveIndex].id;
-          loadTabState(tabs[newActiveIndex]);
+          const next = tabs.find((tab) => tab.id === preferredNextTabId) ?? tabs[newActiveIndex];
+          activeTabId = next.id;
+          loadTabState(next);
         } else {
           activeTabId = '';
           markdown = '';
@@ -4845,6 +5748,7 @@
   }
 
   function getDirtyTabs(candidateTabs: Tab[]) {
+    for (const tab of candidateTabs) if (isMarkdownTab(tab)) flushDocumentRuntime(tab.id);
     const dirtyTabs = candidateTabs.filter((tab) => tab.dirty);
     const activeTab = candidateTabs.find((tab) => tab.id === activeTabId);
     if (dirty && isMarkdownTab(activeTab) && !dirtyTabs.some((tab) => tab.id === activeTab.id)) {
@@ -4861,8 +5765,12 @@
     }
     return dirtyTabs;
   }
-  const jumpToOutlineItem = outlineInteraction.jumpToOutlineItem;
-  const moveOutlineSection = outlineInteraction.moveOutlineSection;
+  function jumpToOutlineItem(item: OutlineItem) {
+    (documentRuntimes.get(activeTabId)?.outlineInteraction ?? outlineInteraction).jumpToOutlineItem(item);
+  }
+  function moveOutlineSection(request: { sourceIndex: number; targetIndex: number; placement: 'before' | 'inside' | 'after' }) {
+    return (documentRuntimes.get(activeTabId)?.outlineInteraction ?? outlineInteraction).moveOutlineSection(request);
+  }
   const updateActiveOutlineFromSourceScroll =
     outlineInteraction.updateActiveOutlineFromSourceScroll;
   const updateActiveOutlineFromSemanticScroll =
@@ -5127,27 +6035,38 @@
     applyZoomSetting(zoomPercent, { onFrame: refreshEditorViewportLayout });
     applyCodeBlockLineNumberSetting(codeBlockLineNumbersVisible);
     document.documentElement.dataset.codeBlockIndent = codeBlockIndent;
+    for (const tab of tabs) {
+      if (!isMarkdownTab(tab)) continue;
+      const wasLarge = tab.largeDocumentMode;
+      const readonlyForOtherReason = tab.readonlyDocumentMode && !wasLarge;
+      tab.largeDocumentMode = tab.markdown.length > largeDocumentLimit || new TextEncoder().encode(tab.markdown).byteLength > largeDocumentLimit;
+      tab.readonlyDocumentMode = tab.largeDocumentMode || readonlyForOtherReason;
+      const runtime = documentRuntimes.get(tab.id);
+      if (runtime && wasLarge && !tab.largeDocumentMode) runtime.mode = preferredEditorMode;
+    }
+    workspaceItems = normalizeWorkspaceItems(tabs, workspaceItems);
+    const activeOwner = findWorkspaceItemForTab(workspaceItems, activeTabId);
+    if (activeOwner?.kind === 'comparison' && options.applyEditorMode && preferences.editorMode !== 'split' && !getWorkspaceItemTabIds(activeOwner).some((id) => (tabs.find((tab) => tab.id === id) as MarkdownTabState).largeDocumentMode)) activeOwner.mode = preferences.editorMode;
+    for (const runtime of documentRuntimes.values()) {
+      const tab = tabs.find((candidate) => candidate.id === runtime.tabId);
+      if (runtime.disposed || !isMarkdownTab(tab)) continue;
+      const owner = findWorkspaceItemForTab(workspaceItems, tab.id);
+      runtime.mode = owner?.kind === 'comparison' ? owner.mode : tab.largeDocumentMode ? 'source' : options.applyEditorMode ? preferredEditorMode : runtime.mode;
+      runtime.editor.updateOptions({ inlineCodeRenderingEnabled, copyMarkdownSyntaxEnabled, mode: getCoreModeForView(runtime.mode), readonly: tab.readonlyDocumentMode });
+    }
     editor.updateOptions({ inlineCodeRenderingEnabled, copyMarkdownSyntaxEnabled });
     applyOutlineDefaultExpansion();
 
-    const shouldBeLargeDocument = markdown.length > largeDocumentLimit;
-    if (!shouldBeLargeDocument && largeDocumentMode) {
-      largeDocumentMode = false;
-      readonlyDocumentMode = false;
-      mode = preferredEditorMode;
-      editor.updateOptions({ mode: getCoreModeForView(mode) });
-    } else if (shouldBeLargeDocument && !largeDocumentMode) {
-      largeDocumentMode = true;
-      readonlyDocumentMode = true;
-      mode = 'source';
-      editor.updateOptions({ mode: 'source' });
-      statusMessage = t.largeDocumentReadonly();
+    const activeDocument = tabs.find((tab) => tab.id === activeTabId);
+    if (isMarkdownTab(activeDocument)) {
+      largeDocumentMode = activeDocument.largeDocumentMode;
+      readonlyDocumentMode = activeDocument.readonlyDocumentMode;
+      mode = activeOwner?.kind === 'comparison' ? activeOwner.mode : largeDocumentMode ? 'source' : options.applyEditorMode ? preferredEditorMode : documentRuntimes.get(activeTabId)?.mode ?? mode;
+      if (largeDocumentMode) statusMessage = t.largeDocumentReadonly();
+      editor.updateOptions({ mode: getCoreModeForView(mode), readonly: readonlyDocumentMode });
     }
-
-    if (options.applyEditorMode && !largeDocumentMode) {
-      mode = preferences.editorMode;
-      editor.updateOptions({ mode: getCoreModeForView(preferences.editorMode) });
-    }
+    tabs = [...tabs];
+    workspaceItems = [...workspaceItems];
 
     if (preferences.developerMode) {
       enableLogger();
@@ -5389,6 +6308,7 @@
         const { invoke } = await import('@tauri-apps/api/core');
         await invoke('refresh_window_menu').catch(() => undefined);
         await setupCriticalDesktopEvents();
+        await setupWorkspaceTransferEvents();
         void invoke<{ shouldPrompt: boolean }>('get_legacy_installer_notice')
           .then((notice) => {
             legacyInstallerPromptOpen = notice.shouldPrompt;
@@ -5447,7 +6367,7 @@
           }
         }
 
-        if (pendingExternalOpenPaths.length > 0) {
+        if (transferBootstrap || pendingExternalOpenPaths.length > 0) {
           // 双击 md 文件启动：不恢复上次工作区，稍后单独加载文件所在目录并打开该文件
           restoredWorkspaceTabs = false;
         } else {
@@ -5496,8 +6416,11 @@
 
       if (persistedEditorMode && !largeDocumentMode) {
         preferredEditorMode = persistedEditorMode;
-        mode = persistedEditorMode;
-        editor.updateOptions({ mode: getCoreModeForView(persistedEditorMode) });
+        const owner = findWorkspaceItemForTab(workspaceItems, activeTabId);
+        mode = owner?.kind === 'comparison' ? owner.mode : persistedEditorMode;
+        const runtime = documentRuntimes.get(activeTabId);
+        if (runtime) runtime.mode = mode;
+        editor.updateOptions({ mode: getCoreModeForView(mode) });
       }
       await setupDesktopEvents();
       await refreshRecentFiles();
@@ -5505,7 +6428,7 @@
       pendingExternalOpenPaths = [];
       logInfo('ExternalOpen', '处理冷启动文件队列', { paths: startupExternalOpenPaths });
       if (
-        startupExternalOpenPaths.length === 0 &&
+        !transferBootstrap && startupExternalOpenPaths.length === 0 &&
         !settings.some((s) => s.key === 'startupWorkspace')
       ) {
         await maybeOpenFirstRunSample({
@@ -5536,6 +6459,9 @@
         await openExternalMarkdownPaths(deferredExternalOpenPaths);
       }
       appBootState = 'ready';
+      if (transferBootstrap) pendingTransferReceives.set(transferBootstrap.token, transferBootstrap);
+      for (const state of pendingTransferReceives.values()) void workspaceTransfer.prepared(state);
+      pendingTransferReceives.clear();
     } finally {
       if (appearanceRuntimeActive && !systemThemeListenerReady) {
         setupSystemThemeListener();
@@ -5549,6 +6475,12 @@
   });
 
   onDestroy(() => {
+    workspaceTransfer.dispose();
+    if (nativeDragId) void cancelNativeTabDrag(nativeDragId);
+    tabDragGhost = null;
+    window.removeEventListener('pointermove', handleWorkspacePointerMove);
+    window.removeEventListener('pointerup', handleWorkspacePointerEnd);
+    window.removeEventListener('pointercancel', handleWorkspacePointerCancel);
     resolveOpenTargetChoice(null);
     appearanceRuntimeActive = false;
     cancelPendingReadingPositionRestore();
@@ -5577,11 +6509,20 @@
     stopSystemThemeSync();
     sidebarResize.destroy();
     unsubscribe();
-    editor.destroy();
+    writingStatsController.destroy();
+    for (const runtime of documentRuntimes.values()) {
+      runtime.disposed = true;
+      runtime.unsubscribe();
+      runtime.editor.destroy();
+    }
+    documentRuntimes.clear();
+    bootEditor.destroy();
     markdownLintController.destroy();
   });
 
   function syncFromEditor(event: EditorChangeEvent) {
+    if (event.reason === 'content-pending') writingStatsController.suspend();
+    else statsContentRevision = event.contentRevision ?? statsContentRevision;
     if (isSwitchingTab) return;
 
     const activeTab = tabs.find((tab) => tab.id === activeTabId);
@@ -5590,6 +6531,12 @@
       return;
     }
     const markdownChanged = event.markdown !== markdown;
+    if (!markdownChanged && event.reason === 'transaction') {
+      version = event.version;
+      pendingInlineMarks = event.pendingInlineMarks;
+      activeTab.version = version;
+      return;
+    }
     if (markdownChanged) {
       selectedStats = null;
     }
@@ -5637,7 +6584,7 @@
     schedulePersistWorkspaceDrafts();
     persistWorkspaceState();
 
-    if (autoSaveEnabled && desktopEnabled && dirty && nativePath) {
+    if (!workspaceInteractionDisabled && autoSaveEnabled && desktopEnabled && dirty && nativePath) {
       documentActions.debouncedAutoSave(activeTab.id);
     }
 
@@ -5682,12 +6629,11 @@
 
   function applyMarkdownAnalysis(markdownToAnalyze: string) {
     clearContentAnalysisTimer();
-    const analysis = analyzeMarkdown(markdownToAnalyze);
+    const analysis = { outline: extractOutline(markdownToAnalyze) };
     outline = analysis.outline;
     if (!outline.some((item) => item.id === activeOutlineId))
       activeOutlineId = outline[0]?.id ?? '';
     pruneCollapsedOutlineIds();
-    stats = analysis.stats;
   }
 
   function scheduleMarkdownAnalysis(markdownToAnalyze: string) {
@@ -5743,7 +6689,8 @@
     linkPickerOpen = true;
   }
 
-  function openLinkFromEditor(href: string) {
+  function openLinkFromEditor(href: string, sourceTabId = activeTabId) {
+    const sourcePath = tabs.find((tab) => tab.id === sourceTabId)?.nativePath ?? null;
     const token = ++linkOpeningToken;
     linkOpening = true;
     statusMessage = t.openingLink();
@@ -5754,7 +6701,7 @@
     });
 
     Promise.all([
-      navigateEditorLink(href).catch((error) => {
+      navigateEditorLink(href, sourceTabId, sourcePath).catch((error) => {
         statusMessage = getEditorLinkErrorMessage(error);
       }),
       minimumVisibleTime,
@@ -5766,7 +6713,7 @@
     });
   }
 
-  async function navigateEditorLink(href: string) {
+  async function navigateEditorLink(href: string, sourceTabId: string, sourcePath: string | null) {
     const trimmedHref = href.trim();
     const isExternalOrAnchor =
       /^(?:https?|mailto):/i.test(trimmedHref) || trimmedHref.startsWith('#');
@@ -5774,12 +6721,14 @@
       throw new Error(t.localLinkDesktopRequired());
     }
 
-    const target = await resolveEditorLink(trimmedHref, nativePath);
+    const target = await resolveEditorLink(trimmedHref, sourcePath);
     if (target.kind === 'external') {
       await openExternalLink(target.href);
       return;
     }
     if (target.kind === 'anchor') {
+      if (!tabs.some((tab) => tab.id === sourceTabId)) return;
+      await switchTab(sourceTabId);
       jumpToLinkFragment(target.fragment);
       return;
     }
@@ -5822,7 +6771,7 @@
       return;
     }
 
-    outlineInteraction.jumpToOutlineItem(item);
+    jumpToOutlineItem(item);
     statusMessage = t.localLinkAnchorOpened({ anchor: fragment });
   }
 
@@ -5941,6 +6890,7 @@
     } else {
       frontMatterFocusTarget = 'default';
     }
+    if (activeComparison) { frontMatterFocusRequest += 1; return; }
     frontMatterEditing = true;
   }
 
@@ -6136,6 +7086,10 @@
         'nomo://open-in-directory-window',
         (event) => {
           if (event.payload.windowLabel !== windowLabel) return;
+          if (workspaceInteractionDisabled) {
+            queueDeferredOpenTarget({ kind: 'documents', paths: event.payload.paths });
+            return;
+          }
           void enqueueOpenTargetOperation(async () => {
             await openTargetInCurrentWindow({ kind: 'documents', paths: event.payload.paths });
             await syncCurrentWindowOpenTargetsNow();
@@ -6175,6 +7129,7 @@
         openDroppedMarkdown(paths);
       }).catch(() => null),
       listen<SettingsUpdatedPayload>(SETTINGS_UPDATED_EVENT, (event) => {
+        if (workspaceInteractionDisabled) { deferredWorkspaceOperations.push(() => handleSettingsUpdated(event.payload)); return; }
         handleSettingsUpdated(event.payload).catch(() => undefined);
       }).catch(() => null),
       listen<{ requestId?: string }>('nomo://request-update-install', (event) => {
@@ -6249,11 +7204,12 @@
   }
 
   function executeDesktopCommand(command: string) {
+    if (workspaceInteractionDisabled) return;
     executeDesktopAppCommand(command, commandHandlers);
   }
 
   function handleGlobalShortcut(event: KeyboardEvent) {
-    if (exitRequestId !== null) return;
+    if (exitRequestId !== null || workspaceInteractionDisabled) return;
     handleGlobalAppShortcut(event, commandHandlers, shortcutPreferences);
   }
 
@@ -6385,13 +7341,13 @@
     return outlineInteraction.getSourceLineHeight();
   }
 
-  function handleDeletedImageResources(event: EditorImageDeletionEvent) {
+  function handleDeletedImageResources(event: EditorImageDeletionEvent, sourceTabId = activeTabId) {
     const loader = getImageLoader();
     if (!imageSettings.autoDeleteUnusedLocalImages || !loader?.remove || event.srcs.length === 0) {
       return;
     }
 
-    const context = getImageContext();
+    const context = getImageContext(sourceTabId);
     Promise.allSettled(event.srcs.map((src) => loader.remove!(src, context))).then((results) => {
       const removed = results.filter(
         (result) => result.status === 'fulfilled' && result.value.removed,
@@ -6412,12 +7368,13 @@
     });
   }
 
-  function getImageContext(): ImageContext {
-    const documentPath = nativePath ?? filePath;
+  function getImageContext(sourceTabId = activeTabId): ImageContext {
+    const tab = tabs.find((candidate) => candidate.id === sourceTabId);
+    const documentPath = tab ? tab.nativePath ?? tab.filePath : nativePath ?? filePath;
     const documentDir = getParentPath(documentPath);
     return {
       documentPath,
-      documentFileName: fileName,
+      documentFileName: tab?.fileName ?? fileName,
       documentDir,
       assetsDirectory: documentDir ? joinPath(documentDir, 'assets') : undefined,
       settings: imageSettings,
@@ -6471,7 +7428,40 @@
   <title>{t.appName()}</title>
 </svelte:head>
 
+{#if tabDragGhost}
+  <TabDragGhost {...tabDragGhost} />
+{/if}
+
 <AppShell
+  {workspaceItems}
+  {activeItemId}
+  {selectWorkspaceItem}
+  closeWorkspaceItem={async (itemId, event) => { await closeWorkspaceItem(itemId, event); }}
+  {getWorkspaceItemActions}
+  onWorkspaceItemPointerDown={beginWorkspacePointerDrag}
+  onDropZones={handleTabDropZones}
+  {dropHighlight}
+  {workspaceInteractionDisabled}
+  {workspaceItemFeaturesEnabled}
+  comparisonItem={activeComparison}
+  {comparisonTabs}
+  {comparisonRuntimes}
+  onComparisonResize={resizeComparison}
+  onComparisonMemberPointerDown={beginMemberPointerDrag}
+  comparisonPaneProps={{
+    interfaceLocale, outlineVisible, frontMatterEditRequest: frontMatterFocusRequest,
+    focusDocument: focusComparisonDocument, onReady: handleDocumentPaneReady,
+    onMemberPointerDown: beginMemberPointerDrag,
+    onSourceSelection: (tabId, range) => { if (activeTabId === tabId) handleSourceSelectionChange({ ...range, documentId: tabId }); },
+    onContextMenu: (tabId, event) => { focusComparisonDocument(tabId); handleWorkspaceContextMenu(event); },
+    openContextMenu: openApplicationContextMenu, copyContextText: copyPlainText,
+    setStatusMessage: (value) => { statusMessage = value; },
+    flushRuntime: flushDocumentRuntime, jumpToOutline: jumpDocumentOutline, moveOutline: moveDocumentOutline,
+  }}
+  sourceRuntimeState={documentRuntimes.get(activeTabId)?.sourceState}
+  onSourceRuntimeStateChange={rememberSourceRuntimeState}
+  onRuntimeReady={handleSingleRuntimeReady}
+  onRuntimeDestroy={handleSingleRuntimeDestroy}
   exitInProgress={exitRequestId !== null}
   {interfaceLocale}
   {appBootState}
@@ -6528,6 +7518,7 @@
   {collapsedOutlineIds}
   {visibleOutlineIds}
   stats={effectiveStats}
+  {statsStatus}
   {writingStatsVisible}
   {writingStatsMetric}
   {readingTimeVisible}

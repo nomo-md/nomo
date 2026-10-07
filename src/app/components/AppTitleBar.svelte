@@ -45,6 +45,7 @@
   export let filePath: string;
   export let dirty: boolean;
   export let largeDocumentMode: boolean;
+  export let splitModeDisabled = false;
   export let getCompactPath: (path: string) => string;
   export let toggleMenu: (menu: string) => void;
   export let closeMenu: (menu: string) => void;
@@ -863,7 +864,7 @@
                 <button
                   role="menuitemradio"
                   aria-checked={mode === 'split'}
-                  disabled={largeDocumentMode}
+                  disabled={largeDocumentMode || splitModeDisabled}
                   on:click={() => finish(() => setMode('split'), 'view')}>{t.splitMode()}</button
                 >
                 <button on:click={() => finish(toggleOutlineVisible, 'view')}

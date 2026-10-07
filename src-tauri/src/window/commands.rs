@@ -479,6 +479,21 @@ pub(crate) fn close_window(
     result
 }
 
+/// 移交完成后的空源窗口先完成设置 owner 握手，跳过文档确认及启动快照。
+pub(crate) fn close_transferred_empty_window(window: &WebviewWindow) -> Result<(), String> {
+    if request_settings_close_before_owner(window.app_handle(), window.label())? {
+        return Ok(());
+    }
+    allow_next_close(window.label())?;
+    let result = window
+        .close()
+        .map_err(|error| format!("关闭移空窗口失败：{error}"));
+    if result.is_err() {
+        clear_next_close(window.label());
+    }
+    result
+}
+
 #[tauri::command]
 pub(crate) fn mark_settings_close_handler_ready(
     window: tauri::WebviewWindow,

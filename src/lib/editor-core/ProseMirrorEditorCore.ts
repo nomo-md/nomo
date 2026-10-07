@@ -1,3 +1,4 @@
+import { serializeClipboardText } from './markdownSerialization';
 import {
   chainCommands,
   createParagraphNear,
@@ -32,6 +33,7 @@ import { MermaidBlockNodeView } from './nodeViews/MermaidBlockNodeView';
 import { CalloutNodeView } from './nodeViews/CalloutNodeView';
 import { HorizontalRuleNodeView } from './nodeViews/HorizontalRuleNodeView';
 import { TocBlockNodeView } from './nodeViews/TocBlockNodeView';
+import { commitActiveEdit } from './nodeViews/activeEditRegistry';
 import {
   executeEditorCommand,
   insertSoftLineBreak,
@@ -146,38 +148,10 @@ function editorThemesEqual(
   );
 }
 
-function serializeClipboardText(slice: Slice): string {
-  let text = '';
-  let hasBlock = false;
-  let previousBlockWasEmptyParagraph = false;
-
-  slice.content.nodesBetween(0, slice.content.size, (node) => {
-    const nodeText = node.isText
-      ? (node.text ?? '')
-      : node.type.name === 'hard_break'
-        ? '\n'
-        : node.isLeaf
-          ? (node.type.spec.leafText?.(node) ?? '')
-          : '';
-
-    if (node.isBlock && ((node.isLeaf && nodeText) || node.isTextblock)) {
-      if (hasBlock) {
-        text += previousBlockWasEmptyParagraph ? '\n' : '\n\n';
-      }
-      hasBlock = true;
-      previousBlockWasEmptyParagraph =
-        node.type === schema.nodes.paragraph && node.content.size === 0;
-    }
-
-    text += nodeText;
-  });
-
-  return text;
-}
-
 export class ProseMirrorEditorCore implements EditorCore {
   private target: HTMLElement | null;
   private view: EditorView | null = null;
+  private suspendedState: EditorState | null = null;
   private markdown: string;
   private originalMarkdown: string;
   private semanticViewDirty = false;
@@ -223,10 +197,11 @@ export class ProseMirrorEditorCore implements EditorCore {
 
   mount(target: HTMLElement): void {
     this.assertActive();
+    if (this.view && this.target === target) return;
+    this.unmount();
     this.target = target;
-    this.view?.destroy();
     this.view = new EditorView(target, {
-      state: this.createState(this.markdown),
+      state: this.suspendedState ?? this.createState(this.markdown),
       dispatchTransaction: (transaction) => this.dispatchTransaction(transaction),
       editable: () => this.isEditable(),
       clipboardTextSerializer: (slice) => this.serializeClipboardText(slice),
@@ -246,7 +221,7 @@ export class ProseMirrorEditorCore implements EditorCore {
       },
       nodeViews: {
         code_block: (node, view, getPos) =>
-          new CodeBlockNodeView(node, view, getPos as () => number),
+          new CodeBlockNodeView(node, view, getPos as () => number, this.isRestoringNodeSelection(getPos)),
         image: (node, view) =>
           new ImageNodeView(node, view, () => this.options.getImageContext?.() ?? {}),
         html_block: (node, view, getPos) =>
@@ -254,13 +229,13 @@ export class ProseMirrorEditorCore implements EditorCore {
         comment_block: (node, view, getPos) =>
           new CommentBlockNodeView(node, view, getPos as () => number),
         comment_inline: (node, view, getPos) =>
-          new CommentInlineNodeView(node, view, getPos as () => number),
+          new CommentInlineNodeView(node, view, getPos as () => number, this.isRestoringNodeSelection(getPos)),
         footnote_ref: (node, view) => new FootnoteRefNodeView(node, view),
         footnote_def: (node, view) => new FootnoteDefNodeView(node, view),
         math_inline: (node, view, getPos) =>
-          new MathInlineNodeView(node, view, getPos as () => number),
+          new MathInlineNodeView(node, view, getPos as () => number, this.isRestoringNodeSelection(getPos)),
         math_block: (node, view, getPos) =>
-          new MathBlockNodeView(node, view, getPos as () => number),
+          new MathBlockNodeView(node, view, getPos as () => number, this.isRestoringNodeSelection(getPos)),
         mermaid_block: (node, view, getPos) =>
           new MermaidBlockNodeView(node, view, getPos as () => number),
         callout: (node, view, getPos) => new CalloutNodeView(node, view, getPos as () => number),
@@ -269,16 +244,45 @@ export class ProseMirrorEditorCore implements EditorCore {
         toc_block: (node, view, getPos) => new TocBlockNodeView(node, view, getPos as () => number),
       },
     });
+    this.suspendedState = null;
+    this.semanticViewDirty = false;
     this.refreshInitialEditableState();
   }
 
+  private isRestoringNodeSelection(getPos: () => number | undefined): boolean {
+    const selection = this.suspendedState?.selection;
+    return selection instanceof NodeSelection && selection.from === getPos();
+  }
+
+  commitPendingEdits(): void {
+    this.assertActive();
+    if (this.view) commitActiveEdit(this.view);
+    this.flushPendingMarkdownSync();
+  }
+
+  unmount(): void {
+    this.assertActive();
+    this.commitPendingEdits();
+    this.clearPlainTextPasteRequest();
+    if (!this.view) return;
+    this.clearBlockAlignmentGaps();
+    this.suspendedState = this.semanticViewDirty ? null : this.view.state;
+    this.view.destroy();
+    this.view = null;
+    this.target = null;
+    this.syncSnapshot = null;
+  }
+
   destroy(): void {
+    if (this.destroyed) return;
+    this.unmount();
     this.clearMarkdownSyncTimer();
     this.clearPlainTextPasteRequest();
     this.listeners.clear();
     this.view?.destroy();
     this.view = null;
     this.target = null;
+    this.suspendedState = null;
     this.destroyed = true;
   }
 
@@ -519,7 +523,7 @@ export class ProseMirrorEditorCore implements EditorCore {
 
   flushMarkdown(): string {
     this.assertActive();
-    this.flushPendingMarkdownSync();
+    this.commitPendingEdits();
     return this.markdown;
   }
 
@@ -571,6 +575,7 @@ export class ProseMirrorEditorCore implements EditorCore {
     this.dirty = options?.dirty ?? this.markdown !== this.originalMarkdown;
     if (delaySemanticSync) {
       this.semanticViewDirty = true;
+      this.suspendedState = null;
       if (shouldReportImageDeletion(options)) {
         this.notifyDeletedImageSrcs(
           findFullyRemovedMarkdownImageSrcs(previousMarkdown, this.markdown),
@@ -590,10 +595,12 @@ export class ProseMirrorEditorCore implements EditorCore {
 
   getSnapshot(): EditorSnapshot {
     this.assertActive();
-    this.flushPendingMarkdownSync();
+    this.commitPendingEdits();
+    const selection = (this.view?.state ?? this.suspendedState)?.selection;
     return {
       markdown: this.markdown,
       version: this.version,
+      selection: selection ? { anchor: selection.anchor, head: selection.head } : undefined,
       meta: {
         mode: this.runtime.mode,
       },
@@ -608,8 +615,16 @@ export class ProseMirrorEditorCore implements EditorCore {
     this.originalDoc = this.parseSemanticDocument(this.markdown).doc;
     this.version = snapshot.version;
     this.dirty = true;
-    this.replaceViewState(this.markdown);
+    this.replaceViewState(this.markdown, snapshot.selection);
     this.emit('restore-snapshot');
+  }
+
+  restoreSelectionSnapshot(selection: { anchor: number; head: number }): void {
+    this.assertActive();
+    const state = this.view?.state ?? this.suspendedState ?? this.createState(this.markdown);
+    const nextState = this.restoreSelection(state, selection);
+    if (this.view) this.view.dispatch(state.tr.setSelection(nextState.selection));
+    else this.suspendedState = nextState;
   }
 
   focus(): void {
@@ -1039,6 +1054,17 @@ export class ProseMirrorEditorCore implements EditorCore {
     }
 
     if (!this.view) {
+      // 异步图片导入可能在标签挂起后完成，仍在来源文档的历史中提交。
+      if (command.type === 'insertImage' && this.runtime.mode === 'semantic') {
+        const state = this.suspendedState ?? this.createState(this.markdown);
+        this.suspendedState = state;
+        const image = schema.nodes.image.create({
+          src: command.src, alt: command.alt ?? null, title: command.title ?? null,
+          width: command.width ?? null, align: command.align ?? null,
+        });
+        this.dispatchTransaction(state.tr.replaceSelectionWith(image, false));
+        return true;
+      }
       return false;
     }
 
@@ -1086,7 +1112,8 @@ export class ProseMirrorEditorCore implements EditorCore {
   updateOptions(options: Partial<EditorRuntimeOptions>): void {
     this.assertActive();
     if (options.mode && options.mode !== this.runtime.mode) {
-      this.flushPendingMarkdownSync();
+      if (this.view) commitActiveEdit(this.view, true);
+      this.commitPendingEdits();
     }
     this.runtime = {
       ...this.runtime,
@@ -1121,6 +1148,7 @@ export class ProseMirrorEditorCore implements EditorCore {
 
   private createChangeEvent(reason: string): EditorChangeEvent {
     return {
+      contentRevision: this.contentRevision,
       markdown: this.markdown,
       version: this.version,
       dirty: this.dirty,
@@ -1156,7 +1184,7 @@ export class ProseMirrorEditorCore implements EditorCore {
         blockquoteInputPlugin(),
         history(),
         taskListPlugin(),
-        mathInlineInputPlugin(),
+        mathInlineInputPlugin(() => this.view),
         inlineMarkdownMarkInputPlugin(),
         linkInteractionPlugin({ openLink: this.options.onOpenLink }),
         codeHighlightPlugin(),
@@ -1309,14 +1337,14 @@ export class ProseMirrorEditorCore implements EditorCore {
             const nodeAfter = $from.nodeAfter;
             if (nodeAfter?.type.name === 'math_inline') {
               if (dispatch) {
-                MathInlineNodeView.requestKeyboardEntry('start');
+                MathInlineNodeView.requestKeyboardEntry('start', this.view ?? undefined);
                 dispatch(state.tr.setSelection(NodeSelection.create(state.doc, $from.pos)));
               }
               return true;
             }
             if (nodeAfter?.type.name === 'comment_inline') {
               if (dispatch) {
-                CommentInlineNodeView.requestKeyboardEntry('start');
+                CommentInlineNodeView.requestKeyboardEntry('start', this.view ?? undefined);
                 dispatch(state.tr.setSelection(NodeSelection.create(state.doc, $from.pos)));
               }
               return true;
@@ -1329,7 +1357,7 @@ export class ProseMirrorEditorCore implements EditorCore {
             const nodeBefore = $from.nodeBefore;
             if (nodeBefore?.type.name === 'math_inline') {
               if (dispatch) {
-                MathInlineNodeView.requestKeyboardEntry('end');
+                MathInlineNodeView.requestKeyboardEntry('end', this.view ?? undefined);
                 dispatch(
                   state.tr.setSelection(
                     NodeSelection.create(state.doc, $from.pos - nodeBefore.nodeSize),
@@ -1340,7 +1368,7 @@ export class ProseMirrorEditorCore implements EditorCore {
             }
             if (nodeBefore?.type.name === 'comment_inline') {
               if (dispatch) {
-                CommentInlineNodeView.requestKeyboardEntry('end');
+                CommentInlineNodeView.requestKeyboardEntry('end', this.view ?? undefined);
                 dispatch(
                   state.tr.setSelection(
                     NodeSelection.create(state.doc, $from.pos - nodeBefore.nodeSize),
@@ -1360,7 +1388,7 @@ export class ProseMirrorEditorCore implements EditorCore {
           enterMathEditAt: (view, pos, caret) => MathBlockNodeView.enterEditAt(view, pos, caret),
           enterMermaidEditAt: (view, pos, caret) =>
             MermaidBlockNodeView.enterEditAt(view, pos, caret),
-          prepareMathKeyboardEntry: (caret) => MathBlockNodeView.prepareKeyboardEntry(caret),
+          prepareMathKeyboardEntry: (caret) => MathBlockNodeView.prepareKeyboardEntry(caret, this.view ?? undefined),
         }),
         contextMenuPlugin({
           onOpen: (event) => this.options.onContextMenuOpen?.(event),
@@ -1374,14 +1402,13 @@ export class ProseMirrorEditorCore implements EditorCore {
   }
 
   private dispatchTransaction(transaction: Transaction): void {
-    if (!this.view) {
-      return;
-    }
-
-    const previousDoc = this.view.state.doc;
-    const previousSelection = this.view.state.selection;
-    const nextState = this.view.state.apply(transaction);
-    this.view.updateState(nextState);
+    const currentState = this.view?.state ?? this.suspendedState;
+    if (!currentState) return;
+    const previousDoc = currentState.doc;
+    const previousSelection = currentState.selection;
+    const nextState = currentState.apply(transaction);
+    if (this.view) this.view.updateState(nextState);
+    else this.suspendedState = nextState;
 
     if (isSemanticBlockAlignmentTransaction(transaction)) {
       return;
@@ -1401,6 +1428,12 @@ export class ProseMirrorEditorCore implements EditorCore {
     this.version += 1;
     this.emit(transaction.docChanged ? 'content-pending' : 'transaction');
     if (!nextState.selection.eq(previousSelection)) {
+      this.options.onSelectionSnapshotChange?.({
+        selection: nextState.selection.empty ? null : {
+          anchor: nextState.selection.anchor, head: nextState.selection.head,
+        },
+        contentRevision: this.contentRevision,
+      });
       this.options.onSelectionChange?.(this.createSelectionEvent());
     }
   }
@@ -1422,6 +1455,24 @@ export class ProseMirrorEditorCore implements EditorCore {
       selectedMarkdown,
       caret: this.getScrollSyncCaret() ?? undefined,
     };
+  }
+
+  setSavedMarkdownBaseline(markdown: string): void {
+    this.assertActive();
+    this.commitPendingEdits();
+    this.originalMarkdown = updateTocBlocks(markdown);
+    this.originalDoc = this.parseSemanticDocument(this.originalMarkdown).doc;
+    this.dirty = this.markdown !== this.originalMarkdown;
+    this.emit('saved-baseline');
+  }
+
+  getDocumentStatsSnapshot(): Record<string, unknown> | null {
+    return this.view?.state.doc.toJSON() ?? null;
+  }
+
+  getSelectionStatsSnapshot(): { anchor: number; head: number } | null {
+    const selection = this.view?.state.selection;
+    return selection && !selection.empty ? { anchor: selection.anchor, head: selection.head } : null;
   }
 
   private scheduleMarkdownSync(): void {
@@ -1468,6 +1519,11 @@ export class ProseMirrorEditorCore implements EditorCore {
 
   private replaceViewState(markdown: string, selection?: { anchor: number; head: number }, preserveCodeViewport = false): void {
     if (!this.view) {
+      this.suspendedState = this.createState(markdown);
+      if (selection) this.suspendedState = this.restoreSelection(this.suspendedState, selection);
+      this.semanticViewDirty = false;
+      this.syncRenderRevision += 1;
+      this.syncSnapshot = null;
       return;
     }
     if (this.runtime.mode === 'source' && markdown.length > LARGE_DOCUMENT_SEMANTIC_LIMIT) {

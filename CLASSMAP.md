@@ -41,7 +41,7 @@
 | ProseMirror 核心实现 | `src/lib/editor-core/ProseMirrorEditorCore.ts` | `src/lib/editor-core/clipboardMarkdown.ts`, `markdown.ts`, `schema.ts`, plugins, nodeViews | EditorView 生命周期、事务、模式切换、命令执行、选区 Markdown 通知、剪贴板负载与右键目标事务 |
 | 剪贴板 Markdown 判定 | `src/lib/editor-core/clipboardMarkdown.ts` | `src/lib/editor-core/ProseMirrorEditorCore.ts`, `markdown.ts` | 修改纯文本/Markdown 等价判定、粘贴 Slice 或纯文本事务标记 |
 | Schema 定义 | `src/lib/editor-core/schema.ts` | `src/lib/editor-core/callout/calloutSchema.ts` | 新增/修改节点或 mark 类型 |
-| Markdown 解析与序列化 | `src/lib/editor-core/markdown.ts` | `src/lib/editor-core/callout/calloutParser.ts`, `calloutSerializer.ts`, `html/` | Markdown 与 ProseMirror doc 互转规则变更 |
+| Markdown 解析与序列化 | `src/lib/editor-core/markdown.ts` | `markdownTokenizer.ts`, `markdownSerialization.ts`, `src/lib/editor-core/callout/`, `html/` | Markdown 与 ProseMirror doc 互转规则变更；纯 tokenizer 与序列化可供 Worker 复用 |
 | Markdown 源码行到语义块导航 | `src/lib/editor-core/markdown.ts`, `src/lib/editor-core/ProseMirrorEditorCore.ts` | `src/app/App.svelte` | 诊断、大纲等功能需要从源码行定位到最近的语义顶层块 |
 | 双栏内容滚动跟随 | `src/app/services/markdownScrollSync.ts`, `src/app/services/markdownScrollSyncWorkspace.ts` | `src/app/components/EditorWorkspace.svelte`, `src/app/components/MarkdownSourceEditor.svelte`, `src/lib/editor-core/ProseMirrorEditorCore.ts`, `src/lib/editor-core/scrollSyncMapping.ts` | 修改30%参考线插值、滚动主栏接管、光标安全区、内容修订门控或几何失效处理 |
 | 双栏旧等高兼容接口 | `src/app/services/markdownBlockAlignment.ts` | `src/lib/editor-core/plugins/blockAlignment.ts`, `src/lib/editor-core/blockAlignment.test.ts` | 维护旧补偿接口与测试；当前双栏运行路径不调用这些接口 |
@@ -56,7 +56,7 @@
 
 | Responsibility | Primary code | Related code | Change when |
 |---|---|---|---|
-| 代码块 NodeView | `src/lib/editor-core/nodeViews/CodeBlockNodeView.ts` | `src/lib/services/shikiCodeTokenizer.ts`, `renderers.ts`, `ProseMirrorEditorCore.ts` | 代码块展示/编辑/高亮、滚动位置保留及同文档刷新恢复 |
+| 代码块 NodeView | `src/lib/editor-core/nodeViews/CodeBlockNodeView.ts` | `src/lib/services/shikiCodeTokenizer.ts`, `src/lib/services/logger.ts`, `renderers.ts`, `ProseMirrorEditorCore.ts`, `nodeViews/activeEditRegistry.ts` | 代码块展示/编辑/高亮、Tab / Shift+Tab 选区整行缩进与原生撤销、后台提交保留选区、滚动位置保留及同文档刷新恢复 |
 | 图片 NodeView | `src/lib/editor-core/nodeViews/ImageNodeView.ts` | `src/app/services/desktopImageLoader.ts` | 图片加载/对齐/尺寸/右键行为变更 |
 | 公式 NodeView | `src/lib/editor-core/nodeViews/MathBlockNodeView.ts`, `MathInlineNodeView.ts` | `src/lib/services/katexMathRenderer.ts` | 公式渲染/编辑体验变更 |
 | 图表 NodeView | `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts` | `src/lib/services/mermaidDiagramRenderer.ts` | Mermaid 图表渲染变更 |
@@ -66,7 +66,7 @@
 | 注释块/行内注释 NodeView | `src/lib/editor-core/nodeViews/CommentBlockNodeView.ts`, `CommentInlineNodeView.ts` | `src/lib/editor-core/nodeViews/activeEditRegistry.ts` | 注释卡片展示/编辑/编辑态协调 |
 | 脚注 NodeView | `src/lib/editor-core/nodeViews/FootnoteDefNodeView.ts`, `FootnoteRefNodeView.ts` | — | 脚注定义/引用展示、跳转、预览 |
 | 分割线 NodeView | `src/lib/editor-core/nodeViews/HorizontalRuleNodeView.ts` | — | 水平分割线渲染/选中 |
-| 编辑态注册表 | `src/lib/editor-core/nodeViews/activeEditRegistry.ts` | `CommentInlineNodeView.ts`, `CommentBlockNodeView.ts` | 跨 NodeView 编辑态互斥协调 |
+| 编辑态注册表 | `src/lib/editor-core/nodeViews/activeEditRegistry.ts` | `CodeBlockNodeView.ts`, `CommentInlineNodeView.ts`, `CommentBlockNodeView.ts`, `ProseMirrorEditorCore.ts` | 每篇文档内编辑态互斥；代码块后台提交保留编辑态，模式切换结束编辑 |
 
 ### 编辑器插件
 
@@ -95,9 +95,14 @@
 | 文档操作控制器 | `src/app/services/documentActionsController.ts` | `src/app/services/documentFiles.ts`, `tabs.ts`, `recoveryDraft.ts` | 打开/保存/另存/自动保存/外部变更 |
 | 编辑器链接目标解析 | `src/app/services/documentLinkNavigation.ts` | `src/app/App.svelte`, `src-tauri/src/external_link.rs` | 相对路径、标题锚点、应用内文档与本地附件导航规则变更 |
 | 标签页状态管理 | `src/app/services/tabs.ts` | `src/app/types.ts` | 标签页创建/复用/状态写入 |
+| 组合标签模型 | `src/app/services/workspaceItems.ts` | `src/app/types.ts`, `src/app/App.svelte`, `src/app/components/DocumentTabs.svelte` | 两篇 Markdown 的归属、成组、拆组、交换与损坏元数据降级 |
+| 双文档运行时与分栏 | `src/app/components/ComparisonWorkspace.svelte`, `ComparisonPane.svelte` | `src/app/services/markdownDocumentRuntime.ts`, `src/app/App.svelte`, `EditorWorkspace.svelte` | 组合共享模式、成员焦点、独立编辑 / 滚动和宽度恢复 |
+| 标签跨窗口移交 | `src/app/services/workspaceTransferController.ts` | `src/app/services/tabTransfer.ts`, `src-tauri/src/window/tab_transfer.rs`, `src-tauri/src/window/open_targets.rs` | prepare / target-ready / commit / cancel、文档原子归属、异常恢复和空源窗口关闭 |
+| Windows 标签屏幕拖动 | `src-tauri/src/window/tab_drag.rs` | `src/app/components/DocumentTabs.svelte`, `src/app/App.svelte`, `src/app/services/tabTransfer.ts` | Pointer 转原生鼠标追踪、DPI / 屏幕落点和拖动取消 |
+| 标签标题拖影 | `src/app/components/TabDragGhost.svelte` | `src/app/App.svelte`, `src/app/components/DocumentTabs.svelte`, `src/app/components/ComparisonPane.svelte`, `src-tauri/src/window/tab_drag.rs` | 窗口内跟随原生鼠标逻辑坐标的普通 / 组合 / 成员标题预览及结束清理 |
 | 启动工作区与统一退出 | `src-tauri/src/window/workspace_lifecycle.rs` | `src/app/App.svelte`, `src-tauri/src/window/commands.rs`, `src-tauri/src/lib.rs` | 最后实际关闭窗口快照、跨窗口退出确认、保存失败与超时取消 |
 | 最近打开与空白页入口 | `src/app/components/RecentOpenPopover.svelte` | `src/app/components/EmptyWorkspace.svelte`, `src/app/components/AppTitleBar.svelte`, `src-tauri/src/config/commands.rs` | 最近记录浮层、原子删除、跨窗口同步与主动打开排序 |
-| 工作区持久化 | `src/app/services/workspacePersistence.ts` | `src/app/App.svelte`, `src/lib/desktop/tauriStorage.ts` | 工作区 v2 元数据、草稿引用、旧 workspaceTabs 迁移 |
+| 工作区持久化 | `src/app/services/workspacePersistence.ts` | `src/app/App.svelte`, `src/lib/desktop/tauriStorage.ts` | 工作区 v4 元数据、组合项、草稿引用、v3/v2/旧 workspaceTabs 迁移 |
 | 阅读位置持久化 | `src/app/services/readingPosition.ts` | `src/app/App.svelte`, `src/app/services/outlineNavigation.ts` | Markdown 文件按路径保存/恢复统一阅读语义锚点 |
 | 恢复草稿 | `src/app/services/recoveryDraft.ts` | `src/app/services/documentActionsController.ts` | 异常退出后草稿写入/恢复 |
 | Markdown 桥接 | `src/lib/markdown/MarkdownBridge.ts` | `src/lib/markdown/frontMatter.ts` | front matter 与正文分离/合并规则变更 |
@@ -128,7 +133,9 @@
 
 | Responsibility | Primary code | Related code | Change when |
 |---|---|---|---|
-| 大纲服务 | `src/lib/outline/outlineService.ts` | — | 标题大纲/字数统计/阅读统计 |
+| 大纲服务 | `src/lib/outline/outlineService.ts` | `src/lib/outline/writingStats.ts` | 标题大纲与同步统计兼容入口 |
+| 正文统计与范围索引 | `src/lib/outline/writingStats.ts` | `sourceTokenPositions.ts`, `writingStatsEngine.ts`, `writingStatsProtocol.ts` | 中英计数、可见字数、源码/语义选区上下文和索引查询 |
+| 后台统计调度 | `src/app/services/writingStatsController.ts` | `src/lib/outline/writingStats.worker.ts`, `src/app/App.svelte` | 120 ms 防抖、单 Worker、快照缓存、失效门禁及统计状态 |
 | 章节结构重排 | `src/lib/outline/outlineReorder.ts` | `src/lib/editor-core/editorCommands.ts` | 计算章节子树、落点、层级变化、Markdown 重排与标题索引映射 |
 | 大纲交互控制器 | `src/app/services/outlineInteractionController.ts` | `src/app/services/outlineNavigation.ts`, `src/lib/outline/outlineReorder.ts` | 点击定位、章节拖拽编排、源码模式可撤销替换 |
 | 大纲滚动定位 | `src/app/services/outlineNavigation.ts` | `src/app/services/editorInteractionController.ts` | 模式切换/源码与语义视图滚动同步 |
@@ -340,8 +347,8 @@
 **Owns:**
 - 应用核心装配：连接 Tauri、编辑器核心、文件系统、设置、标签页
 - 初始化渲染服务（Shiki、KaTeX、Mermaid、图片加载器）
-- 创建 `EditorCore` 实例
-- 加载设置和 v2 工作区状态，协调草稿恢复与启动冲突选择
+- 按文档 ID 创建、挂起和恢复 `EditorCore` 运行时，保留窗口内编辑历史和阅读位置
+- 加载设置和 v4 工作区状态，协调旧版迁移、组合恢复、草稿恢复与启动冲突选择
 - 协调主题运行时初始化、系统明暗同步、快捷键切换和保存失败回滚
 - 协调打开、保存、自动保存、模式切换、外部文件打开、关闭确认
 - 统一路由菜单、最近记录、系统文件管理器和文件树打开请求，并串行协调空窗口复用与跨窗口去重
@@ -386,6 +393,7 @@
 - 通过 props 和回调将 App.svelte 的状态下发给子组件
 - Markdown 工具栏的收展区域和右侧展开柄
 - 装配工作区联合轮廓，并转发活动标签几何与主题更新键
+- 装配双文档 ComparisonWorkspace、成员运行时与焦点回调，并禁用组合的小窗 / 同文档双栏入口
 - 在 Markdown 小窗模式下隐藏常规 chrome，并在可编辑编辑器与大文档只读预览之间选择内容视图
 - 挂载全窗口右键菜单兜底策略，并把统一菜单入口下发给标题栏、文件树、标签栏和大纲
 
@@ -395,7 +403,7 @@
 
 **Called by:** `src/app/App.svelte`
 
-**Depends on:** `AppTitleBar.svelte`, `MarkdownMiniLargePreview.svelte`, `ExplorerSidebar.svelte`, `DocumentTabs.svelte`, `WorkspaceSurface.svelte`, `EditorToolbar.svelte`, `EditorWorkspace.svelte`, `StatusBar.svelte`, `ConfirmDialog.svelte`, `CloseWindowBehaviorDialog.svelte`, `FolderOpenDialog.svelte`, `EmptyWorkspace.svelte`, `SearchReplacePanel.svelte`
+**Depends on:** `AppTitleBar.svelte`, `MarkdownMiniLargePreview.svelte`, `ExplorerSidebar.svelte`, `DocumentTabs.svelte`, `WorkspaceSurface.svelte`, `EditorToolbar.svelte`, `EditorWorkspace.svelte`, `ComparisonWorkspace.svelte`, `StatusBar.svelte`, `ConfirmDialog.svelte`, `CloseWindowBehaviorDialog.svelte`, `FolderOpenDialog.svelte`, `EmptyWorkspace.svelte`, `SearchReplacePanel.svelte`
 
 **Change this when:**
 - 调整整体应用布局结构
@@ -721,10 +729,11 @@
 - 标签页 UI：展示打开文档、切换标签、关闭标签
 - 活动标签指示器的定位与 GSAP 滑动动画，以及相对工作区的逐帧几何回调
 - 固定预览标签状态
+- 投影 single / comparison 外层项、组合菜单、Pointer 起点、可见标签落点与插入 / 成组提示
 - 标签项及标签栏空白区域的菜单项，并通过应用级菜单入口显示
 
 **Does not own:**
-- 不拥有标签页状态管理（由 tabs.ts 和 documentActionsController.ts 管理）
+- 不拥有文档或外层项状态管理（由 tabs.ts、workspaceItems.ts 和 App.svelte 管理）
 
 **Called by:** `src/app/components/AppShell.svelte`
 
@@ -1591,7 +1600,7 @@
 
 **Owns：**
 - 从 Markdown 计算标题大纲
-- 行数、词数、可见字数、源码字符数和阅读统计
+- 同步统计兼容入口；词数、字数与范围查询由 `writingStats.ts` 负责
 
 **Does not own：**
 - 不拥有大纲 UI 展示（在 EditorWorkspace.svelte 中）
@@ -1599,11 +1608,11 @@
 
 **Called by:** `src/app/App.svelte`, `src/app/services/documentActionsController.ts`
 
-**Depends on:** `markdown-it`
+**Depends on:** `src/lib/outline/writingStats.ts`
 
 **Change this when：**
 - 修改大纲提取算法
-- 修改字数/阅读统计逻辑
+- 修改同步统计兼容入口（计数规则在 writingStats.ts）
 
 **Do not change this when：**
 - 修改大纲面板 UI
@@ -2150,10 +2159,10 @@
 **Kind:** service
 
 **Owns:**
-- `PersistedWorkspaceState v2` 的生成、归一化和旧 `workspaceTabs:*` 配置迁移
+- `PersistedWorkspaceState v4` 的生成、组合元数据归一化及 v3/v2/旧 `workspaceTabs:*` 配置迁移
 - 工作区标签元数据持久化边界：禁止把 `markdown` / `savedMarkdown` 写回配置
 - 根据 dirty、未命名标签和 `draftId` 写入或清理工作区草稿正文文件
-- 将持久化标签元数据还原为运行时标签所需的基础结构
+- 将持久化标签元数据还原为运行时标签所需的基础结构；活动组合两篇立即加载，其他项延迟恢复
 
 **Does not own:**
 - 不拥有启动时磁盘文件读取与冲突 UI 决策（在 `App.svelte` 中协调）
@@ -2170,6 +2179,146 @@
 - 修改配置正文剥离规则
 
 **Related tests:** `src/app/services/workspacePersistence.test.ts`
+
+**Confidence:** high
+
+---
+
+### `src/app/services/workspaceItems.ts`
+
+**Kind:** model / utility
+
+**Owns:** single / comparison 外层项创建、文档唯一归属、两篇不同 Markdown 约束、无损降级、移除成员、取消组合与交换左右。
+
+**Does not own:** 编辑器运行时、DOM、跨窗口协议或磁盘持久化。
+
+**Called by:** `src/app/App.svelte`, `workspacePersistence.ts`, `workspaceTransferController.ts`
+
+**Depends on:** `src/app/types.ts`
+
+**Change this when:** 修改组合成员约束、外层项 ID 或归属归一化策略。
+
+**Related tests:** 现有 `workspacePersistence.test.ts` 间接覆盖持久化入口。
+
+**Confidence:** high
+
+---
+
+### `src/app/services/markdownDocumentRuntime.ts`
+
+**Kind:** runtime contract
+
+**Owns:** 按文档 ID 保存 EditorCore、CodeMirror 状态、DOM 挂载引用、交互 / 图片处理器、大纲、光标和阅读位置的运行时契约。
+
+**Does not own:** 实际创建、挂起、销毁或归属变更（由 `App.svelte` 协调）；不写入持久化配置。
+
+**Called by:** `src/app/App.svelte`, `ComparisonPane.svelte`, `ComparisonWorkspace.svelte`, `AppShell.svelte`
+
+**Depends on:** `EditorCore`, `markdownSourceEditor.ts`, `editorInteractionController.ts`, `imageInsertion.ts`, `outlineInteractionController.ts`
+
+**Change this when:** 修改窗口内编辑器状态保留或成员视图重挂载需要的字段。
+
+**Related tests:** —
+
+**Confidence:** high
+
+---
+
+### `src/app/components/ComparisonWorkspace.svelte` / `ComparisonPane.svelte`
+
+**Kind:** component
+
+**Owns:** 两文档分栏、共享模式和大文件源码降级、比例拖动 / 键盘调整、成员标题拖动、聚焦回调、独立视图挂载、源码状态及阅读位置恢复。
+
+**Does not own:** 成组 / 拆组数据变更、保存 / 关闭确认、跨窗口提交或文件归属。
+
+**Called by:** `src/app/components/AppShell.svelte`
+
+**Depends on:** `EditorWorkspace.svelte`, `markdownDocumentRuntime.ts`, `outlineInteractionController.ts`, `outlineNavigation.ts`
+
+**Change this when:** 修改组合分栏交互、成员挂载清理、焦点或阅读位置恢复。
+
+**Related tests:** —
+
+**Confidence:** high
+
+---
+
+### `src/app/services/workspaceTransferController.ts`
+
+**Kind:** controller
+
+**Owns:** 单篇、整组和组合成员移交的前端暂存、接收完整性、原子可见状态应用、超时协调、幂等确认和提交后查询 / 重放。
+
+**Does not own:** Win32 屏幕命中、磁盘事务或编辑器实例生命周期；通过 App 回调刷新临时编辑并应用工作区。
+
+**Called by:** `src/app/App.svelte`
+
+**Depends on:** `workspaceItems.ts`, `workspacePersistence.ts`, `tabTransfer.ts`
+
+**Change this when:** 修改跨窗口协议协调、前端事务冻结、接收落点或失败恢复。
+
+**Related tests:** —
+
+**Confidence:** high
+
+---
+
+### `src/app/services/tabTransfer.ts`
+
+**Kind:** IPC service / protocol
+
+**Owns:** 移交与落点类型、原生拖动和移交 IPC / 事件适配、当前窗口 revision / ownership epoch 缓存及提交后的 epoch 更新。
+
+**Does not own:** 前端工作区暂存或后端事务实现。
+
+**Called by:** `src/app/App.svelte`, `workspaceTransferController.ts`, `desktopWindow.ts`, `DocumentTabs.svelte`
+
+**Depends on:** `@tauri-apps/api/core`, `@tauri-apps/api/event`, `src/app/types.ts`
+
+**Change this when:** 修改移交命令、事件契约或旧异步快照失效规则。
+
+**Related tests:** —
+
+**Confidence:** high
+
+---
+
+### `src-tauri/src/window/tab_transfer.rs`
+
+**Kind:** transaction / command service
+
+**Owns:** prepare / target-ready / commit / cancel 状态机、两窗工作区与文件归属原子提交、revision / epoch 校验、持久化移交记录、异常退出恢复、新目标窗口登记和空源窗口内部关闭。
+
+**Does not own:** Win32 拖动命中、文档编辑器历史或普通窗口关闭 UI。
+
+**Called by:** `src-tauri/src/lib.rs` 命令注册、`config/commands.rs` 写入门禁、`window/open_targets.rs`、`window/commands.rs`
+
+**Depends on:** `config`, `window/open_targets.rs`, `window/tab_drag.rs`, `window/workspace_lifecycle.rs`, `window/state.rs`
+
+**Change this when:** 修改事务完整性、归属校验、磁盘记录恢复或迁移空窗口关闭规则。
+
+**Related tests:** —
+
+**Confidence:** high
+
+---
+
+### `src-tauri/src/window/tab_drag.rs`
+
+**Kind:** Windows input / command service
+
+**Owns:** 文档窗口落点登记、Win32 鼠标与真实顶层窗口命中、物理屏幕坐标 / DPI 换算、原生拖动 move / drop / cancel 事件；排除未就绪窗口和 Markdown 小窗。
+
+**Does not own:** WebView 原生文件拖入、标签成员校验或跨窗口提交。
+
+**Called by:** `src-tauri/src/lib.rs` 命令注册、`window/tab_transfer.rs`、`window/commands.rs`
+
+**Depends on:** `windows-sys`, `tauri`, `window/tab_transfer.rs`, `window/external_open.rs`, `window/state.rs`
+
+**Change this when:** 修改 Windows 鼠标追踪、跨屏落点、窗口遮挡命中或拖动取消。
+
+**Related tests:** —
 
 **Confidence:** high
 
@@ -2512,7 +2661,7 @@
 - 状态栏 UI：行数/词数/字数/字符统计展示、缩放百分比控制
 
 **Does not own:**
-- 不拥有统计数据计算（在 outlineService.ts 中）
+- 不拥有统计数据计算（正文与范围索引在 writingStats.ts，后台调度在 writingStatsController.ts）
 
 **Called by:** `src/app/components/AppShell.svelte`
 
@@ -2525,7 +2674,7 @@
 **Do not change this when:**
 - 修改统计计算逻辑
 
-**Related tests:** —
+**Related tests:** `src/app/components/StatusBar.test.ts`
 
 **Confidence:** high
 
@@ -3060,13 +3209,14 @@
 **Kind:** utility
 
 **Owns:**
-- 跨 NodeView 编辑态协调注册表
-- 确保同一时刻只有一个 NodeView 处于编辑态
+- 跨 NodeView 编辑态协调注册表，每篇文档独立维护活动编辑实例
+- 同一文档内切换编辑对象时结束上一个编辑态
+- 通过可选原位提交回调，让代码块在后台保存和快照时保留编辑态；模式切换可显式结束编辑态
 
 **Does not own:**
 - 不拥有具体 NodeView 的编辑态实现
 
-**Called by:** `src/lib/editor-core/nodeViews/CommentBlockNodeView.ts`, `src/lib/editor-core/nodeViews/CommentInlineNodeView.ts`
+**Called by:** `src/lib/editor-core/ProseMirrorEditorCore.ts`, `src/lib/editor-core/nodeViews/CodeBlockNodeView.ts`, `src/lib/editor-core/nodeViews/CommentBlockNodeView.ts`, `src/lib/editor-core/nodeViews/CommentInlineNodeView.ts`
 
 **Depends on:** —
 
@@ -3534,7 +3684,7 @@
 **Kind:** entry
 
 **Owns:**
-- 窗口子模块声明：commands、external_open、file_association、menu、os、state、tray
+- 窗口子模块声明：commands、external_open、file_association、menu、open_targets、os、state、tray、workspace_lifecycle、tab_transfer、tab_drag
 
 **Does not own:**
 - 不拥有具体业务逻辑
@@ -3818,6 +3968,53 @@
 - 修改分段编辑器布局、滚动条或加载提示样式
 
 **Related tests:** `src/app/App.layout.test.ts`, `src/app/components/SegmentedTextEditorWorkspace.test.ts`
+
+**Confidence:** high
+
+---
+
+
+### `src/lib/outline/writingStats.ts`
+
+**Kind:** pure statistics / index
+
+**Owns:** 共享 tokenizer 的源码正文位置映射、ProseMirror 正文投影、中英文词边界和 Unicode 可见字符边界、累计范围查询。
+
+**Does not own:** DOM、选区修改、文件 IO 或 Worker 生命周期。
+
+**Related code:** `sourceTokenPositions.ts`, `writingStatsEngine.ts`, `writingStatsProtocol.ts`；后两者管理 Worker 内的单文档缓存与消息契约。
+
+**Related tests:** `src/lib/outline/writingStats.test.ts`, `src/lib/outline/writingStatsEngine.test.ts`
+
+**Confidence:** high
+
+---
+
+### `src/app/services/writingStatsController.ts`
+
+**Kind:** controller
+
+**Owns:** 单个统计 Worker、120 ms 最新选区防抖、内容修订快照、跨模式索引复用、请求合并、文档/模式/选区失效门禁、取消与错误状态。
+
+**Called by:** `src/app/App.svelte`；重计算入口为 `src/lib/outline/writingStats.worker.ts`。
+
+**Related tests:** `src/app/services/writingStatsController.test.ts`
+
+**Confidence:** high
+
+---
+
+### `src/lib/editor-core/markdownTokenizer.ts` / `markdownSerialization.ts`
+
+**Kind:** pure Markdown syntax / serialization
+
+**Owns:** 可复用的 markdown-it 规则工厂、表格/Callout/目录 token 归一化、无 DOM 的 Markdown 与选区/剪贴板纯文本序列化。
+
+**Called by:** `markdown.ts`、正文统计与统计 Worker；原模块继续重导出序列化 API。
+
+**Statistics path:** 语义选区的字符数和行数复用序列化规则流式计量，避免生成完整选区字符串；剪贴板和保存仍使用原有字符串序列化入口。
+
+**Related tests:** `src/lib/editor-core/markdown.test.ts`, `src/lib/editor-core/createEditorCore.test.ts`
 
 **Confidence:** high
 

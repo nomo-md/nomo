@@ -9,6 +9,7 @@ type CodeRange = {
   from: number;
   to: number;
 };
+const codeRangesByDoc = new WeakMap<ProseMirrorNode, CodeRange[]>();
 
 /**
  * 行内代码选区桥接插件。
@@ -20,6 +21,7 @@ export function inlineCodeSelectionBridgePlugin(): Plugin<DecorationSet> {
   return new Plugin({
     state: {
       init(_, state) {
+        codeRangesByDoc.set(state.doc, findCodeRanges(state.doc));
         return buildInlineCodeSelectionBridgeDecorations(
           state.doc,
           state.selection.from,
@@ -27,6 +29,7 @@ export function inlineCodeSelectionBridgePlugin(): Plugin<DecorationSet> {
         );
       },
       apply(tr, value, _oldState, newState) {
+        if (tr.docChanged) codeRangesByDoc.set(newState.doc, findCodeRanges(newState.doc));
         if (tr.docChanged || tr.selectionSet) {
           return buildInlineCodeSelectionBridgeDecorations(
             newState.doc,
@@ -62,7 +65,14 @@ function buildInlineCodeSelectionBridgeDecorations(
     }),
   ];
 
-  for (const range of findCodeRanges(doc)) {
+  const ranges = codeRangesByDoc.get(doc) ?? [];
+  let lo = 0, hi = ranges.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (ranges[mid].to <= from) lo = mid + 1; else hi = mid;
+  }
+  for (let i = lo; i < ranges.length && ranges[i].from < to; i++) {
+    const range = ranges[i];
     const overlap = getSelectionOverlap(range, from, to);
     if (!overlap) continue;
     decorations.push(

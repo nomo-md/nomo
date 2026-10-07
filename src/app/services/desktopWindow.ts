@@ -5,6 +5,7 @@ import {
 } from '@tauri-apps/api/window';
 import { createPerfTimer, logError, logInfo } from '../../lib/services/logger';
 import { getPlatformCapabilities } from './platform';
+import { takeWorkspaceWriteStamp } from './tabTransfer';
 
 export type OpenTarget =
   | { kind: 'documents'; paths: string[] }
@@ -25,6 +26,8 @@ export type OpenTargetRouteDecision =
 export interface WindowOpenTargetsSnapshot {
   folderPath?: string | null;
   filePaths: string[];
+  ownershipEpoch?: number;
+  revision?: number;
 }
 
 function getNewWindowChromeOptions() {
@@ -185,8 +188,9 @@ export async function syncWindowOpenTargets(
   if (!desktopEnabled) {
     return;
   }
+  const stamp = snapshot.ownershipEpoch === undefined ? await takeWorkspaceWriteStamp() : {};
   const { invoke } = await import('@tauri-apps/api/core');
-  await invoke('sync_window_open_targets', { input: snapshot });
+  await invoke('sync_window_open_targets', { input: { ...snapshot, ...stamp } });
 }
 
 export async function openSettingsWindow(desktopEnabled: boolean) {

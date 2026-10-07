@@ -84,6 +84,7 @@ export interface EditorSnapshot {
 }
 
 export interface EditorChangeEvent {
+  contentRevision?: number;
   markdown: string;
   version: number;
   dirty: boolean;
@@ -101,6 +102,11 @@ export interface EditorSelectionEvent {
   selection: EditorSelectionSnapshot | null;
   selectedMarkdown: string;
   caret?: EditorSyncCaret;
+}
+
+export interface EditorSelectionSnapshotEvent {
+  selection: EditorSelectionSnapshot | null;
+  contentRevision: number;
 }
 
 export interface EditorError {
@@ -203,6 +209,7 @@ export interface EditorCoreOptions {
   theme?: EditorThemeOptions;
   onChange?: (event: EditorChangeEvent) => void;
   onSelectionChange?: (event: EditorSelectionEvent) => void;
+  onSelectionSnapshotChange?: (event: EditorSelectionSnapshotEvent) => void;
   onError?: (error: EditorError) => void;
   onLinkShortcut?: () => void;
   onOpenLink?: (href: string) => void;
@@ -213,7 +220,13 @@ export interface EditorCoreOptions {
 }
 
 export interface EditorCore {
+  getDocumentStatsSnapshot(): Record<string, unknown> | null;
+  getSelectionStatsSnapshot(): EditorSelectionSnapshot | null;
   mount(target: HTMLElement): void;
+  /** 提交 NodeView 临时输入，刷新正文，但保留文档编辑历史。 */
+  commitPendingEdits(): void;
+  /** 挂起视图以便同一文档稍后重新挂载；最终关闭才调用 destroy。 */
+  unmount(): void;
   destroy(): void;
   getMarkdown(): string;
   flushMarkdown(): string;
@@ -223,8 +236,12 @@ export interface EditorCore {
   getScrollSyncCaret(): EditorSyncCaret | null;
   setMarkdown(markdown: string, options?: SetMarkdownOptions): void;
   setDirty(dirty: boolean): void;
+  /** 保存完成时只更新该次写入的基线，不覆盖保存期间的新输入。 */
+  setSavedMarkdownBaseline(markdown: string): void;
   getSnapshot(): EditorSnapshot;
   restoreSnapshot(snapshot: EditorSnapshot): void;
+  /** 只恢复光标/选区，保持正文、撤销历史与保存基线。 */
+  restoreSelectionSnapshot(selection: EditorSelectionSnapshot): void;
   focus(): void;
   blur(): void;
   getActiveLink(): EditorLinkSnapshot | null;

@@ -1258,7 +1258,7 @@ function insertInlineComment(view: EditorView, content?: string): boolean {
   const nodePos = tr.mapping.map(state.selection.from, -1);
   if (tr.doc.nodeAt(nodePos)?.type === schema.nodes.comment_inline) {
     tr.setSelection(NodeSelection.create(tr.doc, nodePos));
-    CommentInlineNodeView.requestInstantEdit();
+    CommentInlineNodeView.requestInstantEdit(view);
   }
   view.dispatch(tr.scrollIntoView());
   return true;
@@ -1291,7 +1291,7 @@ function insertBlockComment(view: EditorView, content?: string): boolean {
   }
 
   tr.setSelection(NodeSelection.create(tr.doc, nodePos));
-  CommentBlockNodeView.requestInstantEdit();
+  CommentBlockNodeView.requestInstantEdit(view);
   view.dispatch(tr.scrollIntoView());
   return true;
 }

@@ -76,7 +76,7 @@ The Windows NSIS installer and macOS app declare support for opening `.md`, `.ma
 ### Files, Workspaces, and Data Safety
 
 - **Explorer**: Browse `.md`, `.markdown`, `.txt`, and `.json`; create files or folders, rename, delete, refresh, collapse all, copy paths, and reveal items in Explorer or Finder.
-- **Tabs and multiple windows**: Preview and pinned tabs, a tab overflow list, close other / right / all tabs, recent files and folders, document drag-and-drop, and opening folders in the current or a new window.
+- **Tabs and multiple windows**: Single-clicking different files keeps multiple tabs and automatically pins the previous preview. Preview and pinned tabs, a tab overflow list, close other / right / all tabs, recent files and folders, document drag-and-drop, and opening folders in the current or a new window. On Windows, dragging a Markdown tab, comparison tab, or comparison member shows a title ghost that follows the pointer within the window and disappears when the drag ends.
 - **Save protection**: Enable autosave and configure its delay. Markdown can create a local snapshot before saving. A read-only source or an externally changed, moved, or deleted file pauses autosave and offers the corresponding reload, Save As, overwrite, or ignore flow.
 - **State restoration**: Restore workspaces, tabs, window geometry, explorer and toolbar visibility, and the reading or editing position of each Markdown, TXT, and JSON tab.
 
@@ -123,6 +123,7 @@ The Windows NSIS installer and macOS app declare support for opening `.md`, `.ma
 - Local image-copy strategies require the document to be saved. PicGo upload depends on a user-managed PicGo service or command. Cleanup of unreferenced local images is off by default; when enabled, it deletes matching files inside the document directory.
 - PDF export is available on Windows and macOS and currently uses fixed A4 portrait pages with 20 mm margins. Quick Look is macOS-only and currently reads UTF-8 Markdown.
 - Windows NSIS builds can check, download, and install updates in-app. Portable Windows builds can check for updates and open the ZIP download in the system browser; exit Nomo and replace the files manually. On macOS, upgrade with Homebrew or download the DMG from the Release page.
+- A manual update check in Settings → About automatically opens the release notes when a newer version is found. You can reopen the notes after closing them. Startup checks continue to use a notification card.
 
 ## Default Shortcuts
 
@@ -164,6 +165,7 @@ The table uses Windows defaults. Native macOS menus use `CmdOrCtrl` semantics, w
 | <kbd>Shift</kbd> + <kbd>Enter</kbd> | Line break within a paragraph |
 | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>T</kbd> | Insert a table |
 | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>K</kbd> | Insert a code block |
+| <kbd>Tab</kbd> / <kbd>Shift</kbd> + <kbd>Tab</kbd> | While editing a code block: indent / outdent all selected lines; with no selection, insert indentation / outdent the current line |
 | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>M</kbd> | Insert a math block |
 | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Q</kbd> | Toggle a blockquote |
 | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>A</kbd> | Insert a callout |
