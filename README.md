@@ -65,6 +65,7 @@ Windows NSIS 安装版与 macOS App 会向系统声明 `.md`、`.markdown`、`.t
 - **原编码安全保存**：打开 Markdown 时识别并保留 UTF-8、UTF-8 BOM、UTF-16 LE / BE BOM 和 GBK；采用临时文件替换方式写盘，避免保存中断留下半份文件。
 - **完整文档节点**：支持 H1～H6、段落、硬换行、粗体、斜体、下划线、删除线、高亮、链接、行内代码、行内公式、列表、任务列表、引用、五类 Callout、Front matter、脚注、注释、水平分割线和安全 HTML。
 - **技术内容编辑**：代码块支持 Shiki 高亮、标题、语言选择、复制、行号和缩进偏好；KaTeX 支持行内与块级公式；Mermaid 提供流程图、时序图、类图、状态图、饼图、甘特图和 ER 图模板、实时预览及全屏查看。
+- **架构图与品牌图标**：`mermaid` 代码块支持 `architecture-beta`，内置 `logos` 图标包，可使用 `logos:aws`、`logos:microsoft-azure`、`logos:google-cloud`、`logos:docker-icon`、`logos:kubernetes` 等图标，例如 `service aws(logos:aws)[AWS]`。图标随应用打包，主编辑器与 macOS Quick Look 均可离线加载；其他图标包尚未内置。
 - **结构化表格与目录**：表格支持尺寸选择、增删行列、列对齐、表头切换和整表删除；正文 TOC 随标题同步，标题层级角标、大纲和脚注导航帮助维护长文档。
 
 ### TXT / JSON 大文件

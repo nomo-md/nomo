@@ -27,7 +27,16 @@ export function createMermaidDiagramRenderer(): DiagramRenderer {
 }
 
 async function loadMermaid(theme: MermaidThemeDefinition): Promise<MermaidApi> {
-  mermaidPromise ??= import('mermaid').then((module) => module.default);
+  mermaidPromise ??= import('mermaid').then(({ default: mermaid }) => {
+    // 图标数据随应用打包，使用时才加载，保证桌面与 Quick Look 离线可用。
+    mermaid.registerIconPacks([
+      {
+        name: 'logos',
+        loader: () => import('@iconify-json/logos').then((module) => module.icons),
+      },
+    ]);
+    return mermaid;
+  });
   const mermaid = await mermaidPromise;
   const themeKey = JSON.stringify(theme);
   if (initializedThemeKey !== themeKey) {

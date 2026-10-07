@@ -28,6 +28,7 @@
     "@codemirror/commands": "^6.10.4",
     "@codemirror/state": "^6.7.1",
     "@codemirror/view": "^6.43.6",
+    "@iconify-json/logos": "^1.2.15",
     "@lucide/svelte": "^1.0.0",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-clipboard-manager": "^2.0.0",

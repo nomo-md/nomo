@@ -1573,13 +1573,14 @@
 - 调用 Mermaid 渲染图表
 - 为 Mermaid NodeView 提供 SVG
 - 按当前主题传入 Mermaid `theme` 与 `themeVariables`
+- 首次加载 Mermaid 时注册本地 `logos` 图标包，按需加载品牌图标供主编辑器与 Quick Look 离线复用
 
 **Does not own：**
 - 不拥有图表代码编辑交互（在 MermaidBlockNodeView.ts 中）
 
 **Called by:** `src/app/App.svelte`（注册到 renderers.ts）
 
-**Depends on:** `mermaid`
+**Depends on:** `mermaid`, `@iconify-json/logos`
 
 **Change this when：**
 - 修改 Mermaid 配置
