@@ -616,7 +616,10 @@
     logToTerminal('info', 'SettingsWindow', '开始检查软件更新');
 
     try {
-      await runSoftwareUpdateCheck(false);
+      const snapshot = await runSoftwareUpdateCheck(false);
+      if (snapshot.status === 'available' || snapshot.status === 'downloaded') {
+        softwareUpdateDialogOpen = true;
+      }
     } catch (error) {
       logToTerminal('error', 'SettingsWindow', '软件更新检查失败', {
         error: error instanceof Error ? error.message : String(error),
