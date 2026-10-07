@@ -78,7 +78,7 @@ type CodeEditTarget =
   | { kind: 'line'; line: number; edge: 'start' | 'end' };
 
 // 将 Shiki token 行转为 HTML 字符串（用于高亮层 innerHTML）
-function tokensToHtml(tokenLines: CodeTokenLine[]): string {
+function tokensToHtml(tokenLines: CodeTokenLine[], lineBreak = '\n'): string {
   return tokenLines
     .map((line) =>
       line.tokens
@@ -91,7 +91,7 @@ function tokensToHtml(tokenLines: CodeTokenLine[]): string {
         })
         .join(''),
     )
-    .join('\n');
+    .join(lineBreak);
 }
 
 function getHighlightLanguage(params: string): string {
@@ -106,6 +106,15 @@ function countLines(text: string): number {
   return lines;
 }
 
+/** 展示层使用 BR 换行，读取和定位时仍按代码中的单个换行字符计算。 */
+function getRenderedCodeText(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? '';
+  if (node.nodeName === 'BR') return '\n';
+  let text = '';
+  for (const child of Array.from(node.childNodes)) text += getRenderedCodeText(child);
+  return text;
+}
+
 function getTextOffsetFromDomPosition(root: Node, offsetNode: Node, offset: number): number | null {
   if (offsetNode !== root && !root.contains(offsetNode)) return null;
 
@@ -117,7 +126,7 @@ function getTextOffsetFromDomPosition(root: Node, offsetNode: Node, offset: numb
       } else {
         const children = Array.from(node.childNodes);
         for (const child of children.slice(0, offset)) {
-          textOffset += child.textContent?.length ?? 0;
+          textOffset += getRenderedCodeText(child).length;
         }
       }
       return true;
@@ -125,6 +134,10 @@ function getTextOffsetFromDomPosition(root: Node, offsetNode: Node, offset: numb
 
     if (node.nodeType === Node.TEXT_NODE) {
       textOffset += node.textContent?.length ?? 0;
+      return false;
+    }
+    if (node.nodeName === 'BR') {
+      textOffset += 1;
       return false;
     }
 
@@ -601,15 +614,19 @@ export class CodeBlockNodeView {
   ): Promise<void> {
     const id = ++this.renderId;
     const codeEl = container.querySelector('code') ?? container;
+    const isDisplay = container === this.codeDisplay;
+    // WebView2 的 IME 会在不可编辑 PRE 的文本换行之后错算正文位置，
+    // 将组合选区移回代码尾部。展示层改用 BR，文档和 textarea 仍保留原始换行。
     // 先同步正文，展示层在异步高亮前就具有正确的滚动范围。
     const setContent = (html: string | null) => {
       if (this.destroyed || id !== this.renderId) return;
       if (container === this.codeDisplay && !this.editing) this.captureViewport();
-      if (html === null) codeEl.textContent = code;
+      if (html === null && isDisplay) codeEl.innerHTML = escapeHtml(code).replace(/\n/g, '<br>');
+      else if (html === null) codeEl.textContent = code;
       else codeEl.innerHTML = html;
       if (container === this.codeDisplay && !this.editing) this.restoreViewport();
     };
-    if (codeEl.textContent !== code) setContent(null);
+    if ((isDisplay ? getRenderedCodeText(codeEl) : codeEl.textContent) !== code) setContent(null);
     if (code.length > richHighlightMaxChars) {
       return;
     }
@@ -626,7 +643,7 @@ export class CodeBlockNodeView {
         theme: CodeBlockNodeView.currentTheme.shikiTheme,
       });
       if (id !== this.renderId) return; // 放弃过期渲染
-      setContent(tokensToHtml(result.tokens));
+      setContent(tokensToHtml(result.tokens, isDisplay ? '<br>' : '\n'));
     } catch {
       if (id !== this.renderId) return;
       setContent(null);
@@ -850,7 +867,7 @@ export class CodeBlockNodeView {
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
-    if (!this.textarea) return;
+    if (!this.textarea || e.isComposing || e.keyCode === 229) return;
 
     // Shift+Ctrl+Enter：保存退出编辑态，并在上方插入新段落
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.shiftKey) {
@@ -1326,13 +1343,13 @@ export class CodeBlockNodeView {
         (child) => child === codeBranch,
       );
       if (branchIndex >= 0) {
-        return endpointOffset <= branchIndex ? 0 : (codeEl.textContent?.length ?? 0);
+        return endpointOffset <= branchIndex ? 0 : getRenderedCodeText(codeEl).length;
       }
     }
 
     const relation = codeEl.compareDocumentPosition(endpointNode);
     if (relation & Node.DOCUMENT_POSITION_PRECEDING) return 0;
-    if (relation & Node.DOCUMENT_POSITION_FOLLOWING) return codeEl.textContent?.length ?? 0;
+    if (relation & Node.DOCUMENT_POSITION_FOLLOWING) return getRenderedCodeText(codeEl).length;
     return null;
   }
 
@@ -1383,14 +1400,12 @@ export class CodeBlockNodeView {
   }
 
   /** 通过 transaction 更新节点内容 */
-  private saveContent(newCode: string, newLanguage?: string): void {
+  private saveContent(newCode: string): void {
     const pos = this.getPos();
     const node = this.view.state.doc.nodeAt(pos);
-    if (!node) return;
-    const attrs = { params: newLanguage ?? node.attrs.params };
-    const content = newCode ? this.view.state.schema.text(newCode) : undefined;
-    const newNode = node.type.create(attrs, content);
-    this.view.dispatch(this.view.state.tr.replaceWith(pos, pos + node.nodeSize, newNode));
+    if (!node || node.type !== this.node.type || node.textContent === newCode) return;
+    // 保留节点边界及 attrs，避免退出保存把相邻正文的选区映射回代码块。
+    this.view.dispatch(this.view.state.tr.insertText(newCode, pos + 1, pos + node.nodeSize - 1));
   }
 
   private async copyCode(button: HTMLButtonElement): Promise<void> {

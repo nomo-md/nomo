@@ -56,7 +56,7 @@
 
 | Responsibility | Primary code | Related code | Change when |
 |---|---|---|---|
-| 代码块 NodeView | `src/lib/editor-core/nodeViews/CodeBlockNodeView.ts` | `src/lib/services/shikiCodeTokenizer.ts`, `src/lib/services/logger.ts`, `renderers.ts`, `ProseMirrorEditorCore.ts`, `nodeViews/activeEditRegistry.ts` | 代码块展示/编辑/高亮、Tab / Shift+Tab 选区整行缩进与原生撤销、后台提交保留选区、滚动位置保留及同文档刷新恢复 |
+| 代码块 NodeView | `src/lib/editor-core/nodeViews/CodeBlockNodeView.ts` | `src/lib/services/shikiCodeTokenizer.ts`, `src/lib/services/logger.ts`, `renderers.ts`, `ProseMirrorEditorCore.ts`, `nodeViews/activeEditRegistry.ts` | 代码块展示/编辑/高亮、WebView2 中文输入边界与展示换行偏移、Tab / Shift+Tab 选区整行缩进与原生撤销、后台提交保留选区、滚动位置保留及同文档刷新恢复 |
 | 图片 NodeView | `src/lib/editor-core/nodeViews/ImageNodeView.ts` | `src/app/services/desktopImageLoader.ts` | 图片加载/对齐/尺寸/右键行为变更 |
 | 公式 NodeView | `src/lib/editor-core/nodeViews/MathBlockNodeView.ts`, `MathInlineNodeView.ts` | `src/lib/services/katexMathRenderer.ts` | 公式渲染/编辑体验变更 |
 | 图表 NodeView | `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts` | `src/lib/services/mermaidDiagramRenderer.ts` | Mermaid 图表渲染变更 |

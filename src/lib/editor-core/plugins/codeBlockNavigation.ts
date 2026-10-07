@@ -107,6 +107,7 @@ export function codeBlockNavigationPlugin(callback: CodeBlockNavCallback): Plugi
     key: codeBlockNavigationKey,
     props: {
       handleKeyDown(_view, event) {
+        if (_view.composing || event.isComposing || event.keyCode === 229) return false;
         if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return false;
 
         const view = _view;
