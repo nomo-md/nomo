@@ -81,6 +81,28 @@ export interface SoftwareUpdateSnapshot {
 
 const SOFTWARE_UPDATE_STATE_EVENT = 'nomo://software-update-state';
 
+export interface InstalledReleaseNotes {
+  version: string;
+  body: string;
+}
+
+export async function claimInstalledReleaseNotes(): Promise<InstalledReleaseNotes | null> {
+  if (!isTauriRuntime()) return null;
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke<InstalledReleaseNotes | null>('claim_installed_release_notes');
+}
+
+export async function confirmInstalledReleaseNotesShown(version: string): Promise<void> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('confirm_installed_release_notes_shown', { version });
+}
+
+export async function releaseInstalledReleaseNotes(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('claim_installed_release_notes', { release: true });
+}
+
 interface SoftwareUpdateRuntime {
   isDesktopRuntime: () => boolean;
   isWindowsRuntime: () => boolean;

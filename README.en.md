@@ -124,6 +124,7 @@ The Windows NSIS installer and macOS app declare support for opening `.md`, `.ma
 - PDF export is available on Windows and macOS and currently uses fixed A4 portrait pages with 20 mm margins. Quick Look is macOS-only and currently reads UTF-8 Markdown.
 - Windows NSIS builds can check, download, and install updates in-app. Portable Windows builds can check for updates and open the ZIP download in the system browser; exit Nomo and replace the files manually. On macOS, upgrade with Homebrew or download the DMG from the Release page.
 - A manual update check in Settings → About automatically opens the release notes when a newer version is found. You can reopen the notes after closing them. Startup checks continue to use a notification card.
+- The first launch after an upgrade automatically displays the installed version’s release notes, including in-app, manual, and Store upgrades. Notes are bundled with the app and work offline or with update checks disabled. Fresh installations do not show this dialog; existing users see it once when first receiving this feature. Restarting the same version or downgrading does not create a new reminder.
 
 ## Default Shortcuts
 

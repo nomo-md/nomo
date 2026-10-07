@@ -234,6 +234,7 @@
 | 更新提醒界面 | `src/app/components/SoftwareUpdateNotice.svelte`, `src/app/components/SoftwareUpdateDialog.svelte` | `src/app/App.svelte`, `src/app/components/AppTitleBar.svelte` | 启动通知、更新日志弹窗、下载状态展示变更 |
 | 更新前端 IPC 适配 | `src/lib/desktop/tauriUpdater.ts` | `src/app/services/softwareUpdate.ts` | 检查/下载/安装/共享快照 IPC 契约变更 |
 | 更新后端 | `src-tauri/src/software_update.rs` | `src-tauri/src/window/tray.rs` | GitHub Release、安装形态、共享状态、下载/校验/安装器 |
+| 升级后首次启动日志 | `src-tauri/src/software_update.rs`, `src/app/components/SoftwareUpdateSuccessDialog.svelte` | `src-tauri/src/lib.rs`, `src/app/App.svelte`, `src/lib/desktop/tauriUpdater.ts` | 内置日志、最高版本与待展示记录、跨窗口领取、实际挂载确认及启动时序 |
 | 版本发布与 Pages 同步 | `.github/workflows/release.yml` | `.github/workflows/sync-pages-notes.yml`, `.github/release-notes/` | 安装包发布、MD5 生成、发布说明维护、Cloudflare/GitHub Pages 重建与线上校验 |
 
 ### 原生系统集成
@@ -492,6 +493,26 @@
 **Depends on:** `src/app/i18n.ts`, `@lucide/svelte`
 
 **Change this when:** 修改更新卡片视觉、计时或按钮交互
+
+**Confidence:** high
+
+---
+
+### `src/app/components/SoftwareUpdateSuccessDialog.svelte`
+
+**Kind:** component
+
+**Owns:**
+- 升级后的当前版本日志弹窗、开始使用/关闭、焦点约束及恢复
+- 实际挂载后的展示确认回调；不提供下载或安装动作
+
+**Does not own:** 版本记录与跨窗口领取（在 software_update.rs）、Markdown 安全策略（在 softwareUpdateReleaseNotes.ts）
+
+**Called by:** `src/app/App.svelte`（启动恢复完成且已有确认弹窗关闭后）
+
+**Depends on:** `src/app/services/softwareUpdateReleaseNotes.ts`, `src/lib/desktop/tauriStorage.ts`, `src/app/i18n.ts`
+
+**Change this when:** 修改升级完成页的布局、关闭行为或实际展示回调
 
 **Confidence:** high
 
@@ -1155,7 +1176,7 @@
 - 禁用原始 HTML/图片、仅保留 HTTPS 链接的 Markdown 安全渲染
 - 通知卡片摘要提取
 
-**Called by:** `src/app/components/SoftwareUpdateDialog.svelte`, `src/app/App.svelte`
+**Called by:** `src/app/components/SoftwareUpdateDialog.svelte`, `src/app/components/SoftwareUpdateSuccessDialog.svelte`, `src/app/App.svelte`
 
 **Depends on:** `markdown-it`, DOM API
 
@@ -1963,9 +1984,11 @@
 - 维护进程级更新快照并通过 `nomo://software-update-state` 同步所有窗口
 - 下载、校验 MD5、启动安装器
 - Windows 安装版支持应用内更新，免安装版只提供 zip 直链
+- 在 setup 首次写入运行数据前识别既有用户，使用既有 settings 保存最高运行版本与待展示版本，兼容旧版本配置读写
+- 提供当前运行版本的离线日志领取/挂载确认 IPC；进程级领取权防止多窗口重复展示，窗口销毁或前端卸载时释放
 
 **Does not own：**
-- 不拥有前端更新 UI（在 SoftwareUpdateNotice / SoftwareUpdateDialog 中）
+- 不拥有前端更新 UI（在 SoftwareUpdateNotice / SoftwareUpdateDialog / SoftwareUpdateSuccessDialog 中）
 
 **Called by:** `src-tauri/src/lib.rs`（注册为 IPC）
 

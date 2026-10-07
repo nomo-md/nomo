@@ -19,6 +19,8 @@ const CHECKSUMS_ASSET_NAME: &str = "checksums.md5";
 const DOWNLOAD_PROGRESS_EVENT: &str = "nomo://software-update-download-progress";
 const UPDATE_STATE_EVENT: &str = "nomo://software-update-state";
 const CACHED_UPDATE_INFO_FILE: &str = "update-info.json";
+const INSTALLED_RELEASE_NOTES_AVAILABLE_EVENT: &str = "nomo://installed-release-notes-available";
+const INSTALLED_RELEASE_NOTES_HISTORY_KEY: &str = "installedReleaseNotesHistory";
 const CURRENT_RELEASE_NOTES: &str = include_str!(concat!(
     "../../.github/release-notes/v",
     env!("CARGO_PKG_VERSION"),
@@ -145,6 +147,187 @@ struct SoftwareUpdateRuntimeState {
 }
 
 static SOFTWARE_UPDATE_STATE: OnceLock<Mutex<SoftwareUpdateRuntimeState>> = OnceLock::new();
+
+/// 当前运行版本的离线更新日志，不包含下载或安装状态。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InstalledReleaseNotes {
+    version: String,
+    body: String,
+}
+
+/// 放在既有 settings 容器中，旧版本重写配置时也能保留升级记录。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+struct ReleaseNotesHistory {
+    highest_version: Option<String>,
+    pending_version: Option<String>,
+}
+
+fn read_release_notes_history(
+    config: &crate::config::AppConfig,
+) -> Result<ReleaseNotesHistory, String> {
+    match config.app.settings.get(INSTALLED_RELEASE_NOTES_HISTORY_KEY) {
+        Some(record) => serde_json::from_str(&record.value_json)
+            .map_err(|error| format!("读取更新日志版本记录失败：{error}")),
+        None => Ok(ReleaseNotesHistory::default()),
+    }
+}
+
+fn save_release_notes_history(
+    manager: &crate::config::ConfigManager,
+    history: &ReleaseNotesHistory,
+) -> Result<(), String> {
+    let record = crate::models::SettingRecord {
+        key: INSTALLED_RELEASE_NOTES_HISTORY_KEY.to_string(),
+        value_json: serde_json::to_string(history)
+            .map_err(|error| format!("序列化更新日志版本记录失败：{error}"))?,
+        updated_at: crate::config::now_ts(),
+    };
+    manager.update(|config| {
+        config.app.settings.insert(record.key.clone(), record);
+    })
+}
+
+#[derive(Default)]
+struct InstalledReleaseNotesRuntime {
+    initialized: bool,
+    owner_window_label: Option<String>,
+}
+
+static INSTALLED_RELEASE_NOTES_STATE: OnceLock<Mutex<InstalledReleaseNotesRuntime>> =
+    OnceLock::new();
+
+fn installed_release_notes_state() -> &'static Mutex<InstalledReleaseNotesRuntime> {
+    INSTALLED_RELEASE_NOTES_STATE
+        .get_or_init(|| Mutex::new(InstalledReleaseNotesRuntime::default()))
+}
+
+/// 必须在本次启动写入窗口、工作区等记录前调用，避免把全新安装识别为已有用户。
+pub(crate) fn initialize_installed_release_notes<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
+    let mut runtime = installed_release_notes_state()
+        .lock()
+        .map_err(|error| format!("初始化更新日志状态失败：{error}"))?;
+    crate::config::with_manager(app, |manager| {
+        let config = manager.get_config()?;
+        let previous_history = read_release_notes_history(&config)?;
+        let mut history = previous_history.clone();
+        let current_version = env!("CARGO_PKG_VERSION");
+        let should_prompt = match history.highest_version.as_deref() {
+            Some(previous) => is_release_newer(previous, current_version)?,
+            None => has_existing_usage(&config),
+        };
+        if history.highest_version.is_none() || should_prompt {
+            history.highest_version = Some(current_version.to_string());
+            history.pending_version = should_prompt.then(|| current_version.to_string());
+        }
+        if history != previous_history {
+            save_release_notes_history(manager, &history)?;
+        }
+        Ok(())
+    })?;
+    runtime.initialized = true;
+    Ok(())
+}
+
+fn has_existing_usage(config: &crate::config::AppConfig) -> bool {
+    !config.recent.entries.is_empty()
+        || !config.workspace.settings.is_empty()
+        || !config.snapshots.documents.is_empty()
+        || !config.editor.settings.is_empty()
+        || config.app.settings.keys().any(|key| {
+            // 待打开目标和窗口几何不代表用户已使用过应用。
+            key != INSTALLED_RELEASE_NOTES_HISTORY_KEY
+                && !key.starts_with("pending")
+                && !key.starts_with("windowState:")
+        })
+}
+
+/// 原子领取待展示日志；release=true 用于前端卸载时释放尚未确认的领取权。
+#[tauri::command]
+pub(crate) fn claim_installed_release_notes<R: Runtime>(
+    app: AppHandle<R>,
+    window: WebviewWindow<R>,
+    release: Option<bool>,
+) -> Result<Option<InstalledReleaseNotes>, String> {
+    if !crate::window::external_open::is_document_window_label(window.label()) {
+        return Ok(None);
+    }
+    if release.unwrap_or(false) {
+        release_installed_release_notes(&app, window.label());
+        return Ok(None);
+    }
+    let mut runtime = installed_release_notes_state()
+        .lock()
+        .map_err(|error| format!("领取更新日志失败：{error}"))?;
+    if !runtime.initialized {
+        return Err("更新日志版本记录初始化失败，本次启动不展示。".to_string());
+    }
+    if runtime.owner_window_label.is_some() {
+        return Ok(None);
+    }
+    let pending_version = crate::config::with_manager(&app, |manager| {
+        Ok(read_release_notes_history(&manager.get_config()?)?.pending_version)
+    })?;
+    let current_version = env!("CARGO_PKG_VERSION");
+    // 降级时保留较高版本记录，不能展示与当前运行版本不符的日志。
+    if pending_version.as_deref() != Some(current_version) {
+        return Ok(None);
+    }
+    runtime.owner_window_label = Some(window.label().to_string());
+    Ok(Some(InstalledReleaseNotes {
+        version: current_version.to_string(),
+        body: CURRENT_RELEASE_NOTES.to_string(),
+    }))
+}
+
+/// 仅在所属窗口实际挂载弹窗后确认；磁盘提交失败时保留待展示记录。
+#[tauri::command]
+pub(crate) fn confirm_installed_release_notes_shown<R: Runtime>(
+    app: AppHandle<R>,
+    window: WebviewWindow<R>,
+    version: String,
+) -> Result<(), String> {
+    let mut runtime = installed_release_notes_state()
+        .lock()
+        .map_err(|error| format!("确认更新日志展示失败：{error}"))?;
+    if version != env!("CARGO_PKG_VERSION")
+        || runtime.owner_window_label.as_deref() != Some(window.label())
+    {
+        return Err("当前窗口未领取此版本更新日志。".to_string());
+    }
+    crate::config::with_manager(&app, |manager| {
+        let mut history = read_release_notes_history(&manager.get_config()?)?;
+        if history.pending_version.as_deref() != Some(version.as_str()) {
+            return Err("此版本更新日志已不在待展示记录中。".to_string());
+        }
+        history.pending_version = None;
+        save_release_notes_history(manager, &history)
+    })?;
+    runtime.owner_window_label = None;
+    Ok(())
+}
+
+pub(crate) fn release_installed_release_notes<R: Runtime>(app: &AppHandle<R>, window_label: &str) {
+    let released = match installed_release_notes_state().lock() {
+        Ok(mut runtime) if runtime.owner_window_label.as_deref() == Some(window_label) => {
+            runtime.owner_window_label = None;
+            true
+        }
+        Ok(_) => false,
+        Err(error) => {
+            crate::app_logger::warn("Update", &format!("释放更新日志领取权失败：{error}"));
+            false
+        }
+    };
+    if released {
+        if let Err(error) = app.emit(INSTALLED_RELEASE_NOTES_AVAILABLE_EVENT, ()) {
+            crate::app_logger::warn("Update", &format!("通知更新日志可领取失败：{error}"));
+        }
+    }
+}
 
 struct SoftwareUpdateCheckGuard;
 

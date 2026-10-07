@@ -160,8 +160,15 @@
   import ExternalChangeDialog from './components/ExternalChangeDialog.svelte';
   import CloseWindowBehaviorDialog from './components/CloseWindowBehaviorDialog.svelte';
   import SoftwareUpdateDialog from './components/SoftwareUpdateDialog.svelte';
+  import SoftwareUpdateSuccessDialog from './components/SoftwareUpdateSuccessDialog.svelte';
   import SoftwareUpdateNotice from './components/SoftwareUpdateNotice.svelte';
   import type { SoftwareUpdateSnapshot } from '../lib/desktop/tauriUpdater';
+  import {
+    claimInstalledReleaseNotes,
+    confirmInstalledReleaseNotesShown,
+    releaseInstalledReleaseNotes,
+    type InstalledReleaseNotes,
+  } from '../lib/desktop/tauriUpdater';
   import type {
     ContextMenuOpenEvent,
     ContextMenuItem,
@@ -259,7 +266,7 @@
     type ImageContext,
     type ImageHandlingSettings,
   } from '../lib/services/render';
-  import { disableLogger, enableLogger, logInfo } from '../lib/services/logger';
+  import { disableLogger, enableLogger, logError, logInfo } from '../lib/services/logger';
   import { createTauriSegmentedDocumentPort } from '../lib/text-editor/tauriPort';
   import type {
     OpenSegmentedDocumentResult,
@@ -432,6 +439,70 @@
   let softwareUpdateStartupTimer: number | null = null;
   let softwareUpdateNoticeSignature = '';
   let unsubscribeSoftwareUpdate: (() => void) | null = null;
+  let installedReleaseNotes: InstalledReleaseNotes | null = null;
+  let installedReleaseNotesCheckReady = false;
+  let installedReleaseNotesAttempted = false;
+  let installedReleaseNotesLoading = false;
+  let installedReleaseNotesCanOpen = false;
+  let installedReleaseNotesConfirmationStarted = false;
+
+  $: installedReleaseNotesCanOpen =
+    appBootState === 'ready' &&
+    !legacyInstallerPromptOpen &&
+    !confirmDialogState.open &&
+    !startupDraftConflict &&
+    !deleteConfirmOpen &&
+    !externalChangeDialogOpen &&
+    !closeWindowChoiceDialogOpen &&
+    !pendingOpenChoice &&
+    !softwareUpdateDialogOpen &&
+    !workspaceInteractionDisabled &&
+    !markdownMiniActive;
+  $: if (
+    installedReleaseNotesCheckReady && installedReleaseNotesCanOpen &&
+    !installedReleaseNotesAttempted && !installedReleaseNotesLoading
+  ) {
+    void loadInstalledReleaseNotes();
+  }
+
+  async function loadInstalledReleaseNotes() {
+    installedReleaseNotesAttempted = true;
+    installedReleaseNotesLoading = true;
+    try {
+      const notes = await claimInstalledReleaseNotes();
+      if (!appearanceRuntimeActive) {
+        await releaseInstalledReleaseNotes();
+        return;
+      }
+      installedReleaseNotes = notes;
+      if (notes) {
+        installedReleaseNotesAttempted = true;
+        installedReleaseNotesConfirmationStarted = false;
+      }
+    } catch (error) {
+      logError('Update', '领取已安装版本更新日志失败', { error: String(error) });
+    } finally {
+      installedReleaseNotesLoading = false;
+      if (appearanceRuntimeActive && !installedReleaseNotes) {
+        handleSoftwareUpdateSnapshot(softwareUpdateSnapshot);
+      }
+    }
+  }
+
+  async function markInstalledReleaseNotesShown() {
+    if (!installedReleaseNotes || installedReleaseNotesConfirmationStarted) return;
+    installedReleaseNotesConfirmationStarted = true;
+    try {
+      await confirmInstalledReleaseNotesShown(installedReleaseNotes.version);
+    } catch (error) {
+      logError('Update', '保存更新日志已展示记录失败，下次启动仍可展示', { error: String(error) });
+    }
+  }
+
+  function closeInstalledReleaseNotes() {
+    installedReleaseNotes = null;
+    handleSoftwareUpdateSnapshot(softwareUpdateSnapshot);
+  }
 
   /** 后台/非活动标签没有自己的状态栏，错误必须同时进入全局 toast 才对用户可见。 */
   function showVisibleError(error: unknown, fallback: string) {
@@ -2636,6 +2707,10 @@
   }
 
   function handleSoftwareUpdateSnapshot(state: SoftwareUpdateSnapshot) {
+    if (
+      !installedReleaseNotesCheckReady || !installedReleaseNotesAttempted ||
+      installedReleaseNotesLoading || installedReleaseNotes
+    ) return;
     const version = state.version ?? state.candidate?.version;
     if (
       !version ||
@@ -2659,6 +2734,7 @@
   }
 
   function openSoftwareUpdate() {
+    if (installedReleaseNotes) return;
     if (!softwareUpdateSnapshot.candidate && !softwareUpdateSnapshot.downloadedUpdate) {
       return;
     }
@@ -6309,7 +6385,7 @@
         await invoke('refresh_window_menu').catch(() => undefined);
         await setupCriticalDesktopEvents();
         await setupWorkspaceTransferEvents();
-        void invoke<{ shouldPrompt: boolean }>('get_legacy_installer_notice')
+        await invoke<{ shouldPrompt: boolean }>('get_legacy_installer_notice')
           .then((notice) => {
             legacyInstallerPromptOpen = notice.shouldPrompt;
           })
@@ -6470,11 +6546,18 @@
         }
       }
       appBootState = 'ready';
+      installedReleaseNotesCheckReady = desktopEnabled;
       scheduleStartupSoftwareUpdateCheck();
     }
   });
 
   onDestroy(() => {
+    installedReleaseNotesCheckReady = false;
+    if (desktopEnabled) {
+      void releaseInstalledReleaseNotes().catch((error) => {
+        logError('Update', '释放更新日志领取权失败', { error: String(error) });
+      });
+    }
     workspaceTransfer.dispose();
     if (nativeDragId) void cancelNativeTabDrag(nativeDragId);
     tabDragGhost = null;
@@ -7020,6 +7103,14 @@
 
     const { listen } = await import('@tauri-apps/api/event');
     desktopUnlisteners.push(
+      await listen('nomo://installed-release-notes-available', () => {
+        if (!installedReleaseNotes && appearanceRuntimeActive) installedReleaseNotesAttempted = false;
+      }).catch((error) => {
+        logError('Update', '订阅更新日志领取通知失败', { error: String(error) });
+        return () => undefined;
+      }),
+    );
+    desktopUnlisteners.push(
       await listen<{ requestId: number; reason: string }>('nomo://exit-cancelled', (event) => {
         if (exitRequestId !== event.payload.requestId) return;
         exitRequestId = null;
@@ -7209,6 +7300,7 @@
   }
 
   function handleGlobalShortcut(event: KeyboardEvent) {
+    if (installedReleaseNotes && installedReleaseNotesCanOpen) return;
     if (exitRequestId !== null || workspaceInteractionDisabled) return;
     handleGlobalAppShortcut(event, commandHandlers, shortcutPreferences);
   }
@@ -7655,7 +7747,7 @@
   on:status={handleSegmentedStatus}
 />
 
-{#if softwareUpdateNoticeVisible}
+{#if softwareUpdateNoticeVisible && !installedReleaseNotes}
   <SoftwareUpdateNotice
     version={softwareUpdateSnapshot.version ?? softwareUpdateSnapshot.candidate?.version ?? ''}
     summary={createSoftwareUpdateSummary(
@@ -7681,6 +7773,14 @@
     onDownload={downloadCurrentSoftwareUpdate}
     onInstall={installCurrentSoftwareUpdate}
     onRetry={retrySoftwareUpdateCheck}
+  />
+{/if}
+
+{#if installedReleaseNotes && installedReleaseNotesCanOpen}
+  <SoftwareUpdateSuccessDialog
+    notes={installedReleaseNotes}
+    onShown={() => void markInstalledReleaseNotesShown()}
+    onClose={closeInstalledReleaseNotes}
   />
 {/if}
 

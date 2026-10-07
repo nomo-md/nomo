@@ -78,6 +78,7 @@ pub fn run() {
             }
             WindowEvent::Destroyed => {
                 let label = window.label();
+                crate::software_update::release_installed_release_notes(window.app_handle(), label);
                 crate::window::tab_drag::forget_window(label);
                 crate::window::tab_transfer::forget_window(window.app_handle(), label);
                 crate::window::workspace_lifecycle::destroyed(window.app_handle(), label);
@@ -221,6 +222,10 @@ pub fn run() {
             let config = crate::config::ConfigManager::load_or_default(app.handle())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             app.manage(config);
+            if let Err(error) = crate::software_update::initialize_installed_release_notes(app.handle())
+            {
+                crate::app_logger::warn("Update", &format!("初始化更新日志版本记录失败：{error}"));
+            }
             app.manage(crate::window::open_targets::OpenTargetRegistry::default());
             crate::window::tab_transfer::recover_journals(app.handle())
                 .map_err(std::io::Error::other)?;
@@ -393,6 +398,8 @@ pub fn run() {
             crate::software_update::is_windows_installer_installation,
             crate::software_update::get_cached_software_update,
             crate::software_update::get_software_update_state,
+            crate::software_update::claim_installed_release_notes,
+            crate::software_update::confirm_installed_release_notes_shown,
             crate::software_update::check_software_update,
             crate::software_update::download_software_update,
             crate::software_update::install_software_update,

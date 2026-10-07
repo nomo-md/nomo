@@ -310,6 +310,9 @@ export const JA_JP_EXTRA_TRANSLATIONS = {
   softwareUpdateRemindLater: '後で通知',
   softwareUpdateViewDetails: '更新内容を見る',
   softwareUpdateReleaseTitle: 'Nomo v{version} が公開されました',
+  softwareUpdateInstalledTitle: 'Nomo が v{version} に更新されました',
+  softwareUpdateStartUsing: 'Nomo を使い始める',
+  softwareUpdateInstalledHint: 'このバージョンの更新内容',
   softwareUpdateReleaseFallback: 'このリリースには改善と不具合修正が含まれています。',
   softwareUpdatePortableTitle: 'ポータブル版を使用中',
   softwareUpdatePortableHint:
