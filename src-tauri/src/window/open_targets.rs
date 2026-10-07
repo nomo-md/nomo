@@ -36,12 +36,22 @@ pub(crate) enum OpenTargetRouteDecision {
     },
     OpenCurrent {
         target: OpenTargetInput,
+        #[serde(rename = "directoryWindows")]
+        directory_windows: Vec<OpenDirectoryWindow>,
     },
     CreateWindow {
         #[serde(rename = "windowLabel")]
         window_label: String,
         target: OpenTargetInput,
     },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OpenDirectoryWindow {
+    window_label: String,
+    folder_path: String,
+    paths: Vec<String>,
 }
 
 #[derive(Default)]
@@ -114,19 +124,24 @@ pub(crate) async fn prepare_open_target_window(
     super::workspace_lifecycle::wait_until_idle().await;
     let requested_target = target.clone();
     let current_label = window.label().to_string();
-    let (existing_documents, current_target, remaining_target) = {
+    let (existing_documents, current_target, remaining_target, directory_windows) = {
         let alive_labels = app.webview_windows().into_keys().collect::<HashSet<_>>();
         let mut state = registry
             .state
             .lock()
             .map_err(|_| "锁定窗口目标注册表失败".to_string())?;
         prune_registry(&mut state, &alive_labels);
-        resolve_existing_targets(
+        let (existing, current, remaining) = resolve_existing_targets(
             &state,
             &current_label,
             target,
-            reuse_directory_window.unwrap_or(true),
-        )
+            reuse_directory_window.unwrap_or(false),
+        );
+        let candidates = remaining
+            .as_ref()
+            .map(|target| find_directory_windows(&state, target))
+            .unwrap_or_default();
+        (existing, current, remaining, candidates)
     };
 
     for (label, paths) in existing_documents {
@@ -148,7 +163,7 @@ pub(crate) async fn prepare_open_target_window(
     }
 
     if let Some(target) = current_target {
-        // 同目录的新文件要先在当前窗口增加标签，混合批次的其余文件继续按设置处理。
+        // 已打开的文件先定位当前标签，混合批次中的未打开文件继续按设置处理。
         return Ok(OpenTargetRouteDecision::ActivateCurrent {
             target,
             remaining_target,
@@ -174,6 +189,7 @@ pub(crate) async fn prepare_open_target_window(
     if !create_if_missing {
         return Ok(OpenTargetRouteDecision::OpenCurrent {
             target: remaining_target,
+            directory_windows,
         });
     }
 
@@ -248,6 +264,109 @@ impl OpenTargetRegistry {
             state.reservations.remove(label);
         }
     }
+}
+
+// 候选窗口只覆盖直接父目录相同的文件，混合目录批次可继续选择其余文件的去向。
+fn find_directory_windows(
+    state: &RegistryState,
+    target: &OpenTargetInput,
+) -> Vec<OpenDirectoryWindow> {
+    let OpenTargetInput::Documents { paths } = target else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for (label, snapshot) in &state.windows {
+        let Some(folder) = snapshot.folder_key.as_deref() else {
+            continue;
+        };
+        let matching = paths
+            .iter()
+            .filter(|path| {
+                normalize_target_path(path).as_deref().is_some_and(|key| {
+                    key.rsplit_once('/')
+                        .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+                        == Some(folder)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !matching.is_empty() {
+            candidates.push(OpenDirectoryWindow {
+                window_label: label.clone(),
+                folder_path: folder.to_string(),
+                paths: matching,
+            });
+        }
+    }
+    candidates.sort_by(|a, b| a.window_label.cmp(&b.window_label));
+    candidates
+}
+
+/// 显式选择已有目录窗口；重新检查目录归属及文件去重，避免询问期间窗口变化。
+#[tauri::command]
+pub(crate) async fn open_documents_in_directory_window(
+    app: AppHandle,
+    registry: State<'_, OpenTargetRegistry>,
+    window_label: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    super::workspace_lifecycle::wait_until_idle().await;
+    let target = OpenTargetInput::Documents {
+        paths: paths.clone(),
+    };
+    let (existing, current, remaining) = {
+        let alive = app.webview_windows().into_keys().collect::<HashSet<_>>();
+        let mut state = registry
+            .state
+            .lock()
+            .map_err(|_| "锁定窗口目标注册表失败".to_string())?;
+        prune_registry(&mut state, &alive);
+        let candidate = find_directory_windows(&state, &target)
+            .into_iter()
+            .find(|item| item.window_label == window_label)
+            .ok_or_else(|| "所选文件夹窗口已关闭或已切换目录，请重新打开文件".to_string())?;
+        if candidate.paths.len() != paths.len() || paths.is_empty() {
+            return Err("文件已不属于所选文件夹窗口".to_string());
+        }
+        resolve_existing_targets(&state, &window_label, target, false)
+    };
+    for (label, paths) in existing {
+        let window = app
+            .get_webview_window(&label)
+            .ok_or_else(|| "已有文件窗口已关闭，请重新打开文件".to_string())?;
+        window
+            .emit(
+                OPEN_DOCUMENT_EVENT,
+                ExternalOpenPayload {
+                    window_label: label.clone(),
+                    paths,
+                },
+            )
+            .map_err(|error| format!("发送已有文件定位事件失败：{error}"))?;
+        focus_document_window(&app, &label);
+    }
+    let mut selected_paths = Vec::new();
+    for target in [current, remaining].into_iter().flatten() {
+        if let OpenTargetInput::Documents { paths } = target {
+            selected_paths.extend(paths);
+        }
+    }
+    if !selected_paths.is_empty() {
+        let window = app
+            .get_webview_window(&window_label)
+            .ok_or_else(|| "所选文件夹窗口已关闭，请重新打开文件".to_string())?;
+        window
+            .emit(
+                "nomo://open-in-directory-window",
+                ExternalOpenPayload {
+                    window_label: window_label.clone(),
+                    paths: selected_paths,
+                },
+            )
+            .map_err(|error| format!("发送文件夹窗口打开事件失败：{error}"))?;
+        focus_document_window(&app, &window_label);
+    }
+    Ok(())
 }
 
 fn resolve_existing_targets(

@@ -136,6 +136,8 @@ const EXTRA_TRANSLATIONS: Partial<Record<EffectiveInterfaceLocale, TranslationTa
     folderOpenDefaultBehavior: '打开默认行为',
     folderOpenDefaultBehaviorDescription:
       '用于菜单、最近记录和系统文件管理器；目标已打开或当前为空窗口时会直接复用。',
+    openInDirectoryWindow: '在已有文件夹窗口打开',
+    rememberDefaultWindowChoice: '记住“当前窗口”或“新窗口”的选择',
     askEveryTime: '每次询问',
     currentWindow: '当前窗口',
     newWindow: '新窗口',
@@ -774,6 +776,8 @@ const EXTRA_TRANSLATIONS: Partial<Record<EffectiveInterfaceLocale, TranslationTa
     folderOpenDefaultBehavior: '開啟預設行為',
     folderOpenDefaultBehaviorDescription:
       '用於選單、最近記錄和系統檔案管理器；目標已開啟或目前為空視窗時會直接復用。',
+    openInDirectoryWindow: '在既有資料夾視窗開啟',
+    rememberDefaultWindowChoice: '記住「目前視窗」或「新視窗」的選擇',
     askEveryTime: '每次詢問',
     currentWindow: '目前視窗',
     newWindow: '新視窗',
@@ -1415,6 +1419,8 @@ const EXTRA_TRANSLATIONS: Partial<Record<EffectiveInterfaceLocale, TranslationTa
     folderOpenDefaultBehavior: 'Default opening behavior',
     folderOpenDefaultBehaviorDescription:
       'Applies to menus, recent items, and the system file manager. Existing targets and empty windows are reused.',
+    openInDirectoryWindow: 'Open in existing folder window',
+    rememberDefaultWindowChoice: 'Remember the current or new window choice',
     askEveryTime: 'Ask every time',
     currentWindow: 'Current window',
     newWindow: 'New window',

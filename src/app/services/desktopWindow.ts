@@ -10,10 +10,16 @@ export type OpenTarget =
   | { kind: 'documents'; paths: string[] }
   | { kind: 'folder'; path: string };
 
+export interface OpenDirectoryWindow {
+  windowLabel: string;
+  folderPath: string;
+  paths: string[];
+}
+
 export type OpenTargetRouteDecision =
   | { action: 'handled' }
   | { action: 'activate-current'; target: OpenTarget; remainingTarget?: OpenTarget }
-  | { action: 'open-current'; target: OpenTarget }
+  | { action: 'open-current'; target: OpenTarget; directoryWindows?: OpenDirectoryWindow[] }
   | { action: 'create-window'; windowLabel: string; target: OpenTarget };
 
 export interface WindowOpenTargetsSnapshot {
@@ -156,7 +162,19 @@ export async function prepareOpenTargetWindow(
   return invoke<OpenTargetRouteDecision>('prepare_open_target_window', {
     target,
     createIfMissing,
-    reuseDirectoryWindow: options.reuseDirectoryWindow ?? true,
+    reuseDirectoryWindow: options.reuseDirectoryWindow ?? false,
+  });
+}
+
+export async function openInDirectoryWindow(
+  desktopEnabled: boolean,
+  candidate: OpenDirectoryWindow,
+): Promise<void> {
+  if (!desktopEnabled) return;
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('open_documents_in_directory_window', {
+    windowLabel: candidate.windowLabel,
+    paths: candidate.paths,
   });
 }
 

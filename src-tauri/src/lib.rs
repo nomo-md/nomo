@@ -349,6 +349,7 @@ pub fn run() {
             crate::file_system::image_assets::test_picgo_connection,
             crate::window::commands::create_new_window,
             crate::window::open_targets::sync_window_open_targets,
+            crate::window::open_targets::open_documents_in_directory_window,
             crate::window::open_targets::prepare_open_target_window,
             crate::window::open_targets::release_open_target_reservation,
             crate::window::commands::open_settings_window,

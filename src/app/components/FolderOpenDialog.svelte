@@ -2,15 +2,21 @@
   import { createEventDispatcher } from 'svelte';
   import { fade } from 'svelte/transition';
   import { t } from '../i18n';
+  import type { OpenDirectoryWindow } from '../services/desktopWindow';
 
   export let interfaceLocale: string;
   export let open: boolean;
   export let targetPath: string;
   export let targetName: string;
+  export let directoryWindows: OpenDirectoryWindow[] = [];
 
   let rememberChoice = false;
   const dispatch = createEventDispatcher<{
-    choose: { choice: 'current-window' | 'new-window'; remember: boolean };
+    choose: {
+      choice: 'current-window' | 'new-window' | 'directory-window';
+      windowLabel?: string;
+      remember: boolean;
+    };
     cancel: void;
   }>();
 
@@ -58,6 +64,23 @@
         <h3 id="folder-dialog-title">{t.folderOpenQuestion({ folderName: targetName })}</h3>
         <p class="folder-dialog-path">{targetPath}</p>
 
+        {#each directoryWindows as candidate (candidate.windowLabel)}
+          <button
+            type="button"
+            class="folder-dialog-btn directory-window-choice"
+            on:click={() => {
+              dispatch('choose', {
+                choice: 'directory-window',
+                windowLabel: candidate.windowLabel,
+                remember: false,
+              });
+              rememberChoice = false;
+            }}
+          >
+            {t.openInDirectoryWindow()}<span>{candidate.folderPath}</span>
+          </button>
+        {/each}
+
         <div class="folder-dialog-actions">
           <button type="button" class="folder-dialog-btn" on:click={() => choose('current-window')}>
             {t.openInCurrentWindow()}
@@ -74,7 +97,7 @@
 
         <label class="folder-dialog-remember">
           <input type="checkbox" bind:checked={rememberChoice} />
-          <span>{t.rememberFolderOpenChoice()}</span>
+          <span>{t.rememberDefaultWindowChoice()}</span>
         </label>
       </div>
     </div>
@@ -118,6 +141,23 @@
     font-family: var(--md-editor-font-mono);
     -webkit-user-select: text;
     user-select: text;
+  }
+
+  .directory-window-choice {
+    width: 100%;
+    height: auto;
+    min-height: 36px;
+    padding: 8px 12px;
+    margin-bottom: 10px;
+    text-align: left;
+  }
+
+  .directory-window-choice span {
+    display: block;
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--md-editor-muted-fg);
+    overflow-wrap: anywhere;
   }
 
   .folder-dialog-actions {

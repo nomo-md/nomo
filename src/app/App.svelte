@@ -92,12 +92,14 @@
     enterMarkdownMiniMode,
     exitMarkdownMiniMode,
     openSettingsWindow,
+    openInDirectoryWindow,
     refreshInterfaceLanguageChrome,
     prepareOpenTargetWindow,
     setMarkdownMiniModePinned,
     syncWindowOpenTargets,
     updateAppWindowTitle,
     type OpenTarget,
+    type OpenDirectoryWindow,
   } from './services/desktopWindow';
   import { routeOpenTarget } from './services/openTargetRouting';
   import { createImageInsertionHandlers } from './services/imageInsertion';
@@ -268,7 +270,8 @@
   type CloseWindowAction = Exclude<CloseWindowBehavior, 'ask-every-time'>;
   type CloseWindowChoiceResult = { behavior: CloseWindowAction; remember: boolean } | null;
   type OpenTargetChoiceResult = {
-    choice: 'current-window' | 'new-window';
+    choice: 'current-window' | 'new-window' | 'directory-window';
+    windowLabel?: string;
     remember: boolean;
   } | null;
   type ZoomScrollAnchor = {
@@ -357,6 +360,7 @@
   let imageSettings: ImageHandlingSettings = { ...DEFAULT_IMAGE_HANDLING_SETTINGS };
   let openDefaultBehavior: OpenDefaultBehavior = DEFAULT_APP_PREFERENCES.openDefaultBehavior;
   let pendingOpenChoice: OpenTarget | null = null;
+  let pendingOpenDirectoryWindows: OpenDirectoryWindow[] = [];
   let pendingOpenChoiceResolver: ((result: OpenTargetChoiceResult) => void) | null = null;
   let editorHost: HTMLDivElement,
     fileInput: HTMLInputElement,
@@ -642,9 +646,11 @@
     }
   }
 
-  function getCurrentWindowOpenTargetsSnapshot() {
+  function getCurrentWindowOpenTargetsSnapshot(currentTabs: Tab[] = tabs) {
     const filePaths = Array.from(
-      new Set(tabs.map((tab) => tab.nativePath).filter((path): path is string => Boolean(path))),
+      new Set(
+        currentTabs.map((tab) => tab.nativePath).filter((path): path is string => Boolean(path)),
+      ),
     ).sort();
     return {
       folderPath: currentFolderPath || null,
@@ -661,7 +667,7 @@
   }
 
   $: if (desktopEnabled && windowLabel && appBootState === 'ready') {
-    const snapshot = getCurrentWindowOpenTargetsSnapshot();
+    const snapshot = getCurrentWindowOpenTargetsSnapshot(tabs);
     const filePaths = snapshot.filePaths;
     const signature = JSON.stringify([currentFolderPath || null, filePaths]);
     if (signature !== lastWindowOpenTargetsSignature) {
@@ -1996,12 +2002,21 @@
           if (!created) {
             // 接收窗口不再提前显示；创建失败时仍需让用户看到原有错误提示。
             await activateDocumentWindow(desktopEnabled);
-            statusMessage = target.kind === 'folder' ? t.loadFolderTreeFailed() : t.openFileFailed();
+            statusMessage =
+              target.kind === 'folder' ? t.loadFolderTreeFailed() : t.openFileFailed();
           }
         },
         isReusableInitialWindow,
         getBehavior: () => openDefaultBehavior,
         requestChoice: requestOpenTargetChoice,
+        openDirectory: async (candidate) => {
+          try {
+            await openInDirectoryWindow(desktopEnabled, candidate);
+          } catch (error) {
+            showVisibleError(error, t.openFileFailed());
+            throw error;
+          }
+        },
         rememberBehavior: async (behavior) => {
           openDefaultBehavior = behavior;
           await updateAppSetting('openDefaultBehavior', behavior).catch(() => undefined);
@@ -2014,8 +2029,14 @@
     return openTargetWithBehavior({ kind: 'folder', path: folderPath });
   }
 
-  function requestOpenTargetChoice(target: OpenTarget) {
+  function requestOpenTargetChoice(
+    target: OpenTarget,
+    directoryWindows: OpenDirectoryWindow[] = [],
+  ) {
     pendingOpenChoice = target;
+    pendingOpenDirectoryWindows = directoryWindows.filter(
+      (item) => item.windowLabel !== windowLabel,
+    );
     return new Promise<OpenTargetChoiceResult>((resolve) => {
       pendingOpenChoiceResolver = resolve;
     });
@@ -2024,13 +2045,12 @@
   function resolveOpenTargetChoice(result: OpenTargetChoiceResult) {
     const resolve = pendingOpenChoiceResolver;
     pendingOpenChoice = null;
+    pendingOpenDirectoryWindows = [];
     pendingOpenChoiceResolver = null;
     resolve?.(result);
   }
 
-  function handleOpenTargetChoice(
-    event: CustomEvent<{ choice: 'current-window' | 'new-window'; remember: boolean }>,
-  ) {
+  function handleOpenTargetChoice(event: CustomEvent<Exclude<OpenTargetChoiceResult, null>>) {
     resolveOpenTargetChoice(event.detail);
   }
 
@@ -6111,6 +6131,19 @@
       }).catch(() => null),
     ]);
 
+    desktopUnlisteners.push(
+      await listen<{ windowLabel: string; paths: string[] }>(
+        'nomo://open-in-directory-window',
+        (event) => {
+          if (event.payload.windowLabel !== windowLabel) return;
+          void enqueueOpenTargetOperation(async () => {
+            await openTargetInCurrentWindow({ kind: 'documents', paths: event.payload.paths });
+            await syncCurrentWindowOpenTargetsNow();
+          }).catch((error) => showVisibleError(error, t.openFileFailed()));
+        },
+      ),
+    );
+
     criticalDesktopEventsReady = true;
     desktopUnlisteners = [
       ...desktopUnlisteners,
@@ -6672,6 +6705,7 @@
 <FolderOpenDialog
   {interfaceLocale}
   open={pendingOpenChoice !== null}
+  directoryWindows={pendingOpenDirectoryWindows}
   targetPath={getOpenTargetDialogPath(pendingOpenChoice)}
   targetName={getOpenTargetDialogName(pendingOpenChoice)}
   on:choose={handleOpenTargetChoice}

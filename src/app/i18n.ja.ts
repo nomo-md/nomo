@@ -102,6 +102,8 @@ export const JA_JP_EXTRA_TRANSLATIONS = {
   folderOpenDefaultBehavior: 'デフォルトの開く動作',
   folderOpenDefaultBehaviorDescription:
     'メニュー、最近使った項目、システムのファイルマネージャーに適用されます。既存の対象と空のウィンドウは再利用されます。',
+  openInDirectoryWindow: '既存のフォルダーウィンドウで開く',
+  rememberDefaultWindowChoice: '現在または新しいウィンドウの選択を記憶する',
   askEveryTime: '毎回尋ねる',
   currentWindow: '現在のウィンドウ',
   newWindow: '新しいウィンドウ',
