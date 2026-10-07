@@ -831,6 +831,11 @@
   --code-content-padding-block: 12px;
   --code-font-size: 13px;
   --code-line-height: 18px;
+  --code-line-count: 1;
+  --code-visible-lines: 3;
+  --code-viewport-height: calc(
+    var(--code-visible-lines) * var(--code-line-height) + 2 * var(--code-content-padding-block)
+  );
   --code-font: var(--code-font-size) / var(--code-line-height) var(--md-editor-font-mono);
   --code-collapsed-max-height: min(
     calc(24 * var(--code-line-height) + 2 * var(--code-content-padding-block)),
@@ -1008,8 +1013,11 @@
 /* ---- code_block 展示态布局 ---- */
 
 .code-body {
-  display: flex;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   width: 100%;
+  height: var(--code-viewport-height);
   min-width: 0;
   overflow: hidden;
   max-height: var(--code-collapsed-max-height);
@@ -1020,7 +1028,8 @@
 }
 
 .line-numbers-gutter {
-  flex: 0 0 auto; /* 宽度由内容撑开，不再固定 */
+  grid-area: 1 / 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--md-editor-code-border);
@@ -1030,6 +1039,7 @@
 
 /* 行号内部 wrapper：高度由内容撑开，滚动时 translateY 作用在此元素上 */
 .line-numbers-wrapper {
+  flex: 0 0 auto; /* 视口裁剪长行号，不压缩内部行高和内边距 */
   padding: var(--code-content-padding-block) 0;
 }
 
@@ -1044,8 +1054,10 @@
 }
 
 .prosemirror-host .ProseMirror .code-card .code-content {
-  flex: 1;
+  grid-area: 1 / 2;
+  height: 100%;
   min-width: 0;
+  min-height: 0;
   overflow-x: auto;
   overflow-y: auto;
   padding: 0;
@@ -1055,6 +1067,9 @@
 }
 
 .prosemirror-host .ProseMirror .code-card .code-content code {
+  min-height: calc(
+    var(--code-line-count) * var(--code-line-height) + 2 * var(--code-content-padding-block)
+  );
   padding: var(--code-content-padding-block) var(--code-content-padding-right)
     var(--code-content-padding-block) var(--code-content-padding-left);
   border-radius: 0;
@@ -1071,23 +1086,14 @@
   outline: none;
 }
 
-.code-card.is-editing .code-body {
-  position: relative;
-  overflow: hidden; /* 裁剪绝对定位的 gutter wrapper 溢出 */
-}
-
 .code-edit-area {
-  flex: 1;
+  grid-area: 1 / 2;
+  height: 100%;
   min-width: 0;
-  margin-left: var(--code-gutter-width, 32px); /* JS 动态覆盖 */
+  min-height: 0;
   overflow: hidden; /* 裁剪高亮层与 textarea 的滚动区域 */
   position: relative;
-  max-height: var(--code-collapsed-max-height);
   border-radius: 0;
-}
-
-.code-card.is-expanded .code-edit-area {
-  max-height: none;
 }
 
 /* 展开态不显示内部滚动条；保留长代码行的横向滚动与光标定位能力。 */
@@ -1113,7 +1119,6 @@
   pointer-events: none;
   white-space: pre;
   overflow: visible; /* 允许内容自然撑高，由 .code-edit-area overflow:hidden 裁剪 */
-  will-change: transform;
   background: transparent;
   border: 0;
   border-radius: 0;
@@ -1122,6 +1127,9 @@
 .prosemirror-host .ProseMirror .code-card .code-highlight-layer code {
   display: block;
   min-width: max-content;
+  min-height: calc(
+    var(--code-line-count) * var(--code-line-height) + 2 * var(--code-content-padding-block)
+  );
   padding: var(--code-content-padding-block) var(--code-content-padding-right)
     var(--code-content-padding-block) var(--code-content-padding-left);
   background: transparent;
@@ -1134,8 +1142,8 @@
   -webkit-appearance: none;
   display: block;
   width: 100%;
-  min-height: calc(3 * var(--code-line-height) + 2 * var(--code-content-padding-block));
-  max-height: inherit;
+  height: 100%;
+  min-height: 0;
   box-sizing: border-box;
   margin: 0;
   padding: var(--code-content-padding-block) var(--code-content-padding-right)
@@ -1159,19 +1167,6 @@
 .prosemirror-host .ProseMirror .code-card .code-input::selection {
   background: var(--md-editor-selection-bg);
   color: transparent;
-}
-
-.code-card.is-editing .line-numbers-gutter {
-  position: absolute; /* 脱离 flex 流，不让 wrapper 内容撑开 code-body */
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: fit-content; /* 宽度由行号内容撑开 */
-  z-index: 1;
-}
-
-.code-card.is-editing .line-numbers-wrapper {
-  will-change: transform;
 }
 
 /* ---- 语言选择器 ---- */

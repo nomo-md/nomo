@@ -393,6 +393,7 @@ export class CodeBlockNodeView {
     // 行号内部 wrapper：高度由内容撑开，gutter 作为裁剪容器
     this.lineNumbersWrapper = document.createElement('div');
     this.lineNumbersWrapper.className = 'line-numbers-wrapper';
+    this.lineNumbersWrapper.style.transform = 'translateY(-0px)';
     this.lineNumbersGutter.appendChild(this.lineNumbersWrapper);
     this.codeBody.appendChild(this.lineNumbersGutter);
 
@@ -522,7 +523,7 @@ export class CodeBlockNodeView {
 
   private renderDisplay(): void {
     const code = this.node.textContent;
-    this.updateLineNumbers(countLines(code));
+    this.updateLineNumbers(countLines(this.textarea?.value ?? code));
     this.renderHighlightFor(code, this.language, this.codeDisplay, DISPLAY_HIGHLIGHT_MAX_CHARS);
   }
 
@@ -572,7 +573,6 @@ export class CodeBlockNodeView {
       }
       instance.expanded = snapshot.expanded;
       instance.applyExpandedState();
-      instance.syncTextareaRows(instance.lineCount);
       instance.viewport = { top: snapshot.top, left: snapshot.left };
       instance.restoreViewport();
     }
@@ -589,17 +589,6 @@ export class CodeBlockNodeView {
         span.textContent = String(i);
         this.lineNumbersWrapper.appendChild(span);
       }
-      // 行号数量变化后同步行号栏宽度到编辑区 margin-left
-      this.syncGutterWidth();
-    }
-  }
-
-  /** 测量行号栏实际宽度，同步到编辑区的 margin-left */
-  private syncGutterWidth(): void {
-    if (!this.editArea) return;
-    const gutterWidth = this.lineNumbersGutter.offsetWidth;
-    if (gutterWidth > 0) {
-      this.editArea.style.marginLeft = `${gutterWidth}px`;
     }
   }
 
@@ -662,7 +651,6 @@ export class CodeBlockNodeView {
 
     // 步骤1：隐藏展示态，构建编辑态布局
     this.codeDisplay.style.display = 'none';
-    this.lineNumbersWrapper.innerHTML = '';
 
     this.editArea = document.createElement('div');
     this.editArea.className = 'code-edit-area';
@@ -683,7 +671,6 @@ export class CodeBlockNodeView {
     this.textarea.className = 'code-input';
     this.textarea.value = this.originalCode;
     const initialLineCount = countLines(this.originalCode);
-    this.syncTextareaRows(initialLineCount);
     this.textarea.spellcheck = false;
     this.textarea.setAttribute('autocorrect', 'off');
     this.textarea.setAttribute('autocapitalize', 'off');
@@ -712,8 +699,9 @@ export class CodeBlockNodeView {
       EDIT_HIGHLIGHT_MAX_CHARS,
     );
 
-    // 初始同步行号栏宽度（updateLineNumbers 可能未触发 syncGutterWidth，这里兜底）
-    this.syncGutterWidth();
+    // 首次绘制前对齐输入层、高亮层和行号，避免下一帧聚焦前跳回顶部。
+    this.restoreViewport();
+    const viewport = { ...this.viewport };
 
     // 步骤4：聚焦 textarea，尝试定位到点击的行
     this.editFrame = requestAnimationFrame(() => {
@@ -745,7 +733,12 @@ export class CodeBlockNodeView {
           this.textarea.value.length,
         );
       }
-      if (preserveViewport) this.restoreViewport();
+      if (preserveViewport) {
+        this.viewport = viewport;
+        this.restoreViewport();
+      } else {
+        this.handleScroll();
+      }
     });
   }
 
@@ -797,19 +790,24 @@ export class CodeBlockNodeView {
     const newCode = save && this.textarea ? this.textarea.value : this.originalCode;
 
     this.cleanupEdit();
+    const viewport = { ...this.viewport };
 
-    // 步骤1：提交或恢复节点内容。选区由 ProseMirror 自己维护，避免 blur 后把旧代码块重新选中。
+    // 先提交最终内容，再按其滚动范围恢复视口；不能让旧正文提前钳制位置。
+    // 选区由 ProseMirror 自己维护，避免 blur 后把旧代码块重新选中。
     const oldCode = this.node.textContent;
     if (save && newCode !== oldCode) {
       this.saveContent(newCode);
+    } else {
+      this.renderDisplay();
     }
+    this.viewport = viewport;
+    this.restoreViewport();
   }
 
   private cleanupEdit(): void {
     if (this.editFrame) cancelAnimationFrame(this.editFrame);
     this.editFrame = 0;
     if (this.textarea) this.captureViewport();
-    const viewport = { ...this.viewport };
     this.editing = false;
     unregisterActiveEdit(this.view, this.activeEditExitFn);
     this.dom.classList.remove('is-editing');
@@ -822,14 +820,8 @@ export class CodeBlockNodeView {
     this.textarea = null;
     this.highlightLayer = null;
 
-    // 重置行号 wrapper 的滚动偏移
-    this.lineNumbersWrapper.style.transform = '';
-
-    // 恢复展示态
+    // 保留行号偏移，展示内容和视口由 exitEdit 在提交最终内容后恢复。
     this.codeDisplay.style.display = '';
-    this.renderDisplay();
-    this.viewport = viewport;
-    this.restoreViewport();
   }
 
   // ---- 编辑态事件处理 ----
@@ -838,9 +830,9 @@ export class CodeBlockNodeView {
     if (!this.textarea) return;
     const code = this.textarea.value;
     const lineCount = countLines(code);
-    this.syncTextareaRows(lineCount);
     this.updateLineNumbers(lineCount);
     this.scheduleEditHighlight(code);
+    this.handleScroll();
   }
 
   private scheduleEditHighlight(code: string): void {
@@ -1076,10 +1068,15 @@ export class CodeBlockNodeView {
     this.lineNumbersWrapper.style.transform = `translateY(-${this.textarea.scrollTop}px)`;
   }
 
-  private syncTextareaRows(lineCount: number): void {
-    if (!this.textarea) return;
-    const visibleLines = this.expanded ? lineCount : Math.min(lineCount, MAX_VISIBLE_LINES);
-    this.textarea.rows = Math.max(visibleLines, MIN_VISIBLE_LINES);
+  /** 展示态与编辑态使用相同的行数和视口高度，行号仅渲染真实代码行。 */
+  private syncViewportSize(): void {
+    const visibleLines = Math.max(
+      this.expanded ? this.lineCount : Math.min(this.lineCount, MAX_VISIBLE_LINES),
+      MIN_VISIBLE_LINES,
+    );
+    this.dom.style.setProperty('--code-line-count', String(this.lineCount));
+    this.dom.style.setProperty('--code-visible-lines', String(visibleLines));
+    if (this.textarea) this.textarea.rows = visibleLines;
   }
 
   private updateExpandableState(): void {
@@ -1095,12 +1092,12 @@ export class CodeBlockNodeView {
     if (this.lineCount <= MAX_VISIBLE_LINES) return;
     this.expanded = !this.expanded;
     this.applyExpandedState();
-    this.syncTextareaRows(this.lineCount);
     this.resetVerticalCodeScroll();
   }
 
   private applyExpandedState(): void {
     this.dom.classList.toggle('is-expanded', this.expanded);
+    this.syncViewportSize();
     this.expandButton.setAttribute('aria-expanded', String(this.expanded));
     this.updateExpandButtonChrome();
   }
@@ -1117,7 +1114,7 @@ export class CodeBlockNodeView {
     if (this.textarea) {
       this.textarea.scrollTop = 0;
     }
-    this.lineNumbersWrapper.style.transform = '';
+    this.lineNumbersWrapper.style.transform = 'translateY(-0px)';
     if (this.highlightLayer) {
       this.highlightLayer.style.transform = `translate(-${this.textarea?.scrollLeft ?? 0}px, 0)`;
     }
