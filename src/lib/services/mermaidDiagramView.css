@@ -278,12 +278,11 @@
   scrollbar-width: thin;
   scrollbar-color: var(--md-scrollbar-thumb, #999) transparent;
 }
-.mermaid-managed-viewport[data-mermaid-view='card'] {
-  max-height: max(160px, min(420px, 52vh));
-  padding: 12px;
-}
+/* 常态与编辑预览共享尺寸，避免切换时改变图表缩放或撑大小图视口。 */
+.mermaid-managed-viewport[data-mermaid-view='card'],
 .mermaid-managed-viewport[data-mermaid-view='preview'] {
-  max-height: max(160px, min(360px, 42vh));
+  min-height: 0;
+  max-height: max(160px, min(420px, 52vh));
   padding: 12px;
 }
 .mermaid-managed-viewport .mermaid-block-preview-render,

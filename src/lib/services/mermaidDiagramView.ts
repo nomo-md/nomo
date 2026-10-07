@@ -114,13 +114,7 @@ export function bindMermaidViewport(
   const heightBudget = () =>
     options.kind === 'fullscreen'
       ? viewport.clientHeight
-      : Math.max(
-          160,
-          Math.min(
-            options.kind === 'card' ? 420 : 360,
-            window.innerHeight * (options.kind === 'card' ? 0.52 : 0.42),
-          ),
-        );
+      : Math.max(160, Math.min(420, window.innerHeight * 0.52));
 
   const position = (point?: { x: number; y: number }): MermaidViewPosition | undefined => {
     if (!svg || !size || !viewport.clientWidth) return pendingPosition;
