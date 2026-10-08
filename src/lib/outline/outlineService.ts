@@ -1,4 +1,8 @@
 import { calculateWritingStats } from './writingStats';
+import { analyzeInlineSourceText } from '../editor-core/InlineSourceCodec';
+import { createMarkdownTokenizer, inlineTokenSourceRange } from '../editor-core/markdownTokenizer';
+
+const headingTokenizer = createMarkdownTokenizer({ inlineSource: true });
 
 export interface OutlineItem {
   id: string;
@@ -86,28 +90,37 @@ function slugifyHeading(title: string): string {
 }
 
 export function normalizeHeadingTitle(title: string): string {
-  let plain = title
-    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/`([^`]+)`/g, '$1');
-
-  let previous = '';
-  while (plain !== previous) {
-    previous = plain;
-    plain = plain
-      .replace(
-        /(^|[^\p{Letter}\p{Number}])(\*\*|__)(\S(?:[\s\S]*?\S)?)\2(?=$|[^\p{Letter}\p{Number}])/gu,
-        '$1$3',
-      )
-      .replace(
-        /(^|[^\p{Letter}\p{Number}])(\*|_)(\S(?:[\s\S]*?\S)?)\2(?=$|[^\p{Letter}\p{Number}])/gu,
-        '$1$3',
-      )
-      .replace(
-        /(^|[^\p{Letter}\p{Number}])~~(\S(?:[\s\S]*?\S)?)~~(?=$|[^\p{Letter}\p{Number}])/gu,
-        '$1$2',
-      );
+  const analysis = analyzeInlineSourceText(title);
+  const tokens = headingTokenizer.parseInline(title, {})[0]?.children ?? [];
+  const hidden = new Set<number>();
+  const images = new Map<number, { to: number; text: string }>();
+  for (const token of tokens) {
+    const range = inlineTokenSourceRange(token);
+    if (!range) continue;
+    // A link-looking string inside a code span is still literal code content.
+    if (analysis.spans.some((span) => span.type === 'code'
+      && range.from >= span.from && range.to <= span.to)) continue;
+    if (token.type === 'link_open' || token.type === 'link_close' || token.type === 'image') {
+      for (let pos = range.from; pos < range.to; pos++) hidden.add(pos);
+      if (token.type === 'image') {
+        images.set(range.from, {
+          to: range.to,
+          text: normalizeHeadingTitle(token.content || token.attrGet('alt') || ''),
+        });
+      }
+    }
   }
-
-  return plain.replace(/\\([\\`*_[\]{}()#+\-.!>])/g, '$1').trim();
+  let plain = '';
+  const emittedImages = new Set<number>();
+  for (let index = 0; index < analysis.visibleText.length; index++) {
+    const original = analysis.visiblePositions[index];
+    for (const [from, image] of images) {
+      if (!emittedImages.has(from) && original >= from) {
+        plain += image.text;
+        emittedImages.add(from);
+      }
+    }
+    if (!hidden.has(original)) plain += analysis.visibleText[index];
+  }
+  return plain.trim();
 }

@@ -3,14 +3,14 @@ import { EditorState, TextSelection } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 import { parseMarkdown, serializeMarkdown } from './markdown';
 import { schema } from './schema';
-import { inlineMarkdownMarkInputPlugin } from './plugins/inlineMarkdownMarkInput';
-import { pendingInlineMarkKey, pendingInlineMarkPlugin } from './plugins/pendingInlineMark';
+import { inlineSourceEditingPlugin } from './plugins/inlineSourceEditing';
+import { projectInlineSource } from './InlineSourceCodec';
 import { codeHighlightDecorationPlugin } from './plugins/codeHighlightDecorationPlugin';
 import { inlineCodeSelectionBridgePlugin } from './plugins/inlineCodeSelectionBridge';
 
 function hasCodeMark(node: ReturnType<typeof schema.node>): boolean {
   let found = false;
-  node.descendants((n) => {
+  projectInlineSource(node).descendants((n) => {
     if (n.isText && n.marks.some((m) => m.type.name === 'code')) {
       found = true;
       return false;
@@ -22,7 +22,7 @@ function hasCodeMark(node: ReturnType<typeof schema.node>): boolean {
 
 function getCodeTexts(node: ReturnType<typeof schema.node>): string[] {
   const texts: string[] = [];
-  node.descendants((n) => {
+  projectInlineSource(node).descendants((n) => {
     if (n.isText && n.marks.some((m) => m.type.name === 'code')) {
       texts.push(n.text ?? '');
     }
@@ -148,11 +148,11 @@ describe('code mark with math_inline coexistence', () => {
   });
 });
 
-describe('code mark semantic input', () => {
-  it('converts newly typed `code` text into code mark', () => {
+describe('real inline code input', () => {
+  it('derives formatted content from newly typed `code` text without removing delimiters', () => {
     let state = EditorState.create({
       doc: schema.node('doc', null, [schema.node('paragraph')]),
-      plugins: [inlineMarkdownMarkInputPlugin()],
+      plugins: [inlineSourceEditingPlugin()],
     });
 
     state = state.apply(state.tr.insertText('语义输入 `const x = 1`'));
@@ -160,10 +160,10 @@ describe('code mark semantic input', () => {
     expect(getCodeTexts(state.doc)).toEqual(['const x = 1']);
   });
 
-  it('converts newly typed `code` with spaces into code mark', () => {
+  it('derives formatted content from newly typed `code` with spaces without removing delimiters', () => {
     let state = EditorState.create({
       doc: schema.node('doc', null, [schema.node('paragraph')]),
-      plugins: [inlineMarkdownMarkInputPlugin()],
+      plugins: [inlineSourceEditingPlugin()],
     });
 
     state = state.apply(state.tr.insertText('语义输入 `const ok = true`'));
@@ -171,10 +171,10 @@ describe('code mark semantic input', () => {
     expect(getCodeTexts(state.doc)).toEqual(['const ok = true']);
   });
 
-  it('converts `a` to code mark', () => {
+  it('converts `a` without removing delimiters', () => {
     let state = EditorState.create({
       doc: schema.node('doc', null, [schema.node('paragraph')]),
-      plugins: [inlineMarkdownMarkInputPlugin()],
+      plugins: [inlineSourceEditingPlugin()],
     });
 
     state = state.apply(state.tr.insertText('`a`'));
@@ -182,31 +182,15 @@ describe('code mark semantic input', () => {
     expect(getCodeTexts(state.doc)).toEqual(['a']);
   });
 
-  it('converts double backtick code into code mark', () => {
+  it('converts double backtick code without removing delimiters', () => {
     let state = EditorState.create({
       doc: schema.node('doc', null, [schema.node('paragraph')]),
-      plugins: [inlineMarkdownMarkInputPlugin()],
+      plugins: [inlineSourceEditingPlugin()],
     });
 
     state = state.apply(state.tr.insertText('语义输入 `` code with ` backtick ``'));
 
     expect(getCodeTexts(state.doc)).toEqual(['code with ` backtick']);
-  });
-});
-
-describe('code mark pending state', () => {
-  it('shows pending code mark syntax hint', () => {
-    const state = EditorState.create({
-      doc: schema.node('doc', null, [schema.node('paragraph')]),
-      plugins: [pendingInlineMarkPlugin()],
-    });
-
-    const tr = state.tr.setMeta(pendingInlineMarkKey, {
-      action: 'set',
-      markTypeNames: ['code'],
-    });
-    // pending 状态通过 toggleMarkPending 命令触发
-    expect(state.schema.marks.code).toBeDefined();
   });
 });
 

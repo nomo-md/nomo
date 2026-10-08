@@ -2418,7 +2418,9 @@
   -webkit-box-decoration-break: clone;
 }
 
-.prosemirror-host .ProseMirror code.inline-code:has(.pm-inline-code-selection-bridge) {
+.prosemirror-host .ProseMirror code.inline-code:has(.pm-inline-code-selection-bridge),
+.prosemirror-host .ProseMirror .pm-inline-source-code.pm-inline-code-selection-bridge,
+.prosemirror-host .ProseMirror .pm-inline-source-code:has(.pm-inline-code-selection-bridge) {
   padding-block: 0;
   padding-inline: 0;
   border-color: transparent;
@@ -2440,7 +2442,8 @@
 .prosemirror-host
   .ProseMirror
   code.inline-code:has(.pm-inline-code-selection-bridge)
-  .inline-code-token {
+  .inline-code-token,
+.prosemirror-host .ProseMirror .pm-inline-source-code .pm-inline-code-selection-bridge {
   color: inherit;
   font-family: inherit;
   font-size: inherit;
@@ -2451,7 +2454,9 @@
 .prosemirror-host
   .ProseMirror
   code.inline-code:has(.pm-inline-code-selection-bridge)
-  .pm-inline-selection-bridge {
+  .pm-inline-selection-bridge,
+.prosemirror-host .ProseMirror .pm-inline-source-code.pm-inline-selection-bridge,
+.prosemirror-host .ProseMirror .pm-inline-source-code .pm-inline-selection-bridge {
   background: var(--md-editor-text-selection-bg);
 }
 
@@ -2462,7 +2467,9 @@
 .prosemirror-host
   .ProseMirror
   code.inline-code:has(.pm-inline-code-selection-bridge)
-  .inline-code-token::selection {
+  .inline-code-token::selection,
+.prosemirror-host .ProseMirror .pm-inline-source-code.pm-inline-code-selection-bridge::selection,
+.prosemirror-host .ProseMirror .pm-inline-source-code .pm-inline-code-selection-bridge::selection {
   background: transparent;
   color: inherit;
 }
@@ -2654,52 +2661,63 @@
   white-space: pre;
 }
 
-/* ---- 行内格式编辑态的灰色语法提示 ---- */
-/*
- * 架构：Mark 负责语义 → Decoration 判断哪些需要提示 → WidgetDecoration 渲染。
- *
- * 标签是不可编辑的真实占位节点，`**` / `~~` / `<u>` 作为一个整体参与排版。
- * 光标所在的开/闭侧改用 ::before/::after，避免 contenteditable=false 挡住 IME。
- */
+/* ---- 真实行内 Markdown：正文只装饰，语法仍是可逐字编辑的文本 ---- */
 
-.pm-mark-delimiter-widget {
-  display: inline-block;
-  color: color-mix(in srgb, var(--md-editor-muted-fg) 55%, transparent);
+.prosemirror-host .ProseMirror .pm-inline-source-marker {
+  color: var(--md-editor-muted-fg);
   font-family: var(--md-editor-font-mono);
-  font-size: 0.88em;
-  line-height: 1;
-  user-select: none;
-  white-space: pre;
+  font-size: max(12px, 0.88em);
+  font-weight: 400;
+  font-style: normal;
+  text-decoration: none;
+  background: transparent;
+  /* Syntax glyphs keep their baseline without enlarging the text line box.
+     KP may put a pixel line-height on the same span, so this must override it. */
+  line-height: 0 !important;
+  white-space: inherit;
 }
 
-.pm-mark-delimiter-widget[data-edge='open'] {
-  margin-right: 0.08em;
+.prosemirror-host .ProseMirror .pm-inline-source-marker.is-hidden {
+  display: none;
 }
 
-.pm-mark-delimiter-widget[data-edge='close'] {
-  margin-left: 0.08em;
+.prosemirror-host .ProseMirror .pm-inline-source-strong {
+  font-weight: 700;
 }
 
-.pm-mark-delimiter-range[data-caret-open]::before,
-.pm-mark-delimiter-range[data-caret-close]::after {
-  display: inline-block;
-  color: color-mix(in srgb, var(--md-editor-muted-fg) 55%, transparent);
+.prosemirror-host .ProseMirror .pm-inline-source-em {
+  font-style: italic;
+}
+
+.prosemirror-host .ProseMirror .pm-inline-source-strikethrough {
+  text-decoration: line-through;
+}
+
+.prosemirror-host .ProseMirror .pm-inline-source-underline {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.prosemirror-host .ProseMirror .pm-inline-source-highlight {
+  color: inherit;
+  background: var(--md-editor-highlight-bg, color-mix(in srgb, var(--md-editor-accent) 22%, transparent));
+  border-radius: 2px;
+}
+
+.prosemirror-host .ProseMirror .pm-inline-source-code {
+  padding: 2px 4px;
+  border: var(--md-editor-border-width) solid var(--md-inline-code-border);
+  border-radius: var(--md-editor-radius-sm, 3px);
+  background: var(--md-inline-code-background);
+  color: var(--md-inline-code-foreground);
   font-family: var(--md-editor-font-mono);
-  font-size: 0.88em;
-  line-height: 1;
-  user-select: none;
-  white-space: pre;
-  pointer-events: none;
-}
-
-.pm-mark-delimiter-range[data-caret-open]::before {
-  content: attr(data-open);
-  margin-right: 0.08em;
-}
-
-.pm-mark-delimiter-range[data-caret-close]::after {
-  content: attr(data-close);
-  margin-left: 0.08em;
+  font-size: 0.92em;
+  font-weight: 400;
+  font-style: normal;
+  line-height: inherit;
+  white-space: pre-wrap;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 /* ---- 脚注 footnote ---- */

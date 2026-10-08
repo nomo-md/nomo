@@ -1,4 +1,5 @@
 import type { Node as ProseMirrorNode } from 'prosemirror-model';
+import { analyzeInlineSource, isInlineSourceText } from '../editor-core/InlineSourceCodec';
 import { createMarkdownTokenizer, isRenderedImageHtml } from '../editor-core/markdownTokenizer';
 import { classifyHtmlBlock } from '../editor-core/html/htmlClassifier';
 import { INLINE_TAG_TO_MARK } from '../editor-core/html/htmlPolicy';
@@ -25,7 +26,7 @@ export interface WritingStatsIndex {
   headings: number;
 }
 
-const tokenizer = createMarkdownTokenizer();
+const tokenizer = createMarkdownTokenizer({ literalHtmlCode: true });
 recordInlinePositions(tokenizer);
 const Segmenter = (
   Intl as typeof Intl & {
@@ -353,12 +354,12 @@ export function buildSourceWritingStats(markdown: string): WritingStatsIndex {
           }
         }
       }
-      if (!['text', 'text_special', 'code_inline', 'html_inline'].includes(child.type)) continue;
+      if (!['text', 'text_special', 'code_inline', 'inline_source_code', 'html_inline'].includes(child.type)) continue;
       if (!child.content) continue;
       for (const span of tokenSpans(child)) {
         const text = span.text;
         if (!text) continue;
-        if (!run.text) startsWithCode = child.type === 'code_inline' || htmlMarks.includes('code');
+        if (!run.text) startsWithCode = child.type === 'code_inline' || child.type === 'inline_source_code' || htmlMarks.includes('code');
         const rawLength = span.to - span.from;
         const sameLength = rawLength === span.text.length;
         const starts = Array.from(
@@ -390,6 +391,24 @@ export function buildSemanticWritingStats(doc: ProseMirrorNode): WritingStatsInd
     if (node.type.name === 'heading') headings++;
     const run = emptyRun();
     let startsWithCode = false;
+    let hasSource = false;
+    node.forEach((child) => { hasSource ||= isInlineSourceText(child); });
+    if (hasSource && node.type.name !== 'html_block') {
+      const analysis = analyzeInlineSource(node);
+      const omitted: Array<{ from: number; to: number }> = [];
+      node.forEach((child, offset) => {
+        if (!child.isText && child.type.name !== 'hard_break') omitted.push({ from: offset, to: offset + child.nodeSize });
+      });
+      for (let i = 0; i < analysis.visibleText.length; i++) {
+        const offset = analysis.visiblePositions[i];
+        if (omitted.some((range) => offset >= range.from && offset < range.to)) continue;
+        if (!run.text) startsWithCode = analysis.spans.some((span) => span.type === 'code' && offset >= span.from && offset < span.to);
+        append(run, analysis.visibleText[i], [pos + 1 + offset]);
+      }
+      removeTaskPrefix(run, listContent.has(node), startsWithCode);
+      runs.push(run);
+      return false;
+    }
     node.forEach((child, offset) => {
       if (child.isText) {
         const text = child.text ?? '';

@@ -3,7 +3,9 @@ import {
   parseHtmlImgAttrs,
   WRAPPED_IMAGE_HTML,
   STANDALONE_IMAGE_HTML,
+  inlineTokenSourceRange,
 } from './markdownTokenizer';
+import { escapeInlineSourceLiteral, isRetainedInlineToken } from './InlineSourceCodec';
 import { serializeMarkdown } from './markdownSerialization';
 export { serializeMarkdown, serializeMarkdownSelection } from './markdownSerialization';
 import { InputRule, textblockTypeInputRule, wrappingInputRule } from 'prosemirror-inputrules';
@@ -18,7 +20,7 @@ import { calloutParserTokens } from './callout/calloutParser';
 import { splitFrontMatterBlock } from '../markdown/frontMatter';
 import { parseWithSyncAnchors, type MarkdownSyncAnchor } from './scrollSyncMapping';
 
-const markdownIt = createMarkdownTokenizer();
+const markdownIt = createMarkdownTokenizer({ inlineSource: true });
 
 const tableMarkdownParser = new MarkdownParser(schema, markdownIt, {
   ...defaultMarkdownParser.tokens,
@@ -121,7 +123,9 @@ tableMarkdownParserWithHandlers.tokenHandlers = {
     } else {
       // 不可编辑 HTML：作为 paragraph 保留原始文本，供 tableHtmlPlugin 渲染 widget
       state.openNode(schema.nodes.paragraph);
+      state.openMark(schema.marks.inline_source.create({ literal: true }));
       state.addText(tok.content.trimEnd());
+      state.closeMark(schema.marks.inline_source);
       state.closeNode();
     }
   },
@@ -226,6 +230,40 @@ tableMarkdownParserWithHandlers.tokenHandlers.html_inline = (
     // 不支持的内联标签（如 span）— 保留原始 HTML 文本
     state.addText(content);
   }
+};
+
+/**
+ * 六类行内格式保留原文字符。只有链接、图片、公式等既有结构继续走原 handler，
+ * 不从已经裁剪代码空白或解码转义的 token.content 重建原文。
+ */
+tableMarkdownParserWithHandlers.tokenHandlers.inline = (state, token) => {
+  const source = token.content;
+  let cursor = 0;
+  const appendSource = (text: string) => {
+    if (!text) return;
+    state.openMark(schema.marks.inline_source.create());
+    state.addText(text);
+    state.closeMark(schema.marks.inline_source);
+  };
+  const events = (token.children ?? [])
+    .filter(isRetainedInlineToken)
+    .map((child) => ({ token: child, range: inlineTokenSourceRange(child) }))
+    .filter((event): event is { token: Token; range: { from: number; to: number } } =>
+      event.range != null && event.range.from >= 0 && event.range.to <= source.length,
+    )
+    .sort((a, b) => a.range.from - b.range.from);
+  for (const event of events) {
+    if (event.range.from < cursor) continue;
+    appendSource(source.slice(cursor, event.range.from));
+    if (event.token.type === 'text_special' && event.token.info === 'entity') {
+      // 实体保持原来的显示字符，六类语法字符则用真实反斜杠保护其字面含义。
+      appendSource(escapeInlineSourceLiteral(event.token.content));
+    } else {
+      tableMarkdownParserWithHandlers.tokenHandlers[event.token.type](state, event.token);
+    }
+    cursor = event.range.to;
+  }
+  appendSource(source.slice(cursor));
 };
 
 // 覆盖 image token handler — 从 tok.attrs 读取 align/width 写入 node

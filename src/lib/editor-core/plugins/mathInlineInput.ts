@@ -4,6 +4,7 @@ import { schema } from '../schema';
 import { MathInlineNodeView } from '../nodeViews/MathInlineNodeView';
 import { isPlainTextPaste } from '../clipboardMarkdown';
 import type { EditorView } from 'prosemirror-view';
+import { analyzeInlineSource, isInlineSourceBlock } from '../InlineSourceCodec';
 
 interface InlineMathMatch {
   from: number;
@@ -48,10 +49,16 @@ export function mathInlineInputPlugin(getView?: () => EditorView | null): Plugin
 
 function findInlineMathTextMatches(doc: ProseMirrorNode): InlineMathMatch[] {
   const matches: InlineMathMatch[] = [];
+  const codeRanges: Array<{ from: number; to: number }> = [];
 
   doc.descendants((node, pos, parent) => {
     if (node.type === schema.nodes.code_block) {
       return false;
+    }
+    if (isInlineSourceBlock(node)) {
+      for (const span of analyzeInlineSource(node).spans) {
+        if (span.type === 'code') codeRanges.push({ from: pos + 1 + span.openFrom, to: pos + 1 + span.closeTo });
+      }
     }
 
     if (!node.isText || !node.text || hasCodeMark(node)) {
@@ -63,6 +70,7 @@ function findInlineMathTextMatches(doc: ProseMirrorNode): InlineMathMatch[] {
     }
 
     for (const match of scanTextForInlineMath(node.text, pos)) {
+      if (codeRanges.some((range) => match.from < range.to && match.to > range.from)) continue;
       matches.push(match);
     }
     return true;

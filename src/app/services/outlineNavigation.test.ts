@@ -85,6 +85,22 @@ describe('outlineNavigation', () => {
     ).toBe('same-2');
   });
 
+  it('matches the outline slug when a semantic heading contains real HTML delimiters', () => {
+    const pane = document.createElement('section');
+    pane.className = 'semantic-pane';
+    pane.getBoundingClientRect = () => createRect(0);
+    const editor = document.createElement('div');
+    editor.className = 'ProseMirror';
+    const heading = document.createElement('h1');
+    heading.textContent = '<mark>标题</mark>';
+    heading.getBoundingClientRect = () => createRect(20);
+    editor.append(heading);
+    pane.append(editor);
+    expect(getActiveOutlineIdFromSemantic([
+      { id: '标题', level: 1, title: '标题', line: 1 },
+    ], pane)).toBe('标题');
+  });
+
   it('maps a source section anchor into the matching semantic heading section', () => {
     useInstantScroll();
     const sourcePane = createScrollableElement('section', {

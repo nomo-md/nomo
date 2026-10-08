@@ -1,4 +1,4 @@
-import type { OutlineItem } from '../../lib/outline/outlineService';
+import { normalizeHeadingTitle, type OutlineItem } from '../../lib/outline/outlineService';
 import { slugifyHeading } from '../../lib/toc/tocService';
 import { getOutlineItemAtLine } from './outlineState';
 import type { MarkdownSourceEditorHandle } from '../components/markdownSourceEditor';
@@ -589,7 +589,7 @@ function getSemanticHeadingAnchors(
   const headings = getSemanticHeadings(semanticPane);
   const usedIds = new Map<string, number>();
   const anchors = headings.map((element, index) => {
-    const title = element.textContent?.trim() ?? '';
+    const title = normalizeHeadingTitle(element.textContent ?? '');
     const baseId = slugifyHeading(title) || `heading-${index + 1}`;
     const seen = usedIds.get(baseId) ?? 0;
     usedIds.set(baseId, seen + 1);

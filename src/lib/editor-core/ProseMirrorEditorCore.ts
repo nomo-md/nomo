@@ -13,13 +13,12 @@ import {
   selectAll as selectAllCommand,
   selectNodeBackward,
   selectNodeForward,
-  toggleMark,
 } from 'prosemirror-commands';
 import { history, redo, undo } from 'prosemirror-history';
 import { inputRules } from 'prosemirror-inputrules';
 import { keymap } from 'prosemirror-keymap';
-import { EditorState, NodeSelection, TextSelection, type Transaction } from 'prosemirror-state';
-import { Slice, DOMSerializer, type Node as ProseMirrorNode, type ResolvedPos } from 'prosemirror-model';
+import { EditorState, Selection, NodeSelection, TextSelection, type Transaction } from 'prosemirror-state';
+import { Slice, Fragment, DOMSerializer, type Node as ProseMirrorNode, type ResolvedPos } from 'prosemirror-model';
 import { EditorView } from 'prosemirror-view';
 import { liftListItem, sinkListItem, splitListItem, wrapInList } from 'prosemirror-schema-list';
 import { goToNextCell, tableEditing } from 'prosemirror-tables';
@@ -53,13 +52,20 @@ import { headingLevelIndicatorPlugin } from './plugins/headingLevelIndicator';
 import { codeBlockNavigationPlugin } from './plugins/codeBlockNavigation';
 import { displayMathInputPlugin } from './plugins/displayMathInput';
 import { mathInlineInputPlugin } from './plugins/mathInlineInput';
-import { inlineMarkdownMarkInputPlugin } from './plugins/inlineMarkdownMarkInput';
 import { linkInteractionPlugin } from './plugins/linkInteraction';
 import {
-  pendingInlineMarkPlugin,
-  toggleMarkPending,
-  isPendingMarkActive,
-} from './plugins/pendingInlineMark';
+  inlineSourceEditingPlugin,
+  clearEmptyInlineTemplates,
+  isInlineSourceComposing,
+  getEmptyInlineTemplateFormats,
+} from './plugins/inlineSourceEditing';
+import { toggleInlineSourceFormat, getActiveInlineSourceFormats } from './inlineSourceCommands';
+import {
+  materializeInlineSource,
+  materializeInlineSourceWithMapping,
+  projectInlineSource,
+  projectInlineSourceWithMapping,
+} from './InlineSourceCodec';
 import { tableControlsPlugin } from './plugins/tableControls';
 import { tableHtmlBlockPlugin } from './plugins/tableHtml';
 import { taskListPlugin } from './plugins/taskList';
@@ -172,6 +178,7 @@ export class ProseMirrorEditorCore implements EditorCore {
   private contentRevision = 0;
   private syncRenderRevision = 0;
   private syncSnapshot: EditorSyncSnapshot | null = null;
+  private compositionWaiters = new Set<() => void>();
 
   constructor(private readonly options: EditorCoreOptions) {
     const initialTheme = options.theme ?? {
@@ -203,12 +210,25 @@ export class ProseMirrorEditorCore implements EditorCore {
     if (this.view && this.target === target) return;
     this.unmount();
     this.target = target;
+    if (this.suspendedState) this.suspendedState = this.normalizeLegacyInlineState(this.suspendedState);
     this.view = new EditorView(target, {
       state: this.suspendedState ?? this.createState(this.markdown),
       dispatchTransaction: (transaction) => this.dispatchTransaction(transaction),
       editable: () => this.isEditable(),
       clipboardTextSerializer: (slice) => this.serializeClipboardText(slice),
       clipboardTextParser: (text, $context) => createPlainTextSlice(text, $context),
+      transformPasted: (slice) => this.transformInlineSourceSlice(slice, materializeInlineSource),
+      transformCopied: (slice, view) => {
+        if (!(view.state.selection instanceof TextSelection)) {
+          return this.transformInlineSourceSlice(slice, projectInlineSource);
+        }
+        const projected = projectInlineSourceWithMapping(view.state.doc);
+        return projected.doc.slice(
+          projected.mapPosition(view.state.selection.from, 1),
+          projected.mapPosition(view.state.selection.to, -1),
+          true,
+        );
+      },
       handlePaste: (_view, event) => this.handleNativePaste(event),
       handleDOMEvents: {
         keydown: (_view, event) => {
@@ -260,8 +280,41 @@ export class ProseMirrorEditorCore implements EditorCore {
 
   commitPendingEdits(): void {
     this.assertActive();
-    if (this.view) commitActiveEdit(this.view);
+    if (this.view) {
+      commitActiveEdit(this.view);
+      clearEmptyInlineTemplates(this.view);
+    }
     this.flushPendingMarkdownSync();
+  }
+
+  private normalizeLegacyInlineState(state: EditorState): EditorState {
+    const converted = materializeInlineSourceWithMapping(state.doc);
+    if (converted.doc === state.doc) return state;
+    const json = state.selection.toJSON();
+    const forward = state.selection.anchor <= state.selection.head;
+    if (typeof json.anchor === 'number') json.anchor = converted.mapPosition(json.anchor, forward ? 1 : -1);
+    if (typeof json.head === 'number') json.head = converted.mapPosition(json.head, state.selection.empty || !forward ? 1 : -1);
+    let selection: Selection;
+    try { selection = Selection.fromJSON(converted.doc, json); }
+    catch { selection = TextSelection.near(converted.doc.resolve(converted.mapPosition(state.selection.from))); }
+    // Old mark-based undo steps have different coordinates. This one-time import
+    // starts the current plugins; ordinary source-state remount keeps history.
+    return EditorState.create({ doc: converted.doc, selection, plugins: this.createState(this.markdown).plugins });
+  }
+
+  awaitCompositionEnd(): Promise<void> {
+    const view = this.view;
+    if (!view || !isInlineSourceComposing(view)) return Promise.resolve();
+    return new Promise((resolve) => {
+      const finish = () => {
+        view.dom.removeEventListener('compositionend', onEnd);
+        this.compositionWaiters.delete(finish);
+        resolve();
+      };
+      const onEnd = () => window.setTimeout(finish, 0);
+      this.compositionWaiters.add(finish);
+      view.dom.addEventListener('compositionend', onEnd, { once: true });
+    });
   }
 
   unmount(): void {
@@ -272,6 +325,7 @@ export class ProseMirrorEditorCore implements EditorCore {
     this.clearBlockAlignmentGaps();
     this.suspendedState = this.semanticViewDirty ? null : this.view.state;
     this.view.destroy();
+    for (const finish of [...this.compositionWaiters]) finish();
     this.view = null;
     this.target = null;
     this.syncSnapshot = null;
@@ -376,7 +430,7 @@ export class ProseMirrorEditorCore implements EditorCore {
     }
     const serializer = new DOMSerializer(nodes, DOMSerializer.marksFromSchema(schema));
     const container = document.createElement('div');
-    container.append(serializer.serializeFragment(removeEmptyTrailingParagraph(doc).content));
+    container.append(serializer.serializeFragment(projectInlineSource(removeEmptyTrailingParagraph(doc)).content));
     return container.innerHTML;
   }
 
@@ -647,6 +701,7 @@ export class ProseMirrorEditorCore implements EditorCore {
       selection: selection ? { anchor: selection.anchor, head: selection.head } : undefined,
       meta: {
         mode: this.runtime.mode,
+        inlineSource: true,
       },
     };
   }
@@ -659,7 +714,10 @@ export class ProseMirrorEditorCore implements EditorCore {
     this.originalDoc = this.parseSemanticDocument(this.markdown).doc;
     this.version = snapshot.version;
     this.dirty = true;
-    this.replaceViewState(this.markdown, snapshot.selection);
+    const selection = snapshot.selection && snapshot.meta?.inlineSource !== true
+      ? this.restoreLegacyInlineSelection(this.originalDoc, snapshot.selection)
+      : snapshot.selection;
+    this.replaceViewState(this.markdown, selection);
     this.emit('restore-snapshot');
   }
 
@@ -750,10 +808,41 @@ export class ProseMirrorEditorCore implements EditorCore {
       const { doc, selection } = this.view.state;
       const clipboardDoc = removeEmptyTrailingParagraph(doc);
       const selectionTo = Math.min(selection.to, clipboardDoc.content.size);
-      return serializeMarkdownSelection(clipboardDoc, selection.from, selectionTo) ?? plainText;
+      return serializeMarkdownSelection(clipboardDoc, selection.from, selectionTo) ??
+        serializeClipboardText(selection.content(), true);
     } catch {
       return plainText;
     }
+  }
+
+  /** 旧快照按去掉六类定界符后的 PM 坐标存储；只在未标识的新旧边界换算一次。 */
+  private restoreLegacyInlineSelection(doc: ProseMirrorNode, selection: { anchor: number; head: number }) {
+    const projected = projectInlineSourceWithMapping(doc);
+    const restore = (position: number, bias: number) => {
+      const target = Math.max(0, Math.min(projected.doc.content.size, position));
+      let low = 0;
+      let high = doc.content.size;
+      while (low < high) {
+        const mid = Math.floor((low + high) / 2);
+        const mapped = projected.mapPosition(mid);
+        if (mapped < target || (bias > 0 && mapped === target)) low = mid + 1;
+        else high = mid;
+      }
+      return bias > 0 && projected.mapPosition(low) > target ? Math.max(0, low - 1) : low;
+    };
+    const forward = selection.anchor <= selection.head;
+    return {
+      anchor: restore(selection.anchor, forward ? 1 : -1),
+      head: restore(selection.head, selection.anchor === selection.head || !forward ? 1 : -1),
+    };
+  }
+
+  /** 导入/复制只转换片段，保持原有 Slice 开放深度和复杂节点。 */
+  private transformInlineSourceSlice(slice: Slice, transform: (doc: ProseMirrorNode) => ProseMirrorNode): Slice {
+    const inline = slice.content.firstChild?.isInline === true;
+    const content = inline ? Fragment.from(schema.nodes.paragraph.create(null, slice.content)) : slice.content;
+    const converted = transform(schema.nodes.doc.create(null, content));
+    return new Slice(inline ? converted.firstChild!.content : converted.content, slice.openStart, slice.openEnd);
   }
 
   pasteClipboardText(text: string): boolean {
@@ -1127,12 +1216,11 @@ export class ProseMirrorEditorCore implements EditorCore {
     return true;
   }
 
-  /** 判断指定行内格式是否处于 pending 状态（collapsed selection 下的待定标记） */
+  /** 保留工具栏状态接口；值来自真实语法范围及尚未输入的成对模板。 */
   isPendingMarkActive(markName: InlinePendingMarkName): boolean {
     if (!this.view) return false;
-    const markType = this.view.state.schema.marks[markName];
-    if (!markType) return false;
-    return isPendingMarkActive(this.view.state, markType);
+    return getActiveInlineSourceFormats(this.view.state).has(markName) ||
+      getEmptyInlineTemplateFormats(this.view.state).has(markName);
   }
 
   /**
@@ -1229,7 +1317,7 @@ export class ProseMirrorEditorCore implements EditorCore {
         history(),
         taskListPlugin(),
         mathInlineInputPlugin(() => this.view),
-        inlineMarkdownMarkInputPlugin(),
+        inlineSourceEditingPlugin({ readonly: () => !this.isEditable() }),
         linkInteractionPlugin({ openLink: this.options.onOpenLink }),
         codeHighlightPlugin(),
         codeHighlightDecorationPlugin({ enabled: false }),
@@ -1240,7 +1328,6 @@ export class ProseMirrorEditorCore implements EditorCore {
         displayMathInputPlugin(),
         trailingParagraphPlugin(),
         tocSyncPlugin(),
-        pendingInlineMarkPlugin(),
         tableHtmlBlockPlugin(),
         tableControlsPlugin(),
         tableEditing({ allowTableNodeSelection: true }),
@@ -1249,15 +1336,15 @@ export class ProseMirrorEditorCore implements EditorCore {
           'Mod-z': undo,
           'Mod-y': redo,
           'Shift-Mod-z': redo,
-          'Mod-b': toggleMarkPending(schema.marks.strong),
-          'Mod-i': toggleMarkPending(schema.marks.em),
-          'Ctrl-`': toggleMarkPending(schema.marks.code),
+          'Mod-b': toggleInlineSourceFormat('strong'),
+          'Mod-i': toggleInlineSourceFormat('em'),
+          'Ctrl-`': toggleInlineSourceFormat('code'),
           'Mod-k': (_state, _dispatch, _view) => {
             this.options.onLinkShortcut?.();
             return Boolean(this.options.onLinkShortcut);
           },
-          'Alt-Shift-5': toggleMarkPending(schema.marks.strikethrough),
-          'Mod-u': toggleMarkPending(schema.marks.underline),
+          'Alt-Shift-5': toggleInlineSourceFormat('strikethrough'),
+          'Mod-u': toggleInlineSourceFormat('underline'),
           'Mod-\\': (_state, _dispatch, _view) =>
             this.runProseMirrorCommand({ type: 'clearInlineStyles' }),
           'Ctrl-\\': (_state, _dispatch, _view) =>
@@ -1453,19 +1540,21 @@ export class ProseMirrorEditorCore implements EditorCore {
     const previousDoc = currentState.doc;
     const previousSelection = currentState.selection;
     const nextState = currentState.apply(transaction);
+    // 空模板清理和原文标记可能由 appendTransaction 完成，不能只看首个事务。
+    const docChanged = !nextState.doc.eq(previousDoc);
     if (this.view) this.view.updateState(nextState);
     else this.suspendedState = nextState;
 
-    if (isTypographyTransaction(transaction)) {
+    if (isTypographyTransaction(transaction) && !docChanged) {
       this.syncRenderRevision += 1;
       this.syncSnapshot = null;
       return;
     }
-    if (isSemanticBlockAlignmentTransaction(transaction)) {
+    if (isSemanticBlockAlignmentTransaction(transaction) && !docChanged) {
       return;
     }
 
-    if (transaction.docChanged) {
+    if (docChanged) {
       this.contentRevision += 1;
       this.syncRenderRevision += 1;
       this.syncSnapshot = null;
@@ -1477,7 +1566,7 @@ export class ProseMirrorEditorCore implements EditorCore {
 
     // 每次事务都递增版本并通知（pending mark 状态切换、选区变化等需要及时反映到 UI）
     this.version += 1;
-    this.emit(transaction.docChanged ? 'content-pending' : 'transaction');
+    this.emit(docChanged ? 'content-pending' : 'transaction');
     if (!nextState.selection.eq(previousSelection)) {
       this.options.onSelectionSnapshotChange?.({
         selection: nextState.selection.empty ? null : {
@@ -1499,7 +1588,7 @@ export class ProseMirrorEditorCore implements EditorCore {
     const selectionTo = Math.min(selection.to, clipboardDoc.content.size);
     const selectedMarkdown =
       serializeMarkdownSelection(clipboardDoc, selection.from, selectionTo) ??
-      serializeClipboardText(selection.content());
+      serializeClipboardText(selection.content(), true);
 
     return {
       selection: { anchor: selection.anchor, head: selection.head },

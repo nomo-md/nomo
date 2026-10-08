@@ -314,6 +314,16 @@ export const schema = new Schema({
       },
     })
     .append({
+      /** 原文载荷标识；格式与定界符显隐由行内源码插件派生。 */
+      inline_source: {
+        inclusive: true,
+        excludes: '',
+        attrs: { literal: { default: false } },
+        parseDOM: [{ tag: 'span[data-inline-source]' }],
+        toDOM() {
+          return ['span', { 'data-inline-source': 'true' }, 0];
+        },
+      },
       strikethrough: {
         parseDOM: [
           { tag: 's' },

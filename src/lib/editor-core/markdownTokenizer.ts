@@ -57,9 +57,107 @@ export function parseHtmlImgAttrs(tagContent: string): {
   return result;
 }
 
-export function createMarkdownTokenizer(): MarkdownIt {
+export interface InlineTokenSourceRange {
+  from: number;
+  to: number;
+  point?: number;
+}
+
+export function inlineTokenSourceRange(token: Token): InlineTokenSourceRange | undefined {
+  return token.meta?.inlineSourceRange;
+}
+
+/** 在规则消费原文时记录范围，避免从已解码、裁剪的 token.content 反推源码。 */
+export function recordInlineSourceRanges(markdown: MarkdownIt): void {
+  markdown.inline.ruler2.disable('fragments_join');
+  markdown.core.ruler.disable('text_join');
+  markdown.inline.tokenize = (state) => {
+    const rules = state.md.inline.ruler.getRules('');
+    const end = state.posMax;
+    const originalPush = state.push;
+    state.push = function (type, tag, nesting) {
+      const token = originalPush.call(this, type, tag, nesting);
+      token.meta = { ...token.meta, inlineSourcePoint: this.pos };
+      return token;
+    };
+    try {
+      while (state.pos < end) {
+        const from = state.pos;
+        const first = state.tokens.length;
+        let accepted = false;
+        if (state.level < (state.md.options as { maxNesting: number }).maxNesting) {
+          for (const rule of rules) {
+            if (rule(state, false)) { accepted = true; break; }
+          }
+        }
+        if (!accepted) state.pending += state.src[state.pos++];
+        if (state.pos <= from) throw new Error('Inline tokenizer did not advance');
+        if (!accepted) continue;
+        const to = state.pos;
+        const added = state.tokens.slice(first);
+        const markerRun = /^(?:\*+|_+|~{2,})$/.test(state.src.slice(from, to));
+        let markerPos = from;
+        for (const token of added) {
+          if (inlineTokenSourceRange(token) || (token.type === 'text' && token.meta?.inlineSourcePoint == null)) continue;
+          // 自定义规则可能在 push 后整体重写 meta（例如 footnote_ref）。
+          const point = (token.meta?.inlineSourcePoint ?? from) as number;
+          let range: InlineTokenSourceRange = { from, to, point };
+          if (markerRun && token.type === 'text' && /^[*_~]+$/.test(token.content)) {
+            range = { from: markerPos, to: markerPos + token.content.length, point };
+            markerPos = range.to;
+          } else if (token.type === 'link_open') {
+            range.to = point > from ? point : from + (state.src[from] === '<' ? 1 : 0);
+          } else if (token.type === 'link_close') {
+            range.from = point > from ? point : to - (state.src[from] === '<' ? 1 : 0);
+          }
+          token.meta = { ...token.meta, inlineSourceRange: range };
+        }
+        // 图片属性规则延长前一个 image 的源码范围，本身不产生 token。
+        if (!added.length && state.src[from] === '{') {
+          const previous = state.tokens[state.tokens.length - 1];
+          const range = previous && inlineTokenSourceRange(previous);
+          if (previous?.type === 'image' && range) range.to = to;
+        }
+      }
+      if (state.pending) state.pushPending();
+    } finally {
+      state.push = originalPush;
+    }
+  };
+}
+
+export function createMarkdownTokenizer(options: { inlineSource?: boolean; literalHtmlCode?: boolean } = {}): MarkdownIt {
   const markdownIt = MarkdownIt('commonmark', { html: true }).enable(['table', 'strikethrough']);
   markdownIt.validateLink = (url: string) => normalizeLinkHref(url) !== null;
+
+  if (options.inlineSource || options.literalHtmlCode) {
+    // HTML code 与反引号代码使用同一字面内容边界，内部不再生成公式、链接或格式 token。
+    markdownIt.inline.ruler.before('backticks', 'inline_source_html_code', (state, silent) => {
+      const opening = /^<code(?:\s(?:[^"'<>]|"[^"]*"|'[^']*')*)?>/i.exec(state.src.slice(state.pos));
+      if (!opening) return false;
+      const bodyFrom = state.pos + opening[0].length;
+      const closing = /<\/code\s*>/i.exec(state.src.slice(bodyFrom, state.posMax));
+      if (!closing) return false;
+      const bodyTo = bodyFrom + closing.index;
+      const to = bodyTo + closing[0].length;
+      if (!silent) {
+        const token = state.push('inline_source_code', 'code', 0);
+        const body = state.src.slice(bodyFrom, bodyTo);
+        const spans: Array<{ text: string; from: number; to: number }> = [];
+        let cursor = 0;
+        for (const match of body.matchAll(/&(?:#x[\da-f]+|#\d+|[a-z][a-z\d]+);/gi)) {
+          if (match.index! > cursor) spans.push({ text: body.slice(cursor, match.index), from: bodyFrom + cursor, to: bodyFrom + match.index! });
+          spans.push({ text: markdownIt.utils.unescapeAll(match[0]), from: bodyFrom + match.index!, to: bodyFrom + match.index! + match[0].length });
+          cursor = match.index! + match[0].length;
+        }
+        if (cursor < body.length) spans.push({ text: body.slice(cursor), from: bodyFrom + cursor, to: bodyTo });
+        token.content = spans.map((span) => span.text).join('');
+        token.meta = { ...token.meta, statsSpans: spans, inlineSourceCode: { openLength: opening[0].length, closeLength: closing[0].length } };
+      }
+      state.pos = to;
+      return true;
+    });
+  }
 
   markdownIt.inline.ruler.before('link', 'footnote_ref', (state, silent) => {
     const src = state.src;
@@ -298,11 +396,24 @@ export function createMarkdownTokenizer(): MarkdownIt {
     const result = restoreBlankParagraphTokens(normalized);
 
     // 将匹配 [!TYPE] 的 blockquote 改写为 callout
+    const calloutSources = options.inlineSource
+      ? new Map(result.filter((token) => token.type === 'inline').map((token) => [token, token.content]))
+      : null;
     transformCalloutTokens(result);
+    if (calloutSources) {
+      for (const token of result) {
+        const original = calloutSources.get(token);
+        if (original == null || original === token.content || !/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]/.test(original)) continue;
+        token.content = original.replace(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](?:\r?\n)?/, '');
+        token.children = [];
+        markdownIt.inline.parse(token.content, markdownIt, env, token.children);
+      }
+    }
 
     return result;
   };
 
+  if (options.inlineSource) recordInlineSourceRanges(markdownIt);
   return markdownIt;
 }
 

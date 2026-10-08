@@ -1,4 +1,5 @@
 import { normalizeHeadingTitle, type OutlineItem } from '../outline/outlineService';
+import { escapeInlineSourceLiteral } from '../editor-core/InlineSourceCodec';
 
 import { TOC_START_MARKER, TOC_END_MARKER } from './tocMarkers';
 export { TOC_START_MARKER, TOC_END_MARKER } from './tocMarkers';
@@ -202,5 +203,5 @@ export function slugifyHeading(title: string): string {
 }
 
 function escapeLinkText(text: string): string {
-  return text.replace(/([\\\[\]])/g, '\\$1');
+  return escapeInlineSourceLiteral(text);
 }

@@ -113,8 +113,9 @@ describe('Worker writing statistics cache', () => {
       snapshot: { markdown, semanticDoc: doc.toJSON() },
       selection: null,
     });
-    const response = engine({ requestId: 2, context: semantic, selection: { from: 2, to: 5 } });
-    expect(response.selected).toMatchObject({ words: 1, visibleChars: 3, chars: 7 });
+    const response = engine({ requestId: 2, context: semantic, selection: { from: 2, to: 7 } });
+    // The selection contains el**l: real source positions, three visible letters.
+    expect(response.selected).toMatchObject({ words: 1, visibleChars: 3, chars: 5 });
     let codePosition = 0;
     doc.descendants((node, pos) => {
       if (node.type.name === 'code_block') codePosition = pos + 1;

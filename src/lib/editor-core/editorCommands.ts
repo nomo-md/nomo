@@ -1,5 +1,5 @@
-import { lift, setBlockType, splitBlockAs, toggleMark, wrapIn } from 'prosemirror-commands';
-import { pendingInlineMarkKey, toggleMarkPending } from './plugins/pendingInlineMark';
+import { lift, setBlockType, splitBlockAs, wrapIn } from 'prosemirror-commands';
+import { appendClearInlineSourceStyles, toggleInlineSourceFormat } from './inlineSourceCommands';
 import { redo, undo } from 'prosemirror-history';
 import { liftListItem, wrapInList } from 'prosemirror-schema-list';
 import {
@@ -445,6 +445,27 @@ function clearInlineStyles(state: EditorState, dispatch?: (tr: Transaction) => v
     return clearInlineStylesInRange(state, dispatch, selection.from, selection.to);
   }
 
+  const sourceTransaction = state.tr;
+  if (appendClearInlineSourceStyles(state, sourceTransaction)) {
+    const markRange = findClearableMarkRangeAtCursor(state);
+    if (markRange) {
+      sourceTransaction.removeMark(
+        sourceTransaction.mapping.map(markRange.from, -1),
+        sourceTransaction.mapping.map(markRange.to, 1),
+        markRange.mark.type,
+      );
+    }
+    if (dispatch) {
+      dispatch(
+        exitInlinePendingState(sourceTransaction)
+          .setSelection(createMappedSelection(sourceTransaction, selection.from, selection.to))
+          .setStoredMarks([])
+          .scrollIntoView(),
+      );
+    }
+    return true;
+  }
+
   const markRange = findClearableMarkRangeAtCursor(state);
   if (markRange) {
     if (dispatch) {
@@ -494,16 +515,22 @@ function clearInlineStylesInRange(
 ): boolean {
   const clearableMarks = findClearableMarksInRange(state, from, to);
   const atomReplacements = findClearableInlineAtomsInRange(state, from, to);
-  if (clearableMarks.length === 0 && atomReplacements.length === 0) return false;
+  const tr = state.tr;
+  const hasSourceStyles = appendClearInlineSourceStyles(state, tr);
+  if (clearableMarks.length === 0 && atomReplacements.length === 0 && !hasSourceStyles) return false;
 
   if (dispatch) {
-    const tr = state.tr;
     for (const markType of getClearableMarkTypes(state)) {
-      tr.removeMark(from, to, markType);
+      tr.removeMark(tr.mapping.map(from, -1), tr.mapping.map(to, 1), markType);
     }
 
     for (const replacement of atomReplacements.reverse()) {
-      replaceRangeWithPlainText(tr, replacement.from, replacement.to, replacement.text);
+      replaceRangeWithPlainText(
+        tr,
+        tr.mapping.map(replacement.from, 1),
+        tr.mapping.map(replacement.to, -1),
+        replacement.text,
+      );
     }
 
     dispatch(
@@ -657,7 +684,7 @@ function hasClearableStoredMark(state: EditorState): boolean {
 }
 
 function exitInlinePendingState(tr: Transaction): Transaction {
-  return tr.setMeta(pendingInlineMarkKey, { action: 'exit' });
+  return tr.setMeta('inlineSourceTemplate', { action: 'clear' });
 }
 
 function isClearableInlineAtom(node: PmNode): boolean {
@@ -703,17 +730,17 @@ export function executeEditorCommand(
 
   switch (command.type) {
     case 'toggleBold':
-      return run(toggleMarkPending(schema.marks.strong));
+      return run(toggleInlineSourceFormat('strong'));
     case 'toggleItalic':
-      return run(toggleMarkPending(schema.marks.em));
+      return run(toggleInlineSourceFormat('em'));
     case 'toggleCode':
-      return run(toggleMarkPending(schema.marks.code));
+      return run(toggleInlineSourceFormat('code'));
     case 'toggleStrikethrough':
-      return run(toggleMarkPending(schema.marks.strikethrough));
+      return run(toggleInlineSourceFormat('strikethrough'));
     case 'toggleUnderline':
-      return run(toggleMarkPending(schema.marks.underline));
+      return run(toggleInlineSourceFormat('underline'));
     case 'toggleHighlight':
-      return run(toggleMarkPending(schema.marks.highlight));
+      return run(toggleInlineSourceFormat('highlight'));
     case 'clearInlineStyles':
       return run(clearInlineStyles);
     case 'setHeading':

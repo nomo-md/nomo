@@ -2,6 +2,7 @@ import { Fragment, Slice, type Mark, type Node as ProseMirrorNode, type Resolved
 import type { Transaction } from 'prosemirror-state';
 import { parseMarkdown } from './markdown';
 import { schema } from './schema';
+import { projectInlineSource, escapeInlineSourceLiteral } from './InlineSourceCodec';
 
 export const plainTextPasteMeta = 'nomoPlainTextPaste';
 
@@ -22,13 +23,30 @@ export function classifyClipboardMarkdown(text: string): ClipboardMarkdownClassi
   }
 
   const plainDoc = createPlainTextDocument(normalized);
-  return markdownDoc.eq(plainDoc)
+  return projectInlineSource(markdownDoc).eq(plainDoc)
     ? { kind: 'plain', doc: markdownDoc }
     : { kind: 'markdown', doc: markdownDoc };
 }
 
 export function createPlainTextSlice(text: string, $context: ResolvedPos): Slice {
-  return Slice.maxOpen(Fragment.fromArray(createPlainTextBlocks(normalizeClipboardText(text), $context.marks())));
+  const literal = normalizeClipboardText(text);
+  const richContext = Array.from({ length: $context.depth }, (_, i) => $context.node(i + 1))
+    .some((node) => node.type.spec.code || node.type.name === 'html_block');
+  const marks = richContext ? $context.marks() : [
+    ...$context.marks().filter((mark) => mark.type.name === 'link'),
+    schema.marks.inline_source.create(),
+  ];
+  return Slice.maxOpen(Fragment.fromArray(createPlainTextBlocks(
+    richContext ? literal : escapePlainMarkdownText(literal), marks,
+  )));
+}
+
+function escapePlainMarkdownText(text: string): string {
+  return escapeInlineSourceLiteral(text).replace(/\|/g, '\\|').replace(
+    /^(\s{0,3})(#{1,6}(?=\s|$)|[-+](?=\s)|\d+[.)](?=\s)|-{3,}\s*$)/gm,
+    (_match, indent: string, marker: string) => /^\d/.test(marker)
+      ? `${indent}${marker.replace(/[.)]/, '\\$&')}` : `${indent}\\${marker}`,
+  );
 }
 
 export function createMarkdownClipboardSlice(doc: ProseMirrorNode): Slice {

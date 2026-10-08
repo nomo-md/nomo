@@ -1,15 +1,13 @@
 import { Plugin } from 'prosemirror-state';
 import type { Mark, Node as ProseMirrorNode } from 'prosemirror-model';
 import { Decoration, DecorationSet } from 'prosemirror-view';
+import { analyzeInlineSource, isInlineSourceBlock, isInlineSourceText } from '../InlineSourceCodec';
 
 /**
  * 行内代码语法高亮 Decoration Plugin
  *
- * 对文档中所有带 code mark 的文本节点做 token 分类，
- * 通过 inline decoration 给不同 token 类型添加 CSS class。
- *
- * 策略：全量扫描，每次 state 变化时重新计算。
- * 行内代码通常很短，性能开销可忽略。
+ * 对真实原文解析出的代码内容做 token 分类；旧 marks 仅用于导入兼容。
+ * 光标移动复用装饰，内容变化复用 codec 的文本块缓存。
  */
 
 interface InlineCodeToken {
@@ -48,14 +46,8 @@ function buildDecorations(doc: ProseMirrorNode, enabled: boolean): DecorationSet
   }
 
   const decorations: Decoration[] = [];
-
-  doc.descendants((node, pos) => {
-    if (!node.isText) return true;
-
-    const hasCodeMark = node.marks.some((mark: Mark) => mark.type.name === 'code');
-    if (!hasCodeMark || !node.text) return true;
-
-    const tokens = tokenizeInlineCode(node.text);
+  const append = (text: string, pos: number) => {
+    const tokens = tokenizeInlineCode(text);
     let offset = 0;
     for (const token of tokens) {
       if (token.type !== 'plain') {
@@ -68,6 +60,24 @@ function buildDecorations(doc: ProseMirrorNode, enabled: boolean): DecorationSet
         );
       }
       offset += token.value.length;
+    }
+  };
+
+  doc.descendants((node, pos) => {
+    if (node.type.spec.code || node.type.name === 'html_block') return false;
+    if (isInlineSourceBlock(node)) {
+      let source = false;
+      node.forEach((child) => { source ||= isInlineSourceText(child); });
+      if (source) {
+        const analysis = analyzeInlineSource(node);
+        for (const span of analysis.spans) {
+          if (span.type === 'code') append(analysis.source.slice(span.from, span.to), pos + 1 + span.from);
+        }
+        return false;
+      }
+    }
+    if (node.isText && node.text && node.marks.some((mark: Mark) => mark.type.name === 'code')) {
+      append(node.text, pos);
     }
 
     return true;

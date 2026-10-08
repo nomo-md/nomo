@@ -4,6 +4,7 @@ import { EditorView } from 'prosemirror-view';
 import { inputRules } from 'prosemirror-inputrules';
 import { createMarkdownInputRules, parseMarkdown, serializeMarkdown } from './markdown';
 import { schema } from './schema';
+import { isInlineSourceText, projectInlineSource } from './InlineSourceCodec';
 
 describe('markdown serialization', () => {
   it('preserves blank paragraphs between non-paragraph blocks', () => {
@@ -74,10 +75,10 @@ describe('markdown serialization', () => {
     expect(serialized).not.toContain('\\~');
   });
 
-  it('keeps escaping other markdown-sensitive plain text characters', () => {
+  it('keeps incomplete inline source characters editable and unchanged', () => {
     const serialized = serializeMarkdown(parseMarkdown('use [x] and `code')).trim();
 
-    expect(serialized).toBe('use \\[x\\] and \\`code');
+    expect(serialized).toBe('use [x] and `code');
   });
 
   it('serializes underline marks as u tags', () => {
@@ -88,10 +89,12 @@ describe('markdown serialization', () => {
     expect(serializeMarkdown(doc).trim()).toBe('<u>123</u>');
   });
 
-  it('parses u tags as underline marks', () => {
+  it('preserves u tags as source and projects underline semantics', () => {
     const doc = parseMarkdown('<u>123</u>');
+    expect(doc.textContent).toBe('<u>123</u>');
+    expect(isInlineSourceText(doc.firstChild!.firstChild!)).toBe(true);
     let hasUnderline = false;
-    doc.descendants((node) => {
+    projectInlineSource(doc).descendants((node) => {
       if (!node.isText) return true;
       hasUnderline = node.marks.some((mark) => mark.type === schema.marks.underline);
       return !hasUnderline;
@@ -108,10 +111,12 @@ describe('markdown serialization', () => {
     expect(serializeMarkdown(doc).trim()).toBe('<mark>重点</mark>');
   });
 
-  it('parses mark tags as highlight marks', () => {
+  it('preserves mark tags as source and projects highlight semantics', () => {
     const doc = parseMarkdown('<mark>重点</mark>');
+    expect(doc.textContent).toBe('<mark>重点</mark>');
+    expect(isInlineSourceText(doc.firstChild!.firstChild!)).toBe(true);
     let hasHighlight = false;
-    doc.descendants((node) => {
+    projectInlineSource(doc).descendants((node) => {
       if (!node.isText) return true;
       hasHighlight = node.marks.some((mark) => mark.type === schema.marks.highlight);
       return !hasHighlight;
@@ -286,7 +291,8 @@ describe('markdown serialization', () => {
     expect(paragraph.type.name).toBe('paragraph');
     const firstChild = paragraph.child(0);
     expect(firstChild.isText).toBe(true);
-    expect(firstChild.marks.some((m) => m.type === schema.marks.code)).toBe(true);
+    expect(isInlineSourceText(firstChild)).toBe(true);
+    expect(projectInlineSource(doc).firstChild!.firstChild!.marks.some((m) => m.type === schema.marks.code)).toBe(true);
     expect(serializeMarkdown(doc).trim()).toBe(input);
   });
 

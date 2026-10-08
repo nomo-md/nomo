@@ -25,6 +25,17 @@ describe('tocService', () => {
     );
   });
 
+  it('keeps six-format title IDs consistent and escapes literal code contents in generated links', () => {
+    const markdown = '# <u>重复</u>\n## <mark>重复</mark>\n# `**原样**`\n# \\*转义\\*';
+    expect(extractTocItems(markdown).map(({ id, title }) => ({ id, title }))).toEqual([
+      { id: '重复', title: '重复' }, { id: '重复-2', title: '重复' },
+      { id: '原样', title: '**原样**' }, { id: '转义', title: '*转义*' },
+    ]);
+    expect(createTocList(markdown)).toBe(
+      '- [重复](#重复)\n  - [重复](#重复-2)\n- [\\*\\*原样\\*\\*](#原样)\n- [\\*转义\\*](#转义)',
+    );
+  });
+
   it('skips headings inside fenced code blocks and existing toc blocks', () => {
     const markdown = [
       '<!-- toc -->',

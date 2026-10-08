@@ -1,6 +1,7 @@
 import { Plugin } from 'prosemirror-state';
 import type { Mark, Node as ProseMirrorNode } from 'prosemirror-model';
 import { Decoration, DecorationSet } from 'prosemirror-view';
+import { analyzeInlineSource, isInlineSourceBlock } from '../InlineSourceCodec';
 
 const SELECTION_BRIDGE_CLASS = 'pm-inline-selection-bridge';
 const CODE_BRIDGE_CLASS = 'pm-inline-code-selection-bridge';
@@ -89,6 +90,12 @@ function findCodeRanges(doc: ProseMirrorNode): CodeRange[] {
   const ranges: CodeRange[] = [];
 
   doc.descendants((node, pos) => {
+    if (node.type.name === 'html_block' || node.type.spec.code) return false;
+    if (isInlineSourceBlock(node)) {
+      for (const span of analyzeInlineSource(node).spans) {
+        if (span.type === 'code') ranges.push({ from: pos + 1 + span.from, to: pos + 1 + span.to });
+      }
+    }
     if (!node.isText || !node.text || !hasCodeMark(node.marks)) return true;
 
     const from = pos;
@@ -103,7 +110,7 @@ function findCodeRanges(doc: ProseMirrorNode): CodeRange[] {
     return true;
   });
 
-  return ranges;
+  return ranges.sort((a, b) => a.from - b.from);
 }
 
 function hasCodeMark(marks: readonly Mark[]): boolean {

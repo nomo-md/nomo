@@ -77,6 +77,9 @@ importers:
       prosemirror-tables:
         specifier: ^1.8.5
         version: 1.8.5
+      prosemirror-transform:
+        specifier: 1.12.0
+        version: 1.12.0
       prosemirror-view:
         specifier: ^1.41.8
         version: 1.41.8

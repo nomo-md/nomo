@@ -225,6 +225,8 @@ export interface EditorCore {
   mount(target: HTMLElement): void;
   /** 提交 NodeView 临时输入，刷新正文，但保留文档编辑历史。 */
   commitPendingEdits(): void;
+  /** 保存等待正文输入法提交，避免清理空模板或落盘半次组字。 */
+  awaitCompositionEnd?(): Promise<void>;
   /** 挂起视图以便同一文档稍后重新挂载；最终关闭才调用 destroy。 */
   unmount(): void;
   destroy(): void;

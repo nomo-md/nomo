@@ -37,8 +37,8 @@
 
 | Responsibility | Primary code | Related code | Change when |
 |---|---|---|---|
-| 精细段落排版 | `src/lib/typography/knuthPlass.ts` | `types.ts`, `rules.ts`, `measure.ts`, `renderPlan.ts`, `positions.ts`, `solver.ts`, `typography.worker.ts` | 修改 KP 成本模型、中文规则、字体测量、间距或位置映射 |
-| 精细排版编辑适配 | `src/lib/editor-core/plugins/typography.ts` | `nodeViews/TypographyBreakNodeView.ts`, `ProseMirrorEditorCore.ts`, `src/lib/typography/options.ts`, `src/app/services/settings.ts` | 修改输入与导航保护、字素光标移动、局部缓存、视觉断点、软换行或设置开关 |
+| 精细段落排版 | `src/lib/typography/knuthPlass.ts` | `types.ts`, `rules.ts`, `measure.ts`, `renderPlan.ts`, `positions.ts`, `solver.ts`, `typography.worker.ts` | 修改 KP 成本模型、中文规则、共享分批/有界同步测量、间距或位置映射 |
+| 精细排版编辑适配 | `src/lib/editor-core/plugins/typography.ts` | `nodeViews/TypographyBreakNodeView.ts`, `ProseMirrorEditorCore.ts`, `src/lib/typography/options.ts`, `src/app/services/settings.ts` | 修改输入与导航保护、字素光标移动、局部缓存、符号显隐同帧排版、DOM 绑定校验、视觉断点、软换行或设置开关 |
 | 只读与离线排版 | `src/lib/typography/dom.ts` | `exportRuntime.ts`, `scripts/typography-runtime-plugin.ts`, `src/quicklook/preview-entry.ts`, `src/app/components/MarkdownMiniLargePreview.svelte` | 修改只读布局、离线运行时或打印就绪契约 |
 | 编辑器工厂与 API | `src/lib/editor-core/createEditorCore.ts` | `src/lib/editor-core/index.ts` | EditorCore 创建参数或对外接口变更 |
 | ProseMirror 核心实现 | `src/lib/editor-core/ProseMirrorEditorCore.ts` | `src/lib/editor-core/clipboardMarkdown.ts`, `markdown.ts`, `schema.ts`, plugins, nodeViews | EditorView 生命周期、事务、模式切换、命令执行、选区 Markdown 通知、剪贴板负载与右键目标事务 |
@@ -78,17 +78,18 @@
 | 代码块导航 | `src/lib/editor-core/plugins/codeBlockNavigation.ts` | — | 代码块内外光标移动 |
 | 代码高亮装饰 | `src/lib/editor-core/plugins/codeHighlight.ts` | `src/lib/services/shikiCodeTokenizer.ts` | 语法高亮装饰逻辑 |
 | 公式输入规则 | `src/lib/editor-core/plugins/displayMathInput.ts`, `mathInlineInput.ts`, `mathBlock.ts` | — | 公式快捷输入 |
-| 行内 Markdown 输入 | `src/lib/editor-core/plugins/inlineMarkdownMarkInput.ts` | — | 粗体/斜体/删除线等快捷输入 |
+| 六类行内原文与投影 | `src/lib/editor-core/InlineSourceCodec.ts` | `markdownTokenizer.ts`, `markdown.ts`, `markdownSerialization.ts`, `schema.ts` | 原文/定界符/格式范围、等价语法、位置映射、HTML 导入与输出语义 |
+| 六类行内显隐与组字 | `src/lib/editor-core/plugins/inlineSourceEditing.ts` | `src/app/styles/editor-document.css`, `plugins/typography.ts` | 光标/选区所在格式局部展开、单击与实际拖选区分、拖选保持、IME 冻结、真实符号装饰与空模板追踪 |
 | 当前标题层级角标 | `src/lib/editor-core/plugins/headingLevelIndicator.ts` | `src/app/styles/editor-document.css` | H1-H6 当前标题角标的定位、显隐或 GSAP 动效 |
 | 表格控件 | `src/lib/editor-core/plugins/tableControls.ts` | `src/lib/editor-core/plugins/tableControlDom.ts`, `tableHtml.ts` | 表格行列控制 UI |
 | 任务列表 | `src/lib/editor-core/plugins/taskList.ts` | — | 任务列表交互 |
 | 链接交互 | `src/lib/editor-core/plugins/linkInteraction.ts` | `src/app/components/LinkQuickEditor.svelte` | 链接点击/悬浮/编辑 |
-| 待输入 mark | `src/lib/editor-core/plugins/pendingInlineMark.ts` | — | 按钮样式持续输入 |
+| 六类行内字符命令 | `src/lib/editor-core/inlineSourceCommands.ts` | `editorCommands.ts`, `ProseMirrorEditorCore.ts` | 工具栏/快捷键包裹、局部取消、清除格式与空模板；pendingInlineMarks 为兼容派生接口 |
 | 搜索高亮 | `src/lib/editor-core/plugins/searchHighlight.ts` | `src/app/services/searchReplace.ts` | 搜索/替换高亮 |
 | 尾部段落补全 | `src/lib/editor-core/plugins/trailingParagraph.ts` | — | 非段落块插入后自动追加空段落 |
 | 正文目录事务同步 | `src/lib/editor-core/plugins/tocSync.ts` | `src/lib/toc/tocService.ts` | 标题变化后的 TOC 派生更新与撤销历史保持 |
 | 编辑器上下文菜单插件 | `src/lib/editor-core/plugins/contextMenu.ts` | `src/app/App.svelte`, `src/app/components/ContextMenu.svelte` | 语义编辑区目标命中、选区定位与右键菜单事件分发 |
-| 行内代码语法高亮装饰 | `src/lib/editor-core/plugins/codeHighlightDecorationPlugin.ts` | — | 行内 code mark 的 token 着色 |
+| 行内代码语法高亮装饰 | `src/lib/editor-core/plugins/codeHighlightDecorationPlugin.ts` | `InlineSourceCodec.ts`, `plugins/inlineCodeSelectionBridge.ts` | 派生代码范围的 token 着色与选区背景 |
 | 旧语义块间距装饰（兼容） | `src/lib/editor-core/plugins/blockAlignment.ts` | `src/lib/editor-core/ProseMirrorEditorCore.ts` | 维护不入文档、不入 history 的旧 spacer 接口，双栏不再启用 |
 
 ### 文件系统与文档操作
@@ -136,15 +137,15 @@
 
 | Responsibility | Primary code | Related code | Change when |
 |---|---|---|---|
-| 大纲服务 | `src/lib/outline/outlineService.ts` | `src/lib/outline/writingStats.ts` | 标题大纲与同步统计兼容入口 |
+| 大纲服务 | `src/lib/outline/outlineService.ts` | `src/lib/outline/writingStats.ts`, `src/lib/editor-core/InlineSourceCodec.ts` | 标题语义内容与 slug、六类行内符号排除、大纲与同步统计兼容入口 |
 | 正文统计与范围索引 | `src/lib/outline/writingStats.ts` | `sourceTokenPositions.ts`, `writingStatsEngine.ts`, `writingStatsProtocol.ts` | 中英计数、可见字数、源码/语义选区上下文和索引查询 |
 | 后台统计调度 | `src/app/services/writingStatsController.ts` | `src/lib/outline/writingStats.worker.ts`, `src/app/App.svelte` | 120 ms 防抖、单 Worker、快照缓存、失效门禁及统计状态 |
 | 章节结构重排 | `src/lib/outline/outlineReorder.ts` | `src/lib/editor-core/editorCommands.ts` | 计算章节子树、落点、层级变化、Markdown 重排与标题索引映射 |
 | 大纲交互控制器 | `src/app/services/outlineInteractionController.ts` | `src/app/services/outlineNavigation.ts`, `src/lib/outline/outlineReorder.ts` | 点击定位、章节拖拽编排、源码模式可撤销替换 |
-| 大纲滚动定位 | `src/app/services/outlineNavigation.ts` | `src/app/services/editorInteractionController.ts` | 模式切换/源码与语义视图滚动同步 |
+| 大纲滚动定位 | `src/app/services/outlineNavigation.ts` | `src/app/services/editorInteractionController.ts`, `src/lib/outline/outlineService.ts` | 模式切换/源码与语义视图滚动同步，PM/DOM 标题语义匹配 |
 | Markdown 源码 CodeMirror | `src/app/components/MarkdownSourceEditor.svelte` | `src/app/components/markdownSourceEditor.ts`, `src/app/components/EditorWorkspace.svelte` | 修改源码输入、选区、历史、行坐标、滚动容器或块 spacer |
 | 大纲状态 | `src/app/services/outlineState.ts` | — | 大纲展开/折叠/可见性/激活项计算 |
-| TOC 服务 | `src/lib/toc/tocService.ts` | `src/lib/editor-core/nodeViews/TocBlockNodeView.ts` | 生成 TOC Markdown/目录项数据 |
+| TOC 服务 | `src/lib/toc/tocService.ts` | `src/lib/editor-core/nodeViews/TocBlockNodeView.ts`, `src/lib/outline/outlineService.ts` | 生成 TOC Markdown/目录项数据，标题字面符号转义与统一跳转 |
 
 ### 渲染服务
 

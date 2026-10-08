@@ -159,6 +159,12 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     return core;
   }
 
+  async function prepareDocumentSave(tabId: string) {
+    await getDocumentEditor(tabId)?.awaitCompositionEnd?.();
+    getDocumentEditor(tabId)?.commitPendingEdits?.();
+    return flushDocumentRuntime(tabId);
+  }
+
   function updateFocusedDocumentState(tab: MarkdownTabState) {
     if (options.getActiveTabId() !== tab.id) return;
     options.setFileName(tab.fileName);
@@ -281,7 +287,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       return false;
     }
 
-    const core = flushDocumentRuntime(targetTabId);
+    const core = await prepareDocumentSave(targetTabId);
     const currentMarkdown = core?.getMarkdown() ?? activeTab.markdown;
     activeTab.markdown = currentMarkdown;
     const markdownToSave = normalizeMarkdownForSave(currentMarkdown);
@@ -655,7 +661,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       return;
     }
 
-    const core = flushDocumentRuntime(tabId);
+    const core = await prepareDocumentSave(tabId);
     const currentMarkdown = core?.getMarkdown() ?? activeTab.markdown;
     activeTab.markdown = currentMarkdown;
     const markdownToSave = normalizeMarkdownForSave(currentMarkdown);
@@ -720,7 +726,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       return;
     }
 
-    flushDocumentRuntime(tabId);
+    await prepareDocumentSave(tabId);
     const targetTab = options.getTabs().find((tab) => tab.id === tabId);
     if (!isMarkdownTab(targetTab) || !targetTab.nativePath) return;
     if (!force && !targetTab.dirty) return;

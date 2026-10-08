@@ -452,8 +452,7 @@ describe('documentActionsController', () => {
 
     const controller = createDocumentActionsController(options as any);
     controller.debouncedAutoSave(tab.id);
-    vi.advanceTimersByTime(50);
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(50);
     expect(saveNativeMarkdownFile).toHaveBeenCalledTimes(1);
 
     tab.markdown = originalMarkdown;
@@ -494,6 +493,36 @@ describe('documentActionsController', () => {
       dirty: false,
       lastKnownModifiedAt: 3,
     });
+  });
+
+  it.each(['manual', 'auto'])('组字期间的 %s 保存等待提交后再读取正文', async (mode) => {
+    vi.useFakeTimers();
+    const tab = createTab();
+    const { options } = createOptions([tab]);
+    let finishComposition!: () => void;
+    const composing = new Promise<void>((resolve) => { finishComposition = resolve; });
+    const commitPendingEdits = vi.fn();
+    const runtime = {
+      ...options.getEditor(),
+      awaitCompositionEnd: () => composing,
+      commitPendingEdits,
+      getMarkdown: vi.fn(() => tab.markdown),
+      flushMarkdown: vi.fn(() => tab.markdown),
+    };
+    options.getEditor = () => runtime;
+    vi.mocked(saveNativeMarkdownFile).mockResolvedValue({ document: null, error: '' });
+    const controller = createDocumentActionsController(options as any);
+    const saving = mode === 'manual' ? controller.saveMarkdownFile(false) : undefined;
+    if (mode === 'auto') controller.debouncedAutoSave(tab.id);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(commitPendingEdits).not.toHaveBeenCalled();
+    expect(saveNativeMarkdownFile).not.toHaveBeenCalled();
+    tab.markdown = '**中文提交**';
+    finishComposition();
+    await vi.advanceTimersByTimeAsync(0);
+    if (saving) await saving;
+    expect(commitPendingEdits).toHaveBeenCalled();
+    expect(saveNativeMarkdownFile).toHaveBeenCalledWith(tab.nativePath, '**中文提交**\n\n', tab.fileName, null);
   });
 
   it('segmented 标签关闭不由 Markdown controller 处理', async () => {

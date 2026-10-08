@@ -80,7 +80,7 @@ export function createWritingStatsEngine() {
               selected.chars = measured.chars;
               selected.lines = measured.lines;
             } else {
-              const text = serializeClipboardText(cached.doc.slice(from, to));
+              const text = serializeClipboardText(cached.doc.slice(from, to), true);
               selected.chars = text.length;
               selected.lines = text.split(/\r\n|\r|\n/).length;
             }

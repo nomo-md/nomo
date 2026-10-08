@@ -3,6 +3,7 @@ import { EditorState, type Transaction } from 'prosemirror-state';
 import type { EditorView } from 'prosemirror-view';
 import { parseMarkdown } from '../markdown';
 import { TocBlockNodeView } from './TocBlockNodeView';
+import { createTocBlock } from '../../toc/tocService';
 
 describe('TocBlockNodeView', () => {
   it('places selection at the end of the target heading after toc jump', () => {
@@ -60,6 +61,37 @@ describe('TocBlockNodeView', () => {
     expect(nodeView.dom.querySelector('.toc-delete')?.getAttribute('aria-label')).toBe(
       'Delete table of contents',
     );
+  });
+
+  it('navigates to source-formatted headings and renders literal code titles without escape slashes', () => {
+    const markdown = '# <u>标题</u>\n\n# `**字面**`';
+    const doc = parseMarkdown(`${createTocBlock(markdown)}\n\n${markdown}`);
+    const state = EditorState.create({ doc });
+    const semanticPane = document.createElement('section');
+    semanticPane.className = 'semantic-pane';
+    semanticPane.getBoundingClientRect = () => createRect(0);
+    semanticPane.scrollTo = vi.fn();
+    const editorDom = document.createElement('div');
+    editorDom.className = 'ProseMirror';
+    const heading = document.createElement('h1');
+    heading.textContent = '<u>标题</u>';
+    heading.getBoundingClientRect = () => createRect(120);
+    editorDom.append(heading);
+    semanticPane.append(editorDom);
+    let dispatched: Transaction | null = null;
+    const view = {
+      state, dom: editorDom,
+      dispatch(transaction: Transaction) { dispatched = transaction; },
+      focus: vi.fn(),
+    } as unknown as EditorView;
+    const nodeView = new TocBlockNodeView(doc.child(0), view, () => 0);
+    const buttons = nodeView.dom.querySelectorAll<HTMLButtonElement>('.toc-link');
+    expect(buttons[1].querySelector('.toc-text')?.textContent).toBe('**字面**');
+    buttons[0].click();
+    const headingPos = doc.child(0).nodeSize;
+    expect((dispatched as Transaction | null)?.selection.from).toBe(headingPos + 1 + doc.child(1).content.size);
+    expect(semanticPane.scrollTo).toHaveBeenCalledWith({ top: 88, behavior: 'smooth' });
+    nodeView.destroy();
   });
 });
 

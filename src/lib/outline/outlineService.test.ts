@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { analyzeMarkdown, calculateDocumentStats, extractOutline } from './outlineService';
+import { analyzeMarkdown, calculateDocumentStats, extractOutline, normalizeHeadingTitle } from './outlineService';
 
 describe('outlineService', () => {
   it('extracts heading outline with stable ids and line numbers', () => {
@@ -40,6 +40,26 @@ describe('outlineService', () => {
       headings: 1,
       readingMinutes: 1,
     });
+  });
+
+  it('uses the shared six-format source semantics without reparsing code contents', () => {
+    expect(normalizeHeadingTitle('**粗体** *斜体* ~~删除~~ <u>下划线</u> <mark>高亮</mark> `**原样**`'))
+      .toBe('粗体 斜体 删除 下划线 高亮 **原样**');
+    expect(normalizeHeadingTitle('`` `literal` [link](url) **原样** ``'))
+      .toBe('`literal` [link](url) **原样**');
+    expect(normalizeHeadingTitle('<code>**原样** [link](url)</code>')).toBe('**原样** [link](url)');
+  });
+
+  it('keeps incomplete syntax and escaped literals in heading labels', () => {
+    expect(normalizeHeadingTitle('**未闭合 <u>未闭合')).toBe('**未闭合 <u>未闭合');
+    expect(normalizeHeadingTitle('\\*字面星号\\* &amp; foo_bar_baz')).toBe('*字面星号* & foo_bar_baz');
+  });
+
+  it('keeps link labels and image alt text while using shared semantics for their contents', () => {
+    expect(normalizeHeadingTitle('[**粗体** 与 `*字面*`](https://example.com/a_(b))'))
+      .toBe('粗体 与 *字面*');
+    expect(normalizeHeadingTitle('![**图像**](image.png "说明") 后续')).toBe('图像 后续');
+    expect(normalizeHeadingTitle('`![图片](url)`')).toBe('![图片](url)');
   });
 
   it('analyzes outline and stats in one pass without changing results', () => {

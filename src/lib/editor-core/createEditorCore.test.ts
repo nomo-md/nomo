@@ -8,6 +8,7 @@ import { reorderOutlineSection } from '../outline/outlineReorder';
 import { extractOutline } from '../outline/outlineService';
 import { createEditorCore } from './createEditorCore';
 import { parseMarkdown } from './markdown';
+import { projectInlineSource } from './InlineSourceCodec';
 
 beforeEach(() => { setTypographyOptions({ ...DEFAULT_TYPOGRAPHY, enabled: false }); });
 afterEach(() => {
@@ -126,7 +127,7 @@ describe('createEditorCore', () => {
     const target = document.createElement('div');
     const editor = createEditorCore({ markdown: '**重点**', target });
     const view = (editor as unknown as { view: EditorView }).view;
-    const paragraph = findNodeByText(view.state.doc, 'paragraph', '重点');
+    const paragraph = findNodeByText(view.state.doc, 'paragraph', '**重点**');
     view.dispatch(
       view.state.tr.setSelection(
         TextSelection.create(
@@ -149,7 +150,7 @@ describe('createEditorCore', () => {
     const target = document.createElement('div');
     const editor = createEditorCore({ markdown: '# **标题文字**', target });
     const view = (editor as unknown as { view: EditorView }).view;
-    const heading = findNodeByText(view.state.doc, 'heading', '标题文字');
+    const heading = findNodeByText(view.state.doc, 'heading', '**标题文字**');
 
     view.dispatch(
       view.state.tr.setSelection(
@@ -164,10 +165,11 @@ describe('createEditorCore', () => {
 
     view.dispatch(
       view.state.tr.setSelection(
-        TextSelection.create(view.state.doc, heading.pos + 2, heading.pos + 4),
+        TextSelection.create(view.state.doc, heading.pos + 4, heading.pos + 6),
       ),
     );
-    expect(editor.getClipboardPayload()?.text).toBe('**题文**');
+    expect(editor.getClipboardPayload()?.text).toBe('题文');
+    expect(editor.getClipboardPayload()?.html).toContain('<strong>题文</strong>');
     editor.destroy();
   });
 
@@ -194,7 +196,7 @@ describe('createEditorCore', () => {
       target: orderedTarget,
     });
     const orderedView = (orderedEditor as unknown as { view: EditorView }).view;
-    const orderedParagraph = findNodeByText(orderedView.state.doc, 'paragraph', '标题和代码');
+    const orderedParagraph = findNodeByText(orderedView.state.doc, 'paragraph', '**标题**和`代码`');
     orderedView.dispatch(
       orderedView.state.tr.setSelection(
         TextSelection.create(
@@ -210,12 +212,12 @@ describe('createEditorCore', () => {
       orderedView.state.tr.setSelection(
         TextSelection.create(
           orderedView.state.doc,
-          orderedParagraph.pos + 2,
+          orderedParagraph.pos + 4,
           orderedParagraph.pos + 1 + orderedParagraph.node.content.size,
         ),
       ),
     );
-    expect(orderedEditor.getClipboardPayload()?.text).toBe('**题**和`代码`');
+    expect(orderedEditor.getClipboardPayload()?.text).toBe('题**和`代码`');
     orderedEditor.destroy();
   });
 
@@ -340,9 +342,9 @@ describe('createEditorCore', () => {
       ),
     );
     expect(editor.getClipboardPayload()?.text).toContain('| A | B |');
-    expect(editor.getClipboardPayload()?.text).toContain('| [raw] | value |');
+    expect(editor.getClipboardPayload()?.text).toContain('| \\[raw\\] | value |');
 
-    const rawCell = findNodeByText(view.state.doc, 'paragraph', '[raw]');
+    const rawCell = findNodeByText(view.state.doc, 'paragraph', '\\[raw\\]');
     view.dispatch(
       view.state.tr.setSelection(
         TextSelection.create(
@@ -352,7 +354,7 @@ describe('createEditorCore', () => {
         ),
       ),
     );
-    expect(editor.getClipboardPayload()?.text).toBe('[raw]');
+    expect(editor.getClipboardPayload()?.text).toBe('\\[raw\\]');
     editor.destroy();
   });
 
@@ -1528,10 +1530,10 @@ describe('createEditorCore', () => {
     expect(
       editor.pasteClipboard({ text: '**重点** $x$ ~~删除~~' }, { mode: 'plain' }),
     ).toMatchObject({ format: 'plain' });
-    expect(view.state.doc.textContent).toBe('**重点** $x$ ~~删除~~');
-    expect(findFirstNode(view.state.doc, 'paragraph').node.firstChild?.marks).toHaveLength(0);
+    expect(projectInlineSource(view.state.doc).textContent).toBe('**重点** $x$ ~~删除~~');
+    expect(findFirstNode(view.state.doc, 'paragraph').node.firstChild?.marks.map((mark) => mark.type.name)).toEqual(['inline_source']);
     expect(editor.flushMarkdown()).toBe('\\*\\*重点\\*\\* \\$x\\$ \\~\\~删除\\~\\~');
-    expect(parseMarkdown(editor.getMarkdown()).textContent).toBe('**重点** $x$ ~~删除~~');
+    expect(projectInlineSource(parseMarkdown(editor.getMarkdown())).textContent).toBe('**重点** $x$ ~~删除~~');
     editor.destroy();
   });
 
@@ -1563,7 +1565,7 @@ describe('createEditorCore', () => {
     expect(handled).toBe(true);
     expect(pasteEvent.defaultPrevented).toBe(true);
     expect(view.state.doc.firstChild?.type.name).toBe('paragraph');
-    expect(view.state.doc.textContent).toBe('# 字面标题');
+    expect(projectInlineSource(view.state.doc).textContent).toBe('# 字面标题');
     expect(editor.flushMarkdown()).toBe('\\# 字面标题');
     editor.destroy();
   });
@@ -1577,7 +1579,7 @@ describe('createEditorCore', () => {
     const reopened = parseMarkdown(serialized);
     expect(serialized).toContain('\\$\\$');
     expect(reopened.firstChild?.type.name).toBe('paragraph');
-    expect(reopened.textContent).toBe('$$E = mc^2$$');
+    expect(projectInlineSource(reopened).textContent).toBe('$$E = mc^2$$');
     editor.destroy();
   });
 

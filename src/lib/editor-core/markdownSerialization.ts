@@ -16,6 +16,7 @@ import { serializeCallout } from './callout/calloutSerializer';
 import { TOC_START_MARKER, TOC_END_MARKER } from '../toc/tocMarkers';
 import { escapeHtmlAttr } from './markdownTokenizer';
 import { serializeMarkdownLinkDestination, serializeMarkdownLinkTitle } from './link';
+import { isInlineSourceText, projectInlineSource } from './InlineSourceCodec';
 
 const tableMarkdownSerializer = new MarkdownSerializer(
   {
@@ -130,6 +131,10 @@ const tableMarkdownSerializer = new MarkdownSerializer(
       state.closeBlock(node);
     },
     text(state, node, parent) {
+      if (isInlineSourceText(node)) {
+        state.text(node.text ?? '', false);
+        return;
+      }
       let escaped = escapeMarkdownTextWithoutManualInlineMarkers(node.text ?? '');
       if (containsLiteralDisplayMathSyntax(parent)) {
         escaped = escaped.replace(/(?<!\\)\$/g, '\\$');
@@ -157,6 +162,7 @@ const tableMarkdownSerializer = new MarkdownSerializer(
   },
   {
     ...defaultMarkdownSerializer.marks,
+    inline_source: { open: '', close: '', mixable: true },
     em: {
       ...defaultMarkdownSerializer.marks.em,
       open(_state, mark, parent, index) {
@@ -292,7 +298,7 @@ export function prepareMarkdownSelection(doc: ProseMirrorNode): void {
  * 将语义编辑器选区转换为可独立粘贴的 Markdown。
  *
  * 完整覆盖块的可见内容时保留块结构；只覆盖块的一部分时去掉未完整选择的外层语法，
- * 但继续保留选中文字上的行内 marks。局部表格无法稳定合成合法表头，交由调用方降级为纯文本。
+ * 六类行内格式保留实际选中的原文。局部表格无法合成完整表头，调用方只输出其文本内容。
  */
 export function serializeMarkdownSelection(
   doc: ProseMirrorNode,
@@ -623,7 +629,7 @@ function serializeTableCell(cell: ProseMirrorNode): string {
 function serializeInlineText(node: ProseMirrorNode, parent: ProseMirrorNode, index: number): string {
   const raw = node.text ?? '';
   const code = node.marks.some((mark) => mark.type.name === 'code');
-  let text = escapeTableText(raw);
+  let text = isInlineSourceText(node) ? raw : escapeTableText(raw);
   if (code) {
     // 代码跨度内不能用反斜杠转义反引号；围栏须长于正文中的最长连续反引号。
     const delimiter = '`'.repeat(
@@ -743,12 +749,17 @@ function serializeMarkdownComment(content: string, block: boolean): string {
   return inlineContent ? `<!-- ${inlineContent} -->` : '<!---->';
 }
 
-export function serializeClipboardText(slice: Slice): string {
+export function serializeClipboardText(slice: Slice, preserveInlineSource = false): string {
   let text = '';
   let hasBlock = false;
   let previousBlockWasEmptyParagraph = false;
 
-  slice.content.nodesBetween(0, slice.content.size, (node) => {
+  const inline = slice.content.firstChild?.isInline === true;
+  const input = schema.nodes.doc.create(null, inline
+    ? schema.nodes.paragraph.create(null, slice.content) : slice.content);
+  const projected = preserveInlineSource ? input : projectInlineSource(input);
+  const content = inline ? projected.firstChild!.content : projected.content;
+  content.nodesBetween(0, content.size, (node) => {
     const nodeText = node.isText
       ? (node.text ?? '')
       : node.type.name === 'hard_break'

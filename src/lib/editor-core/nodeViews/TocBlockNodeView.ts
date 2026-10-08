@@ -3,6 +3,7 @@ import type { Node as ProseMirrorNode } from 'prosemirror-model';
 import type { EditorView } from 'prosemirror-view';
 import { onInterfaceLocaleChanged, t } from '../../../app/i18n';
 import { slugifyHeading } from '../../toc/tocService';
+import { normalizeHeadingTitle } from '../../outline/outlineService';
 
 interface TocRow {
   title: string;
@@ -136,7 +137,7 @@ export class TocBlockNodeView {
       if (node.type.name !== 'heading') {
         return true;
       }
-      const title = node.textContent.trim();
+      const title = normalizeHeadingTitle(node.textContent);
       const baseId = slugifyHeading(title) || `heading-${pos}`;
       const seen = usedIds.get(baseId) ?? 0;
       usedIds.set(baseId, seen + 1);
@@ -173,7 +174,7 @@ function parseTocRows(content: string): TocRow[] {
 
       number += 1;
       return {
-        title: match[2].replace(/\\([\[\]\\])/g, '$1'),
+        title: normalizeHeadingTitle(match[2]),
         id: safeDecodeURIComponent(match[3]),
         level: Math.floor(match[1].length / 2) + 1,
         number,
@@ -216,7 +217,7 @@ function findSemanticHeadingById(editorDom: HTMLElement, headingId: string): HTM
   );
 
   for (const heading of headings) {
-    const title = heading.textContent?.trim() ?? '';
+    const title = normalizeHeadingTitle(heading.textContent ?? '');
     const baseId = slugifyHeading(title) || `heading-${headings.indexOf(heading) + 1}`;
     const seen = usedIds.get(baseId) ?? 0;
     usedIds.set(baseId, seen + 1);
