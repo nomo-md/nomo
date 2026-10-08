@@ -9,8 +9,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow};
 
-const GITHUB_LATEST_RELEASE_API: &str =
-    "https://api.github.com/repos/LIXianSenQwQ/nomo/releases/latest";
+const GITHUB_LATEST_RELEASE_API: &str = "https://api.github.com/repos/nomo-md/nomo/releases/latest";
 const GITHUB_PROXY_PREFIX: &str = "https://gh-proxy.com/";
 const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const UPDATE_SMALL_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
@@ -1401,12 +1400,17 @@ fn github_proxy_url(original_url: &str) -> Option<String> {
         return None;
     }
 
+    // 仓库迁移后 Release 返回新地址，同时兼容旧地址和已有更新缓存。
     let allowed = (url.host_str() == Some("api.github.com")
-        && url.path() == "/repos/LIXianSenQwQ/nomo/releases/latest")
+        && matches!(
+            url.path(),
+            "/repos/nomo-md/nomo/releases/latest" | "/repos/LIXianSenQwQ/nomo/releases/latest"
+        ))
         || (url.host_str() == Some("github.com")
-            && url
-                .path()
-                .starts_with("/LIXianSenQwQ/nomo/releases/download/"));
+            && (url.path().starts_with("/nomo-md/nomo/releases/download/")
+                || url
+                    .path()
+                    .starts_with("/LIXianSenQwQ/nomo/releases/download/")));
     allowed.then(|| format!("{GITHUB_PROXY_PREFIX}{original_url}"))
 }
 
