@@ -36,6 +36,7 @@
   import type { EditorViewMode } from '../types';
   import { clickOutside } from '../actions/clickOutside';
   import { modeSwitchIndicator } from '../actions/motion';
+  import { typographyRange } from '../actions/typographyRange';
   import { getDiagramTypeLabel, t } from '../i18n';
 
   export let interfaceLocale: string;
@@ -404,6 +405,7 @@
           step="1"
           value={contentWidthPercent}
           disabled={mode === 'split'}
+          use:typographyRange={'width'}
           on:input={updateContentWidth}
         />
       </label>
@@ -435,6 +437,7 @@
               value={contentWidthPercent}
               disabled={mode === 'split'}
               aria-label={t.contentWidth()}
+              use:typographyRange={'width'}
               on:input={updateContentWidth}
               on:keydown={handleWidthPickerKeydown}
             />

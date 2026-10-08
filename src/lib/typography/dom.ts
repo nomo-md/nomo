@@ -25,6 +25,7 @@ export function createDomTypography(
     if (original.style === null) paragraph.removeAttribute('style');
     else paragraph.setAttribute('style', original.style);
     delete paragraph.dataset.kpLayout;
+    delete paragraph.dataset.kpAlignment;
     delete paragraph.dataset.kpReason;
   };
   const invalidate = () => {
@@ -192,6 +193,7 @@ function renderParagraph(
   for (const [node, fragment] of nodes) node.parentNode?.replaceChild(fragment, node);
   paragraph.style.cssText += `;${PARAGRAPH_CSS}`;
   paragraph.dataset.kpLayout = 'ready';
+  paragraph.dataset.kpAlignment = result.status === 'ready' ? (result.alignment ?? 'justify') : '';
 }
 
 /** Export waits for actual assets; timeout is an error, never a successful flush. */

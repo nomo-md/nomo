@@ -7,7 +7,14 @@
   import { t } from '../i18n';
   import { createDomTypography } from '../../lib/typography/dom';
   import type { TypographyController } from '../../lib/typography/types';
+  import { subscribeTypographyInteraction } from '../../lib/typography/interaction';
   let typography: TypographyController | undefined;
+  const layoutInteraction = subscribeTypographyInteraction((snapshot) => {
+    // 选项同值不再广播后，仍保留小窗原有的几何失效与延迟重排策略。
+    if (snapshot.phase !== 'idle') typography?.invalidate();
+    if (snapshot.phase === 'settling')
+      queueMicrotask(() => layoutInteraction.complete(snapshot.generation));
+  });
 
   export let markdown: string;
   export let nativePath: string | null;
@@ -23,6 +30,7 @@
   $: schedulePreviewRender(markdown, nativePath, editorTheme);
 
   onDestroy(() => {
+    layoutInteraction.destroy();
     typography?.destroy();
     renderGeneration += 1;
     lazyObserver?.disconnect();

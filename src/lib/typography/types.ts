@@ -26,6 +26,12 @@ export interface LayoutItem {
   stretch?: number;
   shrink?: number;
   weight?: number;
+  /** Comfortable adjustment, distinct from the hard stretch/shrink capacity. */
+  comfortStretch?: number;
+  comfortShrink?: number;
+  /** Measured code boxes select ragged layout without changing their contents. */
+  code?: boolean;
+  hyphenatable?: boolean;
   discardable?: boolean;
   trimStart?: number;
   trimEnd?: number;
@@ -53,6 +59,11 @@ export interface ParagraphInput {
   lineWidths?: number[];
   minLineHeight: number;
   hanging: boolean;
+  alignment?: 'auto' | 'justify' | 'ragged';
+  /** Maximum line badness, including the largest actual gap adjustment. */
+  tolerance?: number;
+  lastLineMinWidth?: number;
+  lastLinePenalty?: number;
   maxCandidates?: number;
   timeBudgetMs?: number;
 }
@@ -88,7 +99,13 @@ export type LayoutFallbackReason =
   | 'worker-failed';
 
 export type ParagraphLayout =
-  | { status: 'ready'; lines: LineLayout[]; demerits: number; candidates: number }
+  | {
+      status: 'ready';
+      lines: LineLayout[];
+      demerits: number;
+      candidates: number;
+      alignment?: 'justify' | 'ragged';
+    }
   | { status: 'fallback'; reason: LayoutFallbackReason; candidates: number };
 
 export interface LayoutRevision {

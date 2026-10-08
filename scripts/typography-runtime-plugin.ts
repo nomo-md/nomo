@@ -40,6 +40,11 @@ export function typographyRuntimePlugin(): Plugin {
               formats: ['iife'],
               name: 'NomoTypography',
             },
+            rollupOptions: {
+              output: {
+                banner: `/*!\n${await readFile(resolve('public/THIRD_PARTY_NOTICES.md'), 'utf8')}\n*/`,
+              },
+            },
           },
         });
         const output = Array.isArray(result) ? result[0] : result;

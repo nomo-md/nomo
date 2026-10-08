@@ -39,6 +39,8 @@ interface EditorModeSwitchResult {
 export function createEditorInteractionController(options: EditorInteractionOptions) {
   let pendingSourceCaretLine: number | null = null;
   let modeSwitchGeneration = 0;
+  let viewportMeasureQueued = false;
+  let pendingViewportRestore: number | null = null;
 
   async function setMode(
     nextMode: EditorMode,
@@ -171,11 +173,11 @@ export function createEditorInteractionController(options: EditorInteractionOpti
   function syncSourceTextareaHeight(
     restoreScrollTop: number | null = options.getPendingSourceScrollTop(),
   ) {
-    scheduleViewportMeasure(() => measureEditorViewportLayout(restoreScrollTop));
+    scheduleViewportMeasure(restoreScrollTop);
   }
 
   function refreshEditorViewportLayout() {
-    scheduleViewportMeasure(() => measureEditorViewportLayout(null), 2);
+    scheduleViewportMeasure(null);
   }
 
   async function restoreSourceScrollAnchorWhenReady(
@@ -240,13 +242,16 @@ export function createEditorInteractionController(options: EditorInteractionOpti
     }
   }
 
-  function scheduleViewportMeasure(callback: () => void, frameCount = 1) {
+  function scheduleViewportMeasure(restoreScrollTop: number | null) {
+    if (restoreScrollTop !== null) pendingViewportRestore = restoreScrollTop;
+    if (viewportMeasureQueued) return;
+    viewportMeasureQueued = true;
     const raf = getRequestAnimationFrame();
     raf(() => {
-      callback();
-      if (frameCount > 1) {
-        raf(callback);
-      }
+      viewportMeasureQueued = false;
+      const restore = pendingViewportRestore;
+      pendingViewportRestore = null;
+      measureEditorViewportLayout(restore);
     });
   }
 

@@ -6,6 +6,13 @@ import {
 } from '../../lib/desktop/tauriStorage';
 import type { DiagramType } from '../../lib/editor-core/diagramTemplates';
 import { setTypographyOptions } from '../../lib/typography/options';
+import {
+  beginTypographyInteraction,
+  getTypographyGeometryValue,
+  requestTypographyGeometryChange,
+  type TypographyGeometrySource,
+  type TypographyInteractionSnapshot,
+} from '../../lib/typography/interaction';
 import { DEFAULT_TYPOGRAPHY } from '../../lib/typography/types';
 import type { MarkdownLintRuleSet } from '../../lib/markdown-lint/types';
 import type { AppearancePreferences, ColorScheme, ThemeMode } from '../../lib/theme/types';
@@ -202,6 +209,8 @@ const APPEARANCE_THEME_MODEL_MIGRATION_KEY = 'appearanceThemeModelV1';
 const ZOOM_TRANSITION_MS = 150;
 const ZOOM_REDUCED_TRANSITION_MS = 90;
 let zoomAnimationFrame: number | null = null;
+let zoomAnimationGeneration = 0;
+let releaseZoomInteraction: (() => void) | undefined;
 
 export async function loadPersistedEditorSettings(
   desktopEnabled: boolean,
@@ -522,8 +531,8 @@ export function applyTypographySettings(
   lineHeight: number,
   preferences?: Pick<AppPreferences, 'typographyEnabled'>,
 ) {
-  document.documentElement.style.setProperty('--md-editor-font-size', `${fontSize}px`);
-  document.documentElement.style.setProperty('--md-editor-line-height', String(lineHeight));
+  setTypographyGeometryVariable('--md-editor-font-size', `${fontSize}px`, 'font');
+  setTypographyGeometryVariable('--md-editor-line-height', String(lineHeight), 'line-height');
   setTypographyOptions({
     enabled: preferences?.typographyEnabled,
     profile: DEFAULT_TYPOGRAPHY.profile,
@@ -532,20 +541,25 @@ export function applyTypographySettings(
 }
 
 export function applyEditorLayoutSettings(contentWidthPercent: number) {
-  document.documentElement.style.setProperty(
+  setTypographyGeometryVariable(
     '--md-editor-content-width-percent',
     String(contentWidthPercent),
+    'width',
   );
 }
 
 export function applyZoomSetting(
   zoomPercent: number,
-  options?: { transition?: boolean; onFrame?: () => void },
+  options?: {
+    transition?: boolean;
+    onFrame?: () => void;
+    anchor?: TypographyInteractionSnapshot['anchor'];
+  },
 ) {
   const targetZoom = zoomPercent / 100;
   if (!options?.transition || typeof window === 'undefined') {
     cancelZoomAnimation();
-    setZoomValue(targetZoom);
+    setZoomValue(targetZoom, options?.anchor);
     options?.onFrame?.();
     return;
   }
@@ -553,35 +567,44 @@ export function applyZoomSetting(
   const raf = window.requestAnimationFrame?.bind(window);
   if (!raf) {
     cancelZoomAnimation();
-    setZoomValue(targetZoom);
+    setZoomValue(targetZoom, options?.anchor);
     options.onFrame?.();
     return;
   }
-
-  cancelZoomAnimation();
 
   const startZoom = getCurrentZoomValue();
   const delta = targetZoom - startZoom;
   if (Math.abs(delta) < 0.001) {
-    setZoomValue(targetZoom);
+    cancelZoomAnimation();
+    setZoomValue(targetZoom, options?.anchor);
     options.onFrame?.();
     return;
   }
 
+  // Acquire the replacement first: canceling an older animation must not end preview between frames.
+  const release = beginTypographyInteraction('zoom', options.anchor);
+  cancelZoomAnimation();
+  releaseZoomInteraction = release;
+  const generation = zoomAnimationGeneration;
   const duration = prefersReducedMotion() ? ZOOM_REDUCED_TRANSITION_MS : ZOOM_TRANSITION_MS;
   const startedAt = Date.now();
   const tick = () => {
+    if (generation !== zoomAnimationGeneration) return;
     const elapsed = Date.now() - startedAt;
     const progress = Math.min(1, Math.max(0, elapsed / duration));
-    setZoomValue(startZoom + delta * easeOutCubic(progress));
+    setZoomValue(startZoom + delta * easeOutCubic(progress), options.anchor);
     options.onFrame?.();
+    if (generation !== zoomAnimationGeneration) return;
 
     if (progress < 1) {
       zoomAnimationFrame = raf(tick);
     } else {
-      setZoomValue(targetZoom);
+      setZoomValue(targetZoom, options?.anchor);
       options.onFrame?.();
+      if (generation !== zoomAnimationGeneration) return;
       zoomAnimationFrame = null;
+      releaseZoomInteraction = undefined;
+      release();
     }
   };
 
@@ -866,16 +889,28 @@ function getCurrentZoomValue() {
 }
 
 function cancelZoomAnimation() {
-  if (zoomAnimationFrame === null || typeof window === 'undefined') {
-    zoomAnimationFrame = null;
-    return;
+  zoomAnimationGeneration++;
+  if (zoomAnimationFrame !== null && typeof window !== 'undefined') {
+    window.cancelAnimationFrame?.(zoomAnimationFrame);
   }
-  window.cancelAnimationFrame?.(zoomAnimationFrame);
   zoomAnimationFrame = null;
+  releaseZoomInteraction?.();
+  releaseZoomInteraction = undefined;
 }
 
-function setZoomValue(value: number) {
-  document.documentElement.style.setProperty('--md-editor-zoom', String(value));
+function setTypographyGeometryVariable(
+  name: string,
+  value: string,
+  source: TypographyGeometrySource,
+  anchor?: TypographyInteractionSnapshot['anchor'],
+) {
+  const current = getTypographyGeometryValue(name);
+  if (Number.parseFloat(current) === Number.parseFloat(value)) return;
+  requestTypographyGeometryChange(name, value, source, anchor);
+}
+
+function setZoomValue(value: number, anchor?: TypographyInteractionSnapshot['anchor']) {
+  setTypographyGeometryVariable('--md-editor-zoom', String(value), 'zoom', anchor);
 }
 
 function easeOutCubic(progress: number) {

@@ -1,4 +1,5 @@
 import LineBreaker from 'linebreak';
+import { englishHyphenationPoints } from './hyphenation';
 import type { BreakPoint, LayoutItem, ParagraphInput, TypographyOptions } from './types';
 
 export const isHan = (text: string) => /\p{Script=Han}/u.test(text);
@@ -21,15 +22,22 @@ export function supportedText(text: string): boolean {
   return true;
 }
 
-/** UAX #14 supplies opportunities; profile tailoring only removes prohibited ones. */
+/** UAX #14 and measured Liang candidates supply opportunities; CJK rules apply prohibitions. */
 export function createParagraphInput(
   units: LayoutItem[],
   width: number,
   minLineHeight: number,
   options: TypographyOptions,
   forced = new Set<number>(),
+  paragraphFontSize?: number,
 ): ParagraphInput {
   const text = units.map((unit) => unit.text).join('');
+  const hyphens = englishHyphenationPoints(
+    units
+      .map((unit) => (unit.hyphenatable ? unit.text : '\ufffc'.repeat(unit.text.length)))
+      .join(''),
+    text,
+  );
   const opportunities = new Map<number, boolean>();
   const breaker = new LineBreaker(text);
   let next: { position: number; required: boolean } | null;
@@ -88,9 +96,11 @@ export function createParagraphInput(
           to: unit.to,
           text: '',
           width: mixed ? em * 0.125 : 0,
-          stretch: em * (mixed ? 0.125 : 0.35),
+          stretch: em * (mixed ? 0.0625 : 0.1),
           shrink: mixed ? em * 0.0625 : 0,
-          weight: mixed ? 1 : 0.35,
+          comfortStretch: em * (mixed ? 0.04 : 0.05),
+          comfortShrink: mixed ? em * 0.04 : 0,
+          weight: 1,
           discardable: true,
           fontSize: em,
           ascent: 0,
@@ -106,8 +116,14 @@ export function createParagraphInput(
       pair === '……' ||
       unit.text === '\u00a0' ||
       following?.text === '\u00a0';
-    if (forcedBreak || (!prohibited && opportunities.has(offset)) || i === units.length - 1) {
-      const hyphenated = unit.text === '\u00ad' && i < units.length - 1;
+    const automaticHyphen = hyphens.has(offset) && (unit.breakWidth ?? 0) > 0;
+    if (
+      forcedBreak ||
+      (!prohibited && (opportunities.has(offset) || automaticHyphen)) ||
+      i === units.length - 1
+    ) {
+      const hyphenated =
+        !forcedBreak && (unit.text === '\u00ad' || automaticHyphen) && i < units.length - 1;
       breaks.push({
         at: items.length,
         penalty: hyphenated ? 50 : 0,
@@ -117,5 +133,21 @@ export function createParagraphInput(
       });
     }
   }
-  return { items, breaks, width, minLineHeight, hanging: options.hanging };
+  const totalWidth = units.reduce((sum, unit) => sum + unit.width, 0);
+  const codeWidth = units.reduce((sum, unit) => sum + (unit.code ? unit.width : 0), 0);
+  const fontSize =
+    paragraphFontSize ?? units.find((unit) => unit.fontSize > 0)?.fontSize ?? minLineHeight / 1.75;
+  return {
+    items,
+    breaks,
+    width,
+    minLineHeight,
+    hanging: options.hanging,
+    alignment:
+      width / fontSize < 20 || codeWidth / Math.max(1, totalWidth) >= 0.35 ? 'ragged' : 'auto',
+    tolerance: 100,
+    // Protect actual orphan tails without balancing a wide paragraph into two halves.
+    lastLineMinWidth: Math.min(width * 0.12, fontSize * 4),
+    lastLinePenalty: 500,
+  };
 }

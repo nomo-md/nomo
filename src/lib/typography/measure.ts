@@ -19,9 +19,141 @@ export interface MeasuredParagraph {
   text: string;
 }
 
+interface PreparedRun {
+  node: Node;
+  text: string;
+  atomic: boolean;
+  soft?: boolean;
+  hard?: boolean;
+  font: ReturnType<typeof snapshotFont>;
+  hyphenatable: boolean;
+  object?: {
+    projection: HTMLElement;
+    width: number;
+    ascent: number;
+    descent: number;
+    sourceSize: number;
+    code: boolean;
+  };
+}
+
+/** 目标 CSS 仍生效时取得的标量快照；异步测量不再读取原段落的样式或几何。 */
+export interface PreparedParagraphMeasurement {
+  width: number;
+  lineHeight: number;
+  rootFont: number;
+  firstLineIndent: number;
+  runs: readonly PreparedRun[];
+  text: string;
+  hasEnglishWords: boolean;
+}
+
+export interface TypographyMeasureCache {
+  clear(): void;
+}
+
+export interface ParagraphMeasurementContext {
+  prepared?: PreparedParagraphMeasurement | null;
+  cache?: TypographyMeasureCache;
+}
+
+interface GraphemeMetrics {
+  prefixWidth: number;
+  ascent: number;
+  descent: number;
+  left: number;
+  right: number;
+}
+
+interface ShapedGroup {
+  metrics: readonly GraphemeMetrics[];
+  hyphenWidth?: number;
+}
+
+interface MeasureCacheState {
+  entries: Map<string, ShapedGroup>;
+  glyphs: number;
+  keyLength: number;
+  version: number;
+}
+
+const MAX_CACHE_GROUPS = 128;
+const MAX_CACHE_GLYPHS = 32_768;
+const MAX_CACHE_KEY_LENGTH = 262_144;
+const measureCaches = new WeakMap<TypographyMeasureCache, MeasureCacheState>();
+
+/** 每个编辑器持有独立的有界 LRU；只缓存文字度量，不缓存 DOM binding 或原子框。 */
+export function createTypographyMeasureCache(): TypographyMeasureCache {
+  const state: MeasureCacheState = {
+    entries: new Map(),
+    glyphs: 0,
+    keyLength: 0,
+    version: 0,
+  };
+  const cache: TypographyMeasureCache = {
+    clear() {
+      state.entries.clear();
+      state.glyphs = 0;
+      state.keyLength = 0;
+      state.version++;
+    },
+  };
+  measureCaches.set(cache, state);
+  return cache;
+}
+
+function cachedGroup(state: MeasureCacheState | undefined, key: string): ShapedGroup | undefined {
+  const group = state?.entries.get(key);
+  if (group) {
+    state!.entries.delete(key);
+    state!.entries.set(key, group);
+  }
+  return group;
+}
+
+function cacheGroup(state: MeasureCacheState, key: string, group: ShapedGroup) {
+  if (group.metrics.length > MAX_CACHE_GLYPHS || key.length > MAX_CACHE_KEY_LENGTH) return;
+  const previous = state.entries.get(key);
+  if (previous) {
+    state.glyphs -= previous.metrics.length;
+    state.keyLength -= key.length;
+    state.entries.delete(key);
+  }
+  state.entries.set(key, group);
+  state.glyphs += group.metrics.length;
+  state.keyLength += key.length;
+  while (
+    state.entries.size > MAX_CACHE_GROUPS ||
+    state.glyphs > MAX_CACHE_GLYPHS ||
+    state.keyLength > MAX_CACHE_KEY_LENGTH
+  ) {
+    const oldest = state.entries.keys().next().value!;
+    state.glyphs -= state.entries.get(oldest)!.metrics.length;
+    state.keyLength -= oldest.length;
+    state.entries.delete(oldest);
+  }
+}
+
 const SKIP = '.ProseMirror-widget,.ProseMirror-trailingBreak,[data-kp-owned],script,style';
 const ATOMIC =
   '.math-inline,.katex,.footnote-ref,.image-node,img,code,.pm-inline-source-code,input[type="checkbox"]';
+const KP_TEXT_STYLES = new Set(['margin-left', 'margin-right', 'line-height', 'padding-right']);
+
+function isPlainKpTextWrapper(node: HTMLElement): boolean {
+  return (
+    node.tagName === 'SPAN' &&
+    node.classList.length === 1 &&
+    node.classList.contains('kp-unit') &&
+    Array.from(node.attributes).every(({ name }) => name === 'class' || name === 'style') &&
+    node.style.getPropertyValue('margin-left') !== '' &&
+    node.style.getPropertyValue('margin-right') !== '' &&
+    node.style.getPropertyValue('line-height') !== '' &&
+    Array.from(node.style).every((property) => KP_TEXT_STYLES.has(property)) &&
+    node.childNodes.length > 0 &&
+    Array.from(node.childNodes).every((child) => child.nodeType === Node.TEXT_NODE)
+  );
+}
+
 const segmenter =
   typeof Intl.Segmenter === 'function'
     ? new Intl.Segmenter('zh', { granularity: 'grapheme' })
@@ -39,20 +171,70 @@ function snapshotFont(style: CSSStyleDeclaration) {
     wordSpacing: style.wordSpacing,
     fontFeatureSettings: style.fontFeatureSettings,
     fontVariantLigatures: style.fontVariantLigatures,
+    fontKerning: style.fontKerning,
+    fontVariationSettings: style.fontVariationSettings,
+    fontOpticalSizing: style.getPropertyValue('font-optical-sizing'),
+    fontVariantCaps: style.fontVariantCaps,
+    fontVariantNumeric: style.fontVariantNumeric,
+    fontVariantEastAsian: style.fontVariantEastAsian,
+    fontVariantPosition: style.getPropertyValue('font-variant-position'),
+    fontVariantAlternates: style.getPropertyValue('font-variant-alternates'),
+    fontSizeAdjust: style.getPropertyValue('font-size-adjust'),
+    fontLanguageOverride: style.getPropertyValue('font-language-override'),
+    fontSynthesis: style.getPropertyValue('font-synthesis'),
+    textRendering: style.textRendering,
+    direction: style.direction,
   };
-  return { ...font, key: Object.values(font).slice(1).join('|') };
+  return { ...font, key: JSON.stringify(Object.values(font).slice(1)) };
+}
+
+function applyFont(sandbox: HTMLElement, font: ReturnType<typeof snapshotFont>) {
+  sandbox.style.font = font.font;
+  sandbox.style.fontFamily = font.fontFamily;
+  sandbox.style.fontSize = font.fontSize;
+  sandbox.style.fontWeight = font.fontWeight;
+  sandbox.style.fontStyle = font.fontStyle;
+  sandbox.style.fontStretch = font.fontStretch;
+  sandbox.style.letterSpacing = font.letterSpacing;
+  sandbox.style.wordSpacing = font.wordSpacing;
+  sandbox.style.fontFeatureSettings = font.fontFeatureSettings;
+  sandbox.style.fontVariantLigatures = font.fontVariantLigatures;
+  sandbox.style.fontKerning = font.fontKerning;
+  sandbox.style.fontVariationSettings = font.fontVariationSettings;
+  sandbox.style.setProperty('font-optical-sizing', font.fontOpticalSizing);
+  sandbox.style.fontVariantCaps = font.fontVariantCaps;
+  sandbox.style.fontVariantNumeric = font.fontVariantNumeric;
+  sandbox.style.fontVariantEastAsian = font.fontVariantEastAsian;
+  sandbox.style.setProperty('font-variant-position', font.fontVariantPosition);
+  sandbox.style.setProperty('font-variant-alternates', font.fontVariantAlternates);
+  sandbox.style.setProperty('font-size-adjust', font.fontSizeAdjust);
+  sandbox.style.setProperty('font-language-override', font.fontLanguageOverride);
+  sandbox.style.setProperty('font-synthesis', font.fontSynthesis);
+  sandbox.style.textRendering = font.textRendering;
+  sandbox.style.direction = font.direction;
+}
+
+function createSandbox() {
+  const sandbox = document.createElement('span');
+  sandbox.dataset.kpOwned = 'measurement';
+  sandbox.style.cssText =
+    'position:fixed;left:-100000px;top:0;visibility:hidden;white-space:pre;pointer-events:none;';
+  return sandbox;
 }
 
 /** DOM-free search uses real browser measurements collected here in bounded batches. */
 export async function measureParagraph(
   element: HTMLElement,
   options: TypographyOptions,
+  shouldCancel?: () => boolean,
+  context?: ParagraphMeasurementContext,
 ): Promise<MeasuredParagraph | null> {
-  const batches = measureParagraphBatches(element, options, 1_500);
+  const batches = measureParagraphBatches(element, options, 1_500, shouldCancel, context);
   try {
     let step = batches.next();
     while (!step.done) {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (shouldCancel?.()) return null;
       step = batches.next();
     }
     return step.value;
@@ -79,13 +261,19 @@ export function measureParagraphSync(
   }
 }
 
-function* measureParagraphBatches(
+export function prepareParagraphMeasurement(
   element: HTMLElement,
-  options: TypographyOptions,
-  budgetMs: number,
-): Generator<void, MeasuredParagraph | null, void> {
-  let elapsed = performance.now();
-  const deadline = elapsed + budgetMs;
+  shouldCancel?: () => boolean,
+): PreparedParagraphMeasurement | null {
+  return prepareParagraphSnapshot(element, shouldCancel, performance.now() + 1_500);
+}
+
+function prepareParagraphSnapshot(
+  element: HTMLElement,
+  shouldCancel: (() => boolean) | undefined,
+  deadline: number,
+): PreparedParagraphMeasurement | null {
+  if (shouldCancel?.()) return null;
   if (!segmenter) return null;
   if (
     element.querySelector('input:not([type="checkbox"]),textarea,video,iframe,svg:not(.katex svg)')
@@ -102,20 +290,45 @@ function* measureParagraphBatches(
     (parseFloat(style.paddingRight) || 0);
   if (width < 1) return null;
   const rootFont = parseFloat(style.fontSize) || 16;
-  const lineHeight = parseFloat(style.lineHeight) || rootFont * 1.75;
+  const lineHeightCss = style.lineHeight;
+  const lineHeight = parseFloat(lineHeightCss) || rootFont * 1.75;
+  let firstLineIndent = parseFloat(style.textIndent) || 0;
+  const checkbox = element.querySelector<HTMLElement>('.task-checkbox-widget');
+  if (checkbox) {
+    const checkboxStyle = getComputedStyle(checkbox);
+    const scale = element.getBoundingClientRect().width / (element.offsetWidth || 1) || 1;
+    firstLineIndent +=
+      checkbox.getBoundingClientRect().width / scale +
+      (parseFloat(checkboxStyle.marginLeft) || 0) +
+      (parseFloat(checkboxStyle.marginRight) || 0);
+  }
   const computedStyles = new Map<HTMLElement, CSSStyleDeclaration>([[element, style]]);
+  const canReuseKpFont = element.dataset.kpLayout === 'ready' && !!element.closest('.ProseMirror');
+  const semanticParents = new Map<HTMLElement, HTMLElement>();
+  const semanticParent = (node: HTMLElement) => {
+    if (!canReuseKpFont) return node;
+    let parent = semanticParents.get(node);
+    if (!parent) {
+      // Generated text units only add spacing/line height. Marks and hidden
+      // source markers remain semantic parents and retain their own style reads.
+      parent = isPlainKpTextWrapper(node) ? (node.parentElement ?? node) : node;
+      semanticParents.set(node, parent);
+    }
+    return parent;
+  };
   const readStyle = (node: HTMLElement) => {
-    let computed = computedStyles.get(node);
+    const parent = semanticParent(node);
+    let computed = computedStyles.get(parent);
     if (!computed) {
-      computed = getComputedStyle(node);
-      computedStyles.set(node, computed);
+      computed = getComputedStyle(parent);
+      computedStyles.set(parent, computed);
     }
     return computed;
   };
   const runs: { node: Node; text: string; atomic: boolean; soft?: boolean; hard?: boolean }[] = [];
   let timedOut = false;
   const walk = (node: Node) => {
-    if (performance.now() > deadline) {
+    if (shouldCancel?.() || performance.now() > deadline) {
       timedOut = true;
       return;
     }
@@ -166,16 +379,20 @@ function* measureParagraphBatches(
     parent: HTMLElement;
     font: ReturnType<typeof snapshotFont>;
     atomicStyles: (readonly [string, string])[];
+    hyphenatable: boolean;
+    sourceSize: number;
+    code: boolean;
   }[] = [];
   for (const run of runs) {
-    if (performance.now() > deadline) return null;
+    if (shouldCancel?.() || performance.now() > deadline) return null;
     const parent =
       run.node.nodeType === Node.TEXT_NODE ? run.node.parentElement! : (run.node as HTMLElement);
     const computed = readStyle(parent);
-    let font = fontSnapshots.get(parent);
+    const fontParent = semanticParent(parent);
+    let font = fontSnapshots.get(fontParent);
     if (!font) {
       font = snapshotFont(computed);
-      fontSnapshots.set(parent, font);
+      fontSnapshots.set(fontParent, font);
     }
     const atomicStyles = run.atomic
       ? [
@@ -189,88 +406,146 @@ function* measureParagraphBatches(
           'display',
         ].map((property) => [property, computed.getPropertyValue(property)] as const)
       : [];
-    runFonts.push({ parent, font, atomicStyles });
+    const language = parent
+      .closest('p[lang],li[lang],td[lang],th[lang],span[lang],a[lang]')
+      ?.getAttribute('lang');
+    const code =
+      run.atomic && !run.soft && !run.hard && parent.matches('code,.pm-inline-source-code');
+    runFonts.push({
+      parent,
+      font,
+      atomicStyles,
+      hyphenatable:
+        !parent.closest('a,code,.pm-inline-source-code') &&
+        (!language || /^en(?:-|$)/i.test(language)),
+      sourceSize: code ? (parent.textContent?.length ?? 1) : 1,
+      code,
+    });
   }
-  if (performance.now() > deadline) return null;
+  if (shouldCancel?.() || performance.now() > deadline) return null;
+  const preparedRuns: PreparedRun[] = [];
+  let sandbox: HTMLElement | undefined;
+  try {
+    for (let r = 0; r < runs.length; r++) {
+      if (shouldCancel?.() || performance.now() > deadline) return null;
+      const run = runs[r];
+      const captured = runFonts[r];
+      const preparedRun: PreparedRun = {
+        ...run,
+        font: captured.font,
+        hyphenatable: captured.hyphenatable,
+      };
+      if (run.atomic && !run.soft && !run.hard) {
+        sandbox ??= createSandbox();
+        if (!sandbox.isConnected) document.body.append(sandbox);
+        applyFont(sandbox, captured.font);
+        sandbox.style.lineHeight = lineHeightCss;
+        sandbox.style.width = width + 'px';
+        const copy = captured.parent.cloneNode(true) as HTMLElement;
+        const original = copy.getAttribute('data-kp-unit-original-style');
+        if (original !== null) copy.style.cssText = original;
+        // The projection is outside .ProseMirror; remove hidden source markers
+        // and previous KP wrappers before capturing the target object's geometry.
+        copy
+          .querySelectorAll('.pm-inline-source-marker.is-hidden')
+          .forEach((node) => node.remove());
+        copy.classList.remove('kp-unit');
+        copy.querySelectorAll('.kp-unit').forEach((node) => node.replaceWith(...node.childNodes));
+        for (const [property, value] of captured.atomicStyles)
+          copy.style.setProperty(property, value);
+        const marker = document.createElement('span');
+        marker.style.cssText = 'display:inline-block;width:0;height:0;vertical-align:baseline;';
+        sandbox.replaceChildren(copy, marker);
+        const rect = copy.getBoundingClientRect();
+        const baseline = marker.getBoundingClientRect().top;
+        const copyStyle = getComputedStyle(copy);
+        preparedRun.object = {
+          projection: copy,
+          width:
+            rect.width +
+            (parseFloat(copyStyle.marginLeft) || 0) +
+            (parseFloat(copyStyle.marginRight) || 0),
+          ascent: Math.max(0, baseline - rect.top),
+          descent: Math.max(0, rect.bottom - baseline),
+          sourceSize: captured.sourceSize,
+          code: captured.code,
+        };
+        copy.remove();
+      }
+      preparedRuns.push(preparedRun);
+    }
+  } finally {
+    sandbox?.remove();
+  }
+  if (shouldCancel?.() || performance.now() > deadline) return null;
+  const text = runs.map((run) => run.text).join('');
+  return {
+    width,
+    lineHeight,
+    rootFont,
+    firstLineIndent,
+    runs: preparedRuns,
+    text,
+    hasEnglishWords: /[A-Za-z]{8,}/.test(text),
+  };
+}
+
+function* measureParagraphBatches(
+  element: HTMLElement,
+  options: TypographyOptions,
+  budgetMs: number,
+  shouldCancel?: () => boolean,
+  context?: ParagraphMeasurementContext,
+): Generator<void, MeasuredParagraph | null, void> {
+  if (shouldCancel?.()) return null;
+  let elapsed = performance.now();
+  const deadline = elapsed + budgetMs;
+  const prepared =
+    context && 'prepared' in context
+      ? context.prepared
+      : prepareParagraphSnapshot(element, shouldCancel, deadline);
+  if (!prepared || !segmenter || shouldCancel?.() || performance.now() > deadline) return null;
+  const { runs, width, lineHeight, rootFont } = prepared;
+  const cacheState = context?.cache ? measureCaches.get(context.cache) : undefined;
+  const cacheVersion = cacheState?.version;
   const units: LayoutItem[] = [];
   const bindings: DomBinding[] = [];
   const forced = new Set<number>();
-  const sandbox = document.createElement('span');
-  sandbox.dataset.kpOwned = 'measurement';
-  sandbox.style.cssText =
-    'position:fixed;left:-100000px;top:0;visibility:hidden;white-space:pre;pointer-events:none;';
+  const sandbox = createSandbox();
   let from = 0;
   try {
     document.body.append(sandbox);
     const canvas = document.createElement('canvas').getContext('2d');
     for (let r = 0; r < runs.length; r++) {
       const run = runs[r];
-      if (performance.now() > deadline) return null;
-      const { parent, font, atomicStyles } = runFonts[r];
+      if (shouldCancel?.() || performance.now() > deadline) return null;
+      const font = run.font;
       const size = parseFloat(font.fontSize) || rootFont;
-      sandbox.style.font = font.font;
-      sandbox.style.fontFamily = font.fontFamily;
-      sandbox.style.fontSize = font.fontSize;
-      sandbox.style.fontWeight = font.fontWeight;
-      sandbox.style.fontStyle = font.fontStyle;
-      sandbox.style.fontStretch = font.fontStretch;
-      if (canvas)
-        canvas.font = `${font.fontStyle} ${font.fontWeight} ${font.fontSize} ${font.fontFamily}`;
       if (run.atomic) {
         let text = run.text;
         if (run.soft) text = softBreakText(runs[r - 1]?.text ?? '', runs[r + 1]?.text ?? '');
         const breakNode = run.soft || run.hard;
-        let objectWidth = 0,
-          objectAscent = 0,
-          objectDescent = 0;
-        if (!breakNode) {
-          const copy = parent.cloneNode(true) as HTMLElement;
-          const original = copy.getAttribute('data-kp-unit-original-style');
-          if (original !== null) copy.style.cssText = original;
-          // The measurement sandbox is outside .ProseMirror, so its descendants
-          // cannot rely on editor-scoped display:none rules for source markers.
-          copy
-            .querySelectorAll('.pm-inline-source-marker.is-hidden')
-            .forEach((node) => node.remove());
-          copy.classList.remove('kp-unit');
-          copy.querySelectorAll('.kp-unit').forEach((node) => node.replaceWith(...node.childNodes));
-          for (const [property, value] of atomicStyles) copy.style.setProperty(property, value);
-          sandbox.style.lineHeight = style.lineHeight;
-          const marker = document.createElement('span');
-          marker.style.cssText = 'display:inline-block;width:0;height:0;vertical-align:baseline;';
-          sandbox.style.width = `${width}px`;
-          sandbox.replaceChildren(copy, marker);
-          const rect = copy.getBoundingClientRect();
-          const baseline = marker.getBoundingClientRect().top;
-          const copyStyle = getComputedStyle(copy);
-          objectWidth =
-            rect.width +
-            (parseFloat(copyStyle.marginLeft) || 0) +
-            (parseFloat(copyStyle.marginRight) || 0);
-          objectAscent = Math.max(0, baseline - rect.top);
-          objectDescent = Math.max(0, rect.bottom - baseline);
-        }
+        if (canvas)
+          canvas.font = [font.fontStyle, font.fontWeight, font.fontSize, font.fontFamily].join(' ');
         const natural = breakNode
           ? text === ' '
             ? (canvas?.measureText(' ').width ?? size * 0.25)
             : 0
-          : objectWidth;
-        // Atomic here means an unbroken layout box, not an atomic PM node. Its
-        // real text (including hidden padding) still owns every caret position.
-        const sourceSize = parent.matches('code,.pm-inline-source-code')
-          ? (parent.textContent?.length ?? 1)
-          : 1;
+          : (run.object?.width ?? 0);
+        // Atomic means an unbroken layout box; its original source still owns
+        // every caret position, including code delimiters hidden in the projection.
+        const sourceSize = run.object?.sourceSize ?? 1;
+        const to = from + sourceSize;
         bindings.push({
           node: run.node,
           offset: 0,
           endOffset: 1,
           from,
-          to: from + sourceSize,
+          to,
           atomic: true,
           width: natural,
           sourceSize,
         });
-        const to = from + sourceSize;
         units.push({
           kind: breakNode ? 'glue' : 'box',
           from,
@@ -278,107 +553,159 @@ function* measureParagraphBatches(
           text,
           width: natural,
           fontSize: size,
-          ascent: breakNode ? 0 : Math.max(size * 0.8, objectAscent),
-          descent: breakNode ? 0 : Math.max(size * 0.2, objectDescent),
-          stretch: run.soft && text ? size * 0.5 : 0,
-          shrink: run.soft ? natural * 0.4 : 0,
+          ascent: breakNode ? 0 : Math.max(size * 0.8, run.object?.ascent ?? 0),
+          descent: breakNode ? 0 : Math.max(size * 0.2, run.object?.descent ?? 0),
+          stretch: run.soft && text ? natural * 0.5 : 0,
+          shrink: run.soft ? natural / 3 : 0,
+          comfortStretch: run.soft && text ? natural * 0.25 : 0,
+          comfortShrink: run.soft ? natural * 0.25 : 0,
+          code: run.object?.code ?? false,
           discardable: !!breakNode,
         });
         from = to;
         if (run.hard) forced.add(from);
         continue;
       }
-      // Match ProseMirror's editable text shaping in every output surface.
-      sandbox.style.fontFeatureSettings = '"liga" 0';
-      sandbox.style.fontVariantLigatures = 'none';
-      sandbox.style.letterSpacing = font.letterSpacing;
-      sandbox.style.wordSpacing = font.wordSpacing;
-      sandbox.style.setProperty('text-autospace', 'no-autospace');
-      sandbox.style.setProperty('text-spacing-trim', 'space-all');
       const firstRun = r;
-      while (r + 1 < runs.length && !runs[r + 1].atomic && runFonts[r + 1].font.key === font.key)
-        r++;
+      while (r + 1 < runs.length && !runs[r + 1].atomic && runs[r + 1].font.key === font.key) r++;
       const group = runs.slice(firstRun, r + 1);
       const text = group.map((part) => part.text).join('');
-      let hyphenWidth: number | undefined;
-      if (text.includes('\u00ad')) {
-        sandbox.textContent = '-';
-        const hyphenRange = document.createRange();
-        hyphenRange.selectNodeContents(sandbox);
-        hyphenWidth = hyphenRange.getBoundingClientRect().width;
-      }
-      // One write per shaped group avoids forced layout for every old KP wrapper.
-      // Bindings still point into each original run, including its local offsets.
-      sandbox.textContent = text;
-      const textNode = sandbox.firstChild!;
-      const range = document.createRange();
-      range.setStart(textNode, 0);
-      let previousWidth = 0;
+      const segments: {
+        run: PreparedRun;
+        text: string;
+        offset: number;
+        end: number;
+        groupEnd: number;
+      }[] = [];
       let contextLength = 0;
       for (const sourceRun of group) {
         for (const part of segmenter.segment(sourceRun.text)) {
+          if (shouldCancel?.() || performance.now() > deadline) return null;
           const end = part.index + part.segment.length;
-          range.setEnd(textNode, contextLength + end);
-          const prefixWidth = range.getBoundingClientRect().width;
-          const natural = Math.max(0, prefixWidth - previousWidth);
-          previousWidth = prefixWidth;
-          const metrics = canvas?.measureText(part.segment);
-          const space = /^[ \t]+$/.test(part.segment);
-          bindings.push({
-            node: sourceRun.node,
-            offset: part.index,
-            endOffset: end,
-            from,
-            to: from + part.segment.length,
-            atomic: false,
-            width: natural,
-          });
-          units.push({
-            kind: space ? 'glue' : part.segment === '\u00ad' ? 'penalty' : 'box',
-            from,
-            to: from + part.segment.length,
+          segments.push({
+            run: sourceRun,
             text: part.segment,
-            width: part.segment === '\u00ad' ? 0 : natural,
-            fontSize: size,
-            ascent: Math.max(size * 0.8, metrics?.actualBoundingBoxAscent ?? 0),
-            descent: Math.max(size * 0.2, metrics?.actualBoundingBoxDescent ?? 0),
-            leadingSpace: Math.max(0, -(metrics?.actualBoundingBoxLeft ?? 0)),
-            trailingSpace: Math.max(0, natural - (metrics?.actualBoundingBoxRight ?? natural)),
-            breakWidth: part.segment === '\u00ad' ? hyphenWidth : undefined,
-            stretch: space ? size * 0.75 : 0,
-            shrink: space ? natural * 0.4 : 0,
-            weight: 2,
-            discardable: space || part.segment === '\u00ad',
+            offset: part.index,
+            end,
+            groupEnd: contextLength + end,
           });
-          from += part.segment.length;
           const now = performance.now();
-          if (now > deadline) return null;
           if (now - elapsed > 8) {
             yield;
             elapsed = performance.now();
-            if (elapsed > deadline) return null;
+            if (shouldCancel?.() || elapsed > deadline) return null;
           }
         }
         contextLength += sourceRun.text.length;
+      }
+      const needsHyphen =
+        text.includes('\u00ad') || (prepared.hasEnglishWords && /[A-Za-z]/u.test(text));
+      // Run boundaries may split a grapheme even when the joined text is equal.
+      // Including the segmentation keeps cache hits independent of old DOM nodes.
+      const cacheKey = cacheState
+        ? JSON.stringify([font.key, text, needsHyphen, segments.map((part) => part.groupEnd)])
+        : '';
+      const cached =
+        cacheState?.version === cacheVersion ? cachedGroup(cacheState, cacheKey) : undefined;
+      const metrics: GraphemeMetrics[] = [];
+      let hyphenWidth = cached?.hyphenWidth;
+      let range: Range | undefined;
+      if (!cached) {
+        applyFont(sandbox, font);
+        // Match ProseMirror's editable shaping in every output surface.
+        sandbox.style.fontFeatureSettings = '"liga" 0';
+        sandbox.style.fontVariantLigatures = 'none';
+        sandbox.style.letterSpacing = font.letterSpacing;
+        sandbox.style.wordSpacing = font.wordSpacing;
+        sandbox.style.setProperty('text-autospace', 'no-autospace');
+        sandbox.style.setProperty('text-spacing-trim', 'space-all');
+        if (canvas)
+          canvas.font = [font.fontStyle, font.fontWeight, font.fontSize, font.fontFamily].join(' ');
+        if (needsHyphen) {
+          sandbox.textContent = '-';
+          const hyphenRange = document.createRange();
+          hyphenRange.selectNodeContents(sandbox);
+          hyphenWidth = hyphenRange.getBoundingClientRect().width;
+        }
+        sandbox.textContent = text;
+        range = document.createRange();
+        range.setStart(sandbox.firstChild!, 0);
+      }
+      let previousWidth = 0;
+      for (let index = 0; index < segments.length; index++) {
+        if (shouldCancel?.() || performance.now() > deadline) return null;
+        const part = segments[index];
+        let metric = cached?.metrics[index];
+        if (!metric) {
+          range!.setEnd(sandbox.firstChild!, part.groupEnd);
+          const prefixWidth = range!.getBoundingClientRect().width;
+          const natural = Math.max(0, prefixWidth - previousWidth);
+          const measured = canvas?.measureText(part.text);
+          metric = {
+            prefixWidth,
+            ascent: measured?.actualBoundingBoxAscent ?? 0,
+            descent: measured?.actualBoundingBoxDescent ?? 0,
+            left: measured?.actualBoundingBoxLeft ?? 0,
+            right: measured?.actualBoundingBoxRight ?? natural,
+          };
+          metrics.push(metric);
+        }
+        const natural = Math.max(0, metric.prefixWidth - previousWidth);
+        previousWidth = metric.prefixWidth;
+        const space = /^[ \t]+$/.test(part.text);
+        const to = from + part.text.length;
+        bindings.push({
+          node: part.run.node,
+          offset: part.offset,
+          endOffset: part.end,
+          from,
+          to,
+          atomic: false,
+          width: natural,
+        });
+        units.push({
+          kind: space ? 'glue' : part.text === '\u00ad' ? 'penalty' : 'box',
+          from,
+          to,
+          text: part.text,
+          width: part.text === '\u00ad' ? 0 : natural,
+          fontSize: size,
+          ascent: Math.max(size * 0.8, metric.ascent),
+          descent: Math.max(size * 0.2, metric.descent),
+          leadingSpace: Math.max(0, -metric.left),
+          trailingSpace: Math.max(0, natural - metric.right),
+          breakWidth: /^[A-Za-z\u00ad]$/u.test(part.text) ? hyphenWidth : undefined,
+          hyphenatable: part.run.hyphenatable,
+          stretch: space ? natural * 0.5 : 0,
+          shrink: space ? natural / 3 : 0,
+          comfortStretch: space ? natural * 0.25 : 0,
+          comfortShrink: space ? natural * 0.25 : 0,
+          weight: 1,
+          discardable: space || part.text === '\u00ad',
+        });
+        from = to;
+        const now = performance.now();
+        if (shouldCancel?.() || now > deadline) return null;
+        if (now - elapsed > 8) {
+          yield;
+          elapsed = performance.now();
+          if (shouldCancel?.() || elapsed > deadline) return null;
+        }
+      }
+      if (!cached && cacheState && cacheState.version === cacheVersion) {
+        // Only complete groups enter the cache; cancellation cannot retain a
+        // partially measured prefix or old DOM binding.
+        cacheGroup(cacheState, cacheKey, { metrics, hyphenWidth });
       }
     }
   } finally {
     sandbox.remove();
   }
-  if (!units.length || performance.now() > deadline) return null;
-  const input = createParagraphInput(units, width, lineHeight, options, forced);
-  input.firstLineIndent = parseFloat(style.textIndent) || 0;
-  const checkbox = element.querySelector<HTMLElement>('.task-checkbox-widget');
-  if (checkbox) {
-    const checkboxStyle = getComputedStyle(checkbox);
-    const scale = element.getBoundingClientRect().width / (element.offsetWidth || 1) || 1;
-    input.firstLineIndent +=
-      checkbox.getBoundingClientRect().width / scale +
-      (parseFloat(checkboxStyle.marginLeft) || 0) +
-      (parseFloat(checkboxStyle.marginRight) || 0);
-  }
-  if (performance.now() > deadline) return null;
-  return { input, bindings, text: runs.map((run) => run.text).join('') };
+  if (!units.length || shouldCancel?.() || performance.now() > deadline) return null;
+  const input = createParagraphInput(units, width, lineHeight, options, forced, rootFont);
+  input.firstLineIndent = prepared.firstLineIndent;
+  if (shouldCancel?.() || performance.now() > deadline) return null;
+  return { input, bindings, text: prepared.text };
 }
 
 /** Visual coordinates retain both sides of zero-width source boundaries. */

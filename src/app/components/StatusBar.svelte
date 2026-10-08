@@ -9,6 +9,7 @@
   import type { DocumentStats } from '../../lib/outline/outlineService';
   import { clickOutside } from '../actions/clickOutside';
   import { pulseOnChange } from '../actions/motion';
+  import { typographyRange } from '../actions/typographyRange';
   import { t, type EffectiveInterfaceLocale } from '../i18n';
 
   type StatsMetric = 'lines' | 'words' | 'visibleChars' | 'chars';
@@ -24,7 +25,8 @@
   export let markdownLintRuleSet: MarkdownLintRuleSet;
   export let markdownLintState: MarkdownLintState;
   export let onMetricChange: (metric: StatsMetric) => void = () => undefined;
-  export let onZoomChange: (percent: number) => void = () => undefined;
+  export let onZoomChange: (percent: number, options?: { transition?: boolean }) => void = () =>
+    undefined;
   export let onRetryMarkdownLint: () => void = () => undefined;
   export let onMarkdownLintIssueSelect: (issue: MarkdownLintIssue) => boolean = () => false;
 
@@ -114,7 +116,7 @@
   }
   function handleZoomSlider(event: Event) {
     const value = parseInt((event.target as HTMLInputElement).value, 10);
-    if (!isNaN(value)) onZoomChange(value);
+    if (!isNaN(value)) onZoomChange(value, { transition: false });
   }
 </script>
 
@@ -289,6 +291,7 @@
                 step="5"
                 value={zoomPercent}
                 aria-label={t.zoomLevel()}
+                use:typographyRange={'zoom'}
                 on:input={handleZoomSlider}
               />
             </div>

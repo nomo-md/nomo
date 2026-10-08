@@ -34,6 +34,8 @@
     "@tauri-apps/plugin-clipboard-manager": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "gsap": "^3.15.0",
+    "hyphenation.en-us": "0.2.1",
+    "hypher": "0.2.5",
     "katex": "^0.17.0",
     "linebreak": "1.1.0",
     "markdown-it": "^14.2.0",

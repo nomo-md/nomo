@@ -2398,6 +2398,16 @@
   --md-editor-text-selection-bg: color-mix(in srgb, var(--md-editor-accent) 70%, transparent);
 }
 
+.prosemirror-host .ProseMirror [data-kp-layout='ready'] {
+  /* KP compression can overlap inline backgrounds. Preblend the selection
+     against the document so repeated painting does not create darker seams. */
+  --md-editor-text-selection-bg: color-mix(
+    in srgb,
+    var(--md-editor-accent) 70%,
+    var(--md-editor-document-bg) 30%
+  );
+}
+
 .prosemirror-host .ProseMirror ::selection {
   background: transparent;
   color: inherit;

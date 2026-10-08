@@ -38,6 +38,7 @@ export function createEditorSettingsController(options: EditorSettingsController
   }
 
   function updateFontSizeValue(value: number) {
+    if (value === options.getFontSize()) return;
     options.setFontSize(value);
     localStorage.setItem('nomo-font-size', String(value));
     persistSetting('fontSize', value);
@@ -50,6 +51,7 @@ export function createEditorSettingsController(options: EditorSettingsController
   }
 
   function updateLineHeightValue(value: number) {
+    if (value === options.getLineHeight()) return;
     options.setLineHeight(value);
     localStorage.setItem('nomo-line-height', String(value));
     persistSetting('lineHeight', value);
@@ -67,6 +69,7 @@ export function createEditorSettingsController(options: EditorSettingsController
   }
 
   function updateContentWidthValue(value: number) {
+    if (value === options.getContentWidthPercent()) return;
     options.setContentWidthPercent(value);
     localStorage.setItem('nomo-content-width-percent', String(value));
     persistSetting('contentWidthPercent', value);

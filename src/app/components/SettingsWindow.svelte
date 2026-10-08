@@ -12,6 +12,7 @@
     X,
   } from '@lucide/svelte';
   import { onMount } from 'svelte';
+  import { typographyRange } from '../actions/typographyRange';
   import { DIAGRAM_TEMPLATES } from '../../lib/editor-core/diagramTemplates';
   import { isTauriRuntime, openExternalLink } from '../../lib/desktop/tauriStorage';
   import {
@@ -1705,6 +1706,7 @@
                 <div class="range-setting">
                   <input
                     id="fontSize"
+                    use:typographyRange={'font'}
                     type="range"
                     min="14"
                     max="22"
@@ -1724,6 +1726,7 @@
                 <div class="range-setting">
                   <input
                     id="lineHeight"
+                    use:typographyRange={'line-height'}
                     type="range"
                     min="1.4"
                     max="2.1"
@@ -1743,6 +1746,7 @@
                 <div class="range-setting">
                   <input
                     id="contentWidthPercent"
+                    use:typographyRange={'width'}
                     type="range"
                     min="45"
                     max="90"
@@ -1979,6 +1983,7 @@
                 <div class="range-setting">
                   <input
                     id="zoomPercent"
+                    use:typographyRange={'zoom'}
                     type="range"
                     min="80"
                     max="160"

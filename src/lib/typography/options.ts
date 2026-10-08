@@ -18,6 +18,12 @@ export function setTypographyOptions(value: Partial<TypographyOptions>) {
           : current.profile,
     hanging: value.hanging ?? current.hanging,
   };
+  if (
+    next.enabled === current.enabled &&
+    next.profile === current.profile &&
+    next.hanging === current.hanging
+  )
+    return;
   current = next;
   for (const listener of listeners) listener();
 }

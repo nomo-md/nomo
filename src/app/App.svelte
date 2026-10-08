@@ -154,6 +154,7 @@
     getNextActiveMenu,
   } from './services/appUiState';
   import { createEditorSettingsController } from './services/editorSettingsController';
+  import { getTypographyOptions } from '../lib/typography/options';
   import ContextMenu from './components/ContextMenu.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
   import UnsavedConfirmDialog from './components/UnsavedConfirmDialog.svelte';
@@ -6175,6 +6176,7 @@
       createSnapshotBeforeSave,
       fontSize,
       lineHeight,
+      typographyEnabled: getTypographyOptions().enabled,
       contentWidthPercent,
       largeDocumentLimit,
       openDefaultBehavior,
@@ -6216,6 +6218,29 @@
       shortcutPreferences: patch.shortcutPreferences ?? shortcutPreferences,
     });
     const patchKeys = Object.keys(patch);
+    const geometryOnly =
+      patchKeys.length > 0 &&
+      patchKeys.every((key) =>
+        ['fontSize', 'lineHeight', 'contentWidthPercent', 'zoomPercent', 'typographyEnabled'].includes(key),
+      );
+    if (geometryOnly) {
+      // 几何更新同步进入预览，避免每个滑块 input 都等待主题流程或重置无关设置。
+      if ('fontSize' in patch || 'lineHeight' in patch || 'typographyEnabled' in patch) {
+        fontSize = preferences.fontSize;
+        lineHeight = preferences.lineHeight;
+        applyTypographySettings(fontSize, lineHeight, preferences);
+      }
+      if ('contentWidthPercent' in patch) {
+        contentWidthPercent = preferences.contentWidthPercent;
+        applyEditorLayoutSettings(contentWidthPercent);
+      }
+      if ('zoomPercent' in patch) {
+        zoomPercent = preferences.zoomPercent;
+        applyZoomSetting(zoomPercent, { onFrame: refreshEditorViewportLayout });
+      }
+      refreshEditorViewportLayout();
+      return;
+    }
     const appearanceOnly =
       patchKeys.length > 0 &&
       patchKeys.every(
@@ -7333,10 +7358,14 @@
     if (nextZoom === zoomPercent) {
       return;
     }
-    const anchor = saveScrollAnchor(event.clientX, event.clientY);
+    const anchor =
+      getActiveEditorMode() === 'source' || !getTypographyOptions().enabled
+        ? saveScrollAnchor(event.clientX, event.clientY)
+        : null;
     zoomPercent = nextZoom;
     applyZoomSetting(zoomPercent, {
       transition: true,
+      anchor: { left: event.clientX, top: event.clientY },
       onFrame: () => {
         syncZoomFrameViewportLayout(anchor?.pane);
         refreshEditorViewportLayout();
@@ -7350,15 +7379,18 @@
   // 步骤1：校验目标缩放值并更新状态
   // 步骤2：保存滚动锚点，缩放后恢复阅读位置
   // 步骤3：应用缩放动画并持久化到设置
-  function handleZoomChange(nextZoom: number) {
+  function handleZoomChange(nextZoom: number, options?: { transition?: boolean }) {
     const clamped = Math.min(160, Math.max(80, nextZoom));
     if (clamped === zoomPercent) {
       return;
     }
-    const anchor = saveScrollAnchor();
+    const anchor =
+      getActiveEditorMode() === 'source' || !getTypographyOptions().enabled
+        ? saveScrollAnchor()
+        : null;
     zoomPercent = clamped;
     applyZoomSetting(zoomPercent, {
-      transition: true,
+      transition: options?.transition ?? true,
       onFrame: () => {
         syncZoomFrameViewportLayout(anchor?.pane);
         refreshEditorViewportLayout();
@@ -7371,7 +7403,15 @@
 
   function syncZoomFrameViewportLayout(pane?: HTMLElement) {
     const visiblePane = pane ?? (getActiveEditorMode() === 'source' ? sourcePane : semanticPane);
-    visiblePane?.dispatchEvent(new Event('nomo:editor-viewport-layout-refresh'));
+    const grid = visiblePane?.closest('.editor-grid');
+    if (grid) {
+      grid.dispatchEvent(new Event('nomo:editor-viewport-layout-refresh'));
+    } else {
+      for (const visibleGrid of document.querySelectorAll<HTMLElement>('.editor-grid')) {
+        if (visibleGrid.clientHeight)
+          visibleGrid.dispatchEvent(new Event('nomo:editor-viewport-layout-refresh'));
+      }
+    }
   }
 
   // Ctrl+滚轮使用鼠标位置，状态栏缩放使用视口中心。

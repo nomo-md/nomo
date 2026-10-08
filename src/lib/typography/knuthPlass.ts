@@ -70,8 +70,9 @@ export function evaluateLine(
     descent = Math.max(descent, item.descent);
   }
   const delta = width - naturalWidth;
+  const ragged = input.alignment === 'ragged';
   let ratio = 0;
-  if (!(final && delta >= -EPSILON)) {
+  if (!((final || ragged) && delta >= -EPSILON)) {
     const capacity = delta >= 0 ? stretch : shrink;
     if (Math.abs(delta) > EPSILON && capacity <= 0) return null;
     ratio = capacity > 0 ? delta / capacity : 0;
@@ -79,10 +80,21 @@ export function evaluateLine(
   }
   if (width <= 0 || naturalWidth < -EPSILON) return null;
   const adjustments = Array(end - start).fill(0) as number[];
-  const inner = allocate(input, first, last, final && delta >= 0 ? 0 : delta);
+  const inner = allocate(input, first, last, (final || ragged) && delta >= 0 ? 0 : delta);
   for (let i = first; i < last; i++) adjustments[i - start] = inner[i - first];
   for (let i = start; i < first; i++) adjustments[i - start] = -items[i].width;
   for (let i = last; i < end; i++) adjustments[i - start] = -items[i].width;
+  let badness = 100 * Math.abs(ratio) ** 3;
+  for (let i = first; i < last; i++) {
+    const adjustment = adjustments[i - start];
+    const comfort = adjustment >= 0 ? items[i].comfortStretch : items[i].comfortShrink;
+    if (comfort !== undefined && Math.abs(adjustment) > EPSILON) {
+      // A few large holes must not hide behind the paragraph's total glue capacity.
+      badness = Math.max(badness, 100 * (Math.abs(adjustment) / Math.max(EPSILON, comfort)) ** 3);
+    }
+  }
+  if (!ragged && badness > (input.tolerance ?? 10_000)) return null;
+  if (ragged && !final && delta > 0) badness += 100 * (delta / width) ** 2;
   const height = Math.max(input.minLineHeight, ascent + descent);
   return {
     start,
@@ -92,7 +104,7 @@ export function evaluateLine(
     width,
     naturalWidth,
     ratio,
-    badness: Math.min(10_000, 100 * Math.abs(ratio) ** 3),
+    badness: Math.min(10_000, badness),
     fitness: ratio < -0.5 ? 0 : ratio <= 0.5 ? 1 : ratio <= 0.8 ? 2 : 3,
     adjustments,
     trimStart,
@@ -119,6 +131,24 @@ interface State {
 
 /** Pure paragraph optimisation. All paths stop at mandatory breaks. */
 export function layoutParagraph(input: ParagraphInput): ParagraphLayout {
+  if (input.alignment === 'auto') {
+    const now = () => (typeof performance === 'undefined' ? Date.now() : performance.now());
+    const started = now();
+    const justified = layoutParagraph({ ...input, alignment: 'justify' });
+    if (justified.status === 'ready' || justified.reason !== 'no-solution') return justified;
+    // Both passes share the original search budget; ragged is a complete KP result.
+    const remainingTime = (input.timeBudgetMs ?? 100) - (now() - started);
+    const remainingCandidates = (input.maxCandidates ?? 100_000) - justified.candidates;
+    if (remainingTime <= 0 || remainingCandidates <= 0)
+      return { status: 'fallback', reason: 'budget-exceeded', candidates: justified.candidates };
+    const ragged = layoutParagraph({
+      ...input,
+      alignment: 'ragged',
+      timeBudgetMs: remainingTime,
+      maxCandidates: remainingCandidates,
+    });
+    return { ...ragged, candidates: ragged.candidates + justified.candidates };
+  }
   if (
     !Number.isFinite(input.width) ||
     input.width <= 0 ||
@@ -182,8 +212,9 @@ export function layoutParagraph(input: ParagraphInput): ParagraphLayout {
       if (Math.abs(state.fitness - line.fitness) > 1 && state.count) cost += 3_000;
       if (state.flagged && point.flagged) cost += 3_000;
       if (line.last && state.flagged) cost += 1_500;
-      if (point.at === input.items.length && state.count && line.naturalWidth < line.width * 0.2) {
-        cost += 1_000 * (1 - line.naturalWidth / (line.width * 0.2));
+      const minimumLastWidth = input.lastLineMinWidth ?? line.width * 0.2;
+      if (point.at === input.items.length && state.count && line.naturalWidth < minimumLastWidth) {
+        cost += (input.lastLinePenalty ?? 1_000) * (1 - line.naturalWidth / minimumLastWidth);
       }
       const next: State = {
         at: point.at,
@@ -217,5 +248,11 @@ export function layoutParagraph(input: ParagraphInput): ParagraphLayout {
     line.baseline += top;
     top += line.height;
   }
-  return { status: 'ready', lines, demerits: cost, candidates };
+  return {
+    status: 'ready',
+    lines,
+    demerits: cost,
+    candidates,
+    alignment: input.alignment === 'ragged' ? 'ragged' : 'justify',
+  };
 }
