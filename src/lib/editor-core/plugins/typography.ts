@@ -1,4 +1,4 @@
-import { Plugin, PluginKey, type Transaction } from 'prosemirror-state';
+import { Plugin, PluginKey, TextSelection, type Transaction } from 'prosemirror-state';
 import { Decoration, DecorationSet, type EditorView } from 'prosemirror-view';
 import type { Node as ProseMirrorNode } from 'prosemirror-model';
 import { getTypographyOptions, subscribeTypography } from '../../typography/options';
@@ -12,6 +12,11 @@ import { refreshTypographyBreaks } from '../nodeViews/TypographyBreakNodeView';
 const key = new PluginKey<DecorationSet>('nomo-typography');
 const meta = 'nomo:typography';
 const controllers = new WeakMap<EditorView, TypographyController>();
+const graphemeSegmenter =
+  typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter('zh', { granularity: 'grapheme' })
+    : null;
+const graphemeBoundaries = new WeakMap<ProseMirrorNode, number[]>();
 export const isTypographyTransaction = (transaction: Transaction) =>
   transaction.getMeta(meta) !== undefined;
 export const flushEditorTypography = (view: EditorView) =>
@@ -24,9 +29,77 @@ export function typographyPlugin() {
       init: () => DecorationSet.empty,
       apply: (tr, value) => tr.getMeta(meta) ?? value.map(tr.mapping, tr.doc),
     },
-    props: { decorations: (state) => key.getState(state) },
+    props: {
+      decorations: (state) => key.getState(state),
+      handleKeyDown: moveTypographyCursor,
+    },
     view: (view) => createViewController(view),
   });
+}
+
+/** Visual widgets have no source positions, so native DOM motion can skip or revisit a caret. */
+function moveTypographyCursor(view: EditorView, event: KeyboardEvent): boolean {
+  if (
+    !view.editable ||
+    view.composing ||
+    event.isComposing ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.altKey ||
+    !['ArrowLeft', 'ArrowRight'].includes(event.key) ||
+    !getTypographyOptions().enabled ||
+    !graphemeSegmenter
+  )
+    return false;
+  const { selection } = view.state;
+  if (!(selection instanceof TextSelection) || !selection.$anchor.sameParent(selection.$head))
+    return false;
+  const { $head } = selection;
+  if (!$head.depth || !$head.parent.isTextblock) return false;
+  const paragraphPos = $head.before();
+  if (
+    !key
+      .getState(view.state)
+      ?.find(paragraphPos, paragraphPos + $head.parent.nodeSize)
+      .some(
+        (decoration) =>
+          decoration.from === paragraphPos && decoration.spec.paragraph === $head.parent,
+      )
+  )
+    return false;
+  const direction = event.key === 'ArrowRight' ? 1 : -1;
+  let target: number;
+  if (!selection.empty && !event.shiftKey) {
+    target = direction > 0 ? selection.to : selection.from;
+  } else {
+    // Preserve native atom navigation and the editor's formula/comment entry commands.
+    const adjacent = direction > 0 ? $head.nodeAfter : $head.nodeBefore;
+    if (!adjacent?.isText) return false;
+    let boundaries = graphemeBoundaries.get($head.parent);
+    if (!boundaries) {
+      const text = $head.parent.textBetween(0, $head.parent.content.size, '', '\ufffc');
+      if (text.length !== $head.parent.content.size) return false;
+      boundaries = [
+        0,
+        ...Array.from(graphemeSegmenter.segment(text), (part) => part.index + part.segment.length),
+      ];
+      graphemeBoundaries.set($head.parent, boundaries);
+    }
+    const offset =
+      direction > 0
+        ? boundaries.find((boundary) => boundary > $head.parentOffset)
+        : boundaries[boundaries.findIndex((boundary) => boundary >= $head.parentOffset) - 1];
+    if (offset === undefined) return false;
+    target = $head.start() + offset;
+  }
+  view.dispatch(
+    view.state.tr
+      .setSelection(
+        TextSelection.create(view.state.doc, event.shiftKey ? selection.anchor : target, target),
+      )
+      .scrollIntoView(),
+  );
+  return true;
 }
 
 function createViewController(view: EditorView) {
@@ -210,6 +283,23 @@ function createViewController(view: EditorView) {
   const clearActive = (event: Event) => {
     if (composing || view.composing) return;
     const keyboard = event as KeyboardEvent;
+    if (
+      event.type === 'keydown' &&
+      [
+        'ArrowLeft',
+        'ArrowRight',
+        'ArrowUp',
+        'ArrowDown',
+        'Home',
+        'End',
+        'PageUp',
+        'PageDown',
+      ].includes(keyboard.key)
+    ) {
+      // Keep the current DOM stable until native selection changes from navigation have settled.
+      if (getTypographyOptions().enabled && completed !== revision) schedule();
+      return;
+    }
     if (
       event.type === 'keydown' &&
       (keyboard.ctrlKey ||

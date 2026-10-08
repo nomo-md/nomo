@@ -1222,7 +1222,6 @@ export class ProseMirrorEditorCore implements EditorCore {
       plugins: [
         windowsImePunctuationFallbackPlugin(),
         blockAlignmentPlugin(),
-        typographyPlugin(),
         inputRules({
           rules: createMarkdownInputRules(),
         }),
@@ -1435,6 +1434,8 @@ export class ProseMirrorEditorCore implements EditorCore {
             MermaidBlockNodeView.enterEditAt(view, pos, caret),
           prepareMathKeyboardEntry: (caret) => MathBlockNodeView.prepareKeyboardEntry(caret, this.view ?? undefined),
         }),
+        // Format boundaries and editable atoms handle arrows before KP's text navigation.
+        typographyPlugin(),
         contextMenuPlugin({
           onOpen: (event) => this.options.onContextMenuOpen?.(event),
         }),

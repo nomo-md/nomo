@@ -38,9 +38,11 @@ export class TypographyBreakNodeView implements NodeView {
       const before = this.view.state.doc.resolve(pos).nodeBefore?.textContent ?? '';
       const after =
         this.view.state.doc.resolve(pos + this.node.nodeSize).nodeAfter?.textContent ?? '';
-      this.dom.textContent = softBreakText(before, after);
+      const text = softBreakText(before, after);
+      if (this.dom.textContent !== text || this.dom.childElementCount) this.dom.textContent = text;
     } else {
-      this.dom.replaceChildren(document.createElement('br'));
+      if (this.dom.childNodes.length !== 1 || this.dom.firstChild?.nodeName !== 'BR')
+        this.dom.replaceChildren(document.createElement('br'));
     }
   }
   ignoreMutation() {

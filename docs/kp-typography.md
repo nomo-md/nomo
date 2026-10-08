@@ -17,7 +17,7 @@
 | 测量 | `measure.ts`：真实字体连续前缀测量，字框空白测量，公式/图片/行内代码尺寸与基线。 |
 | 渲染与坐标 | `renderPlan.ts`、`positions.ts`：视觉行、间距、边缘调整、原文位置和视觉位置的边界倾向。编辑器继续使用 ProseMirror 原生 DOM 坐标映射。 |
 | 调度 | `solver.ts`、`typography.worker.ts`：内联 Worker、请求编号、错误/超时回退。主线程测量，Worker 求解。 |
-| 编辑态 | `editor-core/plugins/typography.ts`：约 150 ms 空闲调度、组合输入与拖动选区保护、段落缓存、过期结果丢弃、Decorations。`TypographyBreakNodeView` 只负责源码换行的视觉投影。 |
+| 编辑态 | `editor-core/plugins/typography.ts`：约 150 ms 空闲调度、组合输入与拖动选区保护、导航期间延后待完成的重排、段落缓存、过期结果丢弃、Decorations。已排版段落的普通左右键按语义文档字素移动；格式边界及行内对象保留原有优先处理。`TypographyBreakNodeView` 只负责源码换行的视觉投影，相同投影不重复替换 DOM。 |
 | 只读 | `dom.ts`：预览、Quick Look、导出共用；保留语义副本，宽度/字体变化后重排，关闭时恢复。 |
 | 导出 | `ProseMirrorEditorCore.getExportHtml()` 从文档序列化，保留必要的图表/代码渲染快照，重新生成公式。导出清理装饰，再嵌入运行时、Worker 和 KaTeX 字体。 |
 | PDF | Windows 与 macOS 按纸张方向和左右边距计算版心，调用 `__NOMO_PREPARE_PRINT__(widthMm)`，等待字体、图片及最终排版。就绪失败或超时不能打印为成功。 |
@@ -58,6 +58,14 @@ pnpm check
 - 主应用、Quick Look 前端构建和 Windows Rust 检查通过。构建保留原有大 chunk 提示与 Rust dead_code 提示。
 - 百段混排样例在本机 Chromium、约 226 CSS px 段落宽度下，100/100 段完成、0 回退、源码一致，单次约 3,768 ms。修正测试夹具缺少 `min-width: 0` 之前曾耗时 24,147 ms；该夹具会随内容改变 flex 最小宽度，不能将其与固定宽度结果混用。主应用的 `.semantic-pane` 已有该约束。这些是开发检查数据，不是跨平台性能承诺。
 - 全量 `pnpm check` 的既有阻碍是 `plugins/pendingInlineMark.test.ts:763,798` 的 MouseEvent/PointerEvent 类型不匹配；没有为本任务改写该无关测试。
+
+## 左右移动跳光标修复（2026-10-08）
+
+- 视觉断点 widget 没有源码位置，不能以浏览器穿越装饰 DOM 的行为决定普通文本的左右移动。已排版段落按 `Intl.Segmenter` 字素边界更新 `TextSelection`，Shift 保留选择起点；Ctrl/Meta/Alt、组合输入、只读、跨段选区及行内对象沿原有路径处理。
+- 待完成的异步重排在方向键、Home/End/PageUp/PageDown 导航期间重新计时，并丢弃旧请求结果；当前装饰保留。软换行投影内容不变时保留 DOM，减少选区锚点失效。
+- 针对性运行 KP 算法、编辑器排版、格式边界与编辑器内核的既有测试：4 个文件、165 项通过。主应用 `pnpm build` 通过；`pnpm check` 仍只有上述既有的两项 MouseEvent/PointerEvent 错误。
+- 本机 Chromium 在 440 CSS px、110% 缩放、3 段 KP `ready` 的状态下，普通中文连续右移 90 次、左移 90 次回到原位，每次源位置增减 1；Shift 右移 70 次保持起点，原文一致。emoji 家庭组合和组合字符分别整体跨越 11、2 个 UTF-16 单元，格式边界保留原有停留行为。输入后连续右移 30 次均增 1，空闲后恢复 KP，撤销恢复原文；关闭排版恢复源码软换行。
+- 已操作 Windows 开发版客户端中的《迭代记录.md》（110% 缩放），观察到相邻汉字的选择扩展和回缩。长文档窗口/选区读取有延迟，原始跳跃路径尚未取得稳定的前后对照，不能据此宣称该文档全部场景或 Windows 原生输入法验收通过。已安装的发行版未替换。
 
 ## 未完成验收及下一步
 
