@@ -91,6 +91,14 @@ export function createFolderExplorerController(options: FolderExplorerController
     }
   }
 
+  async function refreshLoadedFolders() {
+    // 用户操作完成后必须读取新快照，不能复用操作前已经开始的后台刷新。
+    if (syncInFlight) {
+      await syncInFlight;
+    }
+    await syncLoadedFolders();
+  }
+
   async function syncLoadedFoldersOnce() {
     const rootPath = options.getCurrentFolderPath();
     if (!options.getDesktopEnabled() || !rootPath) {
@@ -112,10 +120,9 @@ export function createFolderExplorerController(options: FolderExplorerController
       missingPaths,
     );
     let nextFolderTree = options.getFolderTree();
-    let nextExpandedFolders = options.getExpandedFolders();
+    const pathsToPrune = [...missingPaths];
     if (missingPaths.length > 0) {
       nextFolderTree = removeTreePaths(nextFolderTree, missingPaths);
-      nextExpandedFolders = pruneExpandedFolders(nextExpandedFolders, missingPaths);
     }
 
     for (const folderPath of foldersToReload) {
@@ -126,7 +133,7 @@ export function createFolderExplorerController(options: FolderExplorerController
           return;
         }
         nextFolderTree = removeTreePaths(nextFolderTree, [folderPath]);
-        nextExpandedFolders = pruneExpandedFolders(nextExpandedFolders, [folderPath]);
+        pathsToPrune.push(folderPath);
         continue;
       }
 
@@ -138,7 +145,9 @@ export function createFolderExplorerController(options: FolderExplorerController
     }
 
     options.setFolderTree(nextFolderTree);
-    if (nextExpandedFolders !== options.getExpandedFolders()) {
+    const currentExpandedFolders = options.getExpandedFolders();
+    const nextExpandedFolders = pruneExpandedFolders(currentExpandedFolders, pathsToPrune);
+    if (nextExpandedFolders !== currentExpandedFolders) {
       options.setExpandedFolders(nextExpandedFolders);
     }
 
@@ -221,6 +230,7 @@ export function createFolderExplorerController(options: FolderExplorerController
     loadFolder,
     removeMissingPaths,
     syncLoadedFolders,
+    refreshLoadedFolders,
     openFolderDialog,
   };
 }

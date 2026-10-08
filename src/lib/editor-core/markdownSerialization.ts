@@ -3,7 +3,13 @@ import {
   MarkdownSerializer,
   MarkdownSerializerState,
 } from 'prosemirror-markdown';
-import { Slice, Fragment, type Node as ProseMirrorNode, type ResolvedPos } from 'prosemirror-model';
+import {
+  Slice,
+  Fragment,
+  type Mark,
+  type Node as ProseMirrorNode,
+  type ResolvedPos,
+} from 'prosemirror-model';
 import { schema, type TableColumnAlignment } from './schema';
 import { serializeHtmlBlock } from './html/pmToHtml';
 import { serializeCallout } from './callout/calloutSerializer';
@@ -151,6 +157,24 @@ const tableMarkdownSerializer = new MarkdownSerializer(
   },
   {
     ...defaultMarkdownSerializer.marks,
+    em: {
+      ...defaultMarkdownSerializer.marks.em,
+      open(_state, mark, parent, index) {
+        return emphasisNeedsHtml(mark, parent, index) ? '<em>' : '*';
+      },
+      close(_state, mark, parent, index) {
+        return emphasisNeedsHtml(mark, parent, index) ? '</em>' : '*';
+      },
+    },
+    strong: {
+      ...defaultMarkdownSerializer.marks.strong,
+      open(_state, mark, parent, index) {
+        return emphasisNeedsHtml(mark, parent, index) ? '<strong>' : '**';
+      },
+      close(_state, mark, parent, index) {
+        return emphasisNeedsHtml(mark, parent, index) ? '</strong>' : '**';
+      },
+    },
     strikethrough: {
       open: '~~',
       close: '~~',
@@ -182,6 +206,57 @@ const tableMarkdownSerializer = new MarkdownSerializer(
     },
   },
 );
+
+function emphasisNeedsHtml(mark: Mark, parent: ProseMirrorNode, index: number): boolean {
+  let from = Math.min(index, parent.childCount - 1);
+  if (from >= 0 && !mark.isInSet(parent.child(from).marks)) from -= 1;
+  if (from < 0) return false;
+
+  let to = from + 1;
+  while (from > 0 && mark.isInSet(parent.child(from - 1).marks)) from -= 1;
+  while (to < parent.childCount && mark.isInSet(parent.child(to).marks)) to += 1;
+
+  const first = inlineBoundaryText(parent.child(from)).match(/^[\s\S]/u)?.[0];
+  const last = inlineBoundaryText(parent.child(to - 1)).match(/[\s\S]$/u)?.[0];
+  const before = from > 0 ? inlineBoundaryText(parent.child(from - 1)).match(/[\s\S]$/u)?.[0] : '';
+  const after = to < parent.childCount ? inlineBoundaryText(parent.child(to)).match(/^[\s\S]/u)?.[0] : '';
+
+  // * / ** 内侧是标点、外侧紧贴文字时不满足 CommonMark 边界规则；用 HTML 保留真实格式。
+  if (
+    (isInlinePunctuation(first) && isInlineWordCharacter(before)) ||
+    (isInlinePunctuation(last) && isInlineWordCharacter(after))
+  ) {
+    return true;
+  }
+
+  // 加粗回退为 HTML 时，外层斜体的星号也可能紧贴标签，需一起保持兼容。
+  if (mark.type === schema.marks.em) {
+    for (let i = from; i < to; i++) {
+      const strong = schema.marks.strong.isInSet(parent.child(i).marks);
+      if (
+        strong &&
+        (i === from || !strong.isInSet(parent.child(i - 1).marks)) &&
+        emphasisNeedsHtml(strong, parent, i)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function inlineBoundaryText(node: ProseMirrorNode): string {
+  if (node.type.name === 'hard_break') return '\n';
+  return node.textContent || '\ufffc';
+}
+
+function isInlinePunctuation(character: string | undefined): boolean {
+  return Boolean(character && /[\p{P}\p{S}]/u.test(character));
+}
+
+function isInlineWordCharacter(character: string | undefined): boolean {
+  return Boolean(character && !/\s/u.test(character) && !isInlinePunctuation(character));
+}
 
 function hasFollowingInlineContent(parent: ProseMirrorNode, index: number): boolean {
   for (let i = index + 1; i < parent.childCount; i++) {
@@ -530,9 +605,9 @@ function serializeTableRow(row: ProseMirrorNode, columnCount: number): string[] 
 
 function serializeTableCell(cell: ProseMirrorNode): string {
   const parts: string[] = [];
-  cell.descendants((node) => {
+  cell.descendants((node, _pos, parent, index) => {
     if (node.isText) {
-      parts.push(serializeInlineText(node));
+      parts.push(serializeInlineText(node, parent!, index));
       return false;
     }
     if (node.type.name === 'hard_break') {
@@ -545,7 +620,7 @@ function serializeTableCell(cell: ProseMirrorNode): string {
   return parts.join('').replace(/\n/g, ' ').replace(/\|/g, '\\|').trim();
 }
 
-function serializeInlineText(node: ProseMirrorNode): string {
+function serializeInlineText(node: ProseMirrorNode, parent: ProseMirrorNode, index: number): string {
   const raw = node.text ?? '';
   const code = node.marks.some((mark) => mark.type.name === 'code');
   let text = escapeTableText(raw);
@@ -558,8 +633,12 @@ function serializeInlineText(node: ProseMirrorNode): string {
     text = `${delimiter}${padding}${raw}${padding}${delimiter}`;
   }
   return node.marks.reduce((value, mark) => {
-    if (mark.type.name === 'strong') return `**${value}**`;
-    if (mark.type.name === 'em') return `*${value}*`;
+    if (mark.type.name === 'strong') {
+      return emphasisNeedsHtml(mark, parent, index) ? `<strong>${value}</strong>` : `**${value}**`;
+    }
+    if (mark.type.name === 'em') {
+      return emphasisNeedsHtml(mark, parent, index) ? `<em>${value}</em>` : `*${value}*`;
+    }
     if (mark.type.name === 'code') return value;
     if (mark.type.name === 'strikethrough') return `~~${value}~~`;
     if (mark.type.name === 'underline') return `<u>${value}</u>`;

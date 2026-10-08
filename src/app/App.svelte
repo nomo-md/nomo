@@ -1962,6 +1962,7 @@
   const toggleRootFolder = folderExplorer.toggleRootFolder;
   const removeMissingExplorerPaths = folderExplorer.removeMissingPaths;
   const syncLoadedExplorerFolders = folderExplorer.syncLoadedFolders;
+  const refreshExplorerFolders = folderExplorer.refreshLoadedFolders;
 
   // 侧边栏宽度拉伸状态与函数
   let sidebarWidth = 250;
@@ -5854,7 +5855,7 @@
 
   async function handleRefreshFolder() {
     if (currentFolderPath) {
-      await loadFolder(currentFolderPath);
+      await refreshExplorerFolders();
     }
   }
 
@@ -5930,7 +5931,7 @@
       }
       // 刷新文件夹
       if (currentFolderPath) {
-        await loadFolder(currentFolderPath);
+        await refreshExplorerFolders();
       }
       statusMessage = t.deletedType({ type: typeLabel });
     } catch (error) {
@@ -5977,16 +5978,16 @@
       await createFolder(targetPath).catch((err) => {
         statusMessage = t.createFolderFailed({ error: err });
       });
-      await loadFolder(currentFolderPath);
-      expandAncestors(targetPath, currentFolderPath);
+      await refreshExplorerFolders();
+      await expandAncestors(targetPath, currentFolderPath);
     } else {
       const { saveMarkdownNative } = await import('../lib/desktop/tauriStorage');
       const defaultContent = `# ${currentName.replace(/\.md$/i, '')}\n\n`;
       const result = await saveMarkdownNative(targetPath, defaultContent, currentName);
       if (result) {
-        await loadFolder(currentFolderPath);
-        expandAncestors(targetPath, currentFolderPath);
-        openFilePathInCurrentWindow(targetPath);
+        await refreshExplorerFolders();
+        await expandAncestors(targetPath, currentFolderPath);
+        await openFilePathInCurrentWindow(targetPath);
       }
     }
   }
@@ -6016,7 +6017,14 @@
       return;
     }
 
-    await loadFolder(currentFolderPath);
+    expandedFolders = new Set(
+      Array.from(expandedFolders, (folderPath) =>
+        pathEqualsOrDescendsFrom(folderPath, path)
+          ? targetPath + folderPath.slice(path.length)
+          : folderPath,
+      ),
+    );
+    await refreshExplorerFolders();
 
     tabs.forEach((t) => {
       if (t.nativePath && pathEqualsOrDescendsFrom(t.nativePath, path)) {
