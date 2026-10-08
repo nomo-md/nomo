@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" /><title>Nomo KP implementation checks</title>
+  <style>
+    html {
+      overflow-y: scroll;
+    }
+    body {
+      font-family: 'Microsoft YaHei', sans-serif;
+      padding: 24px;
+      background: #fafafa;
+    }
+    #editor,
+    #preview {
+      width: 440px;
+      min-width: 0;
+      border: 1px solid #aaa;
+      padding: 16px;
+      font-size: 18px;
+      line-height: 1.75;
+      background: white;
+    }
+    .ProseMirror {
+      outline: none;
+    }
+    button {
+      margin: 6px;
+    }
+    pre {
+      white-space: pre-wrap;
+    }
+    .columns {
+      display: flex;
+      gap: 20px;
+    }
+    h1 {
+      font-size: 22px;
+    }
+    .math-inline {
+      display: inline-block;
+    }
+  </style>
+  <h1>Nomo KP — 编辑与只读排版检查</h1>
+  <button id="verify" disabled>Verify layout</button
+  ><button id="toggle" disabled>Toggle typography</button
+  ><button id="narrow" disabled>Narrow width</button
+  ><button id="composition" disabled>Composition lifecycle</button
+  ><button id="offline" disabled>Build offline export</button>
+  <button id="stress" disabled>Stress 100 paragraphs</button>
+  <div class="columns">
+    <div id="editor"></div>
+    <div id="preview"></div>
+  </div>
+  <pre id="result">Loading</pre>
+  <iframe
+    id="export"
+    title="Offline export"
+    style="width: 800px; height: 480px; display: none"
+  ></iframe>
+  <script type="module">
+    import { EditorState } from 'prosemirror-state';
+    import { EditorView } from 'prosemirror-view';
+    import { history, undo, redo } from 'prosemirror-history';
+    import { keymap } from 'prosemirror-keymap';
+    import { baseKeymap } from 'prosemirror-commands';
+    import { parseMarkdown, serializeMarkdown } from '/src/lib/editor-core/markdown.ts';
+    import { serializeClipboardText } from '/src/lib/editor-core/markdownSerialization.ts';
+    import {
+      typographyPlugin,
+      flushEditorTypography,
+    } from '/src/lib/editor-core/plugins/typography.ts';
+    import { TypographyBreakNodeView } from '/src/lib/editor-core/nodeViews/TypographyBreakNodeView.ts';
+    import { getTypographyOptions, setTypographyOptions } from '/src/lib/typography/options.ts';
+    import { createDomTypography } from '/src/lib/typography/dom.ts';
+    import { renderMarkdownPreviewBody } from '/src/quicklook/preview.ts';
+    import {
+      cleanEditorArtifacts,
+      createExportHtmlDocument,
+    } from '/src/app/services/exportService.ts';
+    import { measureParagraph } from '/src/lib/typography/measure.ts';
+    import { layoutParagraph } from '/src/lib/typography/knuthPlass.ts';
+    import katex from 'katex';
+    import 'katex/dist/katex.min.css';
+    import 'prosemirror-view/style/prosemirror.css';
+    const original =
+      '中文 English **跨越边界的粗体文字**，还有[链接](https://example.com)。接下来的内容用于检查视觉换行和光标。\n第二个源码行保留。\n\nhello\nworld 第二段可编辑。  \n这一行必须另起一行。连续  空格与不换行空格a\u00a0b。\n\n繁體中文：「這是一段測試文字。」省略號……破折號——需要保持完整，emoji 👩‍👩‍👧‍👦 和组合字符a\u0301不能拆开。\n\n行内公式 $\\frac{a+b}{c+d}$ 与普通文本保持合适距离。更多文字可验证该行的高度及后续基线不会重叠。';
+    const report = (v) =>
+      (document.querySelector('#result').textContent = JSON.stringify(v, null, 2));
+    setTypographyOptions({ enabled: true });
+    const view = new EditorView(document.querySelector('#editor'), {
+      state: EditorState.create({
+        doc: parseMarkdown(original),
+        plugins: [
+          history(),
+          keymap({ 'Mod-z': undo, 'Mod-y': redo, ...baseKeymap }),
+          typographyPlugin(),
+        ],
+      }),
+      clipboardTextSerializer: serializeClipboardText,
+      nodeViews: {
+        hard_break: (n, v, p) => new TypographyBreakNodeView(n, v, p),
+        math_inline: (n) => {
+          const dom = document.createElement('span');
+          dom.className = 'math-inline';
+          dom.contentEditable = 'false';
+          dom.innerHTML = katex.renderToString(n.attrs.tex);
+          return { dom, ignoreMutation: () => true };
+        },
+      },
+    });
+    const initial = serializeMarkdown(view.state.doc);
+    document.querySelector('#preview').innerHTML = renderMarkdownPreviewBody(original);
+    const preview = createDomTypography(document.querySelector('#preview'));
+    async function verify() {
+      const start = performance.now();
+      await flushEditorTypography(view);
+      await preview.flush();
+      let geometry = true;
+      for (let p = 1; p < view.state.doc.content.size; p++) {
+        try {
+          const r = view.coordsAtPos(p);
+          geometry &&= Number.isFinite(r.top);
+        } catch {
+          geometry = false;
+        }
+      }
+      const paragraphs = [];
+      let lastInput;
+      for (const el of view.dom.querySelectorAll('p')) {
+        const measured = await measureParagraph(el, getTypographyOptions());
+        lastInput = measured?.input;
+        paragraphs.push({
+          state: el.dataset.kpLayout ?? 'native',
+          width: el.clientWidth,
+          scrollWidth: el.scrollWidth,
+          result: measured ? layoutParagraph(measured.input) : null,
+        });
+      }
+      const readingInput = (
+        await measureParagraph(
+          document.querySelector('#preview p:last-child'),
+          getTypographyOptions(),
+        )
+      )?.input;
+      report({
+        matchingFormulaInputs: JSON.stringify(lastInput) === JSON.stringify(readingInput),
+        enabled: getTypographyOptions().enabled,
+        sourcePreserved: serializeMarkdown(view.state.doc) === initial,
+        geometry,
+        ready: view.dom.querySelectorAll('[data-kp-layout="ready"]').length,
+        readonlyReady: document.querySelectorAll('#preview [data-kp-layout="ready"]').length,
+        elapsedMs: Math.round(performance.now() - start),
+        paragraphs: paragraphs.map((p) => ({
+          ...p,
+          result:
+            p.result?.status === 'ready'
+              ? { status: 'ready', lines: p.result.lines.length, candidates: p.result.candidates }
+              : p.result,
+        })),
+        markdown: serializeMarkdown(view.state.doc),
+      });
+    }
+    document.querySelector('#verify').onclick = verify;
+    document.querySelector('#toggle').onclick = async () => {
+      setTypographyOptions({ enabled: !getTypographyOptions().enabled });
+      await verify();
+    };
+    document.querySelector('#narrow').onclick = async () => {
+      document.querySelector('#editor').style.width = '300px';
+      document.querySelector('#preview').style.width = '300px';
+      await verify();
+    };
+    document.querySelector('#composition').onclick = async () => {
+      view.dom.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+      const before = view.dom.innerHTML;
+      await new Promise((r) => setTimeout(r, 300));
+      const stable = before === view.dom.innerHTML;
+      view.dom.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+      await verify();
+      report({
+        syntheticCompositionStable: stable,
+        note: 'Synthetic lifecycle only, not native IME acceptance',
+      });
+    };
+    document.querySelector('#offline').onclick = async () => {
+      const iframe = document.querySelector('#export');
+      iframe.style.display = 'block';
+      iframe.srcdoc = createExportHtmlDocument(
+        cleanEditorArtifacts(view.dom.innerHTML),
+        'Offline KP',
+        'body{font-family:Microsoft YaHei;font-size:18px;line-height:1.75}.nomo-export{width:440px}',
+      );
+      iframe.onload = async () => {
+        try {
+          await iframe.contentWindow.__NOMO_PREPARE_PRINT__(170);
+          report({
+            offline: true,
+            ready: iframe.contentDocument.querySelectorAll('[data-kp-layout="ready"]').length,
+            width: iframe.contentDocument.querySelector('article').getBoundingClientRect().width,
+            externalScripts: iframe.contentDocument.querySelectorAll('script[src]').length,
+          });
+        } catch (e) {
+          report({ error: String(e) });
+        }
+      };
+    };
+    document.querySelector('#stress').onclick = async () => {
+      const large = parseMarkdown(Array(25).fill(original).join('\n\n'));
+      const expected = serializeMarkdown(large);
+      const start = performance.now();
+      view.dispatch(view.state.tr.replaceWith(0, view.state.doc.content.size, large.content));
+      await flushEditorTypography(view);
+      report({
+        paragraphs: view.state.doc.childCount,
+        ready: view.dom.querySelectorAll('[data-kp-layout="ready"]').length,
+        fallback: view.dom.querySelectorAll('[data-kp-layout="fallback"]').length,
+        elapsedMs: Math.round(performance.now() - start),
+        sourcePreserved: serializeMarkdown(view.state.doc) === expected,
+      });
+    };
+    await verify();
+    document.querySelectorAll('button').forEach((button) => {
+      button.disabled = false;
+    });
+  </script>
+</html>

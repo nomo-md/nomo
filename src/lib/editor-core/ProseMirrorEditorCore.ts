@@ -1,4 +1,7 @@
 import { serializeClipboardText } from './markdownSerialization';
+import { typographyPlugin, isTypographyTransaction } from './plugins/typography';
+import { TypographyBreakNodeView } from './nodeViews/TypographyBreakNodeView';
+import katex from 'katex';
 import {
   chainCommands,
   createParagraphNear,
@@ -16,7 +19,7 @@ import { history, redo, undo } from 'prosemirror-history';
 import { inputRules } from 'prosemirror-inputrules';
 import { keymap } from 'prosemirror-keymap';
 import { EditorState, NodeSelection, TextSelection, type Transaction } from 'prosemirror-state';
-import { Slice, type Node as ProseMirrorNode, type ResolvedPos } from 'prosemirror-model';
+import { Slice, DOMSerializer, type Node as ProseMirrorNode, type ResolvedPos } from 'prosemirror-model';
 import { EditorView } from 'prosemirror-view';
 import { liftListItem, sinkListItem, splitListItem, wrapInList } from 'prosemirror-schema-list';
 import { goToNextCell, tableEditing } from 'prosemirror-tables';
@@ -220,6 +223,7 @@ export class ProseMirrorEditorCore implements EditorCore {
         },
       },
       nodeViews: {
+        hard_break: (node, view, getPos) => new TypographyBreakNodeView(node, view, getPos),
         code_block: (node, view, getPos) =>
           new CodeBlockNodeView(node, view, getPos as () => number, this.isRestoringNodeSelection(getPos)),
         image: (node, view) =>
@@ -334,6 +338,46 @@ export class ProseMirrorEditorCore implements EditorCore {
 
   getBlockAlignmentBlockCount(): number {
     return this.view?.state.doc.childCount ?? 0;
+  }
+
+  getExportHtml(): string {
+    this.flushPendingMarkdownSync();
+    const doc = this.semanticViewDirty
+      ? parseMarkdown(this.markdown)
+      : this.view?.state.doc ?? this.suspendedState?.doc;
+    if (!doc) return '';
+    const nodes = DOMSerializer.nodesFromSchema(schema);
+    const snapshots = new Map<ProseMirrorNode, HTMLElement>();
+    const renderedTypes = new Set([
+      'image', 'math_inline', 'math_block', 'mermaid_block', 'code_block', 'toc_block',
+    ]);
+    doc.descendants((node, pos) => {
+      if (!renderedTypes.has(node.type.name)) return;
+      if (this.view?.state.doc !== doc) return;
+      const dom = this.view?.nodeDOM(pos);
+      if (dom instanceof HTMLElement) snapshots.set(node, dom);
+    });
+    for (const name of renderedTypes) {
+      const fallback = nodes[name];
+      nodes[name] = (node) =>
+        (snapshots.get(node)?.cloneNode(true) as HTMLElement | undefined) ?? fallback(node);
+    }
+    for (const name of ['math_inline', 'math_block']) {
+      nodes[name] = (node) => {
+        const block = name === 'math_block';
+        const element = document.createElement(block ? 'div' : 'span');
+        element.className = block ? 'math-block' : 'math-inline';
+        element.dataset.tex = String(node.attrs.tex ?? '');
+        element.innerHTML = katex.renderToString(element.dataset.tex, {
+          displayMode: block, throwOnError: false, trust: false,
+        });
+        return element;
+      };
+    }
+    const serializer = new DOMSerializer(nodes, DOMSerializer.marksFromSchema(schema));
+    const container = document.createElement('div');
+    container.append(serializer.serializeFragment(removeEmptyTrailingParagraph(doc).content));
+    return container.innerHTML;
   }
 
   getScrollSyncSnapshot(): EditorSyncSnapshot {
@@ -1178,6 +1222,7 @@ export class ProseMirrorEditorCore implements EditorCore {
       plugins: [
         windowsImePunctuationFallbackPlugin(),
         blockAlignmentPlugin(),
+        typographyPlugin(),
         inputRules({
           rules: createMarkdownInputRules(),
         }),
@@ -1410,6 +1455,11 @@ export class ProseMirrorEditorCore implements EditorCore {
     if (this.view) this.view.updateState(nextState);
     else this.suspendedState = nextState;
 
+    if (isTypographyTransaction(transaction)) {
+      this.syncRenderRevision += 1;
+      this.syncSnapshot = null;
+      return;
+    }
     if (isSemanticBlockAlignmentTransaction(transaction)) {
       return;
     }

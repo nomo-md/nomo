@@ -1,4 +1,5 @@
 import katex from 'katex';
+import type { TypographyOptions } from '../lib/typography/types';
 import MarkdownIt from 'markdown-it';
 import Token from 'markdown-it/lib/token.mjs';
 import { transformCalloutTokens } from '../lib/editor-core/callout/calloutParser';
@@ -28,6 +29,9 @@ export interface QuickLookPreviewPayload extends QuickLookPreviewOptions {
   markdown: string;
   /** Nomo 原生配置中的外观偏好；配置不可读时缺失并回退到系统明暗模式。 */
   appearance?: Partial<AppearancePreferences>;
+  typography?: TypographyOptions;
+  fontSize?: number;
+  lineHeight?: number;
 }
 
 const CALLOUT_LABELS: Record<string, string> = {
@@ -80,11 +84,12 @@ const ALLOWED_TAGS = new Set([
 const DISCARD_TAGS = new Set(['script', 'style', 'iframe', 'object', 'embed']);
 const GLOBAL_ATTRS = new Set(['class', 'title']);
 const ATTRS_BY_TAG: Record<string, Set<string>> = {
+  br: new Set(['data-nomo-break']),
   a: new Set(['href', 'title', 'target', 'rel']),
-  div: new Set(['class', 'data-callout-type']),
+  div: new Set(['class', 'data-callout-type', 'data-nomo-tex']),
   img: new Set(['src', 'alt', 'title', 'width', 'height', 'class', 'loading']),
   input: new Set(['class', 'type', 'checked', 'disabled', 'aria-label']),
-  span: new Set(['class', 'aria-hidden']),
+  span: new Set(['class', 'aria-hidden', 'data-nomo-tex']),
   td: new Set(['style']),
   th: new Set(['style']),
 };
@@ -264,6 +269,8 @@ function createQuickLookMarkdownIt() {
     linkify: false,
     typographer: true,
   }).enable(['table', 'strikethrough']);
+  md.renderer.rules.softbreak = () => '<br data-nomo-break="soft">';
+  md.renderer.rules.hardbreak = () => '<br data-nomo-break="hard">';
 
   // 先让 markdown-it 识别链接/图片语法，再在 renderer 和 sanitizer 中按 Nomo 的安全边界过滤。
   md.validateLink = (url: string) => Boolean(url.trim());
@@ -287,10 +294,10 @@ function createQuickLookMarkdownIt() {
   md.renderer.rules.callout_close = () => '</div></div>';
 
   md.renderer.rules.math_inline = (tokens, index) => {
-    return `<span class="math-inline">${renderKatex(tokens[index].content, false)}</span>`;
+    return `<span class="math-inline" data-nomo-tex="${escapeHtml(tokens[index].content)}"></span>`;
   };
   md.renderer.rules.math_display = (tokens, index) => {
-    return `<div class="math-block">${renderKatex(tokens[index].content, true)}</div>`;
+    return `<div class="math-block" data-nomo-tex="${escapeHtml(tokens[index].content)}"></div>`;
   };
 
   md.renderer.rules.image = (tokens, index, options, env, self) => {
@@ -352,7 +359,16 @@ export function renderMarkdownPreviewBody(markdown: string, options: QuickLookPr
   const body = markdownIt.render(markdown, {
     documentDirectory: options.documentDirectory,
   });
-  return sanitizePreviewHtml(renderTaskListItems(body));
+  const clean = sanitizePreviewHtml(renderTaskListItems(body));
+  if (typeof document === 'undefined') return clean;
+  const template = document.createElement('template');
+  template.innerHTML = clean;
+  // Render trusted KaTeX output after sanitizing user HTML: its positioning styles are required.
+  template.content.querySelectorAll<HTMLElement>('[data-nomo-tex]').forEach((node) => {
+    node.innerHTML = renderKatex(node.dataset.nomoTex ?? '', node.classList.contains('math-block'));
+    node.removeAttribute('data-nomo-tex');
+  });
+  return template.innerHTML;
 }
 
 function isBadgeImageSrc(src: string): boolean {

@@ -2,6 +2,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { svelteTesting } from '@testing-library/svelte/vite';
 import { createRequire } from 'node:module';
 import { defineConfig } from 'vite';
+import { typographyRuntimePlugin } from './scripts/typography-runtime-plugin';
 
 const projectRequire = createRequire(import.meta.url);
 const markdownlintEntry = projectRequire.resolve('markdownlint');
@@ -10,7 +11,7 @@ const workerEntityDecoder = createRequire(markdownlintEntry).resolve(
 );
 
 export default defineConfig({
-  plugins: [svelte(), svelteTesting()],
+  plugins: [svelte(), svelteTesting(), typographyRuntimePlugin()],
   base: './',
   clearScreen: false,
   resolve: {

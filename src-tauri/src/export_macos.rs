@@ -67,8 +67,23 @@ fn prepare_and_print_webview(
     let main_thread =
         MainThreadMarker::new().ok_or_else(|| "PDF 导出必须在 macOS 主线程执行".to_string())?;
     let content_world = unsafe { WKContentWorld::pageWorld(main_thread) };
+    let (width, height) = paper_size_points(input.paper_size.as_deref());
+    let page_width = if input.orientation.as_deref() == Some("landscape") {
+        height
+    } else {
+        width
+    };
+    let margins = input.margins.as_ref();
+    let content_width = (page_width
+        - millimeters_to_points(margins.map(|v| v.left))
+        - millimeters_to_points(margins.map(|v| v.right)))
+        / POINTS_PER_MILLIMETER;
     let script = NSString::from_str(
-        r#"
+        &r#"
+if (document.getElementById('nomo-typography-options')) {
+  if (!window.__NOMO_PREPARE_PRINT__) throw new Error('Typography runtime unavailable');
+  await window.__NOMO_PREPARE_PRINT__(__CONTENT_WIDTH__);
+}
 if (document.fonts && document.fonts.ready) {
   await document.fonts.ready;
 }
@@ -80,7 +95,8 @@ await Promise.all(Array.from(document.images).map((image) => {
   });
 }));
 return true;
-"#,
+"#
+        .replace("__CONTENT_WIDTH__", &content_width.to_string()),
     );
     let handler = RcBlock::new(move |_value: *mut AnyObject, error: *mut NSError| {
         if !error.is_null() {

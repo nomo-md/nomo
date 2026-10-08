@@ -1,4 +1,7 @@
 {
+  "typographyEnabled": "精密な組版",
+  "typographyDescription": "Knuth–Plass（KP）アルゴリズムで段落の改行位置を最適化します。",
+  "typographySettings": "段落の組版",
   "copyFile": "ファイルをコピー",
   "fileCopied": "ファイルをコピーしました。チャットアプリに貼り付けて送信できます。",
   "$schema": "https://inlang.com/schema/inlang-message-format",

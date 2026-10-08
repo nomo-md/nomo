@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_IMAGE_HANDLING_SETTINGS } from '../../lib/services/render';
+import { getTypographyOptions, setTypographyOptions } from '../../lib/typography/options';
 
 const storageMock = vi.hoisted(() => ({
   listAppSettings: vi.fn(),
@@ -14,6 +15,7 @@ vi.mock('../../lib/desktop/tauriStorage', () => storageMock);
 import {
   DEFAULT_APP_PREFERENCES,
   applyZoomSetting,
+  applyTypographySettings,
   loadAppPreferences,
   loadPersistedEditorSettings,
   loadPersistedImageSettings,
@@ -32,6 +34,23 @@ beforeEach(() => {
 });
 
 describe('settings', () => {
+  it('uses one typography switch and ignores retired secondary preferences', () => {
+    const previous = getTypographyOptions();
+    const legacyPreferences = {
+      typographyEnabled: true,
+      typographyHanging: false,
+      typographyProfile: 'zh-TW',
+    };
+    const preferences = normalizeAppPreferences(legacyPreferences);
+    try {
+      applyTypographySettings(16, 1.75, preferences);
+      expect(getTypographyOptions()).toEqual({ enabled: true, profile: 'zh-CN', hanging: true });
+      applyTypographySettings(16, 1.75, normalizeAppPreferences({ typographyEnabled: false }));
+      expect(getTypographyOptions()).toEqual({ enabled: false, profile: 'zh-CN', hanging: true });
+    } finally {
+      setTypographyOptions(previous);
+    }
+  });
   it.skip('keeps automatic local image cleanup enabled for existing image settings', () => {
     expect(normalizeImageSettings({}).autoDeleteUnusedLocalImages).toBe(true);
   });

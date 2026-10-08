@@ -230,6 +230,8 @@ export interface EditorCore {
   destroy(): void;
   getMarkdown(): string;
   flushMarkdown(): string;
+  /** Serialize semantic content; only atomic/code views contribute rendered HTML. */
+  getExportHtml?(): string;
   refreshSemanticView(): void;
   getScrollSyncSnapshot(): EditorSyncSnapshot;
   getScrollSyncAnchorRect(anchor: MarkdownSyncAnchor): { top: number; bottom: number } | null;

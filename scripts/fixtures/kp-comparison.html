@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nomo · KP 与浏览器排版对照</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #19303c;
+        --muted: #627580;
+        --paper: #fff;
+        --back: #edf2f5;
+        --line: #d9e2e8;
+        --kp: #007e77;
+        --native: #546da5;
+        --column: 410px;
+        --size: 18px;
+        --body-font: 'Microsoft YaHei', 'PingFang SC', sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        overflow-y: scroll;
+      }
+      body {
+        margin: 0;
+        background: var(--back);
+        color: var(--ink);
+        font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      }
+      button,
+      select,
+      input {
+        font: inherit;
+        accent-color: var(--kp);
+      }
+      select {
+        max-width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: white;
+        padding: 7px 9px;
+        color: var(--ink);
+      }
+      a {
+        color: #006f79;
+        text-underline-offset: 3px;
+      }
+      :focus-visible {
+        outline: 3px solid #009d9480;
+        outline-offset: 3px;
+      }
+      .page {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 26px 24px 60px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 1.1px;
+      }
+      .brand b {
+        font-size: 17px;
+        color: var(--ink);
+        letter-spacing: -0.7px;
+      }
+      h1 {
+        font-size: clamp(23px, 3vw, 32px);
+        font-weight: 650;
+        letter-spacing: -0.8px;
+        margin: 22px 0 9px;
+      }
+      .intro {
+        margin: 0 0 20px;
+        font-size: 14px;
+        line-height: 1.75;
+        color: var(--muted);
+      }
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px 22px;
+        align-items: end;
+        padding: 16px 18px;
+        background: #f8fafb;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+      }
+      .control {
+        display: grid;
+        gap: 7px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .control > span {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .control input[type='range'] {
+        width: 138px;
+        margin: 7px 0;
+      }
+      .checks {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        align-items: center;
+        padding-bottom: 8px;
+        font-size: 13px;
+      }
+      .checks label {
+        display: flex;
+        gap: 5px;
+        align-items: center;
+      }
+      .article-meta {
+        margin: 24px 0 16px;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 8px 22px;
+      }
+      .article-meta h2 {
+        margin: 0;
+        font-size: 20px;
+      }
+      #source {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.7;
+      }
+      .summary {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 20px;
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 13px;
+        min-height: 19px;
+      }
+      #status {
+        color: var(--kp);
+      }
+      #status.error {
+        color: #a24e12;
+      }
+      .comparison {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 22px;
+        max-width: calc(var(--column) * 2 + 102px);
+        margin: 0 auto;
+      }
+      .pane {
+        min-width: 0;
+        background: var(--paper);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .pane-header {
+        border-bottom: 1px solid var(--line);
+        border-top: 3px solid var(--kp);
+        padding: 16px 18px 14px;
+        background: #f4fbfa;
+      }
+      .pane.browser .pane-header {
+        border-top-color: var(--native);
+        background: #f6f8fd;
+      }
+      .pane-header h3 {
+        font-size: 16px;
+        margin: 0 0 6px;
+        font-weight: 650;
+      }
+      .pane-header small {
+        font-size: 12px;
+        color: var(--muted);
+        display: block;
+        line-height: 1.6;
+      }
+      .pane-body {
+        position: relative;
+        padding: 22px 19px 24px;
+      }
+      .text {
+        font-family: var(--body-font);
+        font-size: var(--size);
+        line-height: 1.8;
+        font-variant-ligatures: none;
+        font-feature-settings: 'liga' 0;
+        font-kerning: normal;
+        letter-spacing: normal;
+        word-spacing: normal;
+        text-autospace: no-autospace;
+        text-spacing-trim: space-all;
+      }
+      .text p {
+        margin: 0;
+        text-indent: 0;
+        white-space: normal;
+        word-break: normal;
+        overflow-wrap: normal;
+        line-break: auto;
+        hyphens: manual;
+      }
+      #native-text p {
+        text-align: justify;
+        text-align-last: left;
+      }
+      .text section + section {
+        margin-top: 25px;
+      }
+      .paragraph-note {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 7px;
+        font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+        color: #82909b;
+        font-size: 10px;
+        line-height: 1.4;
+        letter-spacing: 0.3px;
+      }
+      .paragraph-note .different {
+        color: var(--kp);
+      }
+      .paragraph-note .fallback {
+        color: #a24e12;
+      }
+      [data-kp-layout='fallback'] {
+        background: #fff5e8;
+        outline: 1px dashed #d5a46c;
+      }
+      .line-marks {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+      .line-mark {
+        position: absolute;
+        height: 7px;
+        width: 2px;
+        border-radius: 2px;
+        background: var(--kp);
+        opacity: 0.7;
+      }
+      .browser .line-mark {
+        background: var(--native);
+      }
+      .line-marks[hidden] {
+        display: none;
+      }
+      .footnote {
+        max-width: 980px;
+        font-size: 12px;
+        line-height: 1.8;
+        color: var(--muted);
+        margin: 22px auto 0;
+      }
+      details {
+        margin-top: 10px;
+      }
+      summary {
+        cursor: pointer;
+      }
+      .code {
+        font-family: Consolas, monospace;
+        font-size: 11px;
+      }
+      @media (max-width: 720px) {
+        .page {
+          padding: 18px 12px 40px;
+        }
+        .toolbar {
+          gap: 12px;
+          padding: 12px;
+        }
+        .comparison {
+          gap: 10px;
+        }
+        .pane-header {
+          padding: 12px 10px;
+        }
+        .pane-body {
+          padding: 18px 10px;
+        }
+        .pane-header h3 {
+          font-size: 14px;
+        }
+        .article-meta {
+          margin-top: 19px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <div class="brand"><b>Nomo</b><span>／ 排版对照台</span></div>
+      <h1>同一篇文章，两种断行。</h1>
+      <p class="intro">
+        左边运行你的 KP
+        内核，右边交给浏览器。两侧共用原文、字体、字号与栏宽；调整栏宽，观察行末与段落节奏。
+      </p>
+      <div class="toolbar" aria-label="对照设置">
+        <label class="control"
+          >测试内容<select id="sample">
+            <option value="article">网上文章 ·《拿来主义》</option>
+            <option value="mixed">中英文压力样本 · 自编</option>
+          </select></label
+        >
+        <label class="control"
+          ><span>目标栏宽 <output id="width-value">410 px</output></span
+          ><input id="width" type="range" min="220" max="520" step="10" value="410"
+        /></label>
+        <label class="control"
+          ><span>字号 <output id="size-value">18 px</output></span
+          ><input id="size" type="range" min="14" max="24" step="1" value="18"
+        /></label>
+        <label class="control"
+          >两侧字体<select id="font">
+            <option value="sans">黑体 / 系统无衬线</option>
+            <option value="serif">宋体 / 系统衬线</option>
+          </select></label
+        >
+        <label class="control"
+          >浏览器对齐方式<select id="alignment">
+            <option value="justify">两端对齐 · 同目标比较</option>
+            <option value="left">默认左对齐</option>
+          </select></label
+        >
+        <div class="checks">
+          <label><input id="hanging" type="checkbox" />KP 行末悬挂</label
+          ><label><input id="markers" type="checkbox" checked />标出行末</label>
+        </div>
+      </div>
+      <div class="article-meta">
+        <h2 id="article-title">拿来主义</h2>
+        <div id="source"></div>
+      </div>
+      <div class="summary" aria-live="polite">
+        <span id="status">正在排版…</span><span id="geometry"></span><span id="difference"></span>
+      </div>
+      <div class="comparison">
+        <article class="pane">
+          <header class="pane-header">
+            <h3>你的 KP 内核</h3>
+            <small>整段优化 · 字词间距 · 标点压缩</small>
+          </header>
+          <div class="pane-body">
+            <div id="kp-text" class="text"></div>
+            <div id="kp-marks" class="line-marks" aria-hidden="true"></div>
+          </div>
+        </article>
+        <article class="pane browser">
+          <header class="pane-header">
+            <h3>浏览器原生排版</h3>
+            <small id="native-caption">自动断行 · CSS 两端对齐 · 末行靠左</small>
+          </header>
+          <div class="pane-body">
+            <div id="native-text" class="text"></div>
+            <div id="native-marks" class="line-marks" aria-hidden="true"></div>
+          </div>
+        </article>
+      </div>
+      <div class="footnote">
+        行末短线只用于观察，不参与断行；橙色底色表示该段 KP
+        回退。行数较少或断点不同，并不自动代表排版更好。
+        <details>
+          <summary>比较口径与来源</summary>
+          <div id="method">
+            两侧禁用自动中西文间距和连字，使用相同文本 shaping 设置。左侧直接调用当前仓库的
+            <span class="code">createDomTypography → Worker → layoutParagraph</span>；右侧不调用
+            KP，也不插入人工换行。栏宽受窗口可用宽度限制，实际值显示在上方。这里展示的是当前实现，并非
+            TeX 一致性或全部排版规则验收。
+          </div>
+        </details>
+      </div>
+    </main>
+    <script type="module" src="./kp-comparison.ts"></script>
+  </body>
+</html>

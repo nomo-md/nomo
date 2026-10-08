@@ -6106,7 +6106,7 @@
     }
     autoSaveEnabled = preferences.autoSaveEnabled;
 
-    applyTypographySettings(fontSize, lineHeight);
+    applyTypographySettings(fontSize, lineHeight, preferences);
     applyEditorLayoutSettings(contentWidthPercent);
     applyZoomSetting(zoomPercent, { onFrame: refreshEditorViewportLayout });
     applyCodeBlockLineNumberSetting(codeBlockLineNumbersVisible);
@@ -7032,13 +7032,15 @@
     }
 
     const { exportHtml, exportPdf } = await import('./services/exportService');
+    editor.commitPendingEdits();
+    editor.refreshSemanticView();
     if (editorHost) {
       // 屏幕外图表平时按需换肤，导出快照必须先补齐同一主题。
       const { MermaidBlockNodeView } =
         await import('../lib/editor-core/nodeViews/MermaidBlockNodeView');
       await MermaidBlockNodeView.flushThemeUpdates(editorHost);
     }
-    const renderedHtml = editorHost?.innerHTML ?? '';
+    const renderedHtml = editor.getExportHtml?.() ?? editorHost?.innerHTML ?? '';
     const suggestedFileName = fileName.replace(/\.(md|markdown|txt)$/i, '') || 'Untitled';
 
     const result =

@@ -16,6 +16,24 @@ afterEach(() => {
 });
 
 describe('exportService', () => {
+  it('removes KP decorations while retaining source breaks and inline formulas', () => {
+    const clean = cleanEditorArtifacts('<p data-kp-layout="ready" data-kp-original-style="" style="white-space:pre"><span class="kp-unit" style="margin-right:3px">hello</span><span data-kp-owned="break"><br></span><span class="kp-unit" data-nomo-break="soft" data-kp-unit-original-style="" contenteditable="false"> </span><span class="kp-unit">world</span><span class="math-inline kp-unit" data-kp-unit-original-style="" contenteditable="false"><span class="katex">x</span></span></p>');
+    const doc = new DOMParser().parseFromString(clean, 'text/html');
+    expect(doc.querySelectorAll('br')).toHaveLength(1);
+    expect(doc.querySelector('br')?.dataset.nomoBreak).toBe('soft');
+    expect(doc.querySelector('.math-inline .katex')?.textContent).toBe('x');
+    expect(doc.querySelector('[data-kp-owned],.kp-unit,[data-kp-layout]')).toBeNull();
+    expect(doc.querySelector('p')?.style.whiteSpace).toBe('');
+  });
+  it('bundles runtime and math fonts without external scripts or font URLs', () => {
+    const html = createExportHtmlDocument('<p class="katex">x</p>', 'Offline', '');
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    expect(doc.querySelectorAll('script[src]')).toHaveLength(0);
+    expect(doc.querySelector('#nomo-typography-options')).not.toBeNull();
+    expect(html).toContain('__NOMO_PREPARE_PRINT__');
+    expect(html).toContain('data:font/woff2;base64,');
+    expect(html).not.toMatch(/url\(fonts\//);
+  });
   it('createExportHtmlDocument 生成完整独立 HTML', () => {
     const html = createExportHtmlDocument('<p>hello</p>', 'Test', 'body{}');
     expect(html).toContain('<!DOCTYPE html>');

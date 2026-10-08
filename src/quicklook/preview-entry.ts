@@ -1,5 +1,8 @@
 import 'katex/dist/katex.min.css';
 import './preview.css';
+import { createDomTypography } from '../lib/typography/dom';
+import { setTypographyOptions } from '../lib/typography/options';
+import { DEFAULT_TYPOGRAPHY, type TypographyController } from '../lib/typography/types';
 import type { MermaidFullscreenBinding } from '../lib/services/mermaidDiagramView';
 import {
   applyQuickLookAppearance,
@@ -10,6 +13,7 @@ import {
 
 let mermaidBindings: MermaidFullscreenBinding[] = [];
 let renderGeneration = 0;
+let typography: TypographyController | undefined;
 
 declare global {
   interface Window {
@@ -31,6 +35,8 @@ function mountQuickLookPreview(payload: QuickLookPreviewPayload | null | undefin
   if (!root || !payload) return;
 
   renderGeneration += 1;
+  typography?.destroy();
+  setTypographyOptions(payload.typography ?? DEFAULT_TYPOGRAPHY);
   const generation = renderGeneration;
   for (const binding of mermaidBindings) binding.dispose();
   mermaidBindings = [];
@@ -46,10 +52,19 @@ function mountQuickLookPreview(payload: QuickLookPreviewPayload | null | undefin
   }
 
   const resolvedTheme = applyQuickLookAppearance(payload.appearance);
+  const fontSize = Number.isFinite(payload.fontSize) ? payload.fontSize! : 16;
+  const lineHeight = Number.isFinite(payload.lineHeight) ? payload.lineHeight! : 1.75;
+  document.documentElement.style.setProperty(
+    '--md-editor-font-size', `${Math.min(22, Math.max(14, fontSize))}px`,
+  );
+  document.documentElement.style.setProperty(
+    '--md-editor-line-height', String(Math.min(2.1, Math.max(1.4, lineHeight))),
+  );
   root.innerHTML = renderMarkdownPreview(payload.markdown, {
     fileName: payload.fileName,
     documentDirectory: payload.documentDirectory,
   });
+  typography = createDomTypography(root);
   void renderQuickLookMermaidBlocks(root, resolvedTheme.editorTheme.mermaid).then((bindings) => {
     if (generation !== renderGeneration) {
       for (const binding of bindings) binding.dispose();

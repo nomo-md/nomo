@@ -107,7 +107,15 @@ final class PreviewViewController: NSViewController, QLPreviewingController, WKN
             "documentDirectory": fileUrl.deletingLastPathComponent().path,
         ]
         do {
-            if let appearance = try readAppearancePreferences() {
+            let settings = try readPreviewSettings()
+            payload["typography"] = [
+                "enabled": try readSetting(settings, "typographyEnabled") as? Bool ?? false,
+                "profile": "zh-CN",
+                "hanging": true,
+            ] as [String: Any]
+            payload["fontSize"] = try readSetting(settings, "fontSize") as? Double ?? 16
+            payload["lineHeight"] = try readSetting(settings, "lineHeight") as? Double ?? 1.75
+            if let appearance = try readAppearancePreferences(settings) {
                 payload["appearance"] = appearance
                 appearanceLogger.info(
                     "Loaded preferences: themeMode=\(appearance["themeMode"] ?? "<missing>", privacy: .public) colorThemeId=\(appearance["colorThemeId"] ?? "<missing>", privacy: .public) documentStyleId=\(appearance["documentStyleId"] ?? "<missing>", privacy: .public)"
@@ -197,14 +205,14 @@ final class PreviewViewController: NSViewController, QLPreviewingController, WKN
         loadErrorPreview(error)
     }
 
-    /// 从 Nomo 原生配置中读取 Quick Look 所需的外观偏好。
+    /// 从 Nomo 原生配置中读取 Quick Look 所需的主题与排版配置。
     ///
-    /// 扩展只读取主应用配置中的三个主题标识，颜色与样式 token 仍由内嵌前端的同一主题注册表解析。
+    /// 颜色与样式 token 仍由内嵌前端的同一主题注册表解析。
     /// 精确的只读沙盒例外由扩展 entitlements 限定到 Nomo 的 Application Support 目录。
     ///
-    /// - Returns: 至少包含一个有效字符串设置时返回外观偏好字典；配置尚未包含主题设置时返回 `nil`。
+    /// - Returns: 应用配置中的设置记录。
     /// - Throws: 无法定位用户主目录、读取配置或解析配置 JSON 时抛出。
-    private func readAppearancePreferences() throws -> [String: String]? {
+    private func readPreviewSettings() throws -> [String: Any] {
         let configUrl = try resolveUserHomeDirectory()
             .appendingPathComponent("Library/Application Support/com.nomo.desktop", isDirectory: true)
             .appendingPathComponent("config.json", isDirectory: false)
@@ -216,6 +224,17 @@ final class PreviewViewController: NSViewController, QLPreviewingController, WKN
         else {
             throw PreviewError.appearanceConfigurationMalformed
         }
+        return settings
+    }
+
+    private func readSetting(_ settings: [String: Any], _ key: String) throws -> Any? {
+        guard let record = settings[key] as? [String: Any],
+              let encodedValue = record["value_json"] as? String,
+              let data = encodedValue.data(using: .utf8) else { return nil }
+        return try JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed)
+    }
+
+    private func readAppearancePreferences(_ settings: [String: Any]) throws -> [String: String]? {
 
         var appearance: [String: String] = [:]
         for key in ["themeMode", "colorThemeId", "documentStyleId"] {

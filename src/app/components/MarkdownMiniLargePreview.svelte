@@ -5,6 +5,9 @@
   import type { CodeTokenLine } from '../../lib/services/render';
   import { renderMarkdownPreviewBody } from '../../quicklook/preview';
   import { t } from '../i18n';
+  import { createDomTypography } from '../../lib/typography/dom';
+  import type { TypographyController } from '../../lib/typography/types';
+  let typography: TypographyController | undefined;
 
   export let markdown: string;
   export let nativePath: string | null;
@@ -20,6 +23,7 @@
   $: schedulePreviewRender(markdown, nativePath, editorTheme);
 
   onDestroy(() => {
+    typography?.destroy();
     renderGeneration += 1;
     lazyObserver?.disconnect();
   });
@@ -30,6 +34,7 @@
     _theme: EditorThemeOptions,
   ) {
     const generation = ++renderGeneration;
+    typography?.destroy();
     staticHtml = '';
     await tick();
     await waitForVisibleFrame();
@@ -40,6 +45,7 @@
     await tick();
     if (generation !== renderGeneration) return;
     setupLazyRendering();
+    typography = createDomTypography(staticContainer);
   }
 
   function waitForVisibleFrame() {

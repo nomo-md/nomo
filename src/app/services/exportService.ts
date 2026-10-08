@@ -6,6 +6,9 @@ import {
 } from '../../lib/desktop/tauriStorage';
 import { logDebug, logInfo, logWarn } from '../../lib/services/logger';
 import exportCssContent from '../styles/export-document.css?inline';
+import typographyRuntime from 'virtual:nomo-typography-runtime';
+import katexCss from 'virtual:nomo-katex-css';
+import { getTypographyOptions } from '../../lib/typography/options';
 
 const REMOTE_IMAGE_FETCH_TIMEOUT_MS = 8_000;
 const PDF_OUTLINE_MARKER_HOST = 'nomo-pdf-outline.invalid';
@@ -221,6 +224,29 @@ export function cleanEditorArtifacts(htmlFragment: string): string {
   }
 
   restoreMermaidExportSize(root);
+  // Remove visual layout while retaining the semantic soft/hard break distinction.
+  root.querySelectorAll('[data-kp-owned]').forEach((node) => node.remove());
+  root.querySelectorAll<HTMLElement>('[data-kp-original-style]').forEach((node) => {
+    const style = node.getAttribute('data-kp-original-style');
+    if (style) node.setAttribute('style', style);
+    else node.removeAttribute('style');
+    node.removeAttribute('data-kp-original-style');
+    node.removeAttribute('data-kp-layout');
+  });
+  root.querySelectorAll<HTMLElement>('.kp-unit').forEach((node) => {
+    if (node.hasAttribute('data-kp-unit-original-style')) {
+      const style = node.getAttribute('data-kp-unit-original-style');
+      if (style) node.setAttribute('style', style);
+      else node.removeAttribute('style');
+      node.classList.remove('kp-unit');
+      node.removeAttribute('data-kp-unit-original-style');
+    } else node.replaceWith(...node.childNodes);
+  });
+  root.querySelectorAll<HTMLElement>('span[data-nomo-break]').forEach((node) => {
+    const br = doc.createElement('br');
+    br.dataset.nomoBreak = node.dataset.nomoBreak;
+    node.replaceWith(br);
+  });
 
   // 移除 ProseMirror 选区高亮、挂件、光标等编辑器痕迹。
   const selectorsToRemove = [
@@ -239,7 +265,7 @@ export function cleanEditorArtifacts(htmlFragment: string): string {
     '.table-resize-handle',
     '.mermaid-block-fullscreen-button',
     '.callout-type-picker',
-    '[contenteditable="false"]:not(.image-node):not(.mermaid-block):not(.table-widget):not(.horizontal-rule-node)',
+    '[contenteditable="false"]:not(.image-node):not(.mermaid-block):not(.table-widget):not(.horizontal-rule-node):not(.math-inline):not(.math-block):not(.footnote-ref)',
   ];
 
   for (const selector of selectorsToRemove) {
@@ -309,6 +335,13 @@ export function createExportHtmlDocument(
   cssContent: string,
 ): string {
   const escapedTitle = escapeHtml(title || 'Exported Document');
+  const configuration = JSON.stringify(getTypographyOptions()).replace(/</g, '\\u003c');
+  const rootStyle = typeof document === 'undefined' ? null : getComputedStyle(document.documentElement);
+  const font = rootStyle?.getPropertyValue('--md-editor-font-body').trim() ?? '';
+  const fontStyle = font && !/[<>]/.test(font) ? `:root{--nomo-export-font-body:${font};}` : '';
+  const fontSize = parseFloat(rootStyle?.getPropertyValue('--md-editor-font-size') ?? '');
+  const lineHeight = parseFloat(rootStyle?.getPropertyValue('--md-editor-line-height') ?? '');
+  const metricsStyle = `.nomo-export{${Number.isFinite(fontSize) ? `font-size:${fontSize}px;` : ''}${Number.isFinite(lineHeight) ? `line-height:${lineHeight};` : ''}}`;
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -317,12 +350,17 @@ export function createExportHtmlDocument(
   <title>${escapedTitle}</title>
   <style>
 ${cssContent}
+${bodyHtml.includes('katex') ? katexCss : ''}
+${fontStyle}
+${metricsStyle}
   </style>
 </head>
 <body>
   <article class="nomo-export markdown-body">
 ${bodyHtml}
   </article>
+  <script id="nomo-typography-options" type="application/json">${configuration}</script>
+  <script>${typographyRuntime.replace(/<\/script/gi, '<\\/script')}</script>
 </body>
 </html>
 `;

@@ -37,6 +37,9 @@
 
 | Responsibility | Primary code | Related code | Change when |
 |---|---|---|---|
+| 精细段落排版 | `src/lib/typography/knuthPlass.ts` | `types.ts`, `rules.ts`, `measure.ts`, `renderPlan.ts`, `positions.ts`, `solver.ts`, `typography.worker.ts` | 修改 KP 成本模型、中文规则、字体测量、间距或位置映射 |
+| 精细排版编辑适配 | `src/lib/editor-core/plugins/typography.ts` | `nodeViews/TypographyBreakNodeView.ts`, `src/lib/typography/options.ts`, `src/app/services/settings.ts` | 修改输入保护、局部缓存、视觉断点、软换行或设置开关 |
+| 只读与离线排版 | `src/lib/typography/dom.ts` | `exportRuntime.ts`, `scripts/typography-runtime-plugin.ts`, `src/quicklook/preview-entry.ts`, `src/app/components/MarkdownMiniLargePreview.svelte` | 修改只读布局、离线运行时或打印就绪契约 |
 | 编辑器工厂与 API | `src/lib/editor-core/createEditorCore.ts` | `src/lib/editor-core/index.ts` | EditorCore 创建参数或对外接口变更 |
 | ProseMirror 核心实现 | `src/lib/editor-core/ProseMirrorEditorCore.ts` | `src/lib/editor-core/clipboardMarkdown.ts`, `markdown.ts`, `schema.ts`, plugins, nodeViews | EditorView 生命周期、事务、模式切换、命令执行、选区 Markdown 通知、剪贴板负载与右键目标事务 |
 | 剪贴板 Markdown 判定 | `src/lib/editor-core/clipboardMarkdown.ts` | `src/lib/editor-core/ProseMirrorEditorCore.ts`, `markdown.ts` | 修改纯文本/Markdown 等价判定、粘贴 Slice 或纯文本事务标记 |
@@ -200,7 +203,8 @@
 | 前端日志工具 | `src/lib/services/logger.ts` | `src-tauri/src/app_logger.rs` | 日志级别/缓冲区/性能计时/DevTools 输出 |
 | 后端日志系统 | `src-tauri/src/app_logger.rs` | `src/lib/services/logger.ts` | 日志文件落盘/轮转/终端输出 |
 | HTML 导出后端 | `src-tauri/src/export.rs` | `src/app/services/exportService.ts` | HTML 文件写入/Base64 读取 |
-| Windows PDF 导出 | `src-tauri/src/export_windows.rs` | `src-tauri/src/export.rs` | Edge headless PDF 生成 |
+| Windows PDF 导出 | `src-tauri/src/export_windows.rs` | `src-tauri/src/export.rs`, `src/lib/typography/exportRuntime.ts` | WebView2 PrintToPdf、目标版心和排版就绪检查 |
+| macOS PDF 导出 | `src-tauri/src/export_macos.rs` | `src-tauri/src/export.rs`, `src/lib/typography/exportRuntime.ts` | WKWebView 模态打印、目标版心和排版就绪检查 |
 
 ### 导出
 
@@ -3552,8 +3556,8 @@
 **Kind:** service
 
 **Owns:**
-- Windows PDF 导出：通过 Edge headless `--print-to-pdf` 生成 PDF
-- Edge 可执行文件查找
+- Windows PDF 导出：通过隐藏 WebView2 的 PrintToPdf 生成 PDF
+- 字体、图片、目标版心与精细排版完成门禁
 
 **Does not own:**
 - 不拥有 HTML 临时文件写入（在 export.rs 中）
@@ -3564,7 +3568,7 @@
 
 **Change this when:**
 - 修改 PDF 生成方式
-- 修改 Edge 查找路径
+- 修改打印纸张、边距或就绪检查
 
 **Related tests:** —
 

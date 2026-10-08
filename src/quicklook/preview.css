@@ -33,10 +33,10 @@
   --md-editor-radius-sm: 4px;
   --md-editor-radius-md: 8px;
   --md-editor-font-body:
-    ui-serif, 'Songti SC', 'STSong', 'Times New Roman', 'Microsoft YaHei', serif;
+    'Segoe UI', 'Microsoft YaHei', sans-serif;
   --md-editor-font-mono: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
   --md-editor-font-size: 16px;
-  --md-editor-line-height: 1.72;
+  --md-editor-line-height: 1.75;
 }
 
 @media (prefers-color-scheme: dark) {

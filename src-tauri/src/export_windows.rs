@@ -27,16 +27,34 @@ pub(crate) async fn render_html_to_pdf(
     input: &ExportPdfInput,
 ) -> Result<(), String> {
     let export_window = crate::export::create_pdf_export_window(app, html_path).await?;
-    wait_for_document_ready(export_window.window()).await?;
+    wait_for_document_ready(export_window.window(), input).await?;
     print_webview_to_pdf(export_window.window(), output_path, input).await
 }
 
-async fn wait_for_document_ready(window: &tauri::WebviewWindow) -> Result<(), String> {
+async fn wait_for_document_ready(
+    window: &tauri::WebviewWindow,
+    input: &ExportPdfInput,
+) -> Result<(), String> {
+    let (width, height) = paper_size_inches(input.paper_size.as_deref());
+    let page_width = if input.orientation.as_deref() == Some("landscape") {
+        height
+    } else {
+        width
+    };
+    let margins = input.margins.as_ref();
+    let content_width = (page_width
+        - millimeters_to_inches(margins.map(|v| v.left))
+        - millimeters_to_inches(margins.map(|v| v.right)))
+        * MILLIMETERS_PER_INCH;
     let sequence = DOCUMENT_READY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let ready_title = format!("nomo-pdf-document-ready-{sequence}");
     let error_title = format!("nomo-pdf-document-error-{sequence}");
     let script = r#"
 (async () => {
+  if (document.getElementById('nomo-typography-options')) {
+    if (!window.__NOMO_PREPARE_PRINT__) throw new Error('Typography runtime unavailable');
+    await window.__NOMO_PREPARE_PRINT__(__CONTENT_WIDTH__);
+  }
   if (document.fonts && document.fonts.ready) {
     await document.fonts.ready;
   }
@@ -52,6 +70,7 @@ async fn wait_for_document_ready(window: &tauri::WebviewWindow) -> Result<(), St
   document.title = '__ERROR_TITLE__';
 })
 "#
+    .replace("__CONTENT_WIDTH__", &content_width.to_string())
     .replace("__READY_TITLE__", &ready_title)
     .replace("__ERROR_TITLE__", &error_title);
     let (result_tx, result_rx) = oneshot::channel();

@@ -28,11 +28,11 @@ const hardBreakNodeSpec = {
   parseDOM: [
     {
       tag: 'br',
-      getAttrs: () => ({ soft: false }),
+      getAttrs: (dom: HTMLElement) => ({ soft: dom.dataset.nomoBreak === 'soft' }),
     },
   ],
-  toDOM(): DOMOutputSpec {
-    return ['br'];
+  toDOM(node: import('prosemirror-model').Node): DOMOutputSpec {
+    return ['br', { 'data-nomo-break': node.attrs.soft ? 'soft' : 'hard' }];
   },
 };
 const imageNodeSpec = {

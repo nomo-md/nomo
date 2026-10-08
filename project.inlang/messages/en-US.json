@@ -1,4 +1,7 @@
 {
+  "typographyEnabled": "Fine typography",
+  "typographyDescription": "Uses the Knuth–Plass (KP) algorithm to optimize paragraph line breaks.",
+  "typographySettings": "Paragraph typography",
   "copyFile": "Copy File",
   "fileCopied": "File copied. Paste it into your chat app to send.",
   "$schema": "https://inlang.com/schema/inlang-message-format",

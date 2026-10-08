@@ -1,4 +1,7 @@
 {
+  "typographyEnabled": "精细排版",
+  "typographyDescription": "采用 Knuth–Plass（KP）算法优化段落断行。",
+  "typographySettings": "段落排版",
   "copyFile": "复制文件",
   "fileCopied": "文件已复制，可在聊天软件中粘贴发送",
   "$schema": "https://inlang.com/schema/inlang-message-format",

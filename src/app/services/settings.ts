@@ -5,6 +5,8 @@ import {
   type SettingRecord,
 } from '../../lib/desktop/tauriStorage';
 import type { DiagramType } from '../../lib/editor-core/diagramTemplates';
+import { setTypographyOptions } from '../../lib/typography/options';
+import { DEFAULT_TYPOGRAPHY } from '../../lib/typography/types';
 import type { MarkdownLintRuleSet } from '../../lib/markdown-lint/types';
 import type { AppearancePreferences, ColorScheme, ThemeMode } from '../../lib/theme/types';
 import {
@@ -80,6 +82,7 @@ export interface AppPreferences {
   createSnapshotBeforeSave: boolean;
   fontSize: number;
   lineHeight: number;
+  typographyEnabled: boolean;
   contentWidthPercent: number;
   largeDocumentLimit: number;
   openDefaultBehavior: OpenDefaultBehavior;
@@ -161,6 +164,7 @@ export const DEFAULT_APP_PREFERENCES: AppPreferences = {
   createSnapshotBeforeSave: true,
   fontSize: 16,
   lineHeight: 1.75,
+  typographyEnabled: DEFAULT_TYPOGRAPHY.enabled,
   contentWidthPercent: 60,
   largeDocumentLimit: 500_000,
   openDefaultBehavior: 'ask-every-time',
@@ -273,6 +277,7 @@ export async function loadAppPreferences(
     createSnapshotBeforeSave: parseSetting<unknown>(settings, 'createSnapshotBeforeSave'),
     fontSize: parseSetting<unknown>(settings, 'fontSize'),
     lineHeight: parseSetting<unknown>(settings, 'lineHeight'),
+    typographyEnabled: parseSetting<unknown>(settings, 'typographyEnabled'),
     contentWidthPercent: parseSetting<unknown>(settings, 'contentWidthPercent'),
     largeDocumentLimit: parseSetting<unknown>(settings, 'largeDocumentLimit'),
     openDefaultBehavior:
@@ -393,6 +398,10 @@ export function normalizeAppPreferences(
         : DEFAULT_APP_PREFERENCES.createSnapshotBeforeSave,
     fontSize: clampNumber(value.fontSize, 14, 22, DEFAULT_APP_PREFERENCES.fontSize),
     lineHeight: clampNumber(value.lineHeight, 1.4, 2.1, DEFAULT_APP_PREFERENCES.lineHeight),
+    typographyEnabled:
+      typeof value.typographyEnabled === 'boolean'
+        ? value.typographyEnabled
+        : DEFAULT_TYPOGRAPHY.enabled,
     contentWidthPercent: clampNumber(
       value.contentWidthPercent,
       45,
@@ -508,9 +517,18 @@ function prefersReducedMotion(): boolean {
   );
 }
 
-export function applyTypographySettings(fontSize: number, lineHeight: number) {
+export function applyTypographySettings(
+  fontSize: number,
+  lineHeight: number,
+  preferences?: Pick<AppPreferences, 'typographyEnabled'>,
+) {
   document.documentElement.style.setProperty('--md-editor-font-size', `${fontSize}px`);
   document.documentElement.style.setProperty('--md-editor-line-height', String(lineHeight));
+  setTypographyOptions({
+    enabled: preferences?.typographyEnabled,
+    profile: DEFAULT_TYPOGRAPHY.profile,
+    hanging: DEFAULT_TYPOGRAPHY.hanging,
+  });
 }
 
 export function applyEditorLayoutSettings(contentWidthPercent: number) {
@@ -590,6 +608,7 @@ function toPersistedPreferenceEntries(
     createSnapshotBeforeSave: preferences.createSnapshotBeforeSave,
     fontSize: preferences.fontSize,
     lineHeight: preferences.lineHeight,
+    typographyEnabled: preferences.typographyEnabled,
     contentWidthPercent: preferences.contentWidthPercent,
     largeDocumentLimit: preferences.largeDocumentLimit,
     openDefaultBehavior: preferences.openDefaultBehavior,

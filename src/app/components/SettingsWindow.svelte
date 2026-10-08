@@ -549,7 +549,7 @@
       desktopEnabled,
       syncDesktopIcons: options.syncDesktopIcons,
     });
-    applyTypographySettings(settings.fontSize, settings.lineHeight);
+    applyTypographySettings(settings.fontSize, settings.lineHeight, settings);
     applyEditorLayoutSettings(settings.contentWidthPercent);
     return resolved;
   }
@@ -886,7 +886,7 @@
       syncDesktopIcons: appearanceChanged,
     });
     interfaceLocale = applyInterfaceLanguagePreference(nextSettings.interfaceLanguage);
-    applyTypographySettings(nextSettings.fontSize, nextSettings.lineHeight);
+    applyTypographySettings(nextSettings.fontSize, nextSettings.lineHeight, nextSettings);
     applyEditorLayoutSettings(nextSettings.contentWidthPercent);
     markDirtyPreferences(normalizedPatch);
     scheduleAutoSave();
@@ -1681,6 +1681,21 @@
             </div>
           {:else if activeCategory === 'editor'}
             <div class="settings-group">
+              <h2>{t.typographySettings()}</h2>
+              <label class="toggle-row" for="typographyEnabled">
+                <span>
+                  <span class="toggle-title">{t.typographyEnabled()}</span>
+                  <span class="toggle-desc">{t.typographyDescription()}</span>
+                </span>
+                <input
+                  id="typographyEnabled"
+                  type="checkbox"
+                  checked={draftSettings.typographyEnabled}
+                  on:change={(event) => toggleSetting('typographyEnabled', event)}
+                />
+                <span class="toggle-switch" aria-hidden="true"></span>
+              </label>
+
               <h2>{t.editorScale()}</h2>
               <div class="setting-row">
                 <div>

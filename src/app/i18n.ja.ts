@@ -44,7 +44,7 @@ export const JA_JP_EXTRA_TRANSLATIONS = {
   createSnapshotBeforeSave: '保存する前にスナップショットを作成する',
   createSnapshotBeforeSaveDescription:
     'ローカル ファイルを保存する前に Markdown スナップショットを記録して、誤って上書きしても復元できるようにします。',
-  editorScale: 'エディターのスケール',
+  editorScale: 'エディター設定',
   fontSize: 'フォントサイズ',
   fontSizeDescription: 'セマンティック編集およびソース モードの本文テキストに影響します。',
   lineHeight: '行の高さ',

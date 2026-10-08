@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setTypographyOptions } from '../typography/options';
+import { DEFAULT_TYPOGRAPHY } from '../typography/types';
 import { Slice, type Node as ProseMirrorNode } from 'prosemirror-model';
 import { AllSelection, TextSelection } from 'prosemirror-state';
 import type { EditorView } from 'prosemirror-view';
@@ -7,7 +9,9 @@ import { extractOutline } from '../outline/outlineService';
 import { createEditorCore } from './createEditorCore';
 import { parseMarkdown } from './markdown';
 
+beforeEach(() => { setTypographyOptions({ ...DEFAULT_TYPOGRAPHY, enabled: false }); });
 afterEach(() => {
+  setTypographyOptions(DEFAULT_TYPOGRAPHY);
   vi.useRealTimers();
 });
 
