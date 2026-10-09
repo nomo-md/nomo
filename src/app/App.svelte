@@ -4784,7 +4784,12 @@
     })().catch((error) => showVisibleError(error, t.saveFileFailed()));
   }
 
+  const pendingExplorerRenames = new Set<string>();
   const documentActions = createDocumentActionsController({
+    isPathChanging: (path) =>
+      path != null && Array.from(pendingExplorerRenames).some(
+        (sourcePath) => pathEqualsOrDescendsFrom(path, sourcePath),
+      ),
     getLargeDocumentLimit: () => largeDocumentLimit,
     getAutoSaveDelayMs: () => autoSaveDelayMs,
     getCreateSnapshotBeforeSave: () => createSnapshotBeforeSave,
@@ -6011,12 +6016,39 @@
     }
 
     const { renameFile } = await import('../lib/desktop/tauriStorage');
+    pendingExplorerRenames.add(path);
     try {
       await renameFile(path, targetPath);
     } catch (err) {
       statusMessage = t.renameFailed({ error: err });
+      pendingExplorerRenames.delete(path);
       return;
     }
+
+    // 先同步文档路径，再等待目录刷新，避免文件检测把旧路径误判为删除。
+    tabs.forEach((tab) => {
+      if (tab.nativePath && pathEqualsOrDescendsFrom(tab.nativePath, path)) {
+        const newNativePath = targetPath + tab.nativePath.slice(path.length);
+        tab.nativePath = newNativePath;
+        tab.filePath = newNativePath;
+        tab.externalFileChange = tab.externalFileChange.type === 'modified'
+          ? { ...tab.externalFileChange, path: newNativePath }
+          : createEmptyExternalFileChange();
+        if (sameNativePath(newNativePath, targetPath)) {
+          tab.fileName = finalName;
+        }
+        if (activeTabId === tab.id) {
+          fileName = tab.fileName;
+          filePath = tab.filePath;
+          nativePath = tab.nativePath;
+          externalFileChange = tab.externalFileChange;
+          closeExternalChangeDialog();
+        }
+      }
+    });
+    tabs = [...tabs];
+    pendingExplorerRenames.delete(path);
+    persistWorkspaceState();
 
     expandedFolders = new Set(
       Array.from(expandedFolders, (folderPath) =>
@@ -6026,24 +6058,6 @@
       ),
     );
     await refreshExplorerFolders();
-
-    tabs.forEach((t) => {
-      if (t.nativePath && pathEqualsOrDescendsFrom(t.nativePath, path)) {
-        const newNativePath = t.nativePath.replace(path, targetPath);
-        t.nativePath = newNativePath;
-        t.filePath = newNativePath;
-        if (sameNativePath(t.nativePath, targetPath)) {
-          t.fileName = finalName;
-        }
-        if (activeTabId === t.id) {
-          fileName = t.fileName;
-          filePath = t.filePath;
-          nativePath = t.nativePath;
-        }
-      }
-    });
-    tabs = [...tabs];
-    persistWorkspaceState();
   }
 
   const unsubscribe = editor.subscribe(syncFromEditor);

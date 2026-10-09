@@ -492,8 +492,8 @@
   background: transparent;
   text-align: left;
   font-family: inherit;
-  font-weight: 700;
-  font-size: var(--md-editor-ui-font-size);
+  font-weight: 600;
+  font-size: calc(var(--md-editor-ui-font-size) + 1px);
   line-height: 1.25;
   color: var(--md-editor-fg);
   letter-spacing: 0.2px;

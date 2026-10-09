@@ -322,7 +322,8 @@
 }
 
 .folder-actions {
-  display: flex;
+  /* 隐藏时让出名称宽度；文件夹行获得键盘焦点后同样显示按钮。 */
+  display: none;
   flex: 0 0 auto;
   opacity: 0;
   pointer-events: none;
@@ -335,6 +336,7 @@
 .tree-folder-root-title:focus-within .folder-actions,
 .tree-folder.active .folder-actions,
 .tree-folder-root-title.active .folder-actions {
+  display: flex;
   opacity: 1;
   pointer-events: auto;
 }

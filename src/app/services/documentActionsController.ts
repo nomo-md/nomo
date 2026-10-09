@@ -99,6 +99,7 @@ interface DocumentActionsOptions {
   getTabs(): Tab[];
   setTabs(value: Tab[]): void;
   getActiveTabId(): string;
+  isPathChanging?(path: string | null): boolean;
   canReuseTab?(tabId: string): boolean;
   getNextTabIdAfterClose?(tabId: string): string | undefined;
   setActiveTabId(value: string): void;
@@ -834,6 +835,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     const targetTab = options.getTabs().find((tab) => tab.id === tabId);
     if (!isMarkdownTab(targetTab)) return;
     const path = targetTab.nativePath;
+    if (options.isPathChanging?.(path)) return;
     flushDocumentRuntime(tabId);
     const nextChange = await getExternalFileChange(
       options.getDesktopEnabled(),
@@ -842,7 +844,13 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       targetTab.dirty,
     );
     const ownedTab = options.getTabs().find((tab) => tab.id === tabId);
-    if (!isMarkdownTab(ownedTab) || ownedTab.nativePath !== path) return;
+    if (
+      !isMarkdownTab(ownedTab) ||
+      ownedTab.nativePath !== path ||
+      options.isPathChanging?.(path)
+    ) {
+      return;
+    }
     ownedTab.externalFileChange = nextChange;
     if (options.getActiveTabId() === tabId) options.setExternalFileChange(nextChange);
     options.setTabs([...options.getTabs()]);
