@@ -1,6 +1,6 @@
 {
   "name": "nomo",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "license": "AGPL-3.0-or-later",
   "private": true,
   "packageManager": "pnpm@11.5.1",
