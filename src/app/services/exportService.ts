@@ -226,6 +226,10 @@ export function cleanEditorArtifacts(htmlFragment: string): string {
   restoreMermaidExportSize(root);
   // Remove visual layout while retaining the semantic soft/hard break distinction.
   root.querySelectorAll('[data-kp-owned]').forEach((node) => node.remove());
+  root.querySelectorAll('[data-kp-reflow],[data-kp-geometry]').forEach((node) => {
+    node.removeAttribute('data-kp-reflow');
+    node.removeAttribute('data-kp-geometry');
+  });
   root.querySelectorAll<HTMLElement>('[data-kp-original-style]').forEach((node) => {
     const style = node.getAttribute('data-kp-original-style');
     if (style) node.setAttribute('style', style);

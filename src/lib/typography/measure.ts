@@ -185,7 +185,11 @@ function snapshotFont(style: CSSStyleDeclaration) {
     textRendering: style.textRendering,
     direction: style.direction,
   };
-  return { ...font, key: JSON.stringify(Object.values(font).slice(1)) };
+  // Text measurement below always disables ligatures. Key the cache by that
+  // actual shaping configuration, so installing KP's identical CSS does not
+  // turn the first zoom into a cold measurement of every glyph.
+  const shaping = { ...font, fontFeatureSettings: '"liga" 0', fontVariantLigatures: 'none' };
+  return { ...font, key: JSON.stringify(Object.values(shaping).slice(1)) };
 }
 
 function applyFont(sandbox: HTMLElement, font: ReturnType<typeof snapshotFont>) {
@@ -514,7 +518,7 @@ function* measureParagraphBatches(
   const sandbox = createSandbox();
   let from = 0;
   try {
-    document.body.append(sandbox);
+    if (!cacheState) document.body.append(sandbox);
     const canvas = document.createElement('canvas').getContext('2d');
     for (let r = 0; r < runs.length; r++) {
       const run = runs[r];
@@ -611,6 +615,9 @@ function* measureParagraphBatches(
       let hyphenWidth = cached?.hyphenWidth;
       let range: Range | undefined;
       if (!cached) {
+        // Cache hits only bind current text nodes; inserting an unused sandbox
+        // would invalidate page layout before the next paragraph's geometry read.
+        if (!sandbox.isConnected) document.body.append(sandbox);
         applyFont(sandbox, font);
         // Match ProseMirror's editable shaping in every output surface.
         sandbox.style.fontFeatureSettings = '"liga" 0';

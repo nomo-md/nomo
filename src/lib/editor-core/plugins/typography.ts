@@ -29,6 +29,7 @@ import { inlineSourceEditingPluginKey } from './inlineSourceEditing';
 const key = new PluginKey<DecorationSet>('nomo-typography');
 const meta = 'nomo:typography';
 const controllers = new WeakMap<EditorView, TypographyController>();
+let nextGeometryProjection = 0;
 const graphemeSegmenter =
   typeof Intl.Segmenter === 'function'
     ? new Intl.Segmenter('zh', { granularity: 'grapheme' })
@@ -219,6 +220,23 @@ function restoreViewportAnchor(view: EditorView, anchor: TypographyViewportAncho
 function createViewController(view: EditorView) {
   const solver = createTypographySolver();
   const measureCache = createTypographyMeasureCache();
+  const pane = view.dom.closest<HTMLElement>('.semantic-pane');
+  type ParagraphTarget = { node: ProseMirrorNode; pos: number; element: HTMLElement };
+  const paragraphTargets = new Map<Element, ParagraphTarget>();
+  const visibleParagraphs = new Set<Element>();
+  let indexedDoc: ProseMirrorNode | null = null;
+  let visibilityReady = false;
+  let breaksDoc: ProseMirrorNode | null = null;
+  let breaksEnabled: boolean | undefined;
+  let zoomReusePending = false;
+  let zoomProjectionActive = false;
+  let zoomAnchorQueued = false;
+  let zoomGestureAnchor: TypographyViewportAnchor | null = null;
+  let geometryAnchorFrame: number | null = null;
+  let pendingGeometryAnchor: TypographyViewportAnchor | null = null;
+  let geometryProjection = 0;
+  let preparedGeometryRevision = -1;
+  let geometryProjectionStyle: HTMLStyleElement | undefined;
   let revision = 0;
   let geometryRevision = 0;
   let completed = -1;
@@ -251,6 +269,7 @@ function createViewController(view: EditorView) {
   let finishPublishFrame: (() => void) | undefined;
 
   const isPreviewing = () => interaction.phase === 'preview';
+  const isZoomPreview = () => isPreviewing() && interaction.geometrySource === 'zoom';
 
   const isComposing = () =>
     composing ||
@@ -266,6 +285,48 @@ function createViewController(view: EditorView) {
       (!(dragging || sourceDragging) || (view.state.selection.empty && !selectionDrag))
     );
   };
+  const projectCurrentWidth = (preserveAlignment = isZoomPreview()) => {
+    if (destroyed || !getTypographyOptions().enabled) return;
+    // During zoom, native reflow follows every CSS change. Keep one projection
+    // for the gesture instead of invalidating all paragraph styles each frame.
+    if (preserveAlignment && zoomProjectionActive && view.dom.hasAttribute('data-kp-reflow')) return;
+    zoomProjectionActive = preserveAlignment;
+    geometryProjection = ++nextGeometryProjection;
+    geometryProjectionStyle ??= document.createElement('style');
+    geometryProjectionStyle.dataset.kpOwned = 'geometry-projection';
+    const staleParagraph = `.ProseMirror[data-kp-reflow="${geometryProjection}"] [data-kp-layout="ready"]:not([data-kp-geometry="${geometryProjection}"])`;
+    // Keep semantic text/selection DOM intact, but never display fixed breaks and
+    // pixel spacing computed for a different width while the worker catches up.
+    geometryProjectionStyle.textContent = `
+      ${staleParagraph} { white-space: pre-wrap !important; overflow-wrap: anywhere !important; word-break: normal !important; }
+      ${staleParagraph} .kp-break { display: none !important; }
+      ${staleParagraph} .kp-unit { margin-left: 0 !important; margin-right: 0 !important; padding-right: 0 !important; line-height: inherit !important; }
+      ${preserveAlignment ? `${staleParagraph}[data-kp-alignment="justify"] { text-align: justify !important; }` : ''}
+    `;
+    if (!geometryProjectionStyle.isConnected) document.head.append(geometryProjectionStyle);
+    view.dom.dataset.kpReflow = String(geometryProjection);
+  };
+  const finishGeometryProjection = () => {
+    zoomProjectionActive = false;
+    if (!view.dom.hasAttribute('data-kp-reflow')) return;
+    const anchor = captureViewportAnchor(view, interaction.anchor);
+    view.dom.removeAttribute('data-kp-reflow');
+    geometryProjectionStyle?.remove();
+    restoreViewportAnchor(view, anchor);
+    viewportScrollTop = pane?.scrollTop ?? 0;
+  };
+  const restoreGeometryAnchor = () => {
+    if (geometryAnchorFrame !== null) cancelAnimationFrame(geometryAnchorFrame);
+    geometryAnchorFrame = null;
+    const anchor = pendingGeometryAnchor;
+    pendingGeometryAnchor = null;
+    restoreViewportAnchor(view, anchor);
+    viewportScrollTop = pane?.scrollTop ?? 0;
+    lastWidth = view.dom.clientWidth;
+    view.dom
+      .closest('.editor-grid')
+      ?.dispatchEvent(new Event('nomo:editor-viewport-layout-refresh'));
+  };
   const publish = (
     decorations: Decoration[],
     sourceOnly = false,
@@ -273,6 +334,7 @@ function createViewController(view: EditorView) {
     geometryAnchor?: TypographyViewportAnchor | null,
   ) => {
     if (destroyed || isComposing() || (sourceOnly ? !canLayoutSource() : dragging)) return false;
+    if (geometryAnchorFrame !== null || pendingGeometryAnchor) restoreGeometryAnchor();
     const anchor =
       geometryAnchor === undefined
         ? captureViewportAnchor(view, interaction.anchor)
@@ -310,7 +372,10 @@ function createViewController(view: EditorView) {
     }
   };
   const queueRunFrame = () => {
-    if (layoutFrame !== null || destroyed || (isPreviewing() && !viewportOnly)) return;
+    // Native reflow owns zoom frames; solving and decoration replacement resume
+    // at settlement so they cannot stretch a short animation into slow motion.
+    if (layoutFrame !== null || destroyed || isZoomPreview() || (isPreviewing() && !viewportOnly))
+      return;
     if (typeof requestAnimationFrame !== 'function' || document.hidden) {
       timer = setTimeout(() => void run(), 0);
       return;
@@ -325,7 +390,7 @@ function createViewController(view: EditorView) {
     revision++;
     clearTimeout(timer);
     if (isPreviewing()) viewportOnly = true;
-    if (geometryRecovery || interaction.phase === 'settling') {
+    if (isPreviewing() || geometryRecovery || interaction.phase === 'settling') {
       queueRunFrame();
       return;
     }
@@ -334,11 +399,17 @@ function createViewController(view: EditorView) {
     }, 150);
   };
   const geometryChanged = () => {
+    projectCurrentWidth();
     geometryRevision++;
     schedule();
   };
   const fontsChanged = () => {
     measureCache.clear();
+    geometryChanged();
+  };
+  const contentLoaded = () => {
+    // Async NodeViews may replace an image element without changing the document.
+    indexedDoc = null;
     geometryChanged();
   };
   const editorGeometrySignature = () => {
@@ -362,6 +433,56 @@ function createViewController(view: EditorView) {
     viewportOnly = true;
     clearTimeout(timer);
     queueRunFrame();
+  };
+  // Native visibility tracking avoids reading every paragraph's geometry on each
+  // input frame. Rebuild DOM bindings only when the semantic document changes.
+  const visibilityObserver =
+    typeof IntersectionObserver !== 'undefined'
+      ? new IntersectionObserver(
+          (entries) => {
+            let changed = false;
+            for (const entry of entries) {
+              if (!paragraphTargets.has(entry.target)) continue;
+              const wasVisible = visibleParagraphs.has(entry.target);
+              if (entry.isIntersecting) visibleParagraphs.add(entry.target);
+              else visibleParagraphs.delete(entry.target);
+              changed ||= wasVisible !== entry.isIntersecting;
+            }
+            visibilityReady = true;
+            if (changed && getTypographyOptions().enabled && (isPreviewing() || geometryRecovery))
+              requestVisibleLayout();
+          },
+          { root: pane, rootMargin: '160px 0px' },
+        )
+      : null;
+  const indexParagraphs = (doc: ProseMirrorNode) => {
+    if (indexedDoc === doc) return;
+    indexedDoc = doc;
+    visibilityObserver?.disconnect();
+    visibilityReady = false;
+    paragraphTargets.clear();
+    visibleParagraphs.clear();
+    doc.descendants((node, pos) => {
+      if (node.type.name !== 'paragraph' || !node.content.size) return;
+      const element = view.nodeDOM(pos);
+      if (element instanceof HTMLElement) {
+        paragraphTargets.set(element, { node, pos, element });
+        visibilityObserver?.observe(element);
+      }
+      return false;
+    });
+    for (const element of view.dom.querySelectorAll('img,.math-inline')) {
+      if (!observedObjects.has(element)) {
+        observedObjects.add(element);
+        objectObserver?.observe(element);
+      }
+    }
+    for (const element of observedObjects) {
+      if (!view.dom.contains(element)) {
+        objectObserver?.unobserve(element);
+        observedObjects.delete(element);
+      }
+    }
   };
   const paragraphSignature = (
     element: HTMLElement,
@@ -446,6 +567,7 @@ function createViewController(view: EditorView) {
                   result,
                   signature,
                   sourceGeometry,
+                  geometryProjection,
                 );
               }
             }
@@ -487,11 +609,28 @@ function createViewController(view: EditorView) {
     });
   };
   const run = async (): Promise<void> => {
-    if (destroyed || (isPreviewing() && !viewportOnly) || isComposing() || dragging) return;
+    if (destroyed || isZoomPreview() || (isPreviewing() && !viewportOnly) || isComposing() || dragging)
+      return;
+    if (geometryAnchorFrame !== null || pendingGeometryAnchor) restoreGeometryAnchor();
     clearDisabledLayout();
     if (sourceLayoutQueued) {
       await Promise.resolve();
       return run();
+    }
+    if (zoomReusePending) {
+      zoomReusePending = false;
+      // Read layout once in the scheduled frame, not in every input callback.
+      // Responsive objects invalidate independently through ResizeObserver.
+      if (completed === revision && completedEditorGeometry === editorGeometrySignature()) {
+        completedGeometryRevision = interaction.geometryRevision;
+        viewportOnly = false;
+        geometryRecovery = false;
+        finishGeometryProjection();
+        interactionSubscription?.complete(interaction.generation);
+        return;
+      }
+      geometryRecovery = true;
+      viewportOnly = true;
     }
     if (
       completed === revision &&
@@ -499,6 +638,7 @@ function createViewController(view: EditorView) {
       !viewportOnly
     ) {
       geometryRecovery = false;
+      finishGeometryProjection();
       interactionSubscription?.complete(interaction.generation);
       return;
     }
@@ -513,7 +653,11 @@ function createViewController(view: EditorView) {
     const layoutRequestAtStart = layoutRequestRevision;
     const interactivePass = isPreviewing();
     viewportOnly = false;
-    refreshTypographyBreaks(view);
+    if (breaksDoc !== doc || breaksEnabled !== options.enabled) {
+      refreshTypographyBreaks(view);
+      breaksDoc = doc;
+      breaksEnabled = options.enabled;
+    }
     if (!options.enabled) {
       if (publish([])) {
         completed = token;
@@ -526,43 +670,53 @@ function createViewController(view: EditorView) {
       const startedAt = performance.now();
       const timings = { measureMs: 0, solveMs: 0, renderMs: 0, publishMs: 0 };
       const generation = interaction.generation;
-      // 尺寸输入不取消文字测量；文档或装饰绑定失效才终止任务。
+      // 宽度输入复用在途测量；缩放则先让出交互帧，停止后再追补。
       const stale = () =>
         destroyed ||
+        isZoomPreview() ||
         revision !== token ||
         view.state.doc !== doc ||
         isComposing() ||
         dragging ||
         (!interactivePass && isPreviewing());
-      const pane = view.dom.closest<HTMLElement>('.semantic-pane');
       const viewport = pane?.getBoundingClientRect();
       const viewportTop = viewport?.top ?? 0;
       const viewportBottom = viewport?.bottom ?? window.innerHeight;
       const viewportHeight = Math.max(1, viewportBottom - viewportTop);
-      type Target = {
-        node: ProseMirrorNode;
-        pos: number;
-        element: HTMLElement;
+      type Target = ParagraphTarget & {
         distance: number;
         priority: boolean;
       };
       const targets: Target[] = [];
-      doc.descendants((node, pos) => {
-        if (node.type.name !== 'paragraph' || !node.content.size) return;
-        const element = view.nodeDOM(pos);
-        if (!(element instanceof HTMLElement) || element.clientWidth <= 0) return;
-        const rect = element.getBoundingClientRect();
+      indexParagraphs(doc);
+      const available =
+        interactivePass && visibilityReady
+          ? Array.from(visibleParagraphs, (element) => paragraphTargets.get(element)!)
+          : paragraphTargets.values();
+      for (const target of available) {
+        const { element } = target;
+        if (!element.isConnected) {
+          indexedDoc = null;
+          requestVisibleLayout();
+          continue;
+        }
+        if (element.clientWidth <= 0) continue;
+        const rect =
+          !visibilityReady || visibleParagraphs.has(element)
+            ? element.getBoundingClientRect()
+            : null;
         const buffer = Math.min(160, viewportHeight * 0.25);
-        const priority = rect.bottom >= viewportTop - buffer && rect.top <= viewportBottom + buffer;
-        if (interactivePass && !priority) return;
+        const priority =
+          !!rect && rect.bottom >= viewportTop - buffer && rect.top <= viewportBottom + buffer;
+        if (interactivePass && !priority) continue;
         targets.push({
-          node,
-          pos,
-          element,
-          distance: Math.max(viewportTop - rect.bottom, rect.top - viewportBottom, 0),
+          ...target,
+          distance: rect
+            ? Math.max(viewportTop - rect.bottom, rect.top - viewportBottom, 0)
+            : Infinity,
           priority,
         });
-      });
+      }
       targets.sort(
         (a, b) =>
           Number(b.priority) - Number(a.priority) || a.distance - b.distance || a.pos - b.pos,
@@ -584,42 +738,31 @@ function createViewController(view: EditorView) {
         !stale() &&
         view.nodeDOM(target.pos) === target.element &&
         currentSignature(target) === signature;
-      for (const element of view.dom.querySelectorAll('img,.math-inline')) {
-        if (!observedObjects.has(element)) {
-          observedObjects.add(element);
-          objectObserver?.observe(element);
-        }
-      }
-      for (const element of observedObjects) {
-        if (!view.dom.contains(element)) {
-          objectObserver?.unobserve(element);
-          observedObjects.delete(element);
-        }
-      }
       let publishedAt = performance.now();
       let yieldedAt = publishedAt;
       const commit = async () => {
         if (stale()) return false;
         if (!pending.length) return true;
-        await new Promise<void>((resolve) => {
-          let frame: number | undefined;
-          let settled = false;
-          const finish = () => {
-            if (settled) return;
-            settled = true;
-            if (frame !== undefined) cancelAnimationFrame(frame);
-            clearTimeout(timeout);
-            finishPublishFrame = undefined;
-            resolve();
-          };
-          const timeout = setTimeout(finish, document.hidden ? 0 : 32);
-          finishPublishFrame = finish;
-          if (typeof requestAnimationFrame === 'function' && !document.hidden) {
-            const id = requestAnimationFrame(finish);
-            if (settled) cancelAnimationFrame(id);
-            else frame = id;
-          }
-        });
+        if (!interactivePass)
+          await new Promise<void>((resolve) => {
+            let frame: number | undefined;
+            let settled = false;
+            const finish = () => {
+              if (settled) return;
+              settled = true;
+              if (frame !== undefined) cancelAnimationFrame(frame);
+              clearTimeout(timeout);
+              finishPublishFrame = undefined;
+              resolve();
+            };
+            const timeout = setTimeout(finish, document.hidden ? 0 : 32);
+            finishPublishFrame = finish;
+            if (typeof requestAnimationFrame === 'function' && !document.hidden) {
+              const id = requestAnimationFrame(finish);
+              if (settled) cancelAnimationFrame(id);
+              else frame = id;
+            }
+          });
         if (stale()) return false;
         // CSS 已跟手更新，提交前逐段校验；旧尺寸结果不能覆盖当前断行。
         const accepted = pending.filter((candidate) =>
@@ -674,6 +817,7 @@ function createViewController(view: EditorView) {
           if (stale()) break;
           if (!current(target, signature)) {
             skippedGeometry = true;
+            if (interactivePass) break;
             continue;
           }
           let decorations: Decoration[];
@@ -688,6 +832,7 @@ function createViewController(view: EditorView) {
             if (stale()) break;
             if (!current(target, signature)) {
               skippedGeometry = true;
+              if (interactivePass) break;
               continue;
             }
             if (result.status === 'fallback') {
@@ -707,6 +852,7 @@ function createViewController(view: EditorView) {
                   result,
                   signature,
                   sourceGeometry,
+                  geometryProjection,
                 ) ?? fallback('stale-dom-bindings');
               timings.renderMs += performance.now() - renderStart;
             }
@@ -716,6 +862,7 @@ function createViewController(view: EditorView) {
           if (stale()) break;
           if (!current(target, signature)) {
             skippedGeometry = true;
+            if (interactivePass) break;
             continue;
           }
           pending.push({
@@ -756,6 +903,7 @@ function createViewController(view: EditorView) {
           completedEditorGeometry = editorGeometrySignature();
           geometryRecovery = false;
           viewportOnly = false;
+          finishGeometryProjection();
           interactionSubscription?.complete(interaction.generation);
         }
       } else cancelledPasses++;
@@ -872,13 +1020,14 @@ function createViewController(view: EditorView) {
   window.addEventListener('pointerup', pointerUp);
   window.addEventListener('pointercancel', pointerUp);
   window.addEventListener('blur', pointerUp);
-  view.dom.addEventListener('load', geometryChanged, true);
+  view.dom.addEventListener('load', contentLoaded, true);
   const observer =
     typeof ResizeObserver !== 'undefined'
       ? new ResizeObserver(() => {
           const width = view.dom.clientWidth;
           if (width !== lastWidth) {
             lastWidth = width;
+            projectCurrentWidth();
             requestVisibleLayout();
           }
         })
@@ -915,6 +1064,7 @@ function createViewController(view: EditorView) {
     if (!getTypographyOptions().enabled) {
       pendingDisableClear = true;
       clearDisabledLayout();
+      finishGeometryProjection();
     }
     if (!getTypographyOptions().enabled) {
       clearTimeout(timer);
@@ -925,11 +1075,17 @@ function createViewController(view: EditorView) {
       interactionSubscription?.complete(interaction.generation);
     }
   };
-  const pane = view.dom.closest<HTMLElement>('.semantic-pane');
   const viewportScrolled = () => {
     const scrollTop = pane?.scrollTop ?? 0;
     if (scrollTop === viewportScrollTop) return;
     viewportScrollTop = scrollTop;
+    zoomGestureAnchor = null;
+    // A scroll arriving before the next frame supersedes the old reading anchor.
+    if (geometryAnchorFrame !== null || zoomAnchorQueued) {
+      if (geometryAnchorFrame !== null) cancelAnimationFrame(geometryAnchorFrame);
+      geometryAnchorFrame = null;
+      pendingGeometryAnchor = null;
+    }
     if (!getTypographyOptions().enabled || destroyed || isComposing() || dragging) return;
     if (isPreviewing() || geometryRecovery) {
       requestVisibleLayout();
@@ -942,22 +1098,27 @@ function createViewController(view: EditorView) {
       const previous = interaction;
       interaction = snapshot;
       if (destroyed) return;
+      if (!isZoomPreview()) zoomGestureAnchor = null;
       if (previous.phase !== 'preview' && snapshot.phase === 'preview') {
         clearTimeout(timer);
         if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
         layoutFrame = null;
       }
       if (snapshot.geometryRevision !== previous.geometryRevision) {
+        if (preparedGeometryRevision !== snapshot.geometryRevision) projectCurrentWidth();
         // 完整布局已就绪且逻辑几何不变时，纯 zoom 沿用断行，仅缩放和保护视角。
         if (
           snapshot.geometrySource === 'zoom' &&
-          !observedObjects.size &&
           completed === revision &&
-          completedGeometryRevision === previous.geometryRevision &&
-          completedEditorGeometry === editorGeometrySignature()
+          (zoomReusePending || completedGeometryRevision === previous.geometryRevision)
         ) {
-          completedGeometryRevision = snapshot.geometryRevision;
-        } else requestVisibleLayout();
+          zoomReusePending = true;
+          viewportOnly = true;
+          queueRunFrame();
+        } else {
+          zoomReusePending = false;
+          requestVisibleLayout();
+        }
       } else if (snapshot.phase === 'preview' && viewportOnly) {
         queueRunFrame();
       } else if (snapshot.phase === 'settling') {
@@ -973,16 +1134,46 @@ function createViewController(view: EditorView) {
       geometryParticipant: () =>
         view.dom.isConnected &&
         getTypographyOptions().enabled &&
-        (!pane || (pane.clientHeight > 0 && view.dom.clientWidth > 0)),
+        (geometryAnchorFrame !== null ||
+          !pane ||
+          (pane.clientHeight > 0 && view.dom.clientWidth > 0)),
       beforeGeometryChange: (snapshot) => {
-        const anchor = captureViewportAnchor(view, snapshot.anchor);
+        if (geometryAnchorFrame === null && !zoomAnchorQueued) {
+          if (snapshot.geometrySource === 'zoom') {
+            const anchorMoved =
+              snapshot.anchor?.left !== interaction.anchor?.left ||
+              snapshot.anchor?.top !== interaction.anchor?.top;
+            // One gesture keeps the same semantic reading position. Repeated
+            // hit-testing across per-glyph DOM can cost more than the zoom itself.
+            if (!zoomGestureAnchor || zoomGestureAnchor.doc !== view.state.doc || anchorMoved)
+              zoomGestureAnchor = captureViewportAnchor(view, snapshot.anchor);
+            pendingGeometryAnchor = zoomGestureAnchor;
+          } else {
+            zoomGestureAnchor = null;
+            pendingGeometryAnchor = captureViewportAnchor(view, snapshot.anchor);
+          }
+        }
+        projectCurrentWidth(snapshot.geometrySource === 'zoom');
+        preparedGeometryRevision = snapshot.geometryRevision;
         return () => {
-          restoreViewportAnchor(view, anchor);
-          viewportScrollTop = pane?.scrollTop ?? 0;
-          lastWidth = view.dom.clientWidth;
-          view.dom
-            .closest('.editor-grid')
-            ?.dispatchEvent(new Event('nomo:editor-viewport-layout-refresh'));
+          if (snapshot.geometrySource === 'zoom') {
+            // Restore reading position before this zoom paints, while coalescing
+            // repeated inputs in the same task. No paragraph solving runs here.
+            if (!zoomAnchorQueued) {
+              zoomAnchorQueued = true;
+              queueMicrotask(() => {
+                zoomAnchorQueued = false;
+                if (!destroyed && pendingGeometryAnchor) restoreGeometryAnchor();
+              });
+            }
+            return;
+          }
+          // CSS still follows every input immediately. Coalesce the subsequent
+          // layout read and scroll correction so rapid inputs share one frame.
+          if (geometryAnchorFrame !== null) return;
+          if (typeof requestAnimationFrame === 'function' && !document.hidden)
+            geometryAnchorFrame = requestAnimationFrame(restoreGeometryAnchor);
+          else restoreGeometryAnchor();
         };
       },
     },
@@ -1012,12 +1203,18 @@ function createViewController(view: EditorView) {
       clearTimeout(timer);
       finishPublishFrame?.();
       if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
+      if (geometryAnchorFrame !== null) cancelAnimationFrame(geometryAnchorFrame);
+      pendingGeometryAnchor = null;
+      zoomGestureAnchor = null;
+      view.dom.removeAttribute('data-kp-reflow');
+      geometryProjectionStyle?.remove();
       interactionSubscription?.destroy();
       pane?.removeEventListener('scroll', viewportScrolled);
       measureCache.clear();
       solver.destroy();
       observer?.disconnect();
       objectObserver?.disconnect();
+      visibilityObserver?.disconnect();
       unsubscribe();
       document.fonts?.removeEventListener('loadingdone', fontsChanged);
       view.dom.removeEventListener('keydown', clearActive, true);
@@ -1030,7 +1227,7 @@ function createViewController(view: EditorView) {
       window.removeEventListener('pointerup', pointerUp);
       window.removeEventListener('pointercancel', pointerUp);
       window.removeEventListener('blur', pointerUp);
-      view.dom.removeEventListener('load', geometryChanged, true);
+      view.dom.removeEventListener('load', contentLoaded, true);
       controllers.delete(view);
     },
   };
@@ -1095,11 +1292,13 @@ function renderDecorations(
   result: ParagraphLayout,
   signature: string,
   sourceGeometry: string,
+  geometryProjection: number,
 ): Decoration[] | null {
   const plan = createRenderPlan(measured, result);
   const dom = view.nodeDOM(pos) as HTMLElement;
   if (!(dom instanceof HTMLElement)) return null;
   const positions = new Map<MeasuredParagraph['bindings'][number], { from: number; to: number }>();
+  const textPositions = new Map<Node, { from: number; to: number }>();
   const bindingsFrom = new Map<number, MeasuredParagraph['bindings'][number]>();
   const bindingsTo = new Map<number, MeasuredParagraph['bindings'][number]>();
   let previousEnd = pos + 1;
@@ -1113,10 +1312,30 @@ function renderDecorations(
         binding.endOffset > (binding.node.textContent?.length ?? 0))
     )
       return null;
-    const from = view.posAtDOM(binding.node, binding.offset);
+    let textRange = textPositions.get(binding.node);
+    if (!binding.atomic && !textRange) {
+      textRange = {
+        from: view.posAtDOM(binding.node, 0),
+        to: view.posAtDOM(binding.node, binding.node.textContent?.length ?? 0),
+      };
+      textPositions.set(binding.node, textRange);
+    }
+    // Many glyphs share one semantic text node. Its offsets are linear when
+    // both ends map to the complete text; custom projections use the full mapper.
+    const linearText =
+      !binding.atomic &&
+      textRange &&
+      textRange.to - textRange.from === binding.node.textContent?.length
+        ? textRange
+        : undefined;
+    const from = linearText
+      ? linearText.from + binding.offset
+      : view.posAtDOM(binding.node, binding.offset);
     const to = binding.atomic
       ? from + (binding.sourceSize ?? 1)
-      : view.posAtDOM(binding.node, binding.endOffset);
+      : linearText
+        ? linearText.from + binding.endOffset
+        : view.posAtDOM(binding.node, binding.endOffset);
     const size = binding.atomic ? (binding.sourceSize ?? 1) : binding.endOffset - binding.offset;
     // PM can return -1 for a detached node, or clamp an obsolete text offset.
     // Reject the whole plan instead of publishing overlapping/wrong-position units.
@@ -1136,6 +1355,7 @@ function renderDecorations(
       pos + node.nodeSize,
       {
         'data-kp-layout': 'ready',
+        'data-kp-geometry': String(geometryProjection),
         'data-kp-alignment': result.status === 'ready' ? (result.alignment ?? 'justify') : '',
         'data-kp-original-style': originalStyle,
         style: PARAGRAPH_CSS,
@@ -1143,9 +1363,19 @@ function renderDecorations(
       { typographySignature: signature, typographySourceGeometry: sourceGeometry, paragraph: node },
     ),
   ];
+  const naturalLineHeight = parseFloat(getComputedStyle(dom).lineHeight);
   for (const style of plan.styles) {
     const binding = bindingsFrom.get(style.from);
     if (!binding) continue;
+    // Ordinary text already has the paragraph's line box. Avoid splitting every
+    // glyph into a span when KP contributes neither spacing nor extra height.
+    if (
+      !binding.atomic &&
+      style.left === 0 &&
+      style.right === 0 &&
+      style.height <= naturalLineHeight
+    )
+      continue;
     const { from: start, to: end } = positions.get(binding)!;
     if (start < end) {
       // Keep expanded text spacing inside the selection's painted box. Margins
