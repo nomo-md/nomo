@@ -108,6 +108,7 @@
   let outlineAutoScrollFrame = 0;
   let outlinePointerX = 0;
   let outlinePointerY = 0;
+  let expandableOutlineIds = new Set<string>();
   let hasExpandableOutline = false;
   let hasCollapsedExpandableOutline = false;
   let runtimeLifetimeEnded = false;
@@ -157,9 +158,15 @@
     onSourceRuntimeStateChange(state);
   }
 
-  $: hasExpandableOutline = outline.some((_item, index) => isOutlineItemExpandable(index));
+  // 父标题的 ID 和索引不变时，增删子标题也必须刷新展开按钮。
+  $: expandableOutlineIds = new Set(
+    outline
+      .filter((_item, index) => isOutlineItemExpandable(index))
+      .map((item) => item.id),
+  );
+  $: hasExpandableOutline = expandableOutlineIds.size > 0;
   $: hasCollapsedExpandableOutline = outline.some(
-    (item, index) => isOutlineItemExpandable(index) && collapsedOutlineIds.has(item.id),
+    (item) => expandableOutlineIds.has(item.id) && collapsedOutlineIds.has(item.id),
   );
   $: if (splitResizePointerId === null) {
     pendingSplitLeftPercent = splitLeftPercent;
@@ -1026,7 +1033,7 @@
                   on:pointerdown={(event) => handleOutlinePointerDown(event, index)}
                   on:contextmenu={(event) => handleOutlineItemContextMenu(event, item, index)}
                 >
-                  {#if isOutlineItemExpandable(index)}
+                  {#if expandableOutlineIds.has(item.id)}
                     <button
                       type="button"
                       class:collapsed={collapsedOutlineIds.has(item.id)}
