@@ -22,6 +22,27 @@ export function supportedText(text: string): boolean {
   return true;
 }
 
+/** Editable source spaces retain a caret advance, including at visual line edges. */
+export function preserveSourceWhitespace(input: ParagraphInput): ParagraphInput {
+  if (!input.items.some((item) => item.sourceWhitespace)) return input;
+  const breaks = new Map(input.breaks.map((point) => [point.at, point]));
+  const items = input.items.map((item, index) => {
+    if (!item.sourceWhitespace) return item;
+    // UAX #14 normally breaks after a whole space run. Editable runs also need
+    // intermediate opportunities so hundreds of real spaces cannot overflow.
+    const following = input.items[index + 1]?.text ?? '';
+    if (!breaks.has(index + 1) && !closing.test(following) && following !== '\u00a0')
+      breaks.set(index + 1, { at: index + 1, penalty: 50 });
+    return { ...item, discardable: false };
+  });
+  return {
+    ...input,
+    items,
+    editableWhitespace: true,
+    breaks: [...breaks.values()].sort((a, b) => a.at - b.at),
+  };
+}
+
 /** UAX #14 and measured Liang candidates supply opportunities; CJK rules apply prohibitions. */
 export function createParagraphInput(
   units: LayoutItem[],

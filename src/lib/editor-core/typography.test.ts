@@ -241,10 +241,15 @@ it('replaces source layouts without an intermediate native frame or stale break 
     expect(view.state.doc).toBe(doc);
   }
   expect(measure).toHaveBeenCalledTimes(6);
-  // Content editing still removes the old layout, including all its inline units.
+  // Input preparation cancels stale work without exposing native spacing.
+  const beforeInput = paragraph.innerHTML;
   view.dom.dispatchEvent(new Event('beforeinput', { bubbles: true }));
-  expect(paragraph.dataset.kpLayout).toBeUndefined();
-  expect(paragraph.querySelector('.kp-unit,.kp-break')).toBeNull();
+  expect(paragraph.dataset.kpLayout).toBe('ready');
+  expect(paragraph.innerHTML).toBe(beforeInput);
+  view.dispatch(view.state.tr.insertText('追加', text.length + 1));
+  await Promise.resolve();
+  expect(paragraph.dataset.kpLayout).toBe('ready');
+  expect(view.state.doc.textContent).toBe(text + '追加');
 });
 
 it.each(['detached', 'outside-paragraph', 'obsolete-offset'] as const)(
@@ -372,7 +377,9 @@ it('does not mark pending work in another paragraph complete when the local fast
     .mockImplementation(async (element, options) => measureVisibleCharacters(element, options));
   const syncMeasure = vi
     .spyOn(measurement, 'measureParagraphSync')
-    .mockImplementation((element, options) => measureVisibleCharacters(element, options));
+    .mockImplementation((element, options) =>
+      element.textContent === 'xother' ? null : measureVisibleCharacters(element, options),
+    );
   const view = typographyView(['start **bold** tail', 'other']);
   await flushEditorTypography(view);
   asyncMeasure.mockClear();
@@ -380,7 +387,8 @@ it('does not mark pending work in another paragraph complete when the local fast
   view.dispatch(view.state.tr.insertText('x', secondStart));
   view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 10)));
   await Promise.resolve();
-  expect(syncMeasure).toHaveBeenCalledTimes(1);
+  expect(syncMeasure).toHaveBeenCalledTimes(2);
+  expect(view.dom.querySelectorAll('p')[1].dataset.kpReason).toBe('editing-budget-fallback');
   expect(asyncMeasure).not.toHaveBeenCalled();
   await flushEditorTypography(view);
   expect(asyncMeasure.mock.calls.map(([element]) => element.textContent)).toEqual(['xother']);

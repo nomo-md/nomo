@@ -247,15 +247,16 @@ export async function measureParagraph(
   }
 }
 
-/** Cursor-only layout can finish in the current frame, or fall back when its budget expires. */
+/** Local editing layout can finish in the current frame within a bounded budget. */
 export function measureParagraphSync(
   element: HTMLElement,
   options: TypographyOptions,
   budgetMs = 24,
+  context?: ParagraphMeasurementContext,
 ): MeasuredParagraph | null {
   const budget = Number.isFinite(budgetMs) ? budgetMs : 24;
   if (budget <= 0) return null;
-  const batches = measureParagraphBatches(element, options, budget);
+  const batches = measureParagraphBatches(element, options, budget, undefined, context);
   try {
     let step = batches.next();
     while (!step.done) step = batches.next();
@@ -689,6 +690,7 @@ function* measureParagraphBatches(
           comfortShrink: space ? natural * 0.25 : 0,
           weight: 1,
           discardable: space || part.text === '\u00ad',
+          sourceWhitespace: space,
         });
         from = to;
         const now = performance.now();

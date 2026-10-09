@@ -15,6 +15,7 @@ import {
 } from '../../typography/measure';
 import { createTypographySolver } from '../../typography/solver';
 import { layoutParagraph } from '../../typography/knuthPlass';
+import { preserveSourceWhitespace } from '../../typography/rules';
 import { createRenderPlan, PARAGRAPH_CSS, unitStyleCss } from '../../typography/renderPlan';
 import type {
   ParagraphLayout,
@@ -252,6 +253,7 @@ function createViewController(view: EditorView) {
   let cachedDoc = view.state.doc;
   let cachedSourceGeometry = inlineSourceGeometrySnapshot(view);
   let pendingSourceLayout = false;
+  let pendingContentLayout = false;
   let sourceLayoutQueued = false;
   let dragSelectionStarted = false;
   let interaction = getTypographyInteraction();
@@ -508,51 +510,110 @@ function createViewController(view: EditorView) {
   const queueSourceLayout = () => {
     if (
       sourceLayoutQueued ||
-      !pendingSourceLayout ||
+      !(pendingSourceLayout || pendingContentLayout) ||
       destroyed ||
       isPreviewing() ||
       geometryRecovery
     )
       return;
     sourceLayoutQueued = true;
-    // PM has installed the newly visible source DOM by this checkpoint, but the
+    // PM has installed the edited/newly visible source DOM by this checkpoint, but the
     // browser has not painted it. Publish its spacing and breaks in the same frame.
     queueMicrotask(() => {
       sourceLayoutQueued = false;
-      if (!pendingSourceLayout || !canLayoutSource() || isPreviewing() || geometryRecovery) return;
+      if (
+        !(pendingSourceLayout || pendingContentLayout) ||
+        !canLayoutSource() ||
+        isPreviewing() ||
+        geometryRecovery
+      )
+        return;
+      const contentChanged = pendingContentLayout;
       pendingSourceLayout = false;
+      pendingContentLayout = false;
       const options = getTypographyOptions();
       if (!options.enabled) return;
       const value = key.getState(view.state);
       if (!value) return;
       const token = revision;
       const doc = view.state.doc;
-      const deadline = performance.now() + 32;
-      const targets = value.find().filter((decoration) => {
+      const deadline = performance.now() + (contentChanged ? 16 : 32);
+      const targets = new Map<
+        number,
+        { from: number; to: number; node: ProseMirrorNode; nativeEditing: boolean }
+      >();
+      for (const decoration of value.find(undefined, undefined, (spec) => spec.paragraph?.type.name === 'paragraph')) {
         const paragraph = decoration.spec.paragraph as ProseMirrorNode | undefined;
-        return (
+        const node = doc.nodeAt(decoration.from);
+        if (
           paragraph?.type.name === 'paragraph' &&
-          doc.nodeAt(decoration.from) === paragraph &&
+          node?.type.name === 'paragraph' &&
           decoration.spec.typographySourceGeometry !== undefined &&
-          decoration.spec.typographySourceGeometry !==
-            paragraphSourceGeometry(view, decoration.from, paragraph)
-        );
-      });
+          ((contentChanged && node !== paragraph) ||
+            decoration.spec.typographySourceGeometry !==
+              paragraphSourceGeometry(view, decoration.from, node))
+        )
+          targets.set(decoration.from, {
+            from: decoration.from,
+            to: decoration.from + node.nodeSize,
+            node,
+            nativeEditing: contentChanged && Boolean(decoration.spec.editingFallback),
+          });
+      }
+      // New/split paragraphs may have no retained node decoration. The active
+      // paragraph must still settle before paint, rather than wait for idle work.
+      if (contentChanged) {
+        const { $head } = view.state.selection;
+        if ($head.depth && $head.parent.type.name === 'paragraph') {
+          const from = $head.before();
+          if (
+            !targets.has(from) &&
+            !value
+              .find(from, from + $head.parent.nodeSize)
+              .some((decoration) => decoration.spec.paragraph === $head.parent)
+          )
+            targets.set(from, {
+              from,
+              to: from + $head.parent.nodeSize,
+              node: $head.parent,
+              nativeEditing: false,
+            });
+        }
+      }
       const changedRanges: { from: number; to: number }[] = [];
       const replacements: Decoration[] = [];
-      for (let index = 0; index < targets.length; index++) {
-        const target = targets[index];
-        const node = target.spec.paragraph as ProseMirrorNode;
+      let index = 0;
+      const activeFrom = view.state.selection.$head.depth
+        ? view.state.selection.$head.before()
+        : -1;
+      const orderedTargets = [...targets.values()];
+      if (contentChanged)
+        orderedTargets.sort(
+          (a, b) => Number(b.from === activeFrom) - Number(a.from === activeFrom),
+        );
+      for (const target of orderedTargets) {
+        const node = target.node;
         const element = view.nodeDOM(target.from);
         if (!(element instanceof HTMLElement)) continue;
         const sourceGeometry = paragraphSourceGeometry(view, target.from, node);
         const signature = paragraphSignature(element, options, sourceGeometry);
         let rendered: Decoration[] | null = null;
-        if (index < 2 && node.content.size <= 2048 && performance.now() < deadline - 4) {
+        if (
+          !target.nativeEditing &&
+          index < 2 &&
+          node.content.size <= (contentChanged ? 1024 : 2048) &&
+          performance.now() < deadline - 4
+        ) {
           try {
-            const measureBudget = Math.min(24, deadline - performance.now() - 4);
-            const measured = measureParagraphSync(element, options, measureBudget);
+            const measureBudget = Math.min(
+              contentChanged ? 10 : 24,
+              deadline - performance.now() - 4,
+            );
+            const measured = measureParagraphSync(element, options, measureBudget, {
+              cache: measureCache,
+            });
             if (measured && performance.now() < deadline) {
+              if (view.editable) measured.input = preserveSourceWhitespace(measured.input);
               const result = layoutParagraph({
                 ...measured.input,
                 timeBudgetMs: Math.min(6, deadline - performance.now()),
@@ -577,13 +638,24 @@ function createViewController(view: EditorView) {
         }
         replacements.push(
           ...(rendered ?? [
-            fallbackDecoration(target.from, node, 'source-visibility-fallback', {
-              signature,
-              sourceGeometry,
-            }),
+            fallbackDecoration(
+              target.from,
+              node,
+              contentChanged ? 'editing-budget-fallback' : 'source-visibility-fallback',
+              {
+                signature,
+                sourceGeometry,
+                editingFallback: contentChanged,
+                originalStyle:
+                  element.getAttribute('data-kp-original-style') ??
+                  element.getAttribute('style') ??
+                  '',
+              },
+            ),
           ]),
         );
         changedRanges.push({ from: target.from, to: target.to });
+        index++;
       }
       if (
         !changedRanges.length ||
@@ -798,7 +870,8 @@ function createViewController(view: EditorView) {
               d.from === target.pos &&
               d.to === target.pos + target.node.nodeSize &&
               d.spec.typographySignature === signature &&
-              d.spec.paragraph === target.node,
+              d.spec.paragraph === target.node &&
+              !d.spec.editingFallback,
           )
         ) {
           if (performance.now() - yieldedAt >= 6) {
@@ -813,6 +886,7 @@ function createViewController(view: EditorView) {
           const measured = await measureParagraph(target.element, options, stale, {
             cache: measureCache,
           });
+          if (measured && view.editable) measured.input = preserveSourceWhitespace(measured.input);
           timings.measureMs += performance.now() - measureStart;
           if (stale()) break;
           if (!current(target, signature)) {
@@ -964,26 +1038,10 @@ function createViewController(view: EditorView) {
           !['Backspace', 'Delete', 'Enter', 'Process'].includes(keyboard.key)))
     )
       return;
-    // Content editing may merge/detach measured text nodes. Cancel in-flight
-    // plans before removing their decoration DOM, even if the doc is unchanged.
+    // Cancel obsolete bindings, but keep mapped spacing/breaks until the local
+    // post-transaction layout replaces them before paint. Clearing them here
+    // makes ordinary mixed text shrink to native spacing and then expand again.
     schedule();
-    const selection = view.state.selection;
-    const value = key.getState(view.state);
-    if (value) {
-      const from = selection.$from.start();
-      const to = selection.$to.end();
-      const remove = value.find(Math.max(0, from - 1), to + 1);
-      if (remove.length) {
-        publishing = true;
-        try {
-          view.dispatch(
-            view.state.tr.setMeta(meta, value.remove(remove)).setMeta('addToHistory', false),
-          );
-        } finally {
-          publishing = false;
-        }
-      }
-    }
   };
   const compositionStart = () => {
     composing = true;
@@ -1253,6 +1311,7 @@ function createViewController(view: EditorView) {
       if (view.state.doc !== cachedDoc) {
         cachedDoc = view.state.doc;
         pendingSourceLayout = false;
+        pendingContentLayout = view.editable;
         schedule();
       }
       queueSourceLayout();
@@ -1265,7 +1324,12 @@ function fallbackDecoration(
   pos: number,
   node: ProseMirrorNode,
   reason: string,
-  cache?: { signature: string; sourceGeometry: string },
+  cache?: {
+    signature: string;
+    sourceGeometry: string;
+    editingFallback?: boolean;
+    originalStyle?: string;
+  },
 ) {
   return Decoration.node(
     pos,
@@ -1273,12 +1337,19 @@ function fallbackDecoration(
     {
       'data-kp-layout': 'fallback',
       'data-kp-reason': reason,
+      ...(cache?.editingFallback
+        ? {
+            'data-kp-original-style': cache.originalStyle ?? '',
+            style: 'white-space:break-spaces;overflow-wrap:anywhere;',
+          }
+        : {}),
     },
     cache
       ? {
           typographySignature: cache.signature,
           typographySourceGeometry: cache.sourceGeometry,
           paragraph: node,
+          editingFallback: cache.editingFallback,
         }
       : undefined,
   );

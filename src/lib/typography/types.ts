@@ -33,6 +33,8 @@ export interface LayoutItem {
   code?: boolean;
   hyphenatable?: boolean;
   discardable?: boolean;
+  /** Literal text whitespace, unlike automatic glue or a projected soft break. */
+  sourceWhitespace?: boolean;
   trimStart?: number;
   trimEnd?: number;
   hang?: number;
@@ -59,6 +61,8 @@ export interface ParagraphInput {
   lineWidths?: number[];
   minLineHeight: number;
   hanging: boolean;
+  /** Keep literal edge whitespace at its measured advance in an editable view. */
+  editableWhitespace?: boolean;
   alignment?: 'auto' | 'justify' | 'ragged';
   /** Maximum line badness, including the largest actual gap adjustment. */
   tolerance?: number;

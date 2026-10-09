@@ -53,6 +53,7 @@ export function evaluateLine(
   point: BreakPoint,
   lineIndex: number,
   measureRange?: (first: number, last: number) => RangeMetrics,
+  measureFlexibleRange?: (first: number, last: number) => RangeMetrics,
 ): LineLayout | null {
   const { items } = input;
   const end = point.at;
@@ -60,6 +61,14 @@ export function evaluateLine(
   let last = end;
   while (first < last && items[first].discardable) first++;
   while (last > first && items[last - 1].discardable) last--;
+  let flexibleStart = first;
+  let flexibleEnd = last;
+  if (input.editableWhitespace) {
+    // Edge source spaces occupy real caret positions. Interior word spaces
+    // retain the original justification capacities and quality scoring.
+    while (flexibleStart < flexibleEnd && items[flexibleStart].sourceWhitespace) flexibleStart++;
+    while (flexibleEnd > flexibleStart && items[flexibleEnd - 1].sourceWhitespace) flexibleEnd--;
+  }
   const width =
     (input.lineWidths?.[lineIndex] ?? input.width) -
     (lineIndex === 0 ? (input.firstLineIndent ?? 0) : 0);
@@ -75,19 +84,32 @@ export function evaluateLine(
   let shrink = 0;
   let ascent = input.minLineHeight * 0.75;
   let descent = input.minLineHeight * 0.25;
+  const metrics =
+    flexibleStart === first && flexibleEnd === last
+      ? measureRange?.(first, last)
+      : measureFlexibleRange?.(flexibleStart, flexibleEnd);
   if (measureRange) {
-    const metrics = measureRange(first, last);
-    naturalWidth += metrics.width;
-    stretch = metrics.stretch;
-    shrink = metrics.shrink;
-    ascent = Math.max(ascent, metrics.ascent);
-    descent = Math.max(descent, metrics.descent);
+    const whole = measureRange(first, last);
+    naturalWidth += whole.width;
+    if (metrics) {
+      stretch = metrics.stretch;
+      shrink = metrics.shrink;
+    } else {
+      for (let i = flexibleStart; i < flexibleEnd; i++) {
+        stretch += items[i].stretch ?? 0;
+        shrink += items[i].shrink ?? 0;
+      }
+    }
+    ascent = Math.max(ascent, whole.ascent);
+    descent = Math.max(descent, whole.descent);
   } else {
     for (let i = first; i < last; i++) {
       const item = items[i];
       naturalWidth += item.width;
-      stretch += item.stretch ?? 0;
-      shrink += item.shrink ?? 0;
+      if (i >= flexibleStart && i < flexibleEnd) {
+        stretch += item.stretch ?? 0;
+        shrink += item.shrink ?? 0;
+      }
       ascent = Math.max(ascent, item.ascent);
       descent = Math.max(descent, item.descent);
     }
@@ -103,7 +125,6 @@ export function evaluateLine(
   }
   if (width <= 0 || naturalWidth < -EPSILON) return null;
   const tolerance = input.tolerance ?? 10_000;
-  const metrics = measureRange?.(first, last);
   if (!ragged && tolerance >= 100 && metrics?.uniformWeight) {
     // With equal weights, allocation is proportional to capacity. Reject gaps
     // that cannot meet the same comfort limit before allocating candidate arrays.
@@ -120,15 +141,16 @@ export function evaluateLine(
     if (adjustments) return adjustments;
     adjustments = Array(end - start).fill(0) as number[];
     if (Math.abs(adjustmentDelta) > EPSILON) {
-      const inner = allocate(input, first, last, adjustmentDelta);
-      for (let i = first; i < last; i++) adjustments[i - start] = inner[i - first];
+      const inner = allocate(input, flexibleStart, flexibleEnd, adjustmentDelta);
+      for (let i = flexibleStart; i < flexibleEnd; i++)
+        adjustments[i - start] = inner[i - flexibleStart];
     }
     for (let i = start; i < first; i++) adjustments[i - start] = -items[i].width;
     for (let i = last; i < end; i++) adjustments[i - start] = -items[i].width;
     return adjustments;
   };
   let badness = 100 * Math.abs(ratio) ** 3;
-  for (let i = first; Math.abs(adjustmentDelta) > EPSILON && i < last; i++) {
+  for (let i = flexibleStart; Math.abs(adjustmentDelta) > EPSILON && i < flexibleEnd; i++) {
     const adjustment = getAdjustments()[i - start];
     const comfort = adjustment >= 0 ? items[i].comfortStretch : items[i].comfortShrink;
     if (comfort !== undefined && Math.abs(adjustment) > EPSILON) {
@@ -244,8 +266,9 @@ export function layoutParagraph(input: ParagraphInput): ParagraphLayout {
   // Endpoints are visited in order. For each start, accumulate each item once
   // instead of rescanning the same range for every endpoint and fitness state.
   const ranges = new Map<number, RangeMetrics>();
-  const measureRange = (first: number, last: number) => {
-    let range = ranges.get(first);
+  const flexibleRanges = new Map<number, RangeMetrics>();
+  const measureRange = (first: number, last: number, cache = ranges) => {
+    let range = cache.get(first);
     if (!range) {
       range = {
         end: first,
@@ -258,7 +281,7 @@ export function layoutParagraph(input: ParagraphInput): ParagraphLayout {
         stretchComfortRatio: 0,
         shrinkComfortRatio: 0,
       };
-      ranges.set(first, range);
+      cache.set(first, range);
     }
     while (range.end < last) {
       const item = input.items[range.end++];
@@ -292,7 +315,9 @@ export function layoutParagraph(input: ParagraphInput): ParagraphLayout {
       if (++candidates > budget || (candidates % 128 === 0 && clock() > deadline)) {
         return { status: 'fallback', reason: 'budget-exceeded', candidates };
       }
-      const line = evaluateLine(input, state.at, point, state.count, measureRange);
+      const line = evaluateLine(input, state.at, point, state.count, measureRange, (first, last) =>
+        measureRange(first, last, flexibleRanges),
+      );
       if (!line) continue;
       let cost = state.cost + (10 + line.badness) ** 2;
       if (!point.required) cost += point.penalty >= 0 ? point.penalty ** 2 : -(point.penalty ** 2);
