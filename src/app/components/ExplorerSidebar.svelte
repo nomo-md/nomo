@@ -7,6 +7,7 @@
     FilePlus,
     RefreshCw,
     ChevronsUp,
+    Search,
   } from '@lucide/svelte';
   import { slide } from 'svelte/transition';
   import type { FileTreeNode } from '../types';
@@ -184,6 +185,16 @@
   let lastRenderedFolderPath = currentFolderPath;
   let activeExplorerScrollToken = 0;
   let pendingActiveExplorerScrollSignature = '';
+  type ExplorerNodeRow = Extract<ExplorerTreeRow, { node: FileTreeNode }>;
+  let speedSearchInput: HTMLInputElement;
+  let speedSearchDraft = '';
+  let speedSearchQuery = '';
+  let speedSearchComposing = false;
+  let speedSearchPath = '';
+  let speedSearchFocusedPath = '';
+  let speedSearchTabNavigation = false;
+  let speedSearchScrollToken = 0;
+  let speedSearchScrollSignature = '';
 
   $: flattenedRows = buildVisibleExplorerRows(
     folderTree,
@@ -195,8 +206,46 @@
   $: visibleExplorerRowsSignature = flattenedRows.map((row) => row.key).join('\u001f');
   $: hasStandaloneFile = fileName.trim().length > 0 && filePath.trim().length > 0;
   $: activeExplorerPath = nativePath ?? previewNativePath;
+  $: speedSearchRows = !rootFolderExpanded
+    ? []
+    : currentFolderPath
+      ? flattenedRows.filter((row): row is ExplorerNodeRow => row.type !== 'creating')
+      : hasStandaloneFile
+        ? [
+            {
+              key: filePath,
+              type: 'file' as const,
+              node: { name: fileName, path: filePath, is_dir: false, children: [] },
+              depth: 0,
+              top: 0,
+            },
+          ]
+        : [];
+  $: speedSearchNormalizedQuery = speedSearchQuery.normalize('NFC').toLowerCase();
+  $: speedSearchMatches = speedSearchQuery
+    ? speedSearchRows.filter((row) =>
+        row.node.name.normalize('NFC').toLowerCase().includes(speedSearchNormalizedQuery),
+      )
+    : [];
+  $: if (!speedSearchMatches.some((row) => row.node.path === speedSearchPath)) {
+    speedSearchPath = speedSearchMatches[0]?.node.path ?? '';
+  }
+  $: speedSearchIndex = speedSearchMatches.findIndex((row) => row.node.path === speedSearchPath);
+  $: if (speedSearchPath && !speedSearchComposing) {
+    const signature = [
+      speedSearchQuery,
+      speedSearchPath,
+      visibleExplorerRowsSignature,
+      fileTreeViewportHeight,
+    ].join('\u001e');
+    if (signature !== speedSearchScrollSignature) {
+      speedSearchScrollSignature = signature;
+      revealSpeedSearchMatch(speedSearchPath);
+    }
+  }
   $: if (currentFolderPath !== lastRenderedFolderPath) {
     lastRenderedFolderPath = currentFolderPath;
+    clearSpeedSearch();
     resetFileTreeScrollState();
   }
   $: {
@@ -222,6 +271,8 @@
     ].join('\u001e');
     if (
       rootFolderExpanded &&
+      !speedSearchQuery &&
+      !speedSearchComposing &&
       activeExplorerPath &&
       activeExplorerPath !== lastAutoScrolledExplorerPath &&
       flattenedRows.length > 0
@@ -233,6 +284,189 @@
   function handleFileTreeScroll(event: Event) {
     const scrollContainer = event.currentTarget as HTMLElement;
     fileTreeScrollTop = Math.max(0, scrollContainer.scrollTop);
+  }
+
+  function clearSpeedSearch() {
+    speedSearchDraft = '';
+    speedSearchQuery = '';
+    speedSearchComposing = false;
+    speedSearchPath = '';
+    speedSearchScrollSignature = '';
+    speedSearchScrollToken += 1;
+    if (speedSearchInput) speedSearchInput.value = '';
+  }
+
+  function focusSpeedSearch() {
+    speedSearchInput?.focus({ preventScroll: true });
+  }
+
+  function handleExplorerSearchClick(event: MouseEvent) {
+    const target = event.target as HTMLElement;
+    if (target.closest('input, textarea, [contenteditable], .action-btn')) return;
+    clearSpeedSearch();
+    speedSearchFocusedPath =
+      target.closest<HTMLElement>('[data-explorer-path]')?.dataset.explorerPath ?? '';
+    focusSpeedSearch();
+  }
+
+  function handleExplorerSearchFocus(event: FocusEvent) {
+    if (speedSearchTabNavigation) {
+      speedSearchTabNavigation = false;
+      return;
+    }
+    const target = event.target as HTMLElement;
+    if (
+      target === speedSearchInput ||
+      target.closest('input, textarea, [contenteditable], .action-btn')
+    ) return;
+    speedSearchFocusedPath =
+      target.closest<HTMLElement>('[data-explorer-path]')?.dataset.explorerPath ?? '';
+    // 在键入前准备可编辑的接收层，让中文输入法从第一个按键开始就有候选窗口。
+    focusSpeedSearch();
+  }
+
+  function handleExplorerSearchBlur(event: FocusEvent) {
+    if (!(event.relatedTarget instanceof Node) || !fileTreeElement?.contains(event.relatedTarget)) {
+      speedSearchTabNavigation = false;
+      clearSpeedSearch();
+    }
+  }
+
+  function handleSpeedSearchInput(event: Event) {
+    if (document.activeElement !== speedSearchInput) return;
+    speedSearchDraft = (event.currentTarget as HTMLInputElement).value;
+    if (!speedSearchComposing && !(event as InputEvent).isComposing) {
+      commitSpeedSearchQuery();
+    }
+  }
+
+  function commitSpeedSearchQuery() {
+    speedSearchQuery = speedSearchDraft;
+    speedSearchPath = '';
+    cancelPendingExplorerPreview();
+    activeExplorerScrollToken += 1;
+    pendingActiveExplorerScrollSignature = '';
+  }
+
+  function cancelPendingExplorerPreview() {
+    if (pendingClickTimer) clearTimeout(pendingClickTimer);
+    pendingClickTimer = null;
+    pendingClickPath = null;
+  }
+
+  function handleSpeedSearchCompositionStart() {
+    speedSearchComposing = true;
+    cancelPendingExplorerPreview();
+    activeExplorerScrollToken += 1;
+    pendingActiveExplorerScrollSignature = '';
+  }
+
+  function handleSpeedSearchCompositionEnd(event: CompositionEvent) {
+    if (document.activeElement !== speedSearchInput) {
+      clearSpeedSearch();
+      return;
+    }
+    speedSearchComposing = false;
+    speedSearchDraft = (event.currentTarget as HTMLInputElement).value;
+    commitSpeedSearchQuery();
+  }
+
+  function handleExplorerSearchKeydown(event: KeyboardEvent) {
+    const target = event.target as HTMLElement;
+    if (
+      target !== speedSearchInput &&
+      target.closest('input, textarea, [contenteditable], .action-btn')
+    ) return;
+    // 选词的方向键、回车和 Escape 全部留给输入法，不能误打开文件。
+    if (speedSearchComposing || event.isComposing || event.keyCode === 229) {
+      if (target !== speedSearchInput) focusSpeedSearch();
+      return;
+    }
+    if (event.key === 'Tab') {
+      speedSearchTabNavigation = true;
+      clearSpeedSearch();
+      return;
+    }
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === 'Escape' && speedSearchDraft) {
+      event.preventDefault();
+      event.stopPropagation();
+      clearSpeedSearch();
+    } else if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && speedSearchQuery) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (speedSearchMatches.length) {
+        const offset = event.key === 'ArrowDown' ? 1 : -1;
+        const index =
+          (speedSearchIndex + offset + speedSearchMatches.length) % speedSearchMatches.length;
+        speedSearchPath = speedSearchMatches[index].node.path;
+      }
+    } else if (event.key === 'Enter' && (speedSearchQuery || target === speedSearchInput)) {
+      event.preventDefault();
+      event.stopPropagation();
+      const row = speedSearchQuery
+        ? speedSearchMatches[speedSearchIndex]
+        : speedSearchRows.find((item) => item.node.path === speedSearchFocusedPath);
+      if (speedSearchQuery && !row) return;
+      if (row) speedSearchFocusedPath = row.node.path;
+      cancelPendingExplorerPreview();
+      clearSpeedSearch();
+      if (row?.node.is_dir) {
+        if (folderCanExpand(row.node)) toggleFolderCollapse(row.node.path);
+      } else if (row) {
+        void openPreviewFile(row.node.path);
+      } else if (
+        speedSearchFocusedPath &&
+        speedSearchFocusedPath === (currentFolderPath || getDirectoryLabel(filePath))
+      ) {
+        toggleRootFolder();
+      }
+    } else if (target !== speedSearchInput && event.key.length === 1) {
+      event.preventDefault();
+      focusSpeedSearch();
+      speedSearchDraft += event.key;
+      speedSearchInput.value = speedSearchDraft;
+      commitSpeedSearchQuery();
+    }
+  }
+
+  async function revealSpeedSearchMatch(path: string) {
+    const token = ++speedSearchScrollToken;
+    await tick();
+    if (token !== speedSearchScrollToken || path !== speedSearchPath || !fileTreeElement) return;
+    const row = speedSearchMatches.find((item) => item.node.path === path);
+    if (!row || fileTreeViewportHeight <= 0) return;
+    const tree = fileTreeElement.querySelector<HTMLElement>('.virtual-tree-viewport');
+    const treeTop = tree
+      ? tree.getBoundingClientRect().top -
+        fileTreeElement.getBoundingClientRect().top +
+        fileTreeElement.scrollTop
+      : 0;
+    const rowTop = treeTop + row.top;
+    const viewportTop = fileTreeElement.scrollTop;
+    // 为顶部临时提示留出空间，坐标仍取自全部展开行而非当前虚拟切片。
+    if (rowTop < viewportTop + 38) {
+      fileTreeElement.scrollTop = Math.max(0, rowTop - 38);
+    } else if (
+      rowTop + TREE_ROW_HEIGHT > viewportTop + fileTreeViewportHeight - TREE_BOTTOM_PADDING
+    ) {
+      fileTreeElement.scrollTop =
+        rowTop + TREE_ROW_HEIGHT - fileTreeViewportHeight + TREE_BOTTOM_PADDING;
+    }
+    syncFileTreeScrollTopFromDom();
+  }
+
+  function getSpeedSearchNameParts(name: string, queryText: string) {
+    const text = name.normalize('NFC');
+    const query = queryText.normalize('NFC');
+    const start = query ? text.toLowerCase().indexOf(query.toLowerCase()) : -1;
+    return start < 0
+      ? { before: text, match: '', after: '' }
+      : {
+          before: text.slice(0, start),
+          match: text.slice(start, start + query.length),
+          after: text.slice(start + query.length),
+        };
   }
 
   function resetFileTreeScrollState() {
@@ -269,7 +503,13 @@
     if (token !== activeExplorerScrollToken) {
       return;
     }
-    if (!fileTreeElement || path !== activeExplorerPath || !rootFolderExpanded) {
+    if (
+      !fileTreeElement ||
+      path !== activeExplorerPath ||
+      !rootFolderExpanded ||
+      speedSearchQuery ||
+      speedSearchComposing
+    ) {
       clearPendingActiveExplorerScroll(signature);
       return;
     }
@@ -678,17 +918,47 @@
   }
 
   onDestroy(clearPendingRename);
+  onDestroy(() => {
+    speedSearchScrollToken += 1;
+    cancelPendingExplorerPreview();
+  });
 </script>
 
 {#key interfaceLocale}
 <aside class="rail" aria-label={t.explorer()} data-interface-locale={interfaceLocale}>
+  {#if speedSearchDraft || speedSearchComposing}
+    <div
+      class="explorer-speed-search-hint"
+      class:no-match={!speedSearchComposing && speedSearchMatches.length === 0}
+      role="status"
+      aria-live="polite"
+    >
+      <Search size={12} aria-hidden="true" />
+      <span class="explorer-speed-search-query" dir="auto">{speedSearchDraft || '…'}</span>
+      <span class="explorer-speed-search-count">
+        {#if speedSearchComposing}
+          …
+        {:else if speedSearchMatches.length}
+          {speedSearchIndex + 1}/{speedSearchMatches.length}
+        {:else}
+          {t.noSearchResults()}
+        {/if}
+      </span>
+    </div>
+  {/if}
+  <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
   <section
     bind:this={fileTreeElement}
     class="file-tree"
     aria-label={t.folderStructure()}
+    title={t.explorerSpeedSearchHint()}
     bind:clientHeight={fileTreeViewportHeight}
     on:scroll={handleFileTreeScroll}
     on:contextmenu={handleExplorerBlankContextMenu}
+    on:click={handleExplorerSearchClick}
+    on:focusin={handleExplorerSearchFocus}
+    on:focusout={handleExplorerSearchBlur}
+    on:keydown={handleExplorerSearchKeydown}
   >
     <div class="tree-root">
       {#if currentFolderPath}
@@ -699,6 +969,7 @@
           class="tree-folder-root-title"
           class:collapsed={!rootFolderExpanded}
           title={currentFolderPath}
+          data-explorer-path={currentFolderPath}
           on:click={toggleRootFolder}
           on:contextmenu={(event) => showExplorerContextMenu(event, buildRootContextMenuItems())}
         >
@@ -797,6 +1068,7 @@
               <div class="tree-virtual-row" style="transform: translateY({row.top}px)">
                 {#if row.type === 'folder'}
                   {@const node = row.node}
+                  {@const nameParts = getSpeedSearchNameParts(node.name, speedSearchQuery)}
                   {@const isExpanded = expandedFolders.has(node.path)}
                   {@const hasChildren = folderCanExpand(node)}
                   <div
@@ -811,8 +1083,10 @@
                       class="tree-folder nested-dir"
                       class:collapsed={!isExpanded}
                       class:empty={!hasChildren}
+                      class:speed-search-current={speedSearchPath === node.path}
                       style="padding-left: {12 + row.depth * 12}px"
                       title={node.path}
+                      data-explorer-path={node.path}
                       on:click={() => hasChildren && toggleFolderCollapse(node.path)}
                       on:dblclick={(event) => handleFolderDoubleClick(node, event)}
                       on:contextmenu={(event) =>
@@ -858,7 +1132,9 @@
                           />
                         </span>
                       {:else}
-                        <span class="node-name">{node.name}</span>
+                        <span class="node-name">{nameParts.before}{#if nameParts.match}<mark
+                              class="explorer-speed-search-match">{nameParts.match}</mark
+                            >{/if}{nameParts.after}</span>
                         <div class="folder-actions">
                           <button
                             type="button"
@@ -903,6 +1179,7 @@
                   </div>
                 {:else}
                   {@const node = row.node}
+                  {@const nameParts = getSpeedSearchNameParts(node.name, speedSearchQuery)}
                   {#if renamingPath === node.path}
                     <div
                       class="tree-file tree-file-renaming"
@@ -928,14 +1205,18 @@
                       class:active={isActiveFilePath(node.path)}
                       class:selected={isSelectedFilePath(node.path)}
                       class:preview={isPreviewFilePath(node.path)}
+                      class:speed-search-current={speedSearchPath === node.path}
                       style="padding-left: {34 + row.depth * 12}px"
                       title={node.path}
+                      data-explorer-path={node.path}
                       on:click={() => handleFileClick(node.path)}
                       on:dblclick={() => handleFileDblClick(node.path)}
                       on:contextmenu={(event) => handleFileContextMenu(node, event)}
                     >
                       <FileText size={13} />
-                      <span>{node.name}</span>
+                      <span>{nameParts.before}{#if nameParts.match}<mark
+                            class="explorer-speed-search-match">{nameParts.match}</mark
+                          >{/if}{nameParts.after}</span>
                     </button>
                   {/if}
                 {/if}
@@ -951,6 +1232,7 @@
           class="tree-folder-root-title"
           class:collapsed={!rootFolderExpanded}
           title={getDirectoryLabel(filePath)}
+          data-explorer-path={getDirectoryLabel(filePath)}
           on:click={toggleRootFolder}
           on:contextmenu={(event) =>
             showExplorerContextMenu(event, buildStandaloneContextMenuItems())}
@@ -994,20 +1276,40 @@
         </div>
 
         {#if rootFolderExpanded}
+          {@const nameParts = getSpeedSearchNameParts(fileName, speedSearchQuery)}
           <button
             type="button"
             class="tree-file active"
+            class:speed-search-current={speedSearchPath === filePath}
             title={filePath}
+            data-explorer-path={filePath}
             use:pulseOnChange={dirty}
             on:contextmenu={(event) =>
               showExplorerContextMenu(event, buildStandaloneContextMenuItems())}
           >
             <FileText size={13} />
-            <span>{fileName}</span>
+            <span>{nameParts.before}{#if nameParts.match}<mark
+                  class="explorer-speed-search-match">{nameParts.match}</mark
+                >{/if}{nameParts.after}</span>
           </button>
         {/if}
       {/if}
     </div>
+    {#if currentFolderPath || hasStandaloneFile}
+      <input
+        bind:this={speedSearchInput}
+        bind:value={speedSearchDraft}
+        class="explorer-speed-search-input"
+        aria-label={t.explorerSpeedSearchLabel()}
+        tabindex="-1"
+        autocomplete="off"
+        autocapitalize="off"
+        spellcheck="false"
+        on:input={handleSpeedSearchInput}
+        on:compositionstart={handleSpeedSearchCompositionStart}
+        on:compositionend={handleSpeedSearchCompositionEnd}
+      />
+    {/if}
   </section>
   <button
     type="button"
