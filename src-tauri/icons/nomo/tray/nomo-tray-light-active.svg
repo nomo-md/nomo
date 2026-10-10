@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <title>Nomo 托盘图标 · light · active</title>
+  <rect x="1.5" y="1.5" width="21" height="21" rx="4.5" fill="#fefefe" stroke="#c2c8d0" stroke-width="1"/>
+  <path d="M 7 14 V 5.8 L 17 14 V 5.8" fill="none" stroke="#252c36" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="5.5" y="18.5" width="13" height="1.5" rx="0.75" fill="#4d86fd"/>
+</svg>

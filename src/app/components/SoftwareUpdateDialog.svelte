@@ -3,7 +3,8 @@
   import { onMount } from 'svelte';
   import type { SoftwareUpdateSnapshot } from '../../lib/desktop/tauriUpdater';
   import { openExternalLink } from '../../lib/desktop/tauriStorage';
-  import nomoLogoLight from '../../../src-tauri/icons/nomo/source/nomo-app-light-128.png?url';
+  import nomoLogoLight from '../../../src-tauri/icons/nomo/source/nomo-app-light.svg?url';
+  import nomoLogoDark from '../../../src-tauri/icons/nomo/source/nomo-app-dark.svg?url';
   import { t } from '../i18n';
   import { renderSoftwareUpdateReleaseNotes } from '../services/softwareUpdateReleaseNotes';
 
@@ -133,7 +134,10 @@
     on:keydown={handleNotesKeydown}
   >
     <header class="dialog-header">
-      <div class="app-mark"><img src={nomoLogoLight} alt="" /></div>
+      <div class="app-mark" aria-hidden="true">
+        <img class="logo-light" src={nomoLogoLight} alt="" draggable="false" />
+        <img class="logo-dark" src={nomoLogoDark} alt="" draggable="false" />
+      </div>
       <div class="dialog-title">
         <h2 id="software-update-dialog-title">
           {t.softwareUpdateReleaseTitle({ version })}
@@ -263,14 +267,25 @@
     width: 48px;
     height: 48px;
     overflow: hidden;
-    border: 1px solid var(--md-editor-border);
     border-radius: 11px;
-    background: white;
   }
 
   .app-mark img {
     width: 100%;
     height: 100%;
+    display: block;
+    object-fit: contain;
+  }
+
+  .app-mark .logo-dark {
+    display: none;
+  }
+
+  :global(:root[data-theme='dark']) .app-mark .logo-light {
+    display: none;
+  }
+
+  :global(:root[data-theme='dark']) .app-mark .logo-dark {
     display: block;
   }
 

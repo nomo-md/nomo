@@ -84,8 +84,8 @@
   } from '../services/softwareUpdate';
   import SoftwareUpdateDialog from './SoftwareUpdateDialog.svelte';
   import WindowsCaptionControls from './WindowsCaptionControls.svelte';
-  import nomoLogoDark from '../../../src-tauri/icons/nomo/source/nomo-app-dark-128.png?url';
-  import nomoLogoLight from '../../../src-tauri/icons/nomo/source/nomo-app-light-128.png?url';
+  import nomoLogoDark from '../../../src-tauri/icons/nomo/source/nomo-app-dark.svg?url';
+  import nomoLogoLight from '../../../src-tauri/icons/nomo/source/nomo-app-light.svg?url';
 
   const GITHUB_REPOSITORY_URL = 'https://github.com/nomo-md/nomo';
   const GITHUB_ISSUE_URL = 'https://github.com/nomo-md/nomo/issues/new/choose';

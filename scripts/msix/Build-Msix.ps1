@@ -280,17 +280,6 @@ if (Test-Path -LiteralPath $resourcesPath) {
 $shellOutput = Join-Path $repoRoot "src-tauri\windows-shell-extension\bin\x64\$Configuration"
 Copy-Item -LiteralPath (Join-Path $shellOutput 'NomoShellExtension.dll') -Destination (Join-Path $stagingRoot 'NomoShellExtension.dll')
 
-$assetsDirectory = Join-Path $stagingRoot 'Assets'
-New-Item -ItemType Directory -Path $assetsDirectory -Force | Out-Null
-foreach ($asset in @(
-    'StoreLogo.png',
-    'Square44x44Logo.png',
-    'Square71x71Logo.png',
-    'Square150x150Logo.png'
-)) {
-    Copy-Item -LiteralPath (Join-Path $repoRoot "src-tauri\icons\$asset") -Destination (Join-Path $assetsDirectory $asset)
-}
-
 $manifest = Get-Content -LiteralPath $manifestTemplatePath -Raw
 $replacements = @{
     '{{PACKAGE_NAME}}' = [Security.SecurityElement]::Escape([string]$identity.name)
@@ -393,6 +382,8 @@ if (-not $fullTrustCapability) {
     throw '生成的 AppxManifest.xml 缺少 runFullTrust。'
 }
 
+& (Join-Path $PSScriptRoot 'Build-IconResources.ps1') -PackageRoot $stagingRoot -MakePriPath (Resolve-WindowsSdkTool 'makepri.exe')
+
 $makeAppx = Resolve-WindowsSdkTool 'makeappx.exe'
 $signTool = Resolve-WindowsSdkTool 'signtool.exe'
 $modeSuffix = if ($Mode -eq 'Dev') { 'DEV-NOT-FOR-STORE' } else { 'STORE' }
@@ -410,7 +401,7 @@ Reset-TaskDirectory $packageValidationRoot
 if ($LASTEXITCODE -ne 0) {
     throw "MakeAppx 回读验证失败，退出码：$LASTEXITCODE"
 }
-foreach ($requiredPackageFile in @('AppxManifest.xml', 'nomo.exe', 'NomoShellExtension.dll')) {
+foreach ($requiredPackageFile in @('AppxManifest.xml', 'nomo.exe', 'NomoShellExtension.dll', 'resources.pri')) {
     if (-not (Test-Path -LiteralPath (Join-Path $packageValidationRoot $requiredPackageFile))) {
         throw "MSIX 回读验证缺少必要文件：$requiredPackageFile"
     }

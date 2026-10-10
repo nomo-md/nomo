@@ -14,19 +14,19 @@ const TRAY_OPEN_ID: &str = "tray-open-main-window";
 const TRAY_EXIT_ID: &str = "tray-exit-app";
 const TRAY_WINDOW_PREFIX: &str = "tray-window:";
 const TRAY_DARK_ACTIVE_ICON_BYTES: &[u8] =
-    include_bytes!("../../icons/nomo/tray/nomo-tray-dark-active-24-preview.png");
+    include_bytes!("../../icons/nomo/tray/nomo-tray-dark-active-48.png");
 const TRAY_DARK_INACTIVE_ICON_BYTES: &[u8] =
-    include_bytes!("../../icons/nomo/tray/nomo-tray-dark-inactive-24-preview.png");
+    include_bytes!("../../icons/nomo/tray/nomo-tray-dark-inactive-48.png");
 const TRAY_LIGHT_ACTIVE_ICON_BYTES: &[u8] =
-    include_bytes!("../../icons/nomo/tray/nomo-tray-light-active-24-preview.png");
+    include_bytes!("../../icons/nomo/tray/nomo-tray-light-active-48.png");
 const TRAY_LIGHT_INACTIVE_ICON_BYTES: &[u8] =
-    include_bytes!("../../icons/nomo/tray/nomo-tray-light-inactive-24-preview.png");
+    include_bytes!("../../icons/nomo/tray/nomo-tray-light-inactive-48.png");
 #[cfg(target_os = "macos")]
 const WINDOW_LIGHT_ICON_BYTES: &[u8] =
-    include_bytes!("../../icons/nomo/macos/nomo-app-light-256.png");
+    include_bytes!("../../icons/nomo/macos/nomo-app-light-1024.png");
 #[cfg(target_os = "macos")]
 const WINDOW_DARK_ICON_BYTES: &[u8] =
-    include_bytes!("../../icons/nomo/macos/nomo-app-dark-256.png");
+    include_bytes!("../../icons/nomo/macos/nomo-app-dark-1024.png");
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TrayTheme {

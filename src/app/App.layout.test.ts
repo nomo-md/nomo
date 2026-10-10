@@ -650,7 +650,7 @@ describe('App outline layout', () => {
     );
     expect(
       readFileSync(resolve(__dirname, '../../scripts/compile-macos-appicon.sh'), 'utf-8'),
-    ).toContain('sips", "-z", "1024", "1024"');
+    ).toContain('nomo-app-light-catalog-1024.png');
     expect(readFileSync(resolve(__dirname, '../../package.json'), 'utf-8')).toContain(
       'bash scripts/compile-macos-appicon.sh',
     );
@@ -1210,15 +1210,15 @@ describe('App outline layout', () => {
     expect(tauriLibSource).toContain('WindowEvent::CloseRequested');
     expect(tauriTraySource).toContain('TrayIconBuilder::with_id');
     expect(tauriTraySource).toContain('i18n::app_text(app, "tray_open")');
-    expect(tauriTraySource).toContain('nomo-tray-dark-active-24-preview.png');
-    expect(tauriTraySource).toContain('nomo-tray-dark-inactive-24-preview.png');
-    expect(tauriTraySource).toContain('nomo-tray-light-active-24-preview.png');
-    expect(tauriTraySource).toContain('nomo-tray-light-inactive-24-preview.png');
+    expect(tauriTraySource).toContain('nomo-tray-dark-active-48.png');
+    expect(tauriTraySource).toContain('nomo-tray-dark-inactive-48.png');
+    expect(tauriTraySource).toContain('nomo-tray-light-active-48.png');
+    expect(tauriTraySource).toContain('nomo-tray-light-inactive-48.png');
     expect(tauriTraySource).toContain('set_tray_active');
     expect(tauriTraySource).toContain('sync_tray_active_with_window_visibility');
     expect(tauriTraySource).toContain('set_desktop_icon_theme');
-    expect(tauriTraySource).toContain('nomo/macos/nomo-app-light-256.png');
-    expect(tauriTraySource).toContain('nomo/macos/nomo-app-dark-256.png');
+    expect(tauriTraySource).toContain('nomo/macos/nomo-app-light-1024.png');
+    expect(tauriTraySource).toContain('nomo/macos/nomo-app-dark-1024.png');
     expect(tauriWindowCommandsSource).toContain('get_desktop_system_theme');
     expect(tauriLibSource).toContain('crate::window::commands::get_desktop_system_theme');
     expect(tauriTraySource).toContain('apply_window_icons');

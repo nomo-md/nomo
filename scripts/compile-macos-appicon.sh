@@ -8,12 +8,12 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LIGHT="$ROOT/src-tauri/icons/nomo/macos/nomo-app-light-256.png"
-DARK="$ROOT/src-tauri/icons/nomo/macos/nomo-app-dark-256.png"
+LIGHT="$ROOT/src-tauri/icons/nomo/macos/nomo-app-light-catalog-1024.png"
+DARK="$ROOT/src-tauri/icons/nomo/macos/nomo-app-dark-catalog-1024.png"
 OUT_DIR="$ROOT/src-tauri/target/appicon"
 
 if [[ ! -f "$LIGHT" || ! -f "$DARK" ]]; then
-  echo "缺少 macOS Dock 图标: $LIGHT / $DARK" >&2
+  echo "缺少 macOS 1024px 图标，请先执行 pnpm icons:generate: $LIGHT / $DARK" >&2
   exit 1
 fi
 
@@ -41,125 +41,22 @@ mkdir -p "$ICON/Assets" "$OUT_DIR"
 
 python3 - "$LIGHT" "$DARK" "$ICON" <<'PY'
 import json
+import shutil
 import struct
-import subprocess
 import sys
-import tempfile
-import zlib
 from pathlib import Path
-
-
-def paeth(a, b, c):
-    p = a + b - c
-    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
-    if pa <= pb and pa <= pc:
-        return a
-    if pb <= pc:
-        return b
-    return c
-
-
-def read_rgba(path: Path):
-    data = path.read_bytes()
-    assert data[:8] == b"\x89PNG\r\n\x1a\n"
-    pos = 8
-    idat = b""
-    width = height = bit_depth = color_type = None
-    while pos < len(data):
-        length = struct.unpack(">I", data[pos : pos + 4])[0]
-        ctype = data[pos + 4 : pos + 8]
-        chunk = data[pos + 8 : pos + 8 + length]
-        pos += 12 + length
-        if ctype == b"IHDR":
-            width, height, bit_depth, color_type = struct.unpack(">IIBB", chunk[:10])
-        elif ctype == b"IDAT":
-            idat += chunk
-        elif ctype == b"IEND":
-            break
-    if bit_depth != 8 or color_type != 6:
-        raise SystemExit(f"{path} 必须是 8-bit RGBA PNG")
-    raw = zlib.decompress(idat)
-    bpp = 4
-    stride = width * bpp
-    rows = []
-    prev = bytearray(stride)
-    offset = 0
-    for _ in range(height):
-        filter_type = raw[offset]
-        scan = bytearray(raw[offset + 1 : offset + 1 + stride])
-        offset += 1 + stride
-        if filter_type == 1:
-            for i in range(stride):
-                left = scan[i - bpp] if i >= bpp else 0
-                scan[i] = (scan[i] + left) & 255
-        elif filter_type == 2:
-            for i in range(stride):
-                scan[i] = (scan[i] + prev[i]) & 255
-        elif filter_type == 3:
-            for i in range(stride):
-                left = scan[i - bpp] if i >= bpp else 0
-                scan[i] = (scan[i] + ((left + prev[i]) // 2)) & 255
-        elif filter_type == 4:
-            for i in range(stride):
-                left = scan[i - bpp] if i >= bpp else 0
-                up_left = prev[i - bpp] if i >= bpp else 0
-                scan[i] = (scan[i] + paeth(left, prev[i], up_left)) & 255
-        elif filter_type != 0:
-            raise SystemExit(f"{path} 含不支持的 PNG filter {filter_type}")
-        rows.append(bytes(scan))
-        prev = scan
-    return width, height, b"".join(rows)
-
-
-def write_png(path: Path, width: int, height: int, rgba: bytes):
-    def chunk(tag: bytes, payload: bytes) -> bytes:
-        crc = zlib.crc32(tag + payload) & 0xFFFFFFFF
-        return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", crc)
-
-    raw = b"".join(b"\x00" + rgba[y * width * 4 : (y + 1) * width * 4] for y in range(height))
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
-    path.write_bytes(
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", ihdr)
-        + chunk(b"IDAT", zlib.compress(raw, 9))
-        + chunk(b"IEND", b"")
-    )
-
-
-def crop_to_opaque_1024(src: Path, dest: Path) -> None:
-    width, height, rgba = read_rgba(src)
-    min_x, min_y, max_x, max_y = width, height, -1, -1
-    for y in range(height):
-        row = y * width * 4
-        for x in range(width):
-            if rgba[row + x * 4 + 3] > 8:
-                min_x = min(min_x, x)
-                max_x = max(max_x, x)
-                min_y = min(min_y, y)
-                max_y = max(max_y, y)
-    if max_x < min_x:
-        raise SystemExit(f"{src} 没有不透明像素")
-    crop_w = max_x - min_x + 1
-    crop_h = max_y - min_y + 1
-    cropped = bytearray(crop_w * crop_h * 4)
-    for y in range(crop_h):
-        src_off = ((min_y + y) * width + min_x) * 4
-        dest_off = y * crop_w * 4
-        cropped[dest_off : dest_off + crop_w * 4] = rgba[src_off : src_off + crop_w * 4]
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-    write_png(tmp_path, crop_w, crop_h, bytes(cropped))
-    subprocess.check_call(
-        ["sips", "-z", "1024", "1024", str(tmp_path), "--out", str(dest)],
-        stdout=subprocess.DEVNULL,
-    )
-    tmp_path.unlink(missing_ok=True)
 
 
 light_src, dark_src, icon_dir = map(Path, sys.argv[1:4])
 assets = icon_dir / "Assets"
-crop_to_opaque_1024(light_src, assets / "nomo-app-light.png")
-crop_to_opaque_1024(dark_src, assets / "nomo-app-dark.png")
+for src, filename in [(light_src, "nomo-app-light.png"), (dark_src, "nomo-app-dark.png")]:
+    data = src.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise SystemExit(f"{src} 必须是 PNG")
+    width, height, bit_depth, color_type = struct.unpack(">IIBB", data[16:26])
+    if (width, height, bit_depth, color_type) != (1024, 1024, 8, 6):
+        raise SystemExit(f"{src} 必须是从 SVG 导出的 1024x1024、8-bit RGBA PNG")
+    shutil.copyfile(src, assets / filename)
 
 layer = {
     "glass": False,

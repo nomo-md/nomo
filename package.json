@@ -6,6 +6,7 @@
   "packageManager": "pnpm@11.5.1",
   "type": "module",
   "scripts": {
+    "icons:generate": "node scripts/generate-icons.mjs",
     "dev": "pnpm exec paraglide-js compile && vite --host 0.0.0.0",
     "build": "pnpm exec paraglide-js compile && vite build",
     "build:quicklook-renderer": "vite build --config vite.quicklook.config.ts",
