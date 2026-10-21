@@ -3,6 +3,7 @@ import { parseMarkdown } from '../editor-core/markdown';
 import * as stats from './writingStats';
 import * as serialization from '../editor-core/markdownSerialization';
 import { createWritingStatsEngine } from './writingStatsEngine';
+import { utf8Length } from '../markdown-document/utf8Text';
 
 vi.mock('./writingStats', async (load) => {
   const actual = await load<typeof import('./writingStats')>();
@@ -48,6 +49,23 @@ describe('Worker writing statistics cache', () => {
       chars: 2,
       lines: 2,
     });
+  });
+  it('maps global UTF-8 selections across cached checkpoints, emoji and CRLF', () => {
+    const engine = createWritingStatsEngine();
+    const prefix = 'a'.repeat(4094) + '\n';
+    const selected = '😀中文\r\nhello';
+    const markdown = prefix + selected + '\n末尾';
+    engine({ requestId: 1, context, snapshot: { markdown }, selection: null });
+    const from = utf8Length(prefix), to = from + utf8Length(selected);
+    const query = (from: number, to: number) => engine({
+      requestId: 2, context, selection: { from, to, sourceCoordinates: 'utf8' },
+    });
+    const forward = query(from, to);
+    expect(forward.error).toBeUndefined();
+    expect(forward.selected).toMatchObject({ chars: 11, lines: 2 });
+    expect(query(to, from).selected).toEqual(forward.selected);
+    expect(query(0, utf8Length(markdown)).selected).toEqual(forward.full);
+    expect(stats.buildSourceWritingStats).toHaveBeenCalledOnce();
   });
   it('adds semantic positions after a mode switch without reparsing the source', () => {
     const engine = createWritingStatsEngine();

@@ -1,5 +1,8 @@
 import type { NativeDocument, RecentEntry } from '../../lib/desktop/tauriStorage';
 import type { EditorCore } from '../../lib/editor-core';
+import { getMarkdownApplicationSession } from './markdownApplicationSession';
+import { readCompleteSnapshot } from '../../lib/markdown-document/port';
+import { statMarkdownFile, createDocumentSnapshot } from '../../lib/desktop/tauriStorage';
 import { calculateDocumentStats } from '../../lib/outline/outlineService';
 import {
   createEmptyExternalFileChange,
@@ -93,6 +96,7 @@ interface DocumentActionsOptions {
   getFileInput(): HTMLInputElement;
   getEditor(): EditorCore;
   getEditorForTab?(tabId: string): EditorCore | undefined;
+  replaceTabRuntime?(tabId: string): Promise<void>;
   flushTabRuntime?(tabId: string): void;
   onTabRuntimeSaved?(tabId: string): void;
   beforeMarkdownCommit?(): void;
@@ -149,6 +153,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     else if (options.getActiveTabId() === tabId) options.beforeMarkdownCommit?.();
     const tab = options.getTabs().find((candidate) => candidate.id === tabId);
     const core = getDocumentEditor(tabId);
+    if (getMarkdownApplicationSession(core)) { core?.commitPendingEdits(); return core; }
     if (isMarkdownTab(tab) && core) {
       const currentMarkdown = core.flushMarkdown();
       // 独立运行时由文档 ID 路由正文；旧单编辑器调用保留其 onChange 写入标签的方式。
@@ -257,16 +262,18 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     options.setActiveTabId(browserFileTarget.activeTabId);
     const targetTab = browserFileTarget.targetTab;
 
+    await options.replaceTabRuntime?.(targetTab.id);
     targetTab.fileName = file.name;
     targetTab.filePath = t.localBrowserFile({ name: file.name });
     targetTab.nativePath = null;
     targetTab.draftId = null;
     targetTab.markdown = text;
     targetTab.savedMarkdown = text;
+    targetTab.documentId = undefined;
     targetTab.dirty = false;
     targetTab.lastKnownModifiedAt = 0;
-    targetTab.largeDocumentMode = text.length > options.getLargeDocumentLimit();
-    targetTab.readonlyDocumentMode = targetTab.largeDocumentMode;
+    targetTab.largeDocumentMode = false;
+    targetTab.readonlyDocumentMode = false;
     targetTab.diskReadonly = false;
     targetTab.externalFileChange = createEmptyExternalFileChange();
 
@@ -283,6 +290,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       // TXT/JSON 由分段会话保存，绝不能回退到 EditorCore 的 Markdown 全量保存链路。
       return false;
     }
+    if (getMarkdownApplicationSession(getDocumentEditor(targetTabId))) return saveSessionDocument(activeTab, saveAs);
     if (activeTab.largeDocumentMode && !saveAs) {
       options.setStatusMessage(t.largeDocumentReadonlySaveBlocked());
       return false;
@@ -349,6 +357,51 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     return true;
   }
 
+  async function saveSessionDocument(tab: MarkdownTabState, saveAs = false, overwriteExternal = false, automatic = false): Promise<boolean> {
+    const application = getMarkdownApplicationSession(getDocumentEditor(tab.id));
+    if (!application) return false;
+    if (!saveAs && !overwriteExternal && tab.externalFileChange.type !== 'none') {
+      options.setStatusMessage(t.externalChangeChooseAction()); return false;
+    }
+    try {
+      const doc = await application.ready;
+      if (doc.session.state.failure) {
+        if (automatic) return false;
+        await doc.retry();
+      }
+      let path = !saveAs && !tab.diskReadonly ? tab.nativePath : null;
+      if (options.getDesktopEnabled() && !path) {
+        const { save } = await import('@tauri-apps/plugin-dialog');
+        path = await save({ defaultPath: tab.nativePath ?? tab.fileName, filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }] });
+        if (!path) return false;
+      }
+      await doc.session.withSnapshot(async snapshot => {
+        if (!options.getDesktopEnabled()) {
+          const text = await readCompleteSnapshot(doc.port, snapshot);
+          exportMarkdownInBrowser(text, suggestFileNameFromH1(text, tab.fileName));
+        } else if (!automatic && options.getCreateSnapshotBeforeSave() && tab.nativePath) {
+          await createDocumentSnapshot(tab.nativePath, await readCompleteSnapshot(doc.port, snapshot), 'before-save');
+        }
+        await doc.session.saveCaptured(snapshot, path ?? tab.fileName, overwriteExternal);
+      }, automatic ? 'automatic' : 'explicit');
+      if (path) {
+        const status = await statMarkdownFile(path);
+        tab.nativePath = path; tab.filePath = path; tab.fileName = path.split(/[\\/]/).pop() ?? tab.fileName;
+        tab.lastKnownModifiedAt = status.modifiedAt; tab.diskReadonly = status.readonly;
+        await rememberNativeDocument({ path, fileName: tab.fileName, markdown: '', encoding: tab.encoding,
+          sizeBytes: status.sizeBytes, modifiedAt: status.modifiedAt, readonly: status.readonly }, 0);
+        if (!automatic) { await refreshRecentFiles(); await revealDocumentInExplorer(path); }
+      }
+      tab.dirty = doc.session.state.committed.dirty || doc.session.state.pendingTransactions > 0;
+      tab.externalFileChange = createEmptyExternalFileChange();
+      tab.largeDocumentMode = false; tab.readonlyDocumentMode = false;
+      updateFocusedDocumentState(tab); options.setTabs([...options.getTabs()]); options.onTabRuntimeSaved?.(tab.id);
+      options.setStatusMessage(doc.session.state.committed.persistenceWarning
+        ? `${t.saved()}：${doc.session.state.committed.persistenceWarning}` : t.saved());
+      return true;
+    } catch (error) { options.setStatusMessage(`${t.saveFileFailed()}: ${error instanceof Error ? error.message : String(error)}`); return false; }
+  }
+
   async function openRecentFile(path: string) {
     if (!options.getDesktopEnabled()) {
       return;
@@ -396,6 +449,9 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     options.setActiveTabId(nativeDocumentTarget.activeTabId);
     const targetTab = nativeDocumentTarget.targetTab;
 
+    await options.replaceTabRuntime?.(targetTab.id);
+    targetTab.documentId = undefined;
+
     targetTab.fileName = document.fileName;
     targetTab.filePath = document.path;
     targetTab.nativePath = document.path;
@@ -405,8 +461,8 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     targetTab.encoding = normalizeMarkdownEncoding(document.encoding);
     targetTab.dirty = false;
     targetTab.lastKnownModifiedAt = document.modifiedAt;
-    targetTab.largeDocumentMode = isLargeDocument;
-    targetTab.readonlyDocumentMode = isLargeDocument;
+    targetTab.largeDocumentMode = false;
+    targetTab.readonlyDocumentMode = false;
     targetTab.diskReadonly = document.readonly;
     targetTab.externalFileChange = createEmptyExternalFileChange();
 
@@ -417,10 +473,6 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     options.setStatusMessage(message);
     await rememberNativeDocument(document, calculateDocumentStats(document.markdown).words);
     await refreshRecentFiles();
-    if (isLargeDocument) {
-      options.setStatusMessage(t.largeDocumentReadonlyOpened());
-    }
-
     await revealDocumentInExplorer(document.path);
   }
 
@@ -512,6 +564,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       // 分段会话关闭前需要 flush journal/close session，由其工作区统一编排。
       return;
     }
+    await getMarkdownApplicationSession(getDocumentEditor(tabId))?.flush();
     flushDocumentRuntime(tabId);
 
     logCloseDiagnostics('documentActions.closeTab: 进入关闭流程', {
@@ -569,6 +622,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     const preferredNextTabId = options.getActiveTabId() === tabId
       ? options.getNextTabIdAfterClose?.(tabId) : undefined;
     const nextTabs = currentTabs.filter((tab) => tab.id !== tabId);
+    await getMarkdownApplicationSession(getDocumentEditor(tabId))?.close(true);
     options.setTabs(nextTabs);
 
     if (options.getActiveTabId() === tabId) {
@@ -599,6 +653,31 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     const path = activeTab.nativePath;
     if (!options.getDesktopEnabled() || !path || activeTab.externalFileChange.type === 'none') {
       return;
+    }
+    const application = getMarkdownApplicationSession(getDocumentEditor(tabId));
+    if (application) {
+      const doc = await application.ready;
+      await doc.session.flushEdits();
+      const generation = doc.session.state.viewGeneration;
+      const candidate = await doc.port.openDocument({ path });
+      if (generation !== doc.session.state.viewGeneration || !options.getTabs().includes(activeTab)) {
+        await doc.port.close(candidate.documentId, true);
+        options.setStatusMessage(t.externalChangeChooseAction()); return;
+      }
+      let status;
+      try {
+        status = await statMarkdownFile(path);
+        if (generation !== doc.session.state.viewGeneration) throw new Error(t.externalChangeChooseAction());
+        await options.replaceTabRuntime?.(tabId);
+      } catch (error) { await doc.port.close(candidate.documentId, true); throw error; }
+      activeTab.documentId = candidate.documentId;
+      activeTab.byteLength = candidate.byteLength;
+      activeTab.markdown = ''; activeTab.savedMarkdown = ''; activeTab.dirty = candidate.dirty;
+      activeTab.version = candidate.revision; activeTab.lastKnownModifiedAt = status.modifiedAt;
+      activeTab.externalFileChange = createEmptyExternalFileChange();
+      options.setTabs([...options.getTabs()]);
+      if (options.getActiveTabId() === tabId) options.loadTabState(activeTab);
+      options.setStatusMessage(t.reloadedExternalVersion()); return;
     }
     flushDocumentRuntime(tabId);
     const markdownBeforeReload = activeTab.markdown;
@@ -660,6 +739,9 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     if (externalChangeType !== 'modified' && externalChangeType !== 'deleted') {
       options.setStatusMessage(t.noExternalChangeToOverwrite());
       return;
+    }
+    if (getMarkdownApplicationSession(getDocumentEditor(tabId))) {
+      await saveSessionDocument(activeTab, false, true); return;
     }
 
     const core = await prepareDocumentSave(tabId);
@@ -731,6 +813,12 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       return;
     }
 
+    const sessionTab = options.getTabs().find(tab => tab.id === tabId);
+    if (isMarkdownTab(sessionTab) && getMarkdownApplicationSession(getDocumentEditor(tabId))) {
+      if (sessionTab.dirty && sessionTab.nativePath && !sessionTab.diskReadonly && sessionTab.externalFileChange.type === 'none')
+        await saveSessionDocument(sessionTab, false, false, true);
+      return;
+    }
     await prepareDocumentSave(tabId);
     const targetTab = options.getTabs().find((tab) => tab.id === tabId);
     if (!isMarkdownTab(targetTab) || !targetTab.nativePath) return;

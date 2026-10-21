@@ -1,4 +1,5 @@
 import type { EditorSnapshot } from '../../../lib/editor-core/types';
+import type { MarkdownApplicationSession } from '../markdownApplicationSession';
 import { getCalloutLabel, CALLOUT_TYPES } from '../../../lib/editor-core/callout/calloutTypes';
 import { getTypographyOptions } from '../../../lib/typography/options';
 import { t } from '../../i18n';
@@ -7,6 +8,7 @@ import { THEME_TOKEN_CSS_VARIABLES, THEME_STYLE_TOKEN_CSS_VARIABLES } from '../t
 import { awaitExport, throwIfExportAborted, type ExportAppearance, type ExportSnapshot } from './types';
 
 interface SnapshotRuntime {
+  session?: MarkdownApplicationSession;
   disposed: boolean;
   editor: { awaitCompositionEnd?(): Promise<void>; getSnapshot(): EditorSnapshot };
   sourceEditor?: { isComposing?(): boolean };
@@ -77,7 +79,8 @@ export async function captureExportSnapshot(
   throwIfExportAborted(options.signal);
   if (runtime.disposed || !options.isAvailable()) return null;
   options.flush(metadata.id);
-  const state = runtime.editor.getSnapshot();
+  const captured = await runtime.session?.capture(options.signal);
+  const state = captured ? { markdown: captured.markdown, version: captured.revision, contentRevision: captured.revision } : runtime.editor.getSnapshot();
   return Object.freeze({
     documentId: metadata.id, contentRevision: state.contentRevision ?? state.version,
     markdown: state.markdown, documentPath: metadata.nativePath,

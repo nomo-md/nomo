@@ -73,11 +73,11 @@
     getEditor: () => runtime.editor,
     getReadonly: () => tab.readonlyDocumentMode,
     setStatusMessage: (value) => setStatusMessage(value),
-    isActive: () => !destroyed && !runtime.disposed && runtime.outlineInteraction === outlineController && Boolean(host && (mode === 'semantic' || sourceEditor)),
+    isActive: () => !destroyed && !runtime.disposed && runtime.outlineInteraction === outlineController && Boolean(host && (runtime.session || mode === 'semantic' || sourceEditor)),
   });
   runtime.outlineInteraction = outlineController;
 
-  $: frontMatter = extractFrontMatterBlock(tab.markdown);
+  $: frontMatter = runtime.session ? runtime.session.frontMatter : extractFrontMatterBlock(tab.markdown);
   $: readonlyMode = tab.readonlyDocumentMode;
   $: visibleOutlineIds = new Set(runtime.outline.map((item) => item.id));
   $: updateCoreOptions(mode, readonlyMode);
@@ -114,6 +114,7 @@
     appliedMode = nextMode;
     appliedReadonly = readonly;
     runtime.mode = nextMode;
+    runtime.session?.setViewMode(nextMode);
     runtime.editor.updateOptions({ mode: nextMode, readonly });
     if (mountedHost && previousMode && previousMode !== nextMode) scheduleLayoutRestore(anchor, previousMode);
   }
@@ -245,8 +246,8 @@
     updateMarkdown={(value) => runtime.interaction.updateMarkdown(value)}
     onSourceSelectionChange={(range) => onSourceSelection(tab.id, range)}
     enterFrontMatterEdit={() => { focus(); frontMatterEditing = true; }} leaveFrontMatterEdit={() => { frontMatterEditing = false; }}
-    updateFrontMatterContent={(content) => runtime.editor.setMarkdown(replaceFrontMatterContent(runtime.editor.getMarkdown(), content))}
-    deleteFrontMatter={() => { frontMatterEditing = false; runtime.editor.setMarkdown(removeFrontMatter(runtime.editor.getMarkdown())); }}
+    updateFrontMatterContent={(content) => { if (runtime.session) void runtime.session.transformMarkdown(text => replaceFrontMatterContent(text, content)).catch(error => setStatusMessage(String(error))); else runtime.editor.setMarkdown(replaceFrontMatterContent(runtime.editor.getMarkdown(), content)); }}
+    deleteFrontMatter={() => { frontMatterEditing = false; if (runtime.session) void runtime.session.transformMarkdown(removeFrontMatter).catch(error => setStatusMessage(String(error))); else runtime.editor.setMarkdown(removeFrontMatter(runtime.editor.getMarkdown())); }}
     updateActiveOutlineFromSourceScroll={updateSourceScroll} updateActiveOutlineFromSemanticScroll={updateSemanticScroll}
     handleEditorPaste={runtime.images.handleEditorPaste} handleEditorDrop={runtime.images.handleEditorDrop}
     handleWorkspaceContextMenu={(event) => onContextMenu(tab.id, event)} {openContextMenu} {copyContextText}

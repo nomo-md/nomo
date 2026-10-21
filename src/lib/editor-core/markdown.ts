@@ -796,7 +796,8 @@ export function collectMarkdownImageSrcs(markdown: string): Set<string> | null {
 }
 
 /** 返回实际解析结果；失败明确返回 null，不能用字面回退结果执行删除。 */
-export function tryParseMarkdown(markdown: string, options: { exportImageSources?: boolean } = {}): ProseMirrorNode | null {
+export interface MarkdownParseContext { references?: Record<string, { href: string; title: string }> }
+export function tryParseMarkdown(markdown: string, options: MarkdownParseContext & { exportImageSources?: boolean } = {}): ProseMirrorNode | null {
   const validateLink = markdownIt.validateLink;
   if (options.exportImageSources) {
     // Word 需要读取临时/内嵌图片。只在本次同步解析期间接受这些图片来源；
@@ -807,7 +808,7 @@ export function tryParseMarkdown(markdown: string, options: { exportImageSources
   resetHtmlInlineStack();
   try {
     const { frontMatterPrefix, body } = splitMarkdownDocument(markdown);
-    const parsed = tableMarkdownParser.parse(preprocessImageHtml(body));
+    const parsed = tableMarkdownParser.parse(preprocessImageHtml(body), { references: { ...options.references } });
     return parsed.type.create({ ...parsed.attrs, frontMatterPrefix }, parsed.content, parsed.marks);
   } catch {
     return null;
@@ -830,8 +831,8 @@ export function tokenizeMarkdownWithSourceLines(markdown: string): {
   };
 }
 
-export function parseMarkdown(markdown: string): ProseMirrorNode {
-  const parsed = tryParseMarkdown(markdown);
+export function parseMarkdown(markdown: string, context: MarkdownParseContext = {}): ProseMirrorNode {
+  const parsed = tryParseMarkdown(markdown, context);
   if (parsed) return parsed;
   const { frontMatterPrefix, body: rawBody } = splitMarkdownDocument(markdown);
   return schema.node('doc', { frontMatterPrefix }, [
@@ -852,7 +853,7 @@ export interface MarkdownBlockLineMap {
 }
 
 /** 返回与实际解析节点绑定的嵌套来源映射；解析失败时不提供猜测锚点。 */
-export function parseMarkdownWithSyncAnchors(markdown: string): {
+export function parseMarkdownWithSyncAnchors(markdown: string, context: MarkdownParseContext = {}): {
   doc: ProseMirrorNode;
   anchors: MarkdownSyncAnchor[];
 } {
@@ -865,13 +866,13 @@ export function parseMarkdownWithSyncAnchors(markdown: string): {
     const result = parseWithSyncAnchors(tableMarkdownParser, preprocessed.markdown, (line, end) => {
       const provenance = preprocessed.lineProvenance[line];
       return provenance ? (end ? provenance.toLine : provenance.fromLine) + lineOffset : undefined;
-    });
+    }, { references: { ...context.references } });
     return {
       doc: result.doc.type.create({ ...result.doc.attrs, frontMatterPrefix }, result.doc.content, result.doc.marks),
       anchors: result.anchors,
     };
   } catch {
-    return { doc: parseMarkdown(markdown), anchors: [] };
+    return { doc: parseMarkdown(markdown, context), anchors: [] };
   }
 }
 

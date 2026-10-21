@@ -33,6 +33,9 @@ import {
 } from '../../lib/services/storage';
 
 interface PersistedWorkspaceTabV2 {
+  documentId?: string;
+  globalSelection?: GlobalSelection | null;
+  globalScrollAnchor?: GlobalScrollAnchor | null;
   id?: string;
   fileName?: string;
   filePath?: string;
@@ -157,6 +160,10 @@ export async function createPersistedWorkspaceState(input: {
       persistedTabs.push(toPersistedSegmentedWorkspaceTab(tab));
       continue;
     }
+    if (tab.documentId) {
+      persistedTabs.push(toPersistedMarkdownWorkspaceTab(tab, tab.draftId));
+      continue;
+    }
 
     let draftId = tab.draftId;
     if (draftId && input.preservedDraftIds?.has(draftId)) {
@@ -208,7 +215,7 @@ export async function persistWorkspaceDrafts(input: {
   }
 
   for (const tab of input.tabs) {
-    if (!isMarkdownTab(tab)) {
+    if (!isMarkdownTab(tab) || tab.documentId) {
       continue;
     }
 
@@ -353,6 +360,9 @@ export function createRuntimeTabFromPersisted(
     return {
       id: tab.id,
       documentKind: 'markdown',
+      documentId: tab.documentId,
+      globalSelection: tab.globalSelection,
+      globalScrollAnchor: tab.globalScrollAnchor,
       fileName: tab.fileName,
       filePath: tab.filePath,
       nativePath: tab.nativePath,
@@ -484,6 +494,9 @@ function normalizePersistedMarkdownWorkspaceTab(
   return {
     ...common,
     documentKind: 'markdown',
+    documentId: typeof tab.documentId === 'string' && /^md-[a-z0-9-]+$/i.test(tab.documentId) ? tab.documentId : undefined,
+    globalSelection: normalizeGlobalSelection(tab.globalSelection),
+    globalScrollAnchor: normalizeGlobalScrollAnchor(tab.globalScrollAnchor),
     draftId: typeof tab.draftId === 'string' && tab.draftId ? tab.draftId : null,
     encoding: normalizeMarkdownEncoding(tab.encoding ?? DEFAULT_MARKDOWN_ENCODING),
     largeDocumentMode: Boolean(tab.largeDocumentMode),

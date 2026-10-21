@@ -4,6 +4,7 @@ import type { OutlineItem } from '../../lib/outline/outlineService';
 import type { MarkdownSourceEditorHandle } from '../components/markdownSourceEditor';
 import { createTocBlock } from '../../lib/toc/tocService';
 import { t } from '../i18n';
+import { getMarkdownApplicationSession } from './markdownApplicationSession';
 import {
   type OutlineScrollAnchor,
   getSemanticScrollAnchorForBlock,
@@ -129,6 +130,7 @@ export function createEditorInteractionController(options: EditorInteractionOpti
   }
 
   function runCommand(command: EditorCommand) {
+    if (getMarkdownApplicationSession(options.getEditor())) { options.getEditor().execute(command); options.getEditor().focus(); return; }
     if (options.getMode() === 'source' && command.type === 'insertDetails') {
       const source = options.getSourceEditor();
       const selection = source?.getSelection();

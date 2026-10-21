@@ -141,6 +141,24 @@
 | Rust 文件系统 | `src-tauri/src/file_system.rs` | `src-tauri/src/models.rs` | 后端文件读写、Markdown 编码转换/保持、短句柄目录快照与按需枚举 |
 | 图片资源后端 | `src-tauri/src/file_system/image_assets.rs` | — | 图片导入/解析/PicGo 上传/删除 |
 
+### Markdown 统一会话迁移
+
+主应用由 `MarkdownDocumentRuntime.session` / `MarkdownApplicationSession` 装配统一会话，`editor` 门面转发当前局部视图。打开确认后标签只存会话引用与元数据；完整正文通过异步快照读取，门面的同步 `getMarkdown()` / `flushMarkdown()` 会拒绝调用。
+
+| Responsibility | Primary code | Related code | Change when |
+|---|---|---|---|
+| 完整正文、编码与磁盘历史 | `src-tauri/src/text_document/markdown_session.rs` | `markdown_codec.rs`, `markdown_history.rs`, `markdown_commands.rs`, `piece_tree.rs` | 修改原始字节、UTF-8 工作坐标、幂等事务、快照保存、保存意图恢复或历史热缓存；UTF-8 直接复用 raw 基线 |
+| 应用会话装配 | `src/app/services/markdownApplicationSession.ts` | `markdownDocumentRuntime.ts`, `App.svelte`, `EditorWorkspace.svelte`, `ComparisonPane.svelte`, `documentActionsController.ts` | 修改打开、模式切换、异步正文命令、图片书签、保存、恢复或双栏/组合标签会话绑定 |
+| 跨窗会话归属 | `src-tauri/src/window/tab_transfer.rs` | `markdown_session.rs`, `src-tauri/src/lib.rs`, `workspaceTransferController.ts`, `workspacePersistence.ts` | 修改移交准备、同一提交中的多文档归属、取消恢复、窗口销毁释放、迟到 detach 或工作区会话引用 |
+| 前端会话与视图事务 | `src/lib/markdown-document/controller.ts` | `port.ts`, `session.ts`, `utf8Text.ts`, `windowBridge.ts` | 修改待确认输入、重试、保存期间输入、关闭门禁、浏览器内存适配器或视图失效与重定位 |
+| 有界语义和原文窗口 | `src/lib/markdown-document/semanticWindow.ts`, `sourceWindow.ts` | `sourceProjection.ts`, `positions.ts`, `textChanges.ts`, `src/lib/editor-core/ProseMirrorEditorCore.ts` | 修改 PM/CM 共用历史、源文精确补丁、混合换行、UTF-8/UTF-16 映射或局部编辑保留 |
+| 渐进索引与运行时 | `src/lib/markdown-document/runtime.ts` | `structure.ts`, `structure.worker.ts`, `structureIndex.ts`, `incrementalIndex.ts`, `indexInvalidation.ts` | 修改纯文本结构检查点、全局引用、标题 ID 去重、增量收敛、版本门禁、后台取消或加载阶段计时 |
+| 真实窗口与布局策略 | `src/lib/markdown-document/viewportHost.ts` | `mountWindow.ts`, `layoutCache.ts`, `mountPolicy.ts`, `viewport.ts`, `scheduler.ts`, `editor-document.css` | 修改稳定块组、3–6 屏自适应准备、回收滞回、原位 DOM 更新、交互保护、全局选区、边界导航、阅读锚点或有界高度/表格布局缓存 |
+| 语义窗口标题锚点 | `src/lib/editor-core/plugins/headingAnchors.ts` | `src/lib/editor-core/ProseMirrorEditorCore.ts`, `src/lib/markdown-document/viewportHost.ts` | 修改全局标题 ID 的 PM decoration、跨窗口重名标题定位或大纲点击后的显式滚动；宿主不得直接修改标题 DOM 属性 |
+| 全文选区与任务 | `src/lib/markdown-document/selection.ts`, `tasks.ts` | `runtime.ts`, `controller.ts`, `port.ts` | 修改跨窗口选区、完整快照复制、剪切冲突保护、全文搜索替换及取消 |
+| 自动目录派生 | `src/lib/markdown-document/automaticToc.ts` | `runtime.ts`, `controller.ts`, `session.ts`, `markdown_session.rs`, `src/lib/toc/tocService.ts` | 修改完整索引物化目录、原始目录保留、派生事务及撤销/重做语义 |
+| 实现边界与实机验收 | `docs/markdown-loading.md` | `scripts/generate-markdown-loading-fixtures.mjs`, `src/lib/markdown-document/*.test.ts` | 更新迁移进度、固定文档、代码验证入口或双平台验收记录 |
+
 ### 大文件 TXT/JSON 分段编辑
 
 | Responsibility | Primary code | Related code | Change when |
@@ -4217,6 +4235,7 @@
 | `src/lib/editor-core/nodeViews/` | 各类 NodeView 实现 |
 | `src/lib/editor-core/plugins/` | ProseMirror 插件 |
 | `src/lib/markdown/` | Markdown 桥接、front matter、保存归一化 |
+| `src/lib/markdown-document/` | Markdown 统一会话、真实窗口宿主、窗口投影、渐进结构索引、目录派生及完整快照任务 |
 | `src/lib/outline/` | 大纲服务 |
 | `src/lib/toc/` | TOC 服务 |
 | `src/lib/services/` | 渲染服务接口与实现（Shiki、KaTeX、Mermaid） |
@@ -4227,7 +4246,7 @@
 | `src-tauri/src/` | Rust 后端 |
 | `src-tauri/src/config/` | JSON 配置管理（ConfigManager、commands）：设置、最近打开、快照索引、工作区状态/草稿正文仓库、窗口状态 |
 | `src-tauri/src/file_system/` | 文件系统与图片资源 |
-| `src-tauri/src/text_document/` | TXT/JSON 分段文档会话、字节索引、编辑日志与后台任务 |
+| `src-tauri/src/text_document/` | TXT/JSON 分段文档，以及 Markdown 原文会话、编码映射、磁盘历史与快照保存 |
 | `src-tauri/src/window/` | 窗口、菜单、托盘、外部打开、文件关联 |
 | `project.inlang/` | Inlang 本地化文案源文件（**修改这里而非 paraglide/**） |
 

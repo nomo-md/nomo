@@ -13,6 +13,7 @@ import {
 } from './writingStats';
 import type { StatsRequest, StatsResponse } from './writingStatsProtocol';
 import type { Node as ProseMirrorNode } from 'prosemirror-model';
+import { utf8Length, utf8ToUtf16 } from '../markdown-document/utf8Text';
 
 /** Worker 单文档缓存：范围请求不再解析或构建文档快照。 */
 export function createWritingStatsEngine() {
@@ -24,6 +25,7 @@ export function createWritingStatsEngine() {
     semantic: ReturnType<typeof buildSemanticWritingStats> | null;
     doc: ProseMirrorNode | null;
     clipboardDoc: ProseMirrorNode | null;
+    byteCheckpoints?: Array<{ byte: number; offset: number }>;
   } | null = null;
   return (request: StatsRequest): StatsResponse => {
     try {
@@ -62,7 +64,23 @@ export function createWritingStatsEngine() {
         const from = Math.min(selection.from, selection.to),
           to = Math.max(selection.from, selection.to);
         if (context.mode === 'source') {
-          const raw =
+          const byteToOffset = (byte: number) => {
+            if (!cached!.byteCheckpoints) {
+              const checkpoints = [{ byte: 0, offset: 0 }];
+              for (let offset = 0, bytes = 0; offset < cached!.markdown.length;) {
+                let end = Math.min(cached!.markdown.length, offset + 4096);
+                if (end < cached!.markdown.length && /[\uDC00-\uDFFF]/.test(cached!.markdown[end])) end--;
+                bytes += utf8Length(cached!.markdown.slice(offset, end)); offset = end; checkpoints.push({ byte: bytes, offset });
+              }
+              cached!.byteCheckpoints = checkpoints;
+            }
+            const points = cached!.byteCheckpoints;
+            let low = 0, high = points.length - 1;
+            while (low < high) { const mid = Math.ceil((low + high) / 2); if (points[mid].byte <= byte) low = mid; else high = mid - 1; }
+            const start = points[low];
+            return start.offset + utf8ToUtf16(cached!.markdown.slice(start.offset, points[low + 1]?.offset), byte - start.byte);
+          };
+          const raw = selection.sourceCoordinates === 'utf8' ? [byteToOffset(from), byteToOffset(to)] :
             selection.sourceCoordinates === 'normalized'
               ? sourceRangeToRaw(cached.source, from, to)
               : [from, to];

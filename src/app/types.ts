@@ -19,6 +19,11 @@ export interface CommonTabState {
 }
 
 export interface MarkdownTabState extends CommonTabState {
+  /** 完整正文与磁盘恢复日志的身份；markdown 字段仅供旧工作区导入。 */
+  documentId?: string;
+  byteLength?: number;
+  globalSelection?: GlobalSelection | null;
+  globalScrollAnchor?: GlobalScrollAnchor | null;
   documentKind: 'markdown';
   draftId: string | null;
   markdown: string;
@@ -158,6 +163,9 @@ export interface PersistedCommonWorkspaceTab {
 }
 
 export interface PersistedMarkdownWorkspaceTab extends PersistedCommonWorkspaceTab {
+  documentId?: string;
+  globalSelection?: GlobalSelection | null;
+  globalScrollAnchor?: GlobalScrollAnchor | null;
   documentKind: 'markdown';
   draftId: string | null;
   encoding?: MarkdownEncoding;

@@ -7,6 +7,26 @@ import {
 } from './widths';
 
 export const TABLE_LAYOUT_EVENT = 'nomo:table-layout';
+export const TABLE_LAYOUT_READY_EVENT = 'nomo:table-layout-ready';
+export interface TableLayoutSnapshot {
+  /** 同一内容版本块组中的表格序号，允许只保存已完成测量的表格。 */
+  index: number;
+  signature: string;
+  assets: string;
+  widths: number[];
+  constraints: ColumnConstraint[];
+  width: string;
+  availableWidth: number;
+}
+const assetSignature = (table: HTMLElement) => JSON.stringify(
+  Array.from(table.querySelectorAll('img'), image =>
+    [image.currentSrc || image.src, image.complete, image.naturalWidth, image.naturalHeight]),
+);
+// WebView2 在字体变体属性存在时可能返回空 font 简写，必须核对实际几何分量。
+const fontSignature = (style: CSSStyleDeclaration) => JSON.stringify([
+  style.fontFamily, style.fontSize, style.fontWeight, style.fontStyle, style.fontStretch,
+  style.fontVariant, style.lineHeight, style.letterSpacing, style.wordSpacing,
+]);
 export interface TableCellSource {
   key: object;
   element: HTMLTableCellElement;
@@ -33,6 +53,7 @@ interface Entry {
   constraints?: ColumnConstraint[];
   signature?: string;
   widths?: number[];
+  availableWidth?: number;
   error?: Error;
   job?: { version: number; iterator: Iterator<TableCellSource>; metrics: CellMetrics[] };
 }
@@ -71,6 +92,46 @@ export function semanticCellContent(cell: HTMLElement): DocumentFragment {
 
 /** One scheduler, observer set and temporary measurement surface per mounted editor/export. */
 export class TableLayoutController {
+  snapshot(): TableLayoutSnapshot[] | undefined {
+    const result: TableLayoutSnapshot[] = [];
+    let index = 0;
+    for (const entry of this.entries) {
+      const tableIndex = index++;
+      if (entry.dirty || !entry.widths || !entry.constraints || !entry.signature ||
+        entry.availableWidth !== entry.source.wrapper.clientWidth) continue;
+      const font = getComputedStyle(entry.source.table);
+      if (entry.signature !== fontSignature(font)) continue;
+      result.push({ index: tableIndex, signature: entry.signature, assets: assetSignature(entry.source.table),
+        widths: [...entry.widths], constraints: entry.constraints.map(value => ({ ...value })),
+        width: entry.source.table.style.width, availableWidth: entry.availableWidth });
+    }
+    return result.length || !this.entries.size ? result : undefined;
+  }
+  restore(snapshots: readonly TableLayoutSnapshot[]) {
+    const entries = [...this.entries];
+    const usable = snapshots.filter(saved => entries[saved.index]?.source.columns() === saved.widths.length &&
+      assetSignature(entries[saved.index].source.table) === saved.assets);
+    if (!usable.length) return false;
+    usable.forEach(saved => {
+      const entry = entries[saved.index];
+      entry.signature = saved.signature;
+      entry.constraints = saved.constraints.map(value => ({ ...value }));
+      entry.widths = [...saved.widths];
+      entry.availableWidth = saved.availableWidth;
+      entry.dirty = false;
+      entry.job = undefined;
+      const { table, colgroup } = entry.source;
+      colgroup.replaceChildren(...saved.widths.map(width => {
+        const col = table.ownerDocument.createElement('col');
+        col.style.width = `${width}px`;
+        return col;
+      }));
+      table.style.width = saved.width;
+      table.style.tableLayout = 'fixed';
+      table.dataset.tableLayout = 'ready';
+    });
+    return true;
+  }
   get empty() {
     return this.entries.size === 0;
   }
@@ -118,21 +179,26 @@ export class TableLayoutController {
       });
       this.observer.observe(root);
     }
-    if (typeof IntersectionObserver !== 'undefined')
-      this.visibility = new IntersectionObserver(
-        (entries) => {
-          for (const item of entries) {
-            if (item.isIntersecting) this.visible.add(item.target);
-            else this.visible.delete(item.target);
-          }
-          this.schedule();
-        },
-        { rootMargin: '300px' },
-      );
+    this.observeViewport(null, 300);
     root.addEventListener('compositionstart', this.compositionStart);
     root.addEventListener('compositionend', this.compositionEnd);
     root.addEventListener('load', this.loaded, true);
     root.ownerDocument.fonts?.addEventListener('loadingdone', this.invalidate);
+  }
+
+  /** 指定实际滚动根；只扩大浏览器视口的 rootMargin 仍会被滚动容器裁剪。 */
+  observeViewport(root: Element | null, margin: number) {
+    if (typeof IntersectionObserver === 'undefined') return;
+    this.visibility?.disconnect();
+    this.visible.clear();
+    this.visibility = new IntersectionObserver(entries => {
+      for (const item of entries) {
+        if (item.isIntersecting) this.visible.add(item.target);
+        else this.visible.delete(item.target);
+      }
+      this.schedule();
+    }, { root, rootMargin: `${Math.ceil(margin)}px` });
+    for (const entry of this.entries) this.visibility.observe(entry.source.wrapper);
   }
 
   private compositionStart = () => {
@@ -302,7 +368,7 @@ export class TableLayoutController {
       if (!force && this.visibility && !this.visible.has(entry.source.wrapper)) continue;
       if (!entry.source.wrapper.isConnected || entry.source.wrapper.clientWidth <= 0) continue;
       const font = getComputedStyle(entry.source.table);
-      const signature = `${font.font}|${font.letterSpacing}`;
+      const signature = fontSignature(font);
       if (entry.signature !== signature) {
         entry.signature = signature;
         entry.version++;
@@ -418,6 +484,7 @@ export class TableLayoutController {
     const border =
       (parseFloat(style.borderLeftWidth) || 0) + (parseFloat(style.borderRightWidth) || 0);
     const available = wrapper.clientWidth - border;
+    entry.availableWidth = wrapper.clientWidth;
     const result = allocateTableWidths(entry.constraints!, available);
     const same =
       entry.widths?.length === result.columns.length &&
@@ -439,6 +506,7 @@ export class TableLayoutController {
       table.dataset.tableLayoutVersion = String(entry.version);
       delete table.dataset.tableLayoutError;
       entry.widths = result.columns;
+      table.dispatchEvent(new CustomEvent(TABLE_LAYOUT_READY_EVENT, { bubbles: true }));
     }
     // zoom participates in print layout, unlike transform which would leave the old height.
     table.style.setProperty(

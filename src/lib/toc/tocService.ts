@@ -71,7 +71,7 @@ export function removeTocBlocks(markdown: string): string {
   return updated;
 }
 
-function extractTocRanges(markdown: string): TocBlockRange[] {
+export function extractTocRanges(markdown: string): TocBlockRange[] {
   const ranges: TocBlockRange[] = [];
   let startLine: MarkdownLine | null = null;
   let inFence = false;
@@ -123,7 +123,7 @@ export function createDocumentTocList(doc: ProseMirrorNode): string {
   return serializeTocItems(extractDocumentTocItems(doc));
 }
 
-function serializeTocItems(items: readonly Pick<OutlineItem, 'id' | 'level' | 'title'>[]): string {
+export function serializeTocItems(items: readonly Pick<OutlineItem, 'id' | 'level' | 'title'>[]): string {
   return items
     .map((item) => `${'  '.repeat(item.level - 1)}- [${escapeLinkText(item.title)}](#${item.id})`)
     .join('\n');

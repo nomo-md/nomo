@@ -67,6 +67,16 @@ export async function readMarkdownFromPath(path: string, fallbackMessage: string
     .then((result) => normalizeDocumentResult(result));
 }
 
+/** 打开只取文件身份，正文由原生 Markdown 会话捕获并按窗口读取。 */
+export async function readMarkdownMetadata(path: string, fallbackMessage: string): Promise<{ document: NativeDocument | null; error: string | null }> {
+  try {
+    const status = await statMarkdownFile(path);
+    if (!status.exists || !status.isFile) throw new Error(fallbackMessage);
+    return { document: { path: status.path, fileName: status.path.split(/[\\/]/).pop() ?? path,
+      markdown: '', sizeBytes: status.sizeBytes, modifiedAt: status.modifiedAt, readonly: status.readonly, encoding: 'utf-8' }, error: null };
+  } catch (error) { return { document: null, error: error instanceof Error ? error.message : fallbackMessage }; }
+}
+
 export async function saveNativeMarkdownFile(
   path: string | null,
   markdown: string,

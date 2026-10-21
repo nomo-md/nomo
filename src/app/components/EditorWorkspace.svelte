@@ -23,6 +23,7 @@
   import type { MarkdownSourceEditorHandle, MarkdownSourceRuntimeState, MarkdownSourceSelectionSnapshot } from './markdownSourceEditor';
   import { syncEditorPanes } from '../services/markdownScrollSyncWorkspace';
   import type { MarkdownWorkspaceRuntimeBinding } from '../services/markdownDocumentRuntime';
+  import { getMarkdownApplicationSession } from '../services/markdownApplicationSession';
   import { t } from '../i18n';
   import type { EditorViewMode, SplitActivePane, SplitViewLayout } from '../types';
 
@@ -125,8 +126,23 @@
     destroy: (binding: MarkdownWorkspaceRuntimeBinding) => void;
   } | null = null;
 
-  $: blankDocumentEditable = !readonlyDocumentMode && markdown === '';
+  let sessionEmpty = true;
+  let sessionCore: EditorCore | undefined;
+  let unsubscribeSession: (() => void) | undefined;
+  $: if (editorCore !== sessionCore) {
+    unsubscribeSession?.(); sessionCore = editorCore;
+    const session = getMarkdownApplicationSession(editorCore);
+    sessionEmpty = session ? (session.document?.state.status.byteLength ?? 0) === 0 : markdown === '';
+    unsubscribeSession = session ? editorCore.subscribe(() => { sessionEmpty = session.document?.state.status.byteLength === 0; }) : undefined;
+  }
+  $: blankDocumentEditable = !readonlyDocumentMode && (sessionEditor ? sessionEmpty : markdown === '');
   $: if (mode !== 'semantic') sourceInitialized = true;
+  $: sessionEditor = getMarkdownApplicationSession(editorCore);
+  $: if (sessionEditor) sourcePane = sourcePaneContainer;
+  function mountSessionSource(target: HTMLElement) {
+    const destroy = getMarkdownApplicationSession(editorCore)?.mountSource(target);
+    return { destroy };
+  }
   $: publishRuntime(sourceDocumentId, editorCore, editorHost, sourceEditor, sourcePane, semanticPane, mode);
 
   function handlePaperPointerDown(event: PointerEvent) {
@@ -164,7 +180,7 @@
     if (runtimeLifetimeEnded || !host?.isConnected || !semanticScrollPane?.isConnected) return;
     const sourceReady = source && source === registeredSourceHandle && sourceScrollPane?.isConnected &&
       registeredSourceDocumentId === documentId && registeredSourceContent?.isConnected;
-    if ((visibleMode !== 'semantic' || source) && !sourceReady) return;
+    if (!getMarkdownApplicationSession(core) && (visibleMode !== 'semantic' || source) && !sourceReady) return;
     const previous = ownedRuntime?.binding;
     if (previous?.documentId === documentId && previous.editorCore === core && previous.host === host &&
       previous.semanticPane === semanticScrollPane) {
@@ -825,6 +841,7 @@
   }
 
   onDestroy(() => {
+    unsubscribeSession?.();
     runtimeLifetimeEnded = true;
     // 子组件销毁回调已通过 onRuntimeStateChange 提交最后状态，旧 handle 不再可用。
     releaseRuntime(false);
@@ -939,7 +956,7 @@
     style={`--split-left-track: ${splitLeftPercent}fr; --split-right-track: ${100 - splitLeftPercent}fr`}
     use:coordinateEditorPaneGeometry={{ mode, contentVersion: markdown }}
     use:syncEditorPanes={{
-      mode,
+      mode: sessionEditor ? 'semantic' : mode,
       documentId: sourceDocumentId,
       markdown,
       sourceEditor,
@@ -967,7 +984,9 @@
         class="document-layout"
         class:blank-document={blankDocumentEditable}
       >
-        {#if sourceInitialized}
+        {#if sessionEditor && mode !== 'semantic'}
+          <div use:mountSessionSource class="markdown-session-source"></div>
+        {:else if !sessionEditor && sourceInitialized}
         <MarkdownSourceEditor
           bind:sourceEditor
           {markdown}

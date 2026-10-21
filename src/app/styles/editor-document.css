@@ -45,6 +45,32 @@
   overflow-y: hidden;
 }
 
+.source-pane.markdown-session-scroll { overflow-y: auto; }
+.markdown-session-host, .markdown-session-window { position: relative; }
+.markdown-session-spacer { pointer-events: none; }
+.markdown-session-selection { position: absolute; pointer-events: none; background: Highlight; opacity: 0.28; z-index: 2; }
+.markdown-session-input { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0.01; resize: none; }
+.markdown-session-window .ProseMirror { min-height: 0; }
+.source-pane.markdown-session-scroll > .document-layout,
+.editor-grid.split-view .source-pane.markdown-session-scroll > .document-layout {
+  height: auto;
+  min-height: 100%;
+  padding-top: var(--md-editor-split-padding-top, 44px);
+  padding-bottom: var(--md-editor-split-padding-bottom, 64px);
+}
+.markdown-session-source {
+  grid-column: 1;
+  width: 100%;
+  min-width: 0;
+  max-width: calc(var(--md-editor-content-width-percent) * 1cqw);
+  margin: 0 auto;
+  color: var(--md-editor-fg);
+  font: 14px / 1.75 var(--md-editor-font-mono);
+  zoom: var(--md-editor-zoom);
+}
+.editor-grid:has(> .content-outline) .document-layout > .markdown-session-source { grid-column: 2; }
+.editor-grid.split-view .document-layout > .markdown-session-source { grid-column: 1; max-width: none; }
+
 .editor-grid.split-view,
 .editor-grid[data-mode-transition-from='split'] {
   --md-editor-split-padding-top: 36px;

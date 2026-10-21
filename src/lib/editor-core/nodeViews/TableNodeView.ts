@@ -3,7 +3,7 @@ import { Plugin } from 'prosemirror-state';
 import { TableMap } from 'prosemirror-tables';
 import type { EditorView, ViewMutationRecord } from 'prosemirror-view';
 import { projectInlineSource } from '../InlineSourceCodec';
-import { TableLayoutController, type TableCellSource } from '../../table-layout/dom';
+import { TableLayoutController, type TableCellSource, type TableLayoutSnapshot } from '../../table-layout/dom';
 import { subscribeTypographyInteraction } from '../../typography/interaction';
 import katex from 'katex';
 
@@ -50,6 +50,11 @@ export function tableLayoutPlugin() {
 
 export const flushEditorTableLayout = (view: EditorView) =>
   controllers.get(view)?.flush() ?? Promise.resolve();
+export const snapshotEditorTableLayout = (view: EditorView) => controllers.get(view)?.snapshot();
+export const restoreEditorTableLayout = (view: EditorView, snapshots: readonly TableLayoutSnapshot[]) =>
+  controllers.get(view)?.restore(snapshots) ?? false;
+export const prepareEditorTableViewport = (view: EditorView, root: Element, margin: number) =>
+  controllers.get(view)?.observeViewport(root, margin);
 
 /** Owns only the scroll shell and colgroup, never the editable tbody. */
 export class TableNodeView {

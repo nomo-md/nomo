@@ -289,6 +289,14 @@ fn encode_markdown(markdown: &str, encoding: MarkdownEncoding) -> Result<Vec<u8>
 }
 
 pub(crate) fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_file_atomically_with(path, |writer| writer.write_all(bytes).map_err(|error| error.to_string()))
+}
+
+/// 完整快照流式写入；仅在编码、写入和同步全部成功后替换目标。
+pub(crate) fn write_file_atomically_with(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> Result<(), String>,
+) -> Result<(), String> {
     let parent = path
         .parent()
         .filter(|value| !value.as_os_str().is_empty())
@@ -301,11 +309,13 @@ pub(crate) fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), Str
         .open(&temp_path)
         .map_err(|error| format!("创建临时保存文件失败：{error}"))?;
 
-    if let Err(error) = temp_file.write_all(bytes) {
+    if let Err(error) = write(&mut temp_file) {
+        drop(temp_file);
         let _ = fs::remove_file(&temp_path);
         return Err(format!("写入临时保存文件失败：{error}"));
     }
     if let Err(error) = temp_file.sync_all() {
+        drop(temp_file);
         let _ = fs::remove_file(&temp_path);
         return Err(format!("同步临时保存文件失败：{error}"));
     }

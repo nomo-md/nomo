@@ -3,7 +3,7 @@ import type { DocumentStats } from './outlineService';
 export interface StatsRange {
   from: number;
   to: number;
-  sourceCoordinates?: 'normalized';
+  sourceCoordinates?: 'normalized' | 'utf8';
 }
 export interface StatsContext {
   documentId: string;

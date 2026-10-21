@@ -1,4 +1,6 @@
 import { serializeClipboardText } from './markdownSerialization';
+import { MarkdownSourceProjection } from '../markdown-document/sourceProjection';
+import type { DocumentSelection } from '../markdown-document/protocol';
 import { typographyPlugin, isTypographyTransaction } from './plugins/typography';
 import { typographyBreaksPlugin } from './nodeViews/TypographyBreakNodeView';
 import katex from 'katex';
@@ -63,6 +65,7 @@ import { codeHighlightPlugin } from './plugins/codeHighlight';
 import { codeHighlightDecorationPlugin } from './plugins/codeHighlightDecorationPlugin';
 import { inlineCodeSelectionBridgePlugin } from './plugins/inlineCodeSelectionBridge';
 import { headingLevelIndicatorPlugin } from './plugins/headingLevelIndicator';
+import { headingAnchorsKey, headingAnchorsPlugin } from './plugins/headingAnchors';
 import { paragraphSelectionGutterPlugin } from './plugins/paragraphSelectionGutter';
 import { codeBlockNavigationPlugin } from './plugins/codeBlockNavigation';
 import { displayMathInputPlugin } from './plugins/displayMathInput';
@@ -84,7 +87,8 @@ import {
   projectInlineSourceWithMapping,
 } from './InlineSourceCodec';
 import { tableControlsPlugin } from './plugins/tableControls';
-import { TableNodeView, tableLayoutPlugin } from './nodeViews/TableNodeView';
+import { TableNodeView, tableLayoutPlugin, snapshotEditorTableLayout, restoreEditorTableLayout, prepareEditorTableViewport } from './nodeViews/TableNodeView';
+import type { TableLayoutSnapshot } from '../table-layout/dom';
 import { tableHtmlBlockPlugin } from './plugins/tableHtml';
 import { taskListPlugin } from './plugins/taskList';
 import { tocSyncPlugin } from './plugins/tocSync';
@@ -210,6 +214,108 @@ export class ProseMirrorEditorCore implements EditorCore {
   private syncRenderRevision = 0;
   private syncSnapshot: EditorSyncSnapshot | null = null;
   private compositionWaiters = new Set<() => void>();
+  private sourceProjection: MarkdownSourceProjection | null = null;
+  private sourceOperationDepth = 0;
+  private projectionCompositionTimer: ReturnType<typeof setTimeout> | null = null;
+  private parsedDocument: { markdown: string; references: unknown; value: TrailingParagraphNormalization } | null = null;
+
+  private withProjectionOperation<T>(operation: () => T): T {
+    if (!this.options.documentProjection) return operation();
+    const outer = this.sourceOperationDepth === 0;
+    if (outer) { this.flushPendingMarkdownSync(); this.options.documentProjection.historyBoundary?.('operation'); }
+    this.sourceOperationDepth++;
+    try { return operation(); }
+    finally {
+      this.sourceOperationDepth--;
+      if (outer) { this.flushPendingMarkdownSync(); this.options.documentProjection.historyBoundary?.('operation'); }
+    }
+  }
+
+  getSourceSelection(flush = true): DocumentSelection | undefined {
+    if (flush) this.flushPendingMarkdownSync();
+    const selection = (this.view?.state ?? this.suspendedState)?.selection;
+    return this.sourceProjection && selection ? this.projectSelection(this.sourceProjection, selection) : undefined;
+  }
+
+  restoreSourceSelection(selection: DocumentSelection): boolean {
+    if (!this.sourceProjection) return false;
+    const anchor = this.sourceProjection.byteToPosition(selection.anchorByte);
+    const head = this.sourceProjection.byteToPosition(selection.headByte);
+    if (anchor === null || head === null) return false;
+    const state = this.view?.state ?? this.suspendedState;
+    if (!state) return false;
+    // 原文字节边界可映射到文档/块边界，光标需要落到最近的可编辑文本位置。
+    const safeAnchor = Selection.near(state.doc.resolve(anchor), anchor === state.doc.content.size ? -1 : 1).anchor;
+    const safeHead = Selection.near(state.doc.resolve(head), head === state.doc.content.size ? -1 : 1).head;
+    this.restoreSelectionSnapshot({ anchor: safeAnchor, head: safeHead }); return true;
+  }
+
+  hasUnsettledProjection(): boolean {
+    return !!this.view?.composing || !!this.pendingMarkdownDoc || this.hasPendingMathInlineDraft();
+  }
+  atSourceWindowBoundary(direction: -1 | 1): boolean {
+    const state = this.view?.state ?? this.suspendedState;
+    if (!state || !this.sourceProjection) return false;
+    return state.selection.head === (direction < 0 ? Selection.atStart(state.doc).head : Selection.atEnd(state.doc).head);
+  }
+
+  sourceByteAtCoords(left: number, top: number): number | undefined {
+    const hit = this.view?.posAtCoords({ left, top });
+    return hit && this.sourceProjection ? this.sourceProjection.positionToByte(hit.pos) ?? undefined : undefined;
+  }
+
+  snapshotTableLayout() { return this.view ? snapshotEditorTableLayout(this.view) : undefined; }
+  prepareTableViewport(root: Element, margin: number) {
+    if (this.view) prepareEditorTableViewport(this.view, root, margin);
+  }
+  /** 阅读锚点只使用已缓存的块级映射，不走逐字符序列化验证的编辑坐标转换。 */
+  captureBlockReadingAnchor(left: number, top: number) {
+    if (!this.view) return undefined;
+    const hit = this.view.posAtCoords({ left, top });
+    if (!hit) return undefined;
+    const anchor = this.getScrollSyncSnapshot().anchors.find(anchor => anchor.depth === 0 &&
+      anchor.edge === 'start' && anchor.pos <= hit.pos && anchor.endPos > hit.pos);
+    if (!anchor) return undefined;
+    return { line: anchor.fromLine, offset: hit.pos - anchor.pos, top: this.view.coordsAtPos(hit.pos).top };
+  }
+  blockReadingAnchorRect(line: number, offset: number) {
+    if (!this.view) return undefined;
+    const anchor = this.getScrollSyncSnapshot().anchors.find(anchor => anchor.depth === 0 &&
+      anchor.edge === 'start' && anchor.fromLine === line);
+    if (!anchor) return undefined;
+    try { return this.view.coordsAtPos(Math.min(anchor.endPos - 1, anchor.pos + offset)); }
+    catch { return undefined; }
+  }
+  measureStructureBlocks() {
+    return this.getScrollSyncSnapshot().anchors.filter(anchor => anchor.depth === 0 && anchor.edge === 'start')
+      .flatMap(anchor => { const rect = this.getScrollSyncAnchorRect(anchor);
+        return rect ? [{ line: anchor.fromLine, top: rect.top, bottom: rect.bottom }] : []; });
+  }
+  restoreTableLayout(snapshots: readonly TableLayoutSnapshot[]) {
+    return this.view ? restoreEditorTableLayout(this.view, snapshots) : false;
+  }
+
+  sourceRangeRects(fromByte: number, toByte: number): DOMRect[] {
+    if (!this.view || !this.sourceProjection) return [];
+    const from = this.sourceProjection.byteToPosition(fromByte);
+    const to = this.sourceProjection.byteToPosition(toByte);
+    if (from === null || to === null) return [];
+    const start = this.view.domAtPos(from); const end = this.view.domAtPos(to);
+    const range = document.createRange(); range.setStart(start.node, start.offset); range.setEnd(end.node, end.offset);
+    return Array.from(range.getClientRects());
+  }
+
+  rebaseSourceProjection(fromByte: number): void {
+    if (!this.options.documentProjection || !this.sourceProjection) return;
+    const delta = fromByte - this.options.documentProjection.fromByte;
+    this.options.documentProjection.fromByte = fromByte;
+    this.sourceProjection.fromByte = fromByte;
+    if (this.sourceSelectionBefore) this.sourceSelectionBefore = {
+      anchorByte: this.sourceSelectionBefore.anchorByte + delta,
+      headByte: this.sourceSelectionBefore.headByte + delta,
+    };
+  }
+  private sourceSelectionBefore?: DocumentSelection;
 
   constructor(private readonly options: EditorCoreOptions) {
     const initialTheme = options.theme ?? {
@@ -222,9 +328,12 @@ export class ProseMirrorEditorCore implements EditorCore {
     CodeBlockNodeView.updateTheme(initialTheme);
     MermaidBlockNodeView.updateTheme(initialTheme.mermaid);
     this.target = options.target ?? null;
-    this.markdown = updateTocBlocks(options.markdown);
-    this.originalMarkdown = this.markdown;
-    this.originalDoc = this.parseSemanticDocument(this.markdown).doc;
+    this.markdown = options.documentProjection ? options.markdown : updateTocBlocks(options.markdown);
+    this.originalMarkdown = options.savedMarkdown === undefined ? this.markdown
+      : options.documentProjection ? options.savedMarkdown : updateTocBlocks(options.savedMarkdown);
+    this.originalDoc = this.parseSemanticDocument(this.originalMarkdown).doc;
+    this.dirty = options.dirty ?? this.markdown !== this.originalMarkdown;
+    if (options.documentProjection) this.sourceProjection = new MarkdownSourceProjection(this.markdown, this.parseSemanticDocument(this.markdown).doc, options.documentProjection.fromByte, options.documentProjection);
     this.runtime = {
       readonly: options.readonly ?? false,
       mode: options.mode ?? 'semantic',
@@ -287,6 +396,23 @@ export class ProseMirrorEditorCore implements EditorCore {
       },
       handlePaste: (_view, event, slice) => this.handleNativePaste(event, slice),
       handleDOMEvents: {
+        compositionstart: () => {
+          if (this.options.documentProjection) {
+            if (this.projectionCompositionTimer) clearTimeout(this.projectionCompositionTimer);
+            this.projectionCompositionTimer = null;
+            this.flushPendingMarkdownSync(); this.options.documentProjection.historyBoundary?.('composition-start');
+          }
+          return false;
+        },
+        compositionend: () => {
+          if (this.options.documentProjection) this.projectionCompositionTimer = setTimeout(() => {
+            this.projectionCompositionTimer = null;
+            if (this.destroyed) return;
+            try { this.flushPendingMarkdownSync(); this.options.documentProjection?.historyBoundary?.('composition-end'); }
+            catch (cause) { this.options.onError?.({ code: 'source-projection-failed', message: '组字输入仍保留，原文提交需要重试。', cause }); }
+          }, 0);
+          return false;
+        },
         keydown: (_view, event) => {
           if (
             event.shiftKey &&
@@ -404,6 +530,9 @@ export class ProseMirrorEditorCore implements EditorCore {
   }
 
   destroy(): void {
+    if (this.projectionCompositionTimer !== null) clearTimeout(this.projectionCompositionTimer);
+    this.projectionCompositionTimer = null;
+    this.parsedDocument = null;
     if (this.destroyed) return;
     this.unmount();
     this.clearMarkdownSyncTimer();
@@ -415,6 +544,7 @@ export class ProseMirrorEditorCore implements EditorCore {
     this.suspendedState = null;
     this.destroyed = true;
     this.detailsSession.clear();
+    this.parsedDocument = null;
   }
 
   getMarkdown(): string {
@@ -470,7 +600,7 @@ export class ProseMirrorEditorCore implements EditorCore {
   getExportHtml(): string {
     this.flushPendingMarkdownSync();
     const doc = this.semanticViewDirty
-      ? parseMarkdown(this.markdown)
+      ? parseMarkdown(this.markdown, this.options.documentProjection)
       : this.view?.state.doc ?? this.suspendedState?.doc;
     if (!doc) return '';
     const nodes = DOMSerializer.nodesFromSchema(schema);
@@ -516,7 +646,7 @@ export class ProseMirrorEditorCore implements EditorCore {
         ready: false, markdown: this.markdown, anchors: [] };
     }
     if (this.syncSnapshot?.revision === this.contentRevision) return this.syncSnapshot;
-    const parsed = parseMarkdownWithSyncAnchors(this.markdown);
+    const parsed = parseMarkdownWithSyncAnchors(this.markdown, this.options.documentProjection);
     const currentDoc = this.view.state.doc;
     // 复杂块的序列化可能多出软换行。用结构差异的已确认前后缀换算偏移，
     // 不能因局部节点长度不同而丢弃后续整篇锚点，也不按块数或文字搜索猜位置。
@@ -726,13 +856,13 @@ export class ProseMirrorEditorCore implements EditorCore {
     const previousMarkdown = this.markdown;
     if (markdown !== previousMarkdown) this.detailsSession.beforeSourceChange(previousMarkdown, markdown);
     const delaySemanticSync = options?.sourceInput === true;
-    this.markdown = updateTocBlocks(markdown);
+    this.markdown = this.options.documentProjection ? markdown : updateTocBlocks(markdown);
     this.contentRevision += 1;
     this.syncSnapshot = null;
     this.version += 1;
 
     const savedMarkdown =
-      options?.savedMarkdown === undefined ? undefined : updateTocBlocks(options.savedMarkdown);
+      options?.savedMarkdown === undefined ? undefined : this.options.documentProjection ? options.savedMarkdown : updateTocBlocks(options.savedMarkdown);
     if (savedMarkdown !== undefined) {
       this.originalMarkdown = savedMarkdown;
       this.originalDoc = this.parseSemanticDocument(savedMarkdown).doc;
@@ -745,6 +875,7 @@ export class ProseMirrorEditorCore implements EditorCore {
     }
 
     this.dirty = options?.dirty ?? this.markdown !== this.originalMarkdown;
+    if (this.options.documentProjection) this.sourceProjection = new MarkdownSourceProjection(this.markdown, this.parseSemanticDocument(this.markdown).doc, this.options.documentProjection.fromByte, this.options.documentProjection);
     if (delaySemanticSync) {
       this.semanticViewDirty = true;
       this.suspendedState = null;
@@ -787,9 +918,10 @@ export class ProseMirrorEditorCore implements EditorCore {
     this.clearPendingMarkdownSync();
     // 快照不携带视图状态；不同正文不能按旧文档的数值位置继承临时展开。
     if (snapshot.markdown !== this.markdown) this.detailsSession.clear();
-    this.markdown = updateTocBlocks(snapshot.markdown);
+    this.markdown = this.options.documentProjection ? snapshot.markdown : updateTocBlocks(snapshot.markdown);
     this.originalMarkdown = this.markdown;
     this.originalDoc = this.parseSemanticDocument(this.markdown).doc;
+    if (this.options.documentProjection) this.sourceProjection = new MarkdownSourceProjection(this.markdown, this.originalDoc, this.options.documentProjection.fromByte, this.options.documentProjection);
     this.version = snapshot.version;
     this.dirty = true;
     const selection = snapshot.selection && snapshot.meta?.inlineSource !== true
@@ -976,6 +1108,10 @@ export class ProseMirrorEditorCore implements EditorCore {
     input: EditorPasteInput,
     options: { mode?: EditorPasteMode } = {},
   ): EditorPasteResult {
+    return this.withProjectionOperation(() => this.pasteClipboardContent(input, options));
+  }
+
+  private pasteClipboardContent(input: EditorPasteInput, options: { mode?: EditorPasteMode }): EditorPasteResult {
     this.assertActive();
     if (!this.view || !this.isEditable()) {
       return { status: 'rejected', reason: 'readonly' };
@@ -1407,11 +1543,20 @@ export class ProseMirrorEditorCore implements EditorCore {
   }
 
   execute(command: EditorCommand): boolean {
+    if (!['insertText', 'undo', 'redo'].includes(command.type)) return this.withProjectionOperation(() => this.executeCommand(command));
+    return this.executeCommand(command);
+  }
+
+  private executeCommand(command: EditorCommand): boolean {
     this.assertActive();
     this.flushPendingMarkdownSync();
 
     if (!this.canExecute(command)) {
       return false;
+    }
+    if (this.options.documentProjection && (command.type === 'undo' || command.type === 'redo')) {
+      this.commitPendingEdits();
+      return this.options.documentProjection.history(command.type === 'redo');
     }
 
     if (!this.view) {
@@ -1445,6 +1590,7 @@ export class ProseMirrorEditorCore implements EditorCore {
     if (this.destroyed || this.runtime.readonly) {
       return false;
     }
+    if (this.options.documentProjection && (command.type === 'undo' || command.type === 'redo')) return this.options.documentProjection.canHistory(command.type === 'redo');
     if (this.view?.state.selection.$from.parent.type.name === 'details_summary' &&
       !['insertText', 'undo', 'redo', 'toggleBold', 'toggleItalic', 'toggleCode', 'toggleStrikethrough',
         'toggleUnderline', 'toggleHighlight', 'toggleSuperscript', 'toggleSubscript', 'clearInlineStyles',
@@ -1497,6 +1643,27 @@ export class ProseMirrorEditorCore implements EditorCore {
     CodeBlockNodeView.updateTheme(theme);
     MermaidBlockNodeView.updateTheme(theme.mermaid);
     this.emit(`theme:${theme.name}`);
+  }
+
+  /** 派生锚点仅改变视图，不写入正文、历史或对外编辑通知。 */
+  updateHeadingAnchors(ids: readonly string[]): void {
+    const state = this.view?.state ?? this.suspendedState;
+    if (!state) return;
+    const anchors = headingAnchorsKey.getState(state);
+    if (!anchors || (anchors.ids?.length === ids.length && anchors.ids.every((id, i) => id === ids[i]))) return;
+    this.dispatchTransaction(state.tr.setMeta(headingAnchorsKey, [...ids]).setMeta('addToHistory', false));
+  }
+
+  revealHeadingAnchor(id: string): boolean {
+    const view = this.view;
+    if (!view) return false;
+    const anchor = headingAnchorsKey.getState(view.state)?.decorations.find()
+      .find(decoration => decoration.spec.headingId === id);
+    if (!anchor) return false;
+    view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(anchor.from + 1))).scrollIntoView());
+    // 从大纲侧栏进入时 DOM 焦点尚在编辑器外，PM 自带的滚动会跳过；复用显式定位。
+    scrollSearchSelectionIntoView(view, view.state.selection.head);
+    return true;
   }
 
   updateOptions(options: Partial<EditorRuntimeOptions>): void {
@@ -1590,7 +1757,7 @@ export class ProseMirrorEditorCore implements EditorCore {
           rules: createMarkdownInputRules(),
         }),
         blockquoteInputPlugin(),
-        history(),
+        ...(this.options.documentProjection ? [] : [history()]),
         taskListPlugin(),
         mathInlineInputPlugin(() => this.view),
         mathInlineDraftPlugin(),
@@ -1600,12 +1767,13 @@ export class ProseMirrorEditorCore implements EditorCore {
         codeHighlightDecorationPlugin({ enabled: false }),
         inlineCodeSelectionBridgePlugin(),
         headingLevelIndicatorPlugin(),
+        ...(this.options.documentProjection ? [headingAnchorsPlugin()] : []),
         paragraphSelectionGutterPlugin(),
         searchHighlightPlugin(),
         // mathBlockPlugin(),  // 已被 math_block 语义节点 + displayMathInputPlugin 取代
         displayMathInputPlugin(),
         trailingParagraphPlugin(),
-        tocSyncPlugin(),
+        ...(this.options.documentProjection ? [] : [tocSyncPlugin()]),
         tableHtmlBlockPlugin(),
         tableControlsPlugin(),
         tableLayoutPlugin(),
@@ -1613,18 +1781,18 @@ export class ProseMirrorEditorCore implements EditorCore {
         createCalloutPlugin(),
         detailsPlugin(this.detailsSession, enterDetailsBody),
         keymap({
-          'Mod-z': undo,
-          'Mod-y': redo,
-          'Shift-Mod-z': redo,
-          'Mod-b': toggleInlineSourceFormat('strong'),
-          'Mod-i': toggleInlineSourceFormat('em'),
-          'Ctrl-`': toggleInlineSourceFormat('code'),
+          'Mod-z': this.options.documentProjection ? () => this.execute({ type: 'undo' }) : undo,
+          'Mod-y': this.options.documentProjection ? () => this.execute({ type: 'redo' }) : redo,
+          'Shift-Mod-z': this.options.documentProjection ? () => this.execute({ type: 'redo' }) : redo,
+          'Mod-b': this.options.documentProjection ? () => this.execute({ type: 'toggleBold' }) : toggleInlineSourceFormat('strong'),
+          'Mod-i': this.options.documentProjection ? () => this.execute({ type: 'toggleItalic' }) : toggleInlineSourceFormat('em'),
+          'Ctrl-`': this.options.documentProjection ? () => this.execute({ type: 'toggleCode' }) : toggleInlineSourceFormat('code'),
           'Mod-k': (_state, _dispatch, _view) => {
             this.options.onLinkShortcut?.();
             return Boolean(this.options.onLinkShortcut);
           },
-          'Alt-Shift-5': toggleInlineSourceFormat('strikethrough'),
-          'Mod-u': toggleInlineSourceFormat('underline'),
+          'Alt-Shift-5': this.options.documentProjection ? () => this.execute({ type: 'toggleStrikethrough' }) : toggleInlineSourceFormat('strikethrough'),
+          'Mod-u': this.options.documentProjection ? () => this.execute({ type: 'toggleUnderline' }) : toggleInlineSourceFormat('underline'),
           'Mod-\\': (_state, _dispatch, _view) =>
             this.runProseMirrorCommand({ type: 'clearInlineStyles' }),
           'Ctrl-\\': (_state, _dispatch, _view) =>
@@ -1837,7 +2005,12 @@ export class ProseMirrorEditorCore implements EditorCore {
   }
 
   private parseSemanticDocument(markdown: string): TrailingParagraphNormalization {
-    return ensureTrailingParagraph(parseMarkdown(markdown));
+    const references = this.options.documentProjection?.references;
+    if (this.parsedDocument?.markdown === markdown && this.parsedDocument.references === references) return this.parsedDocument.value;
+    const value = ensureTrailingParagraph(parseMarkdown(markdown, this.options.documentProjection));
+    // 单个不可变解析结果，与当前模型共享节点；不保留正文历史、DOM 或回调。
+    this.parsedDocument = { markdown, references, value };
+    return value;
   }
 
   private dispatchTransaction(transaction: Transaction): void {
@@ -1860,6 +2033,7 @@ export class ProseMirrorEditorCore implements EditorCore {
     if (isSemanticBlockAlignmentTransaction(transaction) && !docChanged) {
       return;
     }
+    if (transaction.getMeta(headingAnchorsKey) !== undefined && !docChanged) return;
     const visibilityOnly = transaction.getMeta(detailsKey) && !docChanged;
     if (!docChanged && detailsKey.getState(currentState)?.decorations !== detailsKey.getState(nextState)?.decorations) {
       this.syncRenderRevision += 1;
@@ -1868,6 +2042,9 @@ export class ProseMirrorEditorCore implements EditorCore {
     }
 
     if (docChanged) {
+      if (this.sourceProjection && !this.pendingMarkdownDoc) {
+        this.sourceSelectionBefore = this.projectSelection(this.sourceProjection, previousSelection);
+      }
       if (this.view) FootnoteRefNodeView.refreshOpenPreviews(this.view);
       this.contentRevision += 1;
       this.syncRenderRevision += 1;
@@ -1914,7 +2091,7 @@ export class ProseMirrorEditorCore implements EditorCore {
   setSavedMarkdownBaseline(markdown: string): void {
     this.assertActive();
     this.commitPendingEdits();
-    this.originalMarkdown = updateTocBlocks(markdown);
+    this.originalMarkdown = this.options.documentProjection ? markdown : updateTocBlocks(markdown);
     this.originalDoc = this.parseSemanticDocument(this.originalMarkdown).doc;
     this.dirty = this.markdown !== this.originalMarkdown;
     this.emit('saved-baseline');
@@ -1933,7 +2110,8 @@ export class ProseMirrorEditorCore implements EditorCore {
     this.clearMarkdownSyncTimer();
     this.markdownSyncTimer = setTimeout(() => {
       this.markdownSyncTimer = null;
-      this.flushPendingMarkdownSync();
+      try { this.flushPendingMarkdownSync(); }
+      catch (cause) { this.options.onError?.({ code: 'source-projection-failed', message: cause instanceof Error ? cause.message : '原文写回失败，编辑仍保留在当前视图。', cause }); }
     }, MARKDOWN_SYNC_DEBOUNCE_MS);
   }
 
@@ -1955,6 +2133,19 @@ export class ProseMirrorEditorCore implements EditorCore {
       return false;
     }
 
+    if (this.sourceProjection && this.options.documentProjection) {
+      // 先验证并提交补丁，再清空待提交输入；失败不能把窗口当作已经保存的正文。
+      const change = this.sourceProjection.project(pendingDoc);
+      const selection = (this.view?.state ?? this.suspendedState)?.selection;
+      const nextProjection = new MarkdownSourceProjection(change.source, pendingDoc, this.options.documentProjection.fromByte, this.options.documentProjection);
+      this.options.documentProjection.commit({ ...change, selectionBefore: this.sourceSelectionBefore,
+        selectionAfter: selection && this.projectSelection(nextProjection, selection) });
+      this.sourceProjection = nextProjection; this.sourceSelectionBefore = undefined;
+      this.clearPendingMarkdownSync(); this.markdown = change.source;
+      this.dirty = this.markdown !== this.originalMarkdown; this.semanticViewDirty = false;
+      this.emit('content-sync'); return true;
+    }
+
     this.clearPendingMarkdownSync();
 
     const serializedMarkdown = pendingDoc.eq(this.originalDoc)
@@ -1969,6 +2160,12 @@ export class ProseMirrorEditorCore implements EditorCore {
     this.semanticViewDirty = false;
     this.emit('content-sync');
     return true;
+  }
+
+  private projectSelection(projection: MarkdownSourceProjection, selection: { anchor: number; head: number }): DocumentSelection | undefined {
+    const anchorByte = projection.positionToByte(selection.anchor);
+    const headByte = selection.anchor === selection.head ? anchorByte : projection.positionToByte(selection.head);
+    return anchorByte !== null && headByte !== null ? { anchorByte, headByte } : undefined;
   }
 
   private replaceViewState(markdown: string, selection?: { anchor: number; head: number }, preserveCodeViewport = false): void {
@@ -2045,6 +2242,7 @@ export class ProseMirrorEditorCore implements EditorCore {
   }
 
   private notifyDeletedImages(previousDoc: ProseMirrorNode, nextDoc: ProseMirrorNode): void {
+    if (this.options.documentProjection) return;
     if (!this.options.onImagesDeleted) {
       return;
     }
@@ -2057,6 +2255,7 @@ export class ProseMirrorEditorCore implements EditorCore {
   }
 
   private notifyDeletedImageSrcs(deletedSrcs: string[]): void {
+    if (this.options.documentProjection) return;
     if (!this.options.onImagesDeleted) {
       return;
     }
@@ -2388,7 +2587,7 @@ function selectEditorTextRange(view: EditorView, from: number, to: number, focus
 
 function scrollSearchSelectionIntoView(view: EditorView, pos: number) {
   const scrollContainer = view.dom.closest<HTMLElement>('.semantic-pane');
-  if (!scrollContainer) {
+  if (!scrollContainer || scrollContainer.clientHeight <= 0) {
     return;
   }
 

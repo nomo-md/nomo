@@ -1,4 +1,5 @@
 import type { EditorCore, EditorMode } from '../../lib/editor-core';
+import type { MarkdownApplicationSession } from './markdownApplicationSession';
 import type { OutlineItem } from '../../lib/outline/outlineService';
 import type { MarkdownSourceEditorHandle, MarkdownSourceRuntimeState } from '../components/markdownSourceEditor';
 import type { EditorViewMode } from '../types';
@@ -21,6 +22,7 @@ export interface MarkdownWorkspaceRuntimeBinding {
 
 /** 文档状态随标签保留，DOM 宿主只在文档可见时存在。 */
 export interface MarkdownDocumentRuntime {
+  session?: MarkdownApplicationSession;
   tabId: string;
   editor: EditorCore;
   mode: EditorViewMode;

@@ -6,6 +6,7 @@ import { getSourceTextChanges, type MarkdownSourceEditorHandle, type MarkdownSou
 import { createPerfTimer, logError, logInfo } from '../../lib/services/logger';
 import { t } from '../i18n';
 import { createImageMarkdown, getImageFiles } from './imageMarkdown';
+import { getMarkdownApplicationSession } from './markdownApplicationSession';
 
 interface ImageInsertionOptions {
   getEditor(): EditorCore;
@@ -113,6 +114,11 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
       return;
     }
 
+    const application = getMarkdownApplicationSession(editor);
+    if (application) await application.ready;
+    if (target) editor.restoreSelectionSnapshot(target.selection);
+    const bookmark = application?.createInsertionBookmark();
+    try {
     const context = options.getImageContext();
     const strategy = context.settings?.imageInsertStrategy ?? 'copy-assets';
     if (strategy !== 'upload' && !options.getNativePath()) {
@@ -156,7 +162,9 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
       // 文件选择和资源导入期间光标可能移动，只在来源正文未变化时替换触发符号。
       if (cancelIfTargetChanged()) return;
       if (target) editor.restoreSelectionSnapshot(target.selection);
-      if (options.getMode() === 'source') {
+      if (bookmark) {
+        await bookmark.insert(`\n\n${buildImageSnippet(imported)}\n\n`);
+      } else if (options.getMode() === 'source') {
         insertSourceMarkdown(imported, editor);
       } else {
         for (const item of imported) {
@@ -184,6 +192,7 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
     }
     timer.end({ inserted: imported.length, failed });
     logInfo('ImageInsertion', '图片插入完成', { inserted: imported.length, failed });
+    } finally { bookmark?.dispose(); }
   }
 
   /** HTML 属性值转义：& " < > */
@@ -210,24 +219,7 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
     const selection = sourceEditor?.getSelection() ?? detachedState?.selection.main;
     const start = selection?.from ?? markdown.length;
     const end = selection?.to ?? start;
-    const imageSettings = options.getImageContext().settings;
-    const width = imageSettings?.defaultImageWidth || '';
-    const align = imageSettings?.defaultImageAlign ?? 'none';
-
-    const snippet = items
-      .map((item) => {
-        if (align === 'left' || align === 'center' || align === 'right') {
-          let imgTag = `<img src="${escapeHtmlAttr(item.src)}" alt="${escapeHtmlAttr(item.alt)}"`;
-          if (width) imgTag += ` width="${escapeHtmlAttr(width)}"`;
-          imgTag += '>';
-          return `<p align="${align}">\n  ${imgTag}\n</p>`;
-        } else if (width) {
-          return `<img src="${escapeHtmlAttr(item.src)}" alt="${escapeHtmlAttr(item.alt)}" width="${escapeHtmlAttr(width)}">`;
-        } else {
-          return createImageMarkdown(item.alt, item.src);
-        }
-      })
-      .join('\n');
+    const snippet = buildImageSnippet(items);
     const prefix = markdown.slice(0, start);
     const suffix = markdown.slice(end);
     const before = prefix.endsWith('\n') || prefix.length === 0 ? '' : '\n';
@@ -259,6 +251,17 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
       sourceEditor.focus();
       options.syncSourceTextareaHeight();
     });
+  }
+
+  function buildImageSnippet(items: Array<{ src: string; alt: string }>) {
+    const settings = options.getImageContext().settings;
+    const width = settings?.defaultImageWidth || '';
+    const align = settings?.defaultImageAlign ?? 'none';
+    return items.map(item => {
+      if (!width && align === 'none') return createImageMarkdown(item.alt, item.src);
+      const img = `<img src="${escapeHtmlAttr(item.src)}" alt="${escapeHtmlAttr(item.alt)}"${width ? ` width="${escapeHtmlAttr(width)}"` : ''}>`;
+      return align === 'left' || align === 'center' || align === 'right' ? `<p align="${align}">\n  ${img}\n</p>` : img;
+    }).join('\n');
   }
 
   function getInsertFileName(file: File, index: number) {

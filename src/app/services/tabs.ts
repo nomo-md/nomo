@@ -233,6 +233,7 @@ export function isReusableUntitledTab(tab: Tab | undefined): tab is MarkdownTabS
     tab.fileName === 'untitled.md' &&
     !tab.dirty &&
     tab.markdown.trim() === '' &&
+    !tab.byteLength &&
     !tab.nativePath,
   );
 }

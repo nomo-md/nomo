@@ -1,8 +1,11 @@
 import type { EditorCore, EditorMode, EditorSelectionSnapshot } from '../../lib/editor-core';
 import type { MarkdownSourceEditorHandle } from '../components/markdownSourceEditor';
 import type { EditorViewMode, SplitActivePane } from '../types';
+import type { DocumentSelection } from '../../lib/markdown-document/protocol';
+import { getMarkdownApplicationSession } from './markdownApplicationSession';
 
 export interface EmojiInsertionTarget {
+  globalSelection?: DocumentSelection;
   tabId: string;
   editor: EditorCore;
   source: MarkdownSourceEditorHandle | undefined;
@@ -47,6 +50,8 @@ export function insertEmojiAtTarget(
   text: string,
 ): boolean {
   if (!isEmojiTargetCurrent(target, current)) return false;
+  const application = getMarkdownApplicationSession(target.editor);
+  if (application && target.globalSelection) return application.insertAt(target.globalSelection, target.contentRevision, text);
   if (target.mode === 'source') {
     const snapshot = target.source?.getSelectionStatsSnapshot?.();
     if (snapshot && snapshot.documentId !== target.tabId) return false;

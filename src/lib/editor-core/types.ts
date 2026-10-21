@@ -3,6 +3,7 @@ import type { ImageContext } from '../services/render';
 import type { ContextMenuOpenEvent, ContextMenuTarget } from './plugins/contextMenu';
 import type { EditorThemeOptions } from '../theme/types';
 import type { EditorSyncCaret, EditorSyncSnapshot, MarkdownSyncAnchor } from './scrollSyncMapping';
+import type { DocumentSelection, SourceEdit } from '../markdown-document/protocol';
 
 export type { EditorThemeOptions } from '../theme/types';
 
@@ -218,8 +219,20 @@ export type EditorCommand =
 export type EditorListener = (event: EditorChangeEvent) => void;
 
 export interface EditorCoreOptions {
+  /** 文档会话的局部投影；仅窗口控制器使用，窗口字符串不代表完整文档。 */
+  documentProjection?: {
+    fromByte: number;
+    references?: Record<string, { href: string; title: string }>;
+    commit(change: { source: string; edits: SourceEdit[]; selectionBefore?: DocumentSelection; selectionAfter?: DocumentSelection }): void;
+    history(redo: boolean): boolean;
+    canHistory(redo: boolean): boolean;
+    historyBoundary?(kind: 'operation' | 'composition-start' | 'composition-end'): void;
+  };
   target?: HTMLElement;
   markdown: string;
+  /** 初始化保存基线，避免创建后再用 setMarkdown 重建同一文档。 */
+  savedMarkdown?: string;
+  dirty?: boolean;
   readonly?: boolean;
   mode?: EditorMode;
   inlineCodeRenderingEnabled?: boolean;

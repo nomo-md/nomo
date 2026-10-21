@@ -316,9 +316,11 @@ function createViewController(view: EditorView) {
     if (!geometryProjectionStyle.isConnected) document.head.append(geometryProjectionStyle);
     view.dom.dataset.kpReflow = String(geometryProjection);
   };
-  const finishGeometryProjection = () => {
+  const finishGeometryProjection = (force = false) => {
     zoomProjectionActive = false;
     if (!view.dom.hasAttribute('data-kp-reflow')) return;
+    // 屏幕外段落保留原生换行，等真正可见时再更新其旧宽度断行。
+    if (!force && view.dom.querySelector(`[data-kp-layout="ready"]:not([data-kp-geometry="${geometryProjection}"])`)) return;
     const anchor = captureViewportAnchor(view, interaction.anchor);
     view.dom.removeAttribute('data-kp-reflow');
     geometryProjectionStyle?.remove();
@@ -383,9 +385,9 @@ function createViewController(view: EditorView) {
   };
   const queueRunFrame = () => {
     // 缩放与小窗切换先使用原生换行，精细排版在过渡结束后追补。
-    if (layoutFrame !== null || destroyed || isLayoutDeferred() || (isPreviewing() && !viewportOnly))
+    if (layoutFrame !== null || destroyed || document.hidden || isLayoutDeferred() || (isPreviewing() && !viewportOnly))
       return;
-    if (typeof requestAnimationFrame !== 'function' || document.hidden) {
+    if (typeof requestAnimationFrame !== 'function') {
       timer = setTimeout(() => void run(), 0);
       return;
     }
@@ -469,8 +471,9 @@ function createViewController(view: EditorView) {
               else visibleParagraphs.delete(entry.target);
               changed ||= wasVisible !== entry.isIntersecting;
             }
+            const firstVisibility = !visibilityReady;
             visibilityReady = true;
-            if (changed && getTypographyOptions().enabled && (isPreviewing() || geometryRecovery))
+            if ((changed || firstVisibility) && getTypographyOptions().enabled)
               requestVisibleLayout();
           },
           { root: pane, rootMargin: '160px 0px' },
@@ -479,19 +482,20 @@ function createViewController(view: EditorView) {
   const indexParagraphs = (doc: ProseMirrorNode) => {
     if (indexedDoc === doc) return;
     indexedDoc = doc;
-    visibilityObserver?.disconnect();
-    visibilityReady = false;
+    const previousTargets = new Map(paragraphTargets);
     paragraphTargets.clear();
-    visibleParagraphs.clear();
     doc.descendants((node, pos) => {
       if (node.type.name !== 'paragraph' || !node.content.size) return;
       const element = view.nodeDOM(pos);
       if (element instanceof HTMLElement) {
         paragraphTargets.set(element, { node, pos, element });
-        visibilityObserver?.observe(element);
+        if (!previousTargets.delete(element)) visibilityObserver?.observe(element);
       }
       return false;
     });
+    for (const element of previousTargets.keys()) {
+      visibilityObserver?.unobserve(element); visibleParagraphs.delete(element);
+    }
     for (const element of view.dom.querySelectorAll('img,.math-inline')) {
       if (!observedObjects.has(element)) {
         observedObjects.add(element);
@@ -700,7 +704,7 @@ function createViewController(view: EditorView) {
     });
   };
   const run = async (): Promise<void> => {
-    if (destroyed || isLayoutDeferred() || (isPreviewing() && !viewportOnly) || isComposing() || dragging)
+    if (destroyed || document.hidden || isLayoutDeferred() || (isPreviewing() && !viewportOnly) || isComposing() || dragging)
       return;
     if (geometryAnchorFrame !== null || pendingGeometryAnchor) restoreGeometryAnchor();
     clearDisabledLayout();
@@ -763,7 +767,7 @@ function createViewController(view: EditorView) {
       const generation = interaction.generation;
       // 宽度输入复用在途测量；缩放则先让出交互帧，停止后再追补。
       const stale = () =>
-        destroyed ||
+        destroyed || document.hidden ||
         isLayoutDeferred() ||
         revision !== token ||
         view.state.doc !== doc ||
@@ -780,8 +784,10 @@ function createViewController(view: EditorView) {
       };
       const targets: Target[] = [];
       indexParagraphs(doc);
+      // 首次交集回调前不以全文几何测量猜测首屏；回调会重新安排当前窗口。
+      if (visibilityObserver && !visibilityReady) return;
       const available =
-        interactivePass && visibilityReady
+        visibilityReady
           ? Array.from(visibleParagraphs, (element) => paragraphTargets.get(element)!)
           : paragraphTargets.values();
       for (const target of available) {
@@ -799,7 +805,7 @@ function createViewController(view: EditorView) {
         const buffer = Math.min(160, viewportHeight * 0.25);
         const priority =
           !!rect && rect.bottom >= viewportTop - buffer && rect.top <= viewportBottom + buffer;
-        if (interactivePass && !priority) continue;
+        if (!priority) continue;
         targets.push({
           ...target,
           distance: rect
@@ -893,7 +899,7 @@ function createViewController(view: EditorView) {
               !d.spec.editingFallback,
           )
         ) {
-          if (performance.now() - yieldedAt >= 6) {
+          if (performance.now() - yieldedAt >= 4) {
             await new Promise<void>((resolve) => setTimeout(resolve, 0));
             yieldedAt = performance.now();
           }
@@ -977,7 +983,7 @@ function createViewController(view: EditorView) {
           (interactivePass
             ? performance.now() - publishedAt >= 6
             : through === priorityCount ||
-              (through > priorityCount && performance.now() - publishedAt >= 16))
+              (through > priorityCount && performance.now() - publishedAt >= 4))
         ) {
           if (!(await commit())) break;
         }
@@ -1141,7 +1147,7 @@ function createViewController(view: EditorView) {
     if (!getTypographyOptions().enabled) {
       pendingDisableClear = true;
       clearDisabledLayout();
-      finishGeometryProjection();
+      finishGeometryProjection(true);
     }
     if (!getTypographyOptions().enabled) {
       clearTimeout(timer);
@@ -1164,11 +1170,17 @@ function createViewController(view: EditorView) {
       pendingGeometryAnchor = null;
     }
     if (!getTypographyOptions().enabled || destroyed || isComposing() || dragging) return;
-    if (isPreviewing() || geometryRecovery) {
-      requestVisibleLayout();
-    }
+    requestVisibleLayout();
   };
   pane?.addEventListener('scroll', viewportScrolled, { passive: true });
+  const visibilityChanged = () => {
+    if (document.hidden) {
+      clearTimeout(timer);
+      if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
+      layoutFrame = null; revision++;
+    } else requestVisibleLayout();
+  };
+  document.addEventListener('visibilitychange', visibilityChanged);
   interactionSubscription = subscribeTypographyInteraction(
     (snapshot) => {
       if (snapshot.generation < interaction.generation) return;
@@ -1287,6 +1299,7 @@ function createViewController(view: EditorView) {
       geometryProjectionStyle?.remove();
       interactionSubscription?.destroy();
       pane?.removeEventListener('scroll', viewportScrolled);
+      document.removeEventListener('visibilitychange', visibilityChanged);
       measureCache.clear();
       solver.destroy();
       observer?.disconnect();

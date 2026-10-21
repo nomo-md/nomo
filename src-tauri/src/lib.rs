@@ -89,6 +89,13 @@ pub fn run() {
                 crate::window::tab_drag::forget_window(label);
                 crate::window::tab_transfer::forget_window(window.app_handle(), label);
                 crate::window::workspace_lifecycle::destroyed(window.app_handle(), label);
+                let markdown_sessions = window.state::<text_document::markdown_session::MarkdownDocumentSessionManager>().inner().clone();
+                let closed_owner = label.to_owned();
+                tauri::async_runtime::spawn_blocking(move || {
+                    if let Err(error) = markdown_sessions.detach_owner(&closed_owner) {
+                        crate::app_logger::error("Markdown", &format!("窗口销毁后释放文档失败：{}", error.message));
+                    }
+                });
                 crate::app_logger::debug("Window", &format!("窗口销毁前持久化状态：{label}"));
                 crate::window::state::persist_window_state_before_destroy(window);
                 if label == crate::window::commands::SETTINGS_WINDOW_LABEL {
@@ -245,6 +252,9 @@ pub fn run() {
                 crate::text_document::DocumentSessionManager::new(segmented_root)
                     .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             app.manage(segmented_manager);
+            let markdown_root = app.path().app_data_dir().map_err(std::io::Error::other)?.join("markdown-documents");
+            app.manage(crate::text_document::markdown_session::MarkdownDocumentSessionManager::new(markdown_root)
+                .map_err(std::io::Error::other)?);
 
             if let Some(window) = app.get_webview_window("main") {
                 crate::app_logger::info("Window", "初始化主窗口系统适配和菜单");
@@ -311,6 +321,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            crate::text_document::markdown_commands::markdown_document_command,
             crate::emoji_catalog::load_emoji_catalog,
             crate::file_clipboard::copy_file_to_clipboard,
             crate::export::export_html,

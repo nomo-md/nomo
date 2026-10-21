@@ -417,6 +417,13 @@ pub(crate) async fn prepare_tab_transfer(
         {
             return Err("移交仅支持完整 Markdown 快照".into());
         }
+        if let Some(id) = tab.get("documentId").and_then(Value::as_str) {
+            let status = app.state::<crate::text_document::markdown_session::MarkdownDocumentSessionManager>()
+                .status(window.label(), id).map_err(|e| e.message)?;
+            if tab.get("version").and_then(Value::as_u64) != Some(status.revision) {
+                return Err("移交文档修订已变化，请重新准备".into());
+            }
+        }
     }
     validate_incoming_paths(&input.tabs, &[])?;
     validate_workspace(&input.source_workspace)?;
@@ -713,6 +720,9 @@ pub(crate) fn target_ready_tab_transfer(
                 return Err("目标工作区改变了迁移文档的文件路径".into());
             }
             migrated_metadata.push(target_tab.clone());
+            if tab.get("documentId") != target_tab.get("documentId") {
+                return Err("目标工作区改变了文档会话身份".into());
+            }
         }
         let existing_metadata: Vec<_> = tabs
             .iter()
@@ -848,6 +858,9 @@ pub(crate) fn commit_tab_transfer(
             source_targets.folder_path = None;
         }
         let journal = serde_json::to_value(&transfer).map_err(|error| error.to_string())?;
+        let documents: Vec<String> = transfer.tabs.iter().filter_map(|tab| tab.get("documentId").and_then(Value::as_str).map(str::to_owned)).collect();
+        app.state::<crate::text_document::markdown_session::MarkdownDocumentSessionManager>()
+            .transfer_owners_with(&documents, &transfer.source_window_label, &transfer.target_window_label, || {
         app.state::<super::open_targets::OpenTargetRegistry>()
             .commit_transfer(
                 &transfer.source_window_label,
@@ -877,7 +890,8 @@ pub(crate) fn commit_tab_transfer(
                         })
                     })
                 },
-            )?;
+            )
+        })?;
         for (label, epoch) in [
             (&transfer.source_window_label, transfer.source_epoch),
             (&transfer.target_window_label, transfer.target_epoch),

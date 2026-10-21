@@ -26,7 +26,45 @@ afterEach(() => {
   core = undefined;
   setTypographyOptions(originalOptions);
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   document.body.replaceChildren();
+});
+
+it('only measures visible paragraphs and keeps unchanged observer bindings after input', async () => {
+  setTypographyOptions({ enabled: true });
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(240);
+  let visible = '首屏';
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    return new DOMRect(0, this.tagName === 'P' && this.textContent !== visible ? 5000 : 0, 240, 24);
+  });
+  let notify!: IntersectionObserverCallback;
+  const observed = new Set<Element>();
+  const observe = vi.fn((element: Element) => observed.add(element));
+  const disconnect = vi.fn(() => observed.clear());
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(callback: IntersectionObserverCallback) { notify = callback; }
+    observe = observe;
+    unobserve(element: Element) { observed.delete(element); }
+    disconnect = disconnect;
+  });
+  const measure = vi.spyOn(measurement, 'measureParagraph').mockImplementation(async (element, options) => measureVisibleCharacters(element, options));
+  const view = typographyView(['首屏', '尾部', '更远正文']);
+  const flushing = flushEditorTypography(view);
+  await vi.waitFor(() => expect(observed.size).toBe(3));
+  const publishVisibility = () => notify([...observed].map((target) => ({ target, isIntersecting: target.textContent === visible })) as IntersectionObserverEntry[], {} as IntersectionObserver);
+  publishVisibility(); await flushing;
+  expect(measure.mock.calls.map(([element]) => element.textContent)).toEqual(['首屏']);
+  expect(observe).toHaveBeenCalledTimes(3);
+  measure.mockClear(); visible = '尾部'; publishVisibility();
+  await vi.waitFor(() => expect(measure).toHaveBeenCalledTimes(1));
+  expect(measure.mock.calls[0][0].textContent).toBe('尾部');
+  const second = view.state.doc.firstChild!.nodeSize + 1;
+  visible = '新尾部'; view.dispatch(view.state.tr.insertText('新', second));
+  await flushEditorTypography(view);
+  expect(observe).toHaveBeenCalledTimes(3);
+  expect(disconnect).not.toHaveBeenCalled();
+  view.destroy(); standaloneView = undefined;
+  expect(disconnect).toHaveBeenCalledTimes(1);
 });
 
 it('exports current source even when the semantic view has not caught up', () => {

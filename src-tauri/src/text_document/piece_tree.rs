@@ -6,13 +6,13 @@ use std::sync::{
 
 static NEXT_NODE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum PieceSource {
     Original { offset: u64, length: u64 },
     Added { offset: u64, length: u64 },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) struct Piece {
     pub(super) source: PieceSource,
     // 原文件首窗返回时尚未完成全量扫描，因此换行统计允许暂时未知。
@@ -96,6 +96,19 @@ impl PieceTree {
 
     pub(super) fn len(&self) -> u64 {
         link_len(&self.root)
+    }
+
+    /// 定位源片段，不分配全文片段列表；保存点比较可跳过引用完全相同的长区间。
+    pub(super) fn piece_at(&self, offset: u64) -> Option<(&Piece, u64)> {
+        let mut link = self.root.as_ref();
+        let mut offset = offset;
+        while let Some(node) = link {
+            let left = link_len(&node.left);
+            if offset < left { link = node.left.as_ref(); }
+            else if offset < left + node.piece.len() { return Some((&node.piece, offset - left)); }
+            else { offset -= left + node.piece.len(); link = node.right.as_ref(); }
+        }
+        None
     }
 
     pub(super) fn replace_range(

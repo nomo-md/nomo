@@ -52,6 +52,7 @@ export function parseWithSyncAnchors(
   parser: MarkdownParser,
   text: string,
   sourceLine: (line: number, end: boolean) => number | undefined,
+  markdownEnvironment: object = {},
 ): { doc: ProseMirrorNode; anchors: MarkdownSyncAnchor[] } {
   const ranges = new WeakMap<ProseMirrorNode, SourceRange>();
   const initialized = new WeakSet<ParseState>();
@@ -110,7 +111,7 @@ export function parseWithSyncAnchors(
       },
     ]),
   );
-  const doc = mappedParser.parse(text);
+  const doc = mappedParser.parse(text, markdownEnvironment);
   const anchors: MarkdownSyncAnchor[] = [];
   doc.descendants((node, pos) => {
     const range = ranges.get(node);

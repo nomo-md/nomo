@@ -74,6 +74,21 @@ function getTopLevelNodeNames(doc: ProseMirrorNode): string[] {
 }
 
 describe('createEditorCore', () => {
+  it('opens a restored draft with its saved baseline without an initialization history step', () => {
+    const target = document.createElement('div'); document.body.append(target);
+    const editor = createEditorCore({ target, markdown: '恢复草稿', savedMarkdown: '磁盘正文', dirty: true });
+    const events: boolean[] = [];
+    const unsubscribe = editor.subscribe((event) => events.push(event.dirty));
+    expect(editor.getMarkdown()).toBe('恢复草稿');
+    expect(editor.execute({ type: 'undo' })).toBe(false);
+    editor.restoreSelectionSnapshot({ anchor: 1, head: 1 });
+    editor.execute({ type: 'insertText', text: '新' });
+    expect(editor.getMarkdown()).toBe('新恢复草稿');
+    editor.execute({ type: 'undo' });
+    expect(editor.getMarkdown()).toBe('恢复草稿');
+    expect(events.at(-1)).toBe(true);
+    unsubscribe(); editor.destroy(); target.remove();
+  });
   it('keeps Markdown as the observable editor state', () => {
     const editor = createEditorCore({ markdown: '# Nomo' });
 

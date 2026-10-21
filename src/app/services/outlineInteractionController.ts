@@ -7,6 +7,7 @@ import {
 } from '../../lib/outline/outlineReorder';
 import type { OutlineItem } from '../../lib/outline/outlineService';
 import { t } from '../i18n';
+import { getMarkdownApplicationSession } from './markdownApplicationSession';
 import {
   getActiveOutlineIdFromSemantic,
   getActiveOutlineIdFromSource,
@@ -84,6 +85,12 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
 
   function jumpToOutlineItem(item: OutlineItem) {
     if (options.isActive?.() === false) return;
+    const application = getMarkdownApplicationSession(options.getEditor());
+    if (application) {
+      const heading = application.document?.state.index?.outline.find(heading => heading.id === item.id);
+      if (heading) { options.setActiveOutlineId(item.id); void application.reveal(heading.byte); }
+      return;
+    }
     options.setActiveOutlineId(item.id);
     options.setSuppressOutlineScrollUntil(Date.now() + 800);
     options.onExplicitJumpIntent?.();
@@ -118,6 +125,15 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
     if (options.getReadonly()) {
       options.setStatusMessage(t.outlineMoveReadonly());
       return false;
+    }
+    const application = getMarkdownApplicationSession(options.getEditor());
+    if (application) {
+      void application.transformMarkdown(text => {
+        const result = reorderOutlineSection(text, options.getOutline(), request);
+        if (!result.ok) throw new Error(getOutlineMoveFailureMessage(result.reason));
+        return result.markdown;
+      }).catch(error => options.setStatusMessage(String(error)));
+      return true;
     }
 
     const previousOutline = options.getOutline();
@@ -199,6 +215,7 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
     if (Date.now() < options.getSuppressOutlineScrollUntil()) {
       return;
     }
+    if (updateSessionOutline()) return;
     const sourcePane = options.getSourcePane();
     if (!sourcePane) {
       options.setActiveOutlineId('');
@@ -220,9 +237,21 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
     if (Date.now() < options.getSuppressOutlineScrollUntil()) {
       return;
     }
+    if (updateSessionOutline()) return;
     options.setActiveOutlineId(
       getActiveOutlineIdFromSemantic(options.getOutline(), options.getSemanticPane()),
     );
+  }
+
+  function updateSessionOutline() {
+    const application = getMarkdownApplicationSession(options.getEditor());
+    if (!application) return false;
+    const headings = application.document?.state.index?.outline;
+    const byte = application.readingByte;
+    let active = headings?.[0]?.id ?? '';
+    for (const heading of headings ?? []) { if (heading.byte > byte) break; active = heading.id; }
+    options.setActiveOutlineId(active);
+    return true;
   }
 
   function getSourceLineHeight() {

@@ -365,6 +365,7 @@ struct AddedInner {
 pub(super) struct AddedStore {
     path: PathBuf,
     inner: Mutex<AddedInner>,
+    persistent: bool,
 }
 
 impl AddedStore {
@@ -380,11 +381,19 @@ impl AddedStore {
             .open(&path)?;
         Ok(Self {
             path,
+            persistent: false,
             inner: Mutex::new(AddedInner {
                 file: Some(file),
                 len: 0,
             }),
         })
+    }
+
+    /// Markdown 恢复日志持有 Added 区间；进程退出不能删除已确认输入。
+    pub(super) fn open_persistent(path: PathBuf) -> TextDocumentResult<Self> {
+        let file = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&path)?;
+        let len = file.metadata()?.len();
+        Ok(Self { path, persistent: true, inner: Mutex::new(AddedInner { file: Some(file), len }) })
     }
 
     pub(super) fn append(&self, bytes: &[u8]) -> TextDocumentResult<u64> {
@@ -492,6 +501,7 @@ impl AddedStore {
 
 impl Drop for AddedStore {
     fn drop(&mut self) {
+        if self.persistent { return; }
         if let Err(error) = self.remove() {
             crate::app_logger::warn(
                 "SegmentedDocument",
