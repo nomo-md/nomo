@@ -239,6 +239,12 @@ export class MarkdownSourceWindow {
     const range = document.createRange(); range.setStart(start.node, start.offset); range.setEnd(end.node, end.offset);
     return Array.from(range.getClientRects());
   }
+  byteTop(byte: number): number {
+    const position = this.coordinates.viewOffset(
+      utf8ToUtf16(this.coordinates.source, byte - this.bridge.window.fromByte),
+    );
+    return this.view.documentTop + this.view.lineBlockAt(position).top;
+  }
   restoreSelection(selection: DocumentSelection) {
     const position = (byte: number) =>
       this.coordinates.viewOffset(

@@ -60,6 +60,102 @@ async function setup(text: string, mode: 'semantic' | 'source' = 'semantic', onO
 }
 
 describe('完整会话的真实窗口宿主', () => {
+  it.each([
+    { height: 240, offset: 64, scale: 1 },
+    { height: 800, offset: 160, scale: 1 },
+    { height: 1200, offset: 180, scale: 1 },
+    { height: 800, offset: 160, scale: 1.5 },
+  ])('大纲在 $height 高编辑区按 $offset 对齐（缩放 $scale），高亮跟随同一参考线', async ({ height, offset, scale }) => {
+    const { runtime, host, target, failures } = await setup('# 第一章\n\n正文\n\n# 第二章\n\n结尾');
+    const pane = target.parentElement!;
+    Object.defineProperty(pane, 'clientHeight', { value: height });
+    Object.defineProperty(pane, 'scrollHeight', { value: 6000 });
+    Object.defineProperty(target, 'offsetWidth', { value: 500 });
+    pane.getBoundingClientRect = () => new DOMRect(0, 100, 500, height);
+    target.getBoundingClientRect = () => new DOMRect(0, 300 - pane.scrollTop, 500 * scale, 4000);
+    const headings = [...target.querySelectorAll<HTMLElement>('h1')];
+    const positions = [0, 900];
+    headings.forEach((heading, i) => {
+      heading.getBoundingClientRect = () => new DOMRect(0, 300 + positions[i] * scale - pane.scrollTop, 500, 40);
+    });
+    const second = runtime.state.index!.outline[1];
+    const reveal = vi.spyOn(host.activeCore!, 'revealHeadingAnchor');
+    await host.reveal(second.byte, true, 'outline');
+    expect(headings[1].getBoundingClientRect().top - pane.getBoundingClientRect().top).toBeCloseTo(offset);
+    expect(reveal).toHaveBeenCalledWith(second.id, false);
+    expect(host.activeOutlineId).toBe(second.id);
+    // 资源重排后仍保持点击的标题位置；用户滚动后交回真实参考线判定。
+    positions[1] += 100;
+    target.dispatchEvent(new Event('load'));
+    await vi.waitFor(() => expect(headings[1].getBoundingClientRect().top - 100).toBeCloseTo(offset));
+    pane.scrollTop = 0;
+    pane.dispatchEvent(new Event('scroll'));
+    expect(host.activeOutlineId).toBe(runtime.state.index!.outline[0].id);
+    expect(host.position.byteOffset).not.toBe(second.byte);
+    expect(failures).toEqual([]);
+  });
+
+  it('文末受滚动范围限制时保持可达位置及点击目标，用户接管后恢复参考线高亮', async () => {
+    const { runtime, host, target } = await setup('# 第一章\n\n正文\n\n# 第二章\n\n结尾');
+    const pane = target.parentElement!;
+    Object.defineProperty(pane, 'clientHeight', { value: 800 });
+    Object.defineProperty(pane, 'scrollHeight', { value: 1200 });
+    let scrollTop = 0;
+    Object.defineProperty(pane, 'scrollTop', { get: () => scrollTop, set: value => { scrollTop = Math.min(400, Math.max(0, value)); } });
+    pane.getBoundingClientRect = () => new DOMRect(0, 100, 500, 800);
+    target.getBoundingClientRect = () => new DOMRect(0, 100 - scrollTop, 500, 1200);
+    [...target.querySelectorAll<HTMLElement>('h1')].forEach((heading, i) => {
+      heading.getBoundingClientRect = () => new DOMRect(0, 100 + i * 900 - scrollTop, 500, 40);
+    });
+    await host.reveal(runtime.state.index!.outline[1].byte, true, 'outline');
+    expect(scrollTop).toBe(400);
+    expect(host.activeOutlineId).toBe(runtime.state.index!.outline[1].id);
+    pane.dispatchEvent(new Event('wheel'));
+    expect(host.activeOutlineId).toBe(runtime.state.index!.outline[0].id);
+  });
+
+  it('大纲在源码模式使用标题行坐标，普通 reveal 保留原有定位方式', async () => {
+    const { runtime, host, target, failures } = await setup('# 第一章\n\n正文\n\n# 第二章\n\n结尾', 'source');
+    const pane = target.parentElement!;
+    Object.defineProperty(pane, 'clientHeight', { value: 800 });
+    Object.defineProperty(pane, 'scrollHeight', { value: 4000 });
+    pane.getBoundingClientRect = () => new DOMRect(0, 100, 500, 800);
+    target.getBoundingClientRect = () => new DOMRect(0, 100 - pane.scrollTop, 500, 3000);
+    const second = runtime.state.index!.outline[1];
+    vi.spyOn(host.activeSource!, 'byteTop').mockImplementation(byte => 100 + (byte === second.byte ? 900 : 0) - pane.scrollTop);
+    await host.reveal(second.byte, true, 'outline');
+    expect(pane.scrollTop).toBe(740);
+    expect(host.activeOutlineId).toBe(second.id);
+    pane.dispatchEvent(new Event('wheel'));
+    pane.scrollTop = 0;
+    expect(host.activeOutlineId).toBe(runtime.state.index!.outline[0].id);
+    await host.reveal(second.byte);
+    expect(pane.scrollTop).not.toBe(740);
+    expect(failures).toEqual([]);
+  });
+
+  it('大纲等待挂载期间用户滚动会取消旧定位，连续点击仅保留最后目标', async () => {
+    const { runtime, host, port, target } = await setup('# 第一章\n\n' + '正文\n\n'.repeat(3500) + '# 第二章\n\n结尾');
+    const end = runtime.state.index!.outline[1];
+    const read = port.readWindow.bind(port);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let started!: () => void;
+    const waiting = new Promise<void>(resolve => { started = resolve; });
+    vi.spyOn(port, 'readWindow').mockImplementation(async (...args) => {
+      if (args[2] > 0) { started(); await gate; }
+      return read(...args);
+    });
+    const pending = host.reveal(end.byte, true, 'outline');
+    await waiting;
+    target.parentElement!.dispatchEvent(new Event('wheel'));
+    release();
+    await pending;
+    expect(host.captureSelection().headByte).not.toBe(end.byte + 2);
+    await Promise.all([host.reveal(end.byte, true, 'outline'), host.reveal(0, true, 'outline')]);
+    expect(host.captureSelection().headByte).toBe(2);
+  });
+
   it('首次挂载前被浏览器截断的滚动目标，在内容安装后恢复实际位置', async () => {
     const port = createMemoryMarkdownPort();
     const runtime = new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '正文段落\n\n'.repeat(4000) }), localBuild);

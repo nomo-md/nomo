@@ -320,6 +320,9 @@ export class MarkdownApplicationSession {
       },
       onOpenSource: (range: { byte: number }) => { void this.openSource(range.byte).catch(this.onFailure); },
       onFailure: this.onFailure,
+      onNavigationIntent: () => {
+        (mode === 'source' ? this.semanticHost : this.sourceHost)?.cancelOutlineNavigation();
+      },
       writeClipboard: (text: string) => writeEditorClipboard({ text, html: '' }, this.desktop),
       onScroll: (byte: number) => {
         if (
@@ -539,6 +542,9 @@ export class MarkdownApplicationSession {
   }
   get readingByte() {
     return this.currentHost?.position.byteOffset ?? 0;
+  }
+  get activeOutlineId() {
+    return this.currentHost?.activeOutlineId ?? '';
   }
   get isGlobalSelection() {
     return !!this.currentHost?.hasGlobalSelection;
@@ -787,6 +793,14 @@ export class MarkdownApplicationSession {
     return (
       this.currentHost ?? (this.viewMode === 'source' ? this.sourceHost : this.semanticHost)
     )?.reveal(byte, focus);
+  }
+  async revealOutlineHeading(byte: number) {
+    const origin = this.currentHost;
+    this.scrollOrigin = origin?.mode;
+    this.scrollUntil = 0;
+    const hosts = this.viewMode === 'split' ? [this.semanticHost, this.sourceHost] : [origin];
+    // 两栏各按自己的可见高度精确定位；跟随栏不能抢夺焦点或接管活动栏。
+    await Promise.all(hosts.map(host => host?.reveal(byte, host === origin, 'outline')));
   }
   selectRange(fromByte: number, toByte: number) {
     return this.currentHost?.selectRange({ anchorByte: fromByte, headByte: toByte });

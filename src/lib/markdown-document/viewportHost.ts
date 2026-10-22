@@ -14,6 +14,7 @@ import { subscribeTypographyInteraction } from '../typography/interaction';
 import { DocumentConflictError, type DocumentSelection, type DocumentWindow } from './protocol';
 import { utf8ToUtf16, utf8Length } from './utf8Text';
 import type { MarkdownStructureIndex } from './structureIndex';
+import { getOutlineViewportOffset } from '../outline/outlineViewport';
 
 interface Mounted {
   key: string;
@@ -67,6 +68,9 @@ export class MarkdownViewportHost {
   private preferredFocus = false;
   private scrollByte: number | undefined;
   private locatedByte: number | undefined;
+  // 只保留一次大纲导航的语义目标；资源重排后继续校准，用户接管或修订变化即释放。
+  private outlineNavigation?: { id: string; byte: number; revision: number; aligned: boolean };
+  private publishedOutlineId = '';
   private input: HTMLTextAreaElement | undefined;
   private composing = false;
   private compositionWaiters = new Set<() => void>();
@@ -122,6 +126,7 @@ export class MarkdownViewportHost {
       onFailure(error: unknown): void;
       writeClipboard(text: string): Promise<void>;
       onScroll?(byte: number): void;
+      onNavigationIntent?(): void;
       onPresentation?(state: MarkdownPresentation): void;
       onOpenSource?(range: { fromByte: number; toByte: number; byte: number }): void;
     },
@@ -141,6 +146,9 @@ export class MarkdownViewportHost {
     target.classList.add('markdown-session-host');
     this.scroll.classList.add('markdown-session-scroll');
     this.scroll.addEventListener('scroll', this.onScroll, { passive: true });
+    this.scroll.addEventListener('wheel', this.onNavigationIntent, { passive: true });
+    this.scroll.addEventListener('touchstart', this.onNavigationIntent, { passive: true });
+    this.scroll.addEventListener('pointerdown', this.onNavigationIntent, true);
     target.addEventListener('keydown', this.onKey, true);
     target.addEventListener('keyup', this.onSelectionChanged, true);
     target.addEventListener('copy', this.onCopy, true);
@@ -302,6 +310,51 @@ export class MarkdownViewportHost {
       line: first?.fromLine ?? 1,
     };
   }
+  /** 章节高亮读取参考线的真实几何位置，不使用 locatedByte 的导航意图。 */
+  get activeOutlineId(): string {
+    const headings = this.index?.outline;
+    if (!headings?.length) return '';
+    if (this.outlineNavigation && !this.outlineNavigation.aligned) return this.outlineNavigation.id;
+    const bounds = this.scroll.getBoundingClientRect();
+    const reference = bounds.top + getOutlineViewportOffset(this.scroll.clientHeight);
+    let low = 0, high = headings.length;
+    // 未挂载标题使用高度索引，已挂载标题使用实际坐标；滚动路径不遍历全文标题。
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      const heading = headings[middle];
+      const block = this.blockPositions.get(heading.blockId);
+      const top = this.headingTop(heading.byte, heading.id) ?? (block === undefined ? Infinity :
+        bounds.top + this.contentTop + this.heights.top(block) * this.scale - this.scroll.scrollTop);
+      if (top <= reference + 1) low = middle + 1;
+      else high = middle;
+    }
+    // 文末无法继续滚动时，保留明确点击且仍可见的标题，直到用户接管。
+    const target = this.outlineNavigation;
+    if (target && this.scroll.scrollTop >= this.scroll.scrollHeight - this.scroll.clientHeight - 1) {
+      const top = this.headingTop(target.byte, target.id);
+      if (top !== undefined && top > reference && top < bounds.bottom) return target.id;
+    }
+    return headings[Math.max(0, low - 1)].id;
+  }
+  private headingTop(byte: number, id: string): number | undefined {
+    const view = this.mounted.find(view => byte >= view.window.fromByte && byte < view.window.toByte);
+    if (view?.restricted) return view.element.getBoundingClientRect().top;
+    return view?.semantic?.core.headingAnchorTop(id) ?? view?.source?.byteTop(byte);
+  }
+  cancelOutlineNavigation() {
+    const target = this.outlineNavigation;
+    if (!target) return false;
+    this.outlineNavigation = undefined;
+    if (this.preferredByte === target.byte) this.preferredByte = undefined;
+    this.locatedByte = undefined;
+    this.preferredFocus = false;
+    this.navigation++;
+    this.generation++;
+    return true;
+  }
+  private onNavigationIntent = () => {
+    if (this.cancelOutlineNavigation()) this.callbacks.onNavigationIntent?.();
+  };
   private get localScrollTop() {
     return Math.max(0, (this.scroll.scrollTop - this.contentTop) / this.scale);
   }
@@ -330,6 +383,7 @@ export class MarkdownViewportHost {
     if (!this.composing) this.captureSelection();
   };
   private onInput = () => {
+    this.onNavigationIntent();
     this.focusAfterRemount = this.target.contains(globalThis.document.activeElement);
     this.document.interacting();
   };
@@ -351,6 +405,7 @@ export class MarkdownViewportHost {
       return;
     }
     this.programScroll = undefined;
+    this.onNavigationIntent();
     this.locatedByte = undefined;
     this.document.requestVisibleStructure(this, null);
     this.invalidateStable();
@@ -683,6 +738,7 @@ export class MarkdownViewportHost {
     }
   }
   private onKey = (event: KeyboardEvent) => {
+    this.onNavigationIntent();
     if (event.target instanceof HTMLElement && event.target.closest('button') &&
       ['Enter', ' '].includes(event.key)) return;
     if (this.active?.restricted && (event.ctrlKey || event.metaKey) && ['z', 'y'].includes(event.key.toLowerCase())) {
@@ -1356,6 +1412,7 @@ export class MarkdownViewportHost {
     this.readingAnchor = this.captureAnchor();
   }
   scrollToByte(byte: number) {
+    this.cancelOutlineNavigation();
     this.locatedByte = byte;
     this.document.requestVisibleStructure(this, null);
     this.invalidateStable();
@@ -1366,7 +1423,10 @@ export class MarkdownViewportHost {
     this.scrollByte = byte;
     this.schedule();
   }
-  async reveal(byte: number, focus = false) {
+  async reveal(byte: number, focus = false, alignment: 'selection' | 'outline' = 'selection') {
+    this.cancelOutlineNavigation();
+    const heading = alignment === 'outline' ? this.document.state.index?.outline.find(item => item.byte === byte) : undefined;
+    if (heading) this.outlineNavigation = { id: heading.id, byte, revision: this.document.state.status.revision, aligned: false };
     this.locatedByte = byte;
     // 在异步等待前登记意图，等待期间的外部焦点事件可以撤销它。
     this.preferredFocus = focus;
@@ -1388,11 +1448,25 @@ export class MarkdownViewportHost {
     if (view?.semantic && byte >= view.window.fromByte && byte <= view.window.toByte)
       await view.semantic.whenReady;
     if (navigation !== this.navigation || this.disposed || this.hidden) return;
+    this.alignOutlineHeading();
     if (this.preferredByte !== undefined) this.schedule();
+  }
+  private alignOutlineHeading() {
+    const target = this.outlineNavigation;
+    if (!target) return;
+    if (target.revision !== this.document.state.status.revision) { this.cancelOutlineNavigation(); return; }
+    const top = this.headingTop(target.byte, target.id);
+    if (top === undefined || this.scroll.clientHeight <= 0) return;
+    const delta = top - this.scroll.getBoundingClientRect().top - getOutlineViewportOffset(this.scroll.clientHeight);
+    const moved = Math.abs(delta) >= 1;
+    const firstAlignment = !target.aligned;
+    if (moved) this.scrollTo((this.scroll.scrollTop + delta - this.contentTop) / this.scale);
+    target.aligned = true;
+    if (moved || firstAlignment) this.readingAnchor = this.captureAnchor();
   }
   private restorePreferred() {
     const byte = this.preferredByte;
-    if (byte === undefined) return;
+    if (byte === undefined) { this.alignOutlineHeading(); this.publishOutlinePosition(); return; }
     const view = this.mounted.find(
       (view) => byte >= view.window.fromByte && (byte < view.window.toByte ||
         byte === this.document.state.status.byteLength && byte === view.window.toByte),
@@ -1410,7 +1484,7 @@ export class MarkdownViewportHost {
         view.source?.restoreSelection(selection);
         // 标题 byte 指向 Markdown 标记（如 #），不是可编辑文本光标；使用同一锚点的 PM 位置。
         const heading = this.index?.outline.find(heading => heading.byte === byte);
-        if (!heading || !view.semantic?.core.revealHeadingAnchor(heading.id))
+        if (!heading || !view.semantic?.core.revealHeadingAnchor(heading.id, !this.outlineNavigation))
           view.semantic?.core.restoreSourceSelection(selection);
       } catch {
         const edge = { anchorByte: view.window.fromByte, headByte: view.window.fromByte };
@@ -1419,6 +1493,14 @@ export class MarkdownViewportHost {
       this.callbacks.onActive(view.semantic?.core, view.source);
       if (this.preferredFocus) this.focus();
     }
+    this.alignOutlineHeading();
+    this.publishOutlinePosition();
+  }
+  private publishOutlinePosition() {
+    const id = this.activeOutlineId;
+    if (id === this.publishedOutlineId) return;
+    this.publishedOutlineId = id;
+    this.scroll.dispatchEvent(new Event('nomo-outline-position'));
   }
   focus() {
     this.focusAfterRemount = true;
@@ -1454,6 +1536,7 @@ export class MarkdownViewportHost {
   }
   async setHidden(hidden: boolean) {
     if (this.hidden === hidden) return;
+    this.cancelOutlineNavigation();
     this.hidden = hidden;
     this.document.requestVisibleStructure(this, null);
     this.invalidateStable();
@@ -1481,6 +1564,7 @@ export class MarkdownViewportHost {
   }
   async dispose() {
     if (this.disposed) return;
+    this.cancelOutlineNavigation();
     this.hidden = true;
     this.document.requestVisibleStructure(this, null);
     this.invalidateStable();
@@ -1506,6 +1590,9 @@ export class MarkdownViewportHost {
     clearTimeout(this.preparationTimer);
     this.preparationIndicator?.remove(); this.preparationIndicator = undefined;
     this.scroll.removeEventListener('scroll', this.onScroll);
+    this.scroll.removeEventListener('wheel', this.onNavigationIntent);
+    this.scroll.removeEventListener('touchstart', this.onNavigationIntent);
+    this.scroll.removeEventListener('pointerdown', this.onNavigationIntent, true);
     this.target.removeEventListener('keydown', this.onKey, true);
     this.target.removeEventListener('keyup', this.onSelectionChanged, true);
     this.target.removeEventListener('copy', this.onCopy, true);

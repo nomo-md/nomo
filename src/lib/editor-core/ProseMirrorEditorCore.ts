@@ -1657,15 +1657,25 @@ export class ProseMirrorEditorCore implements EditorCore {
     this.dispatchTransaction(state.tr.setMeta(headingAnchorsKey, [...ids]).setMeta('addToHistory', false));
   }
 
-  revealHeadingAnchor(id: string): boolean {
+  headingAnchorTop(id: string): number | undefined {
+    const view = this.view;
+    if (!view) return undefined;
+    const anchor = headingAnchorsKey.getState(view.state)?.decorations.find()
+      .find(decoration => decoration.spec.headingId === id);
+    const node = anchor && view.nodeDOM(anchor.from);
+    return node instanceof HTMLElement ? node.getBoundingClientRect().top : undefined;
+  }
+
+  revealHeadingAnchor(id: string, scroll = true): boolean {
     const view = this.view;
     if (!view) return false;
     const anchor = headingAnchorsKey.getState(view.state)?.decorations.find()
       .find(decoration => decoration.spec.headingId === id);
     if (!anchor) return false;
-    view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(anchor.from + 1))).scrollIntoView());
-    // 从大纲侧栏进入时 DOM 焦点尚在编辑器外，PM 自带的滚动会跳过；复用显式定位。
-    scrollSearchSelectionIntoView(view, view.state.selection.head);
+    const transaction = view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(anchor.from + 1)));
+    view.dispatch(scroll ? transaction.scrollIntoView() : transaction);
+    // 默认沿用搜索居中；大纲由窗口宿主在挂载/布局后按独立参考线定位。
+    if (scroll) scrollSearchSelectionIntoView(view, view.state.selection.head);
     return true;
   }
 

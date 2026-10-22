@@ -8,6 +8,7 @@ import {
 import type { OutlineItem } from '../../lib/outline/outlineService';
 import { t } from '../i18n';
 import { getMarkdownApplicationSession } from './markdownApplicationSession';
+import { getOutlineViewportOffset } from '../../lib/outline/outlineViewport';
 import {
   getActiveOutlineIdFromSemantic,
   getActiveOutlineIdFromSource,
@@ -47,6 +48,7 @@ interface OutlineInteractionOptions {
 
 export function createOutlineInteractionController(options: OutlineInteractionOptions) {
   let outlineMoveGeneration = 0;
+  let outlineJumpGeneration = 0;
 
   function toggleOutlineVisible() {
     options.setOutlineVisible(!options.getOutlineVisible());
@@ -85,23 +87,35 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
 
   function jumpToOutlineItem(item: OutlineItem) {
     if (options.isActive?.() === false) return;
-    const application = getMarkdownApplicationSession(options.getEditor());
+    const editor = options.getEditor();
+    const generation = ++outlineJumpGeneration;
+    options.onExplicitJumpIntent?.();
+    const application = getMarkdownApplicationSession(editor);
     if (application) {
       const heading = application.document?.state.index?.outline.find(heading => heading.id === item.id);
-      if (heading) { options.setActiveOutlineId(item.id); void application.reveal(heading.byte); }
+      if (heading) {
+        options.setActiveOutlineId(item.id);
+        options.setSuppressOutlineScrollUntil(0);
+        void application.revealOutlineHeading(heading.byte).then(() => {
+          if (generation === outlineJumpGeneration && options.getEditor() === editor && options.isActive?.() !== false)
+            updateSessionOutline();
+        }).catch(error => {
+          if (generation === outlineJumpGeneration && options.getEditor() === editor && options.isActive?.() !== false)
+            options.setStatusMessage(String(error));
+        });
+      }
       return;
     }
     options.setActiveOutlineId(item.id);
     options.setSuppressOutlineScrollUntil(Date.now() + 800);
-    options.onExplicitJumpIntent?.();
 
     requestAnimationFrame(() => {
-      if (options.isActive?.() === false) return;
+      if (generation !== outlineJumpGeneration || options.getEditor() !== editor || options.isActive?.() === false) return;
       if (options.getMode() === 'semantic') {
         scrollSemanticToAnchor(options.getOutline(), options.getSemanticPane(), {
           outlineId: item.id,
           sectionProgress: 0,
-        });
+        }, { viewportOffset: getOutlineViewportOffset(options.getSemanticPane().clientHeight) });
         return;
       }
 
@@ -115,7 +129,7 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
       sourceEditor.setSelection(selection.end);
       if (sourcePane) {
         setScrollTop(sourcePane, restoreScrollTop);
-        smoothScrollElementTo(sourcePane, Math.max(0, sourceEditor.getLineTop(item.line) - 40));
+        smoothScrollElementTo(sourcePane, Math.max(0, sourceEditor.getLineTop(item.line) - getOutlineViewportOffset(sourcePane.clientHeight)));
       }
     });
   }
@@ -246,11 +260,7 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
   function updateSessionOutline() {
     const application = getMarkdownApplicationSession(options.getEditor());
     if (!application) return false;
-    const headings = application.document?.state.index?.outline;
-    const byte = application.readingByte;
-    let active = headings?.[0]?.id ?? '';
-    for (const heading of headings ?? []) { if (heading.byte > byte) break; active = heading.id; }
-    options.setActiveOutlineId(active);
+    options.setActiveOutlineId(application.activeOutlineId);
     return true;
   }
 

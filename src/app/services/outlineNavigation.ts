@@ -1,5 +1,6 @@
 import { normalizeHeadingTitle, type OutlineItem } from '../../lib/outline/outlineService';
 import { createHeadingIdAllocator } from '../../lib/toc/tocService';
+import { getOutlineViewportOffset } from '../../lib/outline/outlineViewport';
 import { getOutlineItemAtLine } from './outlineState';
 import type { MarkdownSourceEditorHandle } from '../components/markdownSourceEditor';
 
@@ -29,6 +30,7 @@ export type OutlineScrollBehavior = 'instant' | 'smooth';
 interface ScrollToAnchorOptions {
   behavior?: OutlineScrollBehavior;
   anchorMode?: 'semantic' | 'source';
+  viewportOffset?: number;
 }
 
 interface LegacyOutlineScrollAnchor {
@@ -97,7 +99,10 @@ export function getActiveOutlineIdFromSource(
   if (!outline.length) {
     return '';
   }
-  const visibleLine = getSourceVisibleLine(scrollTop, lineHeight, sourceEditor, sourcePane);
+  const visibleLine = getSourceVisibleLine(
+    scrollTop + getOutlineViewportOffset(sourcePane?.clientHeight ?? 0),
+    lineHeight, sourceEditor, sourcePane,
+  );
   return getOutlineItemAtLine(outline, visibleLine)?.id ?? outline[0]?.id ?? '';
 }
 
@@ -291,7 +296,7 @@ export function getActiveOutlineIdFromSemantic(
   }
 
   const viewportTop = semanticPane.getBoundingClientRect().top;
-  const threshold = viewportTop + 96;
+  const threshold = viewportTop + getOutlineViewportOffset(semanticPane.clientHeight) + 1;
   let activeIndex = 0;
   headingAnchors.forEach(({ element }, index) => {
     if (element.getBoundingClientRect().top <= threshold) {
@@ -439,7 +444,7 @@ export function scrollSemanticToAnchor(
   const sectionHeight = Math.max(1, nextTop - currentTop);
   const top = clampScrollTop(
     semanticPane,
-    currentTop + sectionHeight * anchor.sectionProgress - 32,
+    currentTop + sectionHeight * anchor.sectionProgress - (options.viewportOffset ?? 32),
   );
   scrollElementTo(semanticPane, top, options.behavior);
 }

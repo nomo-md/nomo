@@ -160,6 +160,45 @@ describe('应用 Markdown 会话入口', () => {
     expect(source.contains(document.activeElement)).toBe(true);
   });
 
+  it('双栏大纲分别按两栏高度对齐，跟随栏不会抢走活动栏焦点', async () => {
+    const { application, doc, failures } = await setup('# 第一章\n\n正文\n\n# 第二章\n\n结尾');
+    const makePane = (mode: string, height: number) => {
+      const pane = document.body.appendChild(document.createElement('section'));
+      pane.className = mode + '-pane';
+      Object.defineProperty(pane, 'clientHeight', { value: height });
+      Object.defineProperty(pane, 'scrollHeight', { value: 4000 });
+      pane.getBoundingClientRect = () => new DOMRect(0, 100, 500, height);
+      const target = pane.appendChild(document.createElement('div'));
+      target.getBoundingClientRect = () => new DOMRect(0, 100 - pane.scrollTop, 500, 3000);
+      return { pane, target };
+    };
+    const semantic = makePane('semantic', 800), source = makePane('source', 400);
+    application.editor.mount(semantic.target);
+    await vi.waitFor(() => expect(application.writable).toBe(true));
+    await application.setViewMode('split');
+    application.mountSource(source.target);
+    await vi.waitFor(() => expect(source.target.querySelector('.cm-editor')).not.toBeNull());
+    await vi.waitFor(() => expect(semantic.target.querySelectorAll('h1')).toHaveLength(2));
+    const headings = [...semantic.target.querySelectorAll<HTMLElement>('h1')];
+    headings.forEach((heading, i) => {
+      heading.getBoundingClientRect = () => new DOMRect(0, 100 + i * 900 - semantic.pane.scrollTop, 500, 40);
+    });
+    const second = doc.state.index!.outline[1];
+    const sourceHost = (application as any).sourceHost;
+    vi.spyOn(sourceHost.activeSource, 'byteTop').mockImplementation((byte: unknown) => 100 + (byte === second.byte ? 900 : 0) - source.pane.scrollTop);
+    application.editor.focus();
+    await application.revealOutlineHeading(second.byte);
+    expect(semantic.pane.scrollTop).toBe(740);
+    expect(source.pane.scrollTop).toBe(820);
+    expect(semantic.target.contains(document.activeElement)).toBe(true);
+    expect(application.activeOutlineId).toBe(second.id);
+    source.target.querySelector<HTMLElement>('.cm-content')!.focus();
+    await application.revealOutlineHeading(second.byte);
+    expect(source.target.contains(document.activeElement)).toBe(true);
+    expect(application.activeOutlineId).toBe(second.id);
+    expect(failures).toEqual([]);
+  });
+
   it('阅读后首次进入双栏，迟到的源码宿主接续当前位置', async () => {
     const { application, tab } = await setup('巨'.repeat(20000));
     const semantic = document.body.appendChild(document.createElement('div'));

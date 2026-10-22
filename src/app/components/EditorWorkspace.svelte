@@ -27,6 +27,16 @@
   import { t } from '../i18n';
   import type { EditorViewMode, SplitActivePane, SplitViewLayout } from '../types';
 
+  function trackOutlinePosition(node: HTMLElement, callback: () => void) {
+    let update = callback;
+    const handler = () => update();
+    node.addEventListener('nomo-outline-position', handler);
+    return {
+      update(callback: () => void) { update = callback; },
+      destroy() { node.removeEventListener('nomo-outline-position', handler); },
+    };
+  }
+
   export let interfaceLocale: string;
   export let mode: EditorViewMode;
   export let modeTransitionDisabled = false;
@@ -975,6 +985,12 @@
       class:split-pane-right={splitViewLayout === 'semantic-source'}
       class:split-pane-active={mode === 'split' && splitActivePane === 'source'}
       aria-label={t.markdownSource()}
+      use:trackOutlinePosition={updateActiveOutlineFromSourceScroll}
+      on:scroll={() => {
+        if (!sessionEditor) return;
+        updateActiveOutlineFromSourceScroll();
+        onSourceScroll?.();
+      }}
       on:contextmenu|preventDefault
       on:pointerdown={() => mode === 'split' && setSplitActivePane('source')}
       on:focusin={() => mode === 'split' && setSplitActivePane('source')}
@@ -1049,6 +1065,7 @@
       class:split-pane-right={splitViewLayout === 'source-semantic'}
       class:split-pane-active={mode === 'split' && splitActivePane === 'semantic'}
       aria-label={t.semanticEditorArea()}
+      use:trackOutlinePosition={updateActiveOutlineFromSemanticScroll}
       on:scroll={() => {
         updateActiveOutlineFromSemanticScroll();
         onSemanticScroll?.();

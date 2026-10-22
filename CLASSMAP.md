@@ -153,7 +153,7 @@
 | 前端会话与视图事务 | `src/lib/markdown-document/controller.ts` | `port.ts`, `session.ts`, `utf8Text.ts`, `windowBridge.ts` | 修改待确认输入、重试、保存期间输入、关闭门禁、浏览器内存适配器或视图失效与重定位 |
 | 有界语义和原文窗口 | `src/lib/markdown-document/semanticWindow.ts`, `sourceWindow.ts` | `sourceProjection.ts`, `positions.ts`, `textChanges.ts`, `src/lib/editor-core/ProseMirrorEditorCore.ts` | 修改同实例语义预览、初始就绪与统一写入门禁、PM/CM 共用历史、源文精确补丁、混合换行、UTF-8/UTF-16 映射或局部编辑保留 |
 | 渐进索引与运行时 | `src/lib/markdown-document/runtime.ts` | `structure.ts`, `structure.worker.ts`, `structureIndex.ts`, `incrementalIndex.ts`, `indexInvalidation.ts` | 修改纯文本结构检查点、可撤销可见结构需求、全局引用、标题 ID 去重、增量收敛、版本门禁、后台取消或加载阶段计时 |
-| 真实窗口与布局策略 | `src/lib/markdown-document/viewportHost.ts` | `mountWindow.ts`, `layoutCache.ts`, `mountPolicy.ts`, `viewport.ts`, `scheduler.ts`, `editor-document.css` | 修改首屏呈现与覆盖计时、受限结构提示与导航、稳定块组、3–6 屏自适应准备、回收滞回、原位 DOM 更新、交互保护、全局选区、边界导航、阅读锚点或有界高度/表格布局缓存 |
+| 真实窗口与布局策略 | `src/lib/markdown-document/viewportHost.ts` | `mountWindow.ts`, `layoutCache.ts`, `mountPolicy.ts`, `viewport.ts`, `scheduler.ts`, `editor-document.css` | 修改首屏呈现与覆盖计时、受限结构提示与导航、稳定块组、3–6 屏自适应准备、回收滞回、原位 DOM 更新、交互保护、全局选区、边界导航、大纲挂载后的精确定位与几何高亮、阅读锚点或有界高度/表格布局缓存 |
 | 语义窗口标题锚点 | `src/lib/editor-core/plugins/headingAnchors.ts` | `src/lib/editor-core/ProseMirrorEditorCore.ts`, `src/lib/markdown-document/viewportHost.ts` | 修改全局标题 ID 的 PM decoration、跨窗口重名标题定位或大纲点击后的显式滚动；宿主不得直接修改标题 DOM 属性 |
 | 全文选区与任务 | `src/lib/markdown-document/selection.ts`, `tasks.ts` | `runtime.ts`, `controller.ts`, `port.ts` | 修改跨窗口选区、完整快照复制、剪切冲突保护、全文搜索替换及取消 |
 | 自动目录派生 | `src/lib/markdown-document/automaticToc.ts` | `runtime.ts`, `controller.ts`, `session.ts`, `markdown_session.rs`, `src/lib/toc/tocService.ts` | 修改完整索引物化目录、原始目录保留、派生事务及撤销/重做语义 |
@@ -177,7 +177,7 @@
 | 后台统计调度 | `src/app/services/writingStatsController.ts` | `src/lib/outline/writingStats.worker.ts`, `src/app/App.svelte` | 120 ms 防抖、单 Worker、快照缓存、失效门禁及统计状态 |
 | 章节结构重排 | `src/lib/outline/outlineReorder.ts` | `src/lib/editor-core/editorCommands.ts` | 计算章节子树、落点、层级变化、Markdown 重排与标题索引映射 |
 | 大纲交互控制器 | `src/app/services/outlineInteractionController.ts` | `src/app/services/outlineNavigation.ts`, `src/lib/outline/outlineReorder.ts` | 点击定位、章节拖拽编排、源码模式可撤销替换 |
-| 大纲滚动定位 | `src/app/services/outlineNavigation.ts` | `src/app/services/editorInteractionController.ts`, `src/lib/outline/outlineService.ts` | 模式切换/源码与语义视图滚动同步，PM/DOM 标题语义匹配 |
+| 大纲滚动定位 | `src/app/services/outlineNavigation.ts`, `src/lib/markdown-document/viewportHost.ts` | `src/lib/outline/outlineViewport.ts`, `src/app/services/markdownApplicationSession.ts`, `src/app/services/editorInteractionController.ts` | 会话大纲在语义/源码/双栏按编辑区高度 20%（64–180px）定位与高亮，取消过期导航；兼容视图的 PM/DOM 标题匹配及模式切换阅读锚点 |
 | Markdown 源码 CodeMirror | `src/app/components/MarkdownSourceEditor.svelte` | `src/app/components/markdownSourceEditor.ts`, `src/app/components/EditorWorkspace.svelte` | 修改源码输入、选区、历史、行坐标、滚动容器或块 spacer |
 | 大纲状态 | `src/app/services/outlineState.ts` | — | 大纲展开/折叠/可见性/激活项计算 |
 | 大纲浮窗定位 | `src/app/actions/outlinePanelDrag.ts`, `src/app/services/outlinePanelPosition.ts` | `EditorWorkspace.svelte`, `AppTitleBar.svelte`, `appCommands.ts` | 顶部区域拖动、编辑区边界约束、位置记忆与菜单重置；不参与章节重排或正文排版 |
