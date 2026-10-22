@@ -109,6 +109,7 @@
   } from '../services/softwareUpdate';
   import SoftwareUpdateDialog from './SoftwareUpdateDialog.svelte';
   import WindowsCaptionControls from './WindowsCaptionControls.svelte';
+  import SettingsSelect from './SettingsSelect.svelte';
   import nomoLogoDark from '../../../src-tauri/icons/nomo/source/nomo-app-dark.svg?url';
   import nomoLogoLight from '../../../src-tauri/icons/nomo/source/nomo-app-light.svg?url';
 
@@ -1131,8 +1132,7 @@
    * 逐字输入只做校验不应用：每次应用都会让全部窗口重排正文。输入值与候选完全一致
    * （从联想列表选中或打出完整名称）时立即应用，其余情况等回车或失焦触发 change。
    */
-  function handleFontFamilyInput(key: FontPreferenceKey, event: Event) {
-    const value = (event.currentTarget as HTMLInputElement).value;
+  function handleFontFamilyInput(key: FontPreferenceKey, value: string) {
     fontInputInvalid = { ...fontInputInvalid, [key]: !isValidFontFamilyInput(value) };
     const suggestions = key === 'monoFontFamily' ? fontSuggestions?.mono : fontSuggestions?.text;
     if (suggestions?.includes(value)) {
@@ -1156,8 +1156,7 @@
     updateDraft({ interfaceLanguage });
   }
 
-  function handleInterfaceLanguageChange(event: Event) {
-    const nextLanguage = (event.currentTarget as HTMLSelectElement).value;
+  function handleInterfaceLanguageChange(nextLanguage: string) {
     if (
       nextLanguage === 'system' ||
       INTERFACE_LANGUAGE_OPTIONS.some((item) => item.value === nextLanguage)
@@ -1874,19 +1873,20 @@
 
               <div class="setting-row">
                 <div>
-                  <span class="setting-label">{t.interfaceLanguage()}</span>
-                  <p>{t.interfaceLanguageDescription()}</p>
+                  <label for="interfaceLanguage" class="setting-label">{t.interfaceLanguage()}</label>
+                  <p id="interfaceLanguageHint">{t.interfaceLanguageDescription()}</p>
                 </div>
-                <select
-                  class="select-input"
-                  aria-label={t.interfaceLanguage()}
+                <SettingsSelect
+                  id="interfaceLanguage"
+                  label={t.interfaceLanguage()}
+                  describedBy="interfaceLanguageHint"
                   value={draftSettings.interfaceLanguage}
-                  on:change={handleInterfaceLanguageChange}
-                >
-                  {#each INTERFACE_LANGUAGE_OPTIONS as language}
-                    <option value={language.value}>{t[language.labelKey]()}</option>
-                  {/each}
-                </select>
+                  options={INTERFACE_LANGUAGE_OPTIONS.map((language) => ({
+                    value: language.value,
+                    label: t[language.labelKey](),
+                  }))}
+                  onValueChange={handleInterfaceLanguageChange}
+                />
               </div>
             </div>
           {:else if activeCategory === 'editor'}
@@ -2302,48 +2302,29 @@
                       </p>
                     {/if}
                   </div>
-                  <div class="font-family-control">
-                    <input
-                      id={row.key}
-                      class="text-input font-family-input"
-                      class:mono={row.mono}
-                      type="text"
-                      list={row.mono ? 'monoFontSuggestions' : 'textFontSuggestions'}
-                      value={draftSettings[row.key]}
-                      placeholder={t.fontFamilyPlaceholder()}
-                      aria-invalid={invalid}
-                      aria-describedby={invalid || missing
-                        ? `${row.key}Hint ${row.key}Notice`
-                        : `${row.key}Hint`}
-                      autocomplete="off"
-                      spellcheck={false}
-                      on:input={(event) => handleFontFamilyInput(row.key, event)}
-                      on:change={(event) => commitFontFamily(row.key, event.currentTarget.value)}
-                    />
-                    {#if draftSettings[row.key]}
-                      <button
-                        type="button"
-                        class="font-family-reset"
-                        title={t.resetFontFamily()}
-                        aria-label={t.resetFontFamily()}
-                        on:click={() => commitFontFamily(row.key, '')}
-                      >
-                        <X size={14} />
-                      </button>
-                    {/if}
-                  </div>
+                  <SettingsSelect
+                    id={row.key}
+                    label={row.label()}
+                    editable
+                    mono={row.mono}
+                    value={draftSettings[row.key]}
+                    placeholder={t.fontFamilyPlaceholder()}
+                    resetLabel={t.resetFontFamily()}
+                    {invalid}
+                    describedBy={invalid || missing
+                      ? `${row.key}Hint ${row.key}Notice`
+                      : `${row.key}Hint`}
+                    options={[
+                      { value: '', label: t.fontFamilyPlaceholder() },
+                      ...(row.mono ? fontSuggestions?.mono ?? [] : fontSuggestions?.text ?? []).map(
+                        (name) => ({ value: name, label: name }),
+                      ),
+                    ]}
+                    onInputValue={(value) => handleFontFamilyInput(row.key, value)}
+                    onValueChange={(value) => commitFontFamily(row.key, value)}
+                  />
                 </div>
               {/each}
-              <datalist id="textFontSuggestions">
-                {#each fontSuggestions?.text ?? [] as name}
-                  <option value={name}></option>
-                {/each}
-              </datalist>
-              <datalist id="monoFontSuggestions">
-                {#each fontSuggestions?.mono ?? [] as name}
-                  <option value={name}></option>
-                {/each}
-              </datalist>
 
               <h2>{t.visualZoom()}</h2>
               <div class="setting-row">
@@ -2914,18 +2895,21 @@
                   <label for="defaultDiagramType" class="setting-label"
                     >{t.defaultDiagramType()}</label
                   >
-                  <p>{t.defaultDiagramTypeDescription()}</p>
+                  <p id="defaultDiagramTypeHint">{t.defaultDiagramTypeDescription()}</p>
                 </div>
-                <select
+                <SettingsSelect
                   id="defaultDiagramType"
-                  class="select-input"
+                  label={t.defaultDiagramType()}
+                  describedBy="defaultDiagramTypeHint"
                   value={draftSettings.defaultDiagramType}
-                  on:change={(event) => updateStringSetting('defaultDiagramType', event)}
-                >
-                  {#each DIAGRAM_TEMPLATES as template}
-                    <option value={template.type}>{getDiagramTypeLabel(template.type)}</option>
-                  {/each}
-                </select>
+                  options={DIAGRAM_TEMPLATES.map((template) => ({
+                    value: template.type,
+                    label: getDiagramTypeLabel(template.type),
+                  }))}
+                  onValueChange={(value) => updateDraft({
+                    defaultDiagramType: value as AppPreferences['defaultDiagramType'],
+                  })}
+                />
               </div>
 
               <div class="shortcut-settings">
@@ -3692,8 +3676,7 @@
     text-align: right;
   }
 
-  .text-input,
-  .select-input {
+  .text-input {
     width: 100%;
     min-width: 0;
     height: var(--md-editor-control-height-md);
@@ -3733,52 +3716,6 @@
 
   .setting-row .font-family-warning {
     color: var(--md-editor-warning);
-  }
-
-  .font-family-control {
-    position: relative;
-    width: 220px;
-    justify-self: end;
-  }
-
-  .text-input.font-family-input {
-    padding-right: 30px;
-  }
-
-  .text-input.font-family-input.mono {
-    font-family: var(--md-editor-font-mono);
-  }
-
-  .text-input.font-family-input:focus {
-    border-color: var(--md-editor-accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--md-editor-accent) 15%, transparent);
-  }
-
-  .text-input.font-family-input[aria-invalid='true'] {
-    border-color: var(--md-editor-danger);
-  }
-
-  .font-family-reset {
-    position: absolute;
-    top: 50%;
-    right: 6px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 20px;
-    height: 20px;
-    padding: 0;
-    border: 0;
-    border-radius: var(--md-editor-radius-xs);
-    background: transparent;
-    color: var(--md-editor-muted-fg);
-    transform: translateY(-50%);
-    cursor: pointer;
-  }
-
-  .font-family-reset:hover {
-    background: var(--md-editor-hover-bg);
-    color: var(--md-editor-fg);
   }
 
   .action-button {
@@ -4109,7 +4046,6 @@
 
   button:focus-visible,
   input:focus-visible,
-  select:focus-visible,
   .toggle-row input:focus-visible + .toggle-switch {
     outline: 2px solid var(--md-editor-accent);
     outline-offset: 2px;

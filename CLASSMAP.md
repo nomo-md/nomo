@@ -207,7 +207,7 @@
 | 用户自定义主题 | `src/app/services/userThemes.ts`, `src/app/services/userThemeDefinition.ts` | `src/app/services/themeRegistry.ts`, `src/app/services/themeManager.ts`, `src/app/services/settings.ts`, `src-tauri/src/config/themes.rs`, `src/app/components/SettingsWindow.svelte`, `src/quicklook/preview.ts` | 主题 JSON 格式与校验、按基础主题补齐令牌、目录加载与跨窗口重载、导入/删除/导出模板、启动快照内嵌与 Quick Look 读取 |
 | 自定义字体覆盖 | `src/lib/theme/fonts.ts` | `src/app/services/themeManager.ts`, `src/app/services/settings.ts`, `src/app/services/fontAvailability.ts`, `src/app/components/SettingsWindow.svelte` | 界面/正文/代码字体名校验、叠加到主题字体令牌、设置页本地字体探测与候选 |
 | 编辑器设置应用 | `src/app/services/editorSettingsController.ts` | `src/app/services/settings.ts` | 字体、行高和内容宽度同步到编辑器 |
-| 设置窗口 UI | `src/app/components/SettingsWindow.svelte` | `src/app/services/settings.ts`, `src/app/services/themeManager.ts`, `src/lib/desktop/tauriUpdater.ts` | 设置界面/主题预览/更新/文件关联/图片配置 |
+| 设置窗口 UI | `src/app/components/SettingsWindow.svelte` | `src/app/components/SettingsSelect.svelte`, `src/app/services/settings.ts`, `src/app/services/themeManager.ts`, `src/lib/desktop/tauriUpdater.ts` | 设置界面/主题预览/更新/文件关联/图片配置；SettingsSelect 统一普通下拉与可输入字体候选的主题样式、键盘导航和弹层生命周期 |
 | Markdown 格式检查 | `src/app/services/markdownLintController.ts`, `src/app/workers/markdownLint.worker.ts` | `src/lib/markdown-lint/`, `src/app/components/StatusBar.svelte`, `src/app/App.svelte`, `vite.config.ts` | 修改检查调度、Worker 依赖解析、规则集、诊断状态、结果本地化或状态栏详情 |
 | Rust 配置管理 | `src-tauri/src/config/mod.rs` | `src-tauri/src/models.rs` | 应用配置 JSON 持久化、设置读写、启动前读取 |
 | 用户主题文件存储 | `src-tauri/src/config/themes.rs` | `src/lib/desktop/tauriStorage.ts` | `themes/<id>.json` 列出/保存/删除、外部主题读取与模板写出、ID/大小/数量上限 |
