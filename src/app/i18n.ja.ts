@@ -57,9 +57,9 @@ export const JA_JP_EXTRA_TRANSLATIONS = {
   calloutStyleDescription: '吹き出しと引用符の視覚的な密度を制御します。',
   classic: 'クラシック',
   modern: 'モダンな',
-  largeDocumentLimit: '大きなドキュメントのしきい値',
-  largeDocumentLimitDescription:
-    'セマンティック解析によるウィンドウのブロックを避けるために、しきい値を超えた後は読み取り専用ソース モードを使用してください。',
+  markdownWindowingThreshold: 'ウィンドウ化のしきい値',
+  markdownWindowingThresholdDescription:
+    'ウィンドウ化の容量上限を割合で調整します。値を大きくすると、より多くの内容を読み込んだまま保持します。',
   charByte: '文字数/バイト数',
   defaultIndent: 'デフォルトのインデント',
   defaultIndentDescription: 'コード ブロック エディター内で Tab キーを押すときに使用されます。',
@@ -589,7 +589,7 @@ export const JA_JP_EXTRA_TRANSLATIONS = {
   markdownLintSourceRequired: '正確な位置を確認するにはソースモードを使用してください',
   markdownLintFailureDescription: 'チェッカーは停止しました。手動で再チェックできます。',
   markdownLintSkippedDescription:
-    '大きなドキュメントのしきい値を超えています。小さくなると自動的にチェックを再開します。',
+    '構文チェックの上限を超えています。小さくなると自動的にチェックを再開します。',
   estimatedReadingMinutes: '推定読み取り値 {minutes} 分',
   selectStatsMetric: '統計指標を選択してください',
   switchTheme: 'テーマを切り替える',

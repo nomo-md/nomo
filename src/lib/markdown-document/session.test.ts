@@ -4,6 +4,7 @@ import { DocumentConflictError } from './protocol';
 import { Utf8Text, utf8Length } from './utf8Text';
 import { MarkdownMountPolicy } from './mountPolicy';
 import { emptyEnhancements } from './enhancements';
+import { DEFAULT_MARKDOWN_MOUNT_LIMITS, MARKDOWN_RESIDENT_LIMITS, resolveMarkdownWindowingLimits } from './windowingLimits';
 
 describe('Markdown document integrity', () => {
   it('keeps an immutable complete snapshot while later edits continue', () => {
@@ -135,6 +136,17 @@ describe('persistent UTF-8 text', () => {
 });
 
 describe('mount policy', () => {
+  it('preserves every default and scales capacities at both slider boundaries', () => {
+    expect(resolveMarkdownWindowingLimits(100)).toEqual({ mount: DEFAULT_MARKDOWN_MOUNT_LIMITS, resident: MARKDOWN_RESIDENT_LIMITS });
+    expect(resolveMarkdownWindowingLimits(75)).toEqual({
+      mount: { bytes: 786432, layoutUnits: 4500, returnBytes: 629145, returnLayoutUnits: 3600, idleMilliseconds: 2000 },
+      resident: { views: 24, sourceBytes: 786432, domNodes: 15000, imageBytes: 100663296 },
+    });
+    expect(resolveMarkdownWindowingLimits(400)).toEqual({
+      mount: { bytes: 4194304, layoutUnits: 24000, returnBytes: 3355443, returnLayoutUnits: 19200, idleMilliseconds: 2000 },
+      resident: { views: 128, sourceBytes: 4194304, domNodes: 80000, imageBytes: 536870912 },
+    });
+  });
   const complete = {
     revision: 1,
     state: 'ready' as const,
@@ -144,6 +156,19 @@ describe('mount policy', () => {
     enhancementObjects: 0,
     enhancements: emptyEnhancements(),
   };
+  it('re-evaluates unchanged content on scale changes and retains the recovery hysteresis', () => {
+    const policy = new MarkdownMountPolicy();
+    const content = { ...complete, layoutUnits: 5000 };
+    expect(policy.update(content, 0, false)).toBe('progressive-full');
+    policy.updateLimits(resolveMarkdownWindowingLimits(75).mount);
+    expect(policy.update(content, 1, false)).toBe('windowed');
+    policy.updateLimits(resolveMarkdownWindowingLimits(100).mount);
+    expect(policy.update(content, 3000, false)).toBe('windowed');
+    policy.updateLimits(resolveMarkdownWindowingLimits(200).mount);
+    expect(policy.update(content, 3001, false)).toBe('windowed');
+    expect(policy.update(content, 5000, false)).toBe('windowed');
+    expect(policy.update(content, 5001, false)).toBe('progressive-full');
+  });
   it('keeps unknown structure windowed and classifies small complex documents', () => {
     const policy = new MarkdownMountPolicy();
     expect(policy.update({ ...complete, state: 'partial' }, 0, false)).toBe('windowed');

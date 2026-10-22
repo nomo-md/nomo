@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MarkdownResidentBudget, emptyResidentCost, type MarkdownResidentCost } from './residentBudget';
 import { emptyEnhancements } from './enhancements';
+import { resolveMarkdownWindowingLimits } from './windowingLimits';
 
 afterEach(() => vi.useRealTimers());
 const progress = { revision: 1, state: 'ready' as const, totalBytes: 10000, indexedBytes: 10000,
@@ -18,6 +19,38 @@ function reserve(budget: MarkdownResidentBudget, host: object, cost: Partial<Mar
   return result.token;
 }
 describe('共享驻留预算', () => {
+  it('updates a shared budget in place and recovers against the new admission limits after composition', async () => {
+    vi.useFakeTimers();
+    const budget = new MarkdownResidentBudget(undefined, () => Date.now());
+    const a = {}, b = {}, changed = vi.fn();
+    budget.register(a, 'shared', changed); budget.register(b, 'shared', changed);
+    budget.updateDocument(a, { ...progress, totalBytes: 1500000, layoutUnits: 7000 });
+    const token = reserve(budget, a, { views: 40 }, true);
+    budget.commit(token, { ...emptyResidentCost(), views: 40 });
+    expect(budget.pressured(a)).toBe(true);
+    budget.holdInteraction(a, 'composition', true);
+    const larger = resolveMarkdownWindowingLimits(200);
+    budget.updateLimits(larger.resident, larger.mount);
+    expect(budget.diagnostics.actual.views).toBe(40);
+    expect(budget.diagnostics.entries).toBe(1);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(budget.pressured(b)).toBe(true);
+    budget.holdInteraction(a, 'composition', false);
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(budget.pressured(a)).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(budget.pressured(a)).toBe(false);
+    expect(budget.pressured(b)).toBe(false);
+    expect(budget.commit(token, { ...emptyResidentCost(), views: 39 })).toBe(true);
+    const smaller = resolveMarkdownWindowingLimits(75);
+    budget.updateLimits(smaller.resident, smaller.mount);
+    expect(budget.pressured(a)).toBe(true);
+    expect(budget.diagnostics.protectedExcess.views).toBe(15);
+    budget.updateLimits(larger.resident, larger.mount);
+    budget.unregister(a); budget.unregister(b);
+    await Promise.resolve();
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it('连续交互只推迟共享可选扩展，基础内容照常准入且隐藏取消等待', async () => {
     vi.useFakeTimers();
     const { budget, a, b, changed } = setup();

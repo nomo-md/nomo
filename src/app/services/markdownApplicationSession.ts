@@ -12,6 +12,7 @@ import {
   readCompleteSnapshot,
 } from '../../lib/markdown-document/port';
 import { ProgressiveMarkdownDocument } from '../../lib/markdown-document/runtime';
+import { normalizeMarkdownWindowingScalePercent, resolveMarkdownWindowingLimits } from '../../lib/markdown-document/windowingLimits';
 import { MarkdownViewportHost, type MarkdownPresentation, type OutlineNavigationClock } from '../../lib/markdown-document/viewportHost';
 import { utf8Length, utf16ToUtf8 } from '../../lib/markdown-document/utf8Text';
 import { getSourceTextChanges } from '../../lib/markdown-document/textChanges';
@@ -53,6 +54,7 @@ export class MarkdownApplicationSession {
   private scrollOrigin: 'semantic' | 'source' | undefined;
   private scrollUntil = 0;
   private frontMatterRevision = -1;
+  private windowingScalePercent = 100;
   private pendingFocus = false;
   private sourceFocus = false;
   private activeHostMode: 'semantic' | 'source' | undefined;
@@ -200,6 +202,7 @@ export class MarkdownApplicationSession {
       }
       this.document = doc;
       if (this.disposed) return doc;
+      doc.updateMountLimits(resolveMarkdownWindowingLimits(this.windowingScalePercent).mount);
       this.unsubscribeSelection = doc.selection.subscribe((selection) =>
         this.onSelection?.(selection),
       );
@@ -266,6 +269,11 @@ export class MarkdownApplicationSession {
       return doc;
     })();
     void this.ready.catch(error => { if (!this.disposed) onFailure(error); });
+  }
+  setWindowingScalePercent(value: number) {
+    if (this.disposed) return;
+    this.windowingScalePercent = normalizeMarkdownWindowingScalePercent(value);
+    this.document?.updateMountLimits(resolveMarkdownWindowingLimits(this.windowingScalePercent).mount);
   }
   private beginOpening(target: HTMLElement) {
     if (this.document || this.openings.has(target)) return;

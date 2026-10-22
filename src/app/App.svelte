@@ -119,6 +119,8 @@
   } from './services/workspaceItems';
   import type { MarkdownDocumentRuntime, MarkdownWorkspaceRuntimeBinding } from './services/markdownDocumentRuntime';
   import { MarkdownApplicationSession, getMarkdownApplicationSession } from './services/markdownApplicationSession';
+  import { markdownResidentBudget } from '../lib/markdown-document/residentBudget';
+  import { resolveMarkdownWindowingLimits } from '../lib/markdown-document/windowingLimits';
   import { createWorkspaceTransferController } from './services/workspaceTransferController';
   import type { MarkdownSourceRuntimeState } from './components/markdownSourceEditor';
   import {
@@ -387,6 +389,7 @@
     focusMode = DEFAULT_APP_PREFERENCES.sidebarHidden,
     toolbarHidden = DEFAULT_APP_PREFERENCES.toolbarHidden;
   let largeDocumentLimit = DEFAULT_APP_PREFERENCES.largeDocumentLimit;
+  let markdownWindowingScalePercent = DEFAULT_APP_PREFERENCES.markdownWindowingScalePercent;
   let autoSaveDelayMs = DEFAULT_APP_PREFERENCES.autoSaveDelayMs;
   let createSnapshotBeforeSave = DEFAULT_APP_PREFERENCES.createSnapshotBeforeSave;
   let defaultCodeBlockLanguage = DEFAULT_APP_PREFERENCES.defaultCodeBlockLanguage;
@@ -700,7 +703,6 @@
     activeTabId,
     version,
     markdown,
-    largeDocumentLimit,
     largeDocumentMode,
   );
 
@@ -712,7 +714,6 @@
       version,
       markdown,
       ruleSet: markdownLintRuleSet,
-      largeDocumentLimit,
       largeDocumentMode,
     };
   }
@@ -723,13 +724,12 @@
     tabId: string,
     documentVersion: number,
     content: string,
-    documentLimit: number,
     isLargeDocument: boolean,
   ) {
     const activeTab = tabs.find((tab) => tab.id === tabId);
     const signature =
       enabled && isMarkdownTab(activeTab)
-        ? `${tabId}:${documentVersion}:${ruleSet}:${documentLimit}:${isLargeDocument}`
+        ? `${tabId}:${documentVersion}:${ruleSet}:${isLargeDocument}`
         : `disabled:${enabled}:${tabId}`;
     if (signature === lastMarkdownLintSignature) return;
     lastMarkdownLintSignature = signature;
@@ -751,7 +751,6 @@
         version: documentVersion,
         markdown: content,
         ruleSet,
-        largeDocumentLimit: documentLimit,
         largeDocumentMode: isLargeDocument,
       },
       delayMs,
@@ -4004,6 +4003,7 @@
       await tick();
       return activeTabId === tab.id && (mode === 'source' || mode === 'split');
     });
+    application.setWindowingScalePercent(markdownWindowingScalePercent);
     const core = application.editor;
     const runtime = {
       tabId: tab.id, editor: core, session: application, mode: initialMode,
@@ -4614,7 +4614,7 @@
         const selected = application.captureSelection();
         if (selected) writingStatsController.setSelection({ from: selected.anchorByte, to: selected.headByte, sourceCoordinates: 'utf8' });
         if (markdownLintEnabled) markdownLintController.schedule({ tabId, version: snapshot.revision, markdown: snapshot.markdown,
-          ruleSet: markdownLintRuleSet, largeDocumentLimit, largeDocumentMode: false }, 0);
+          ruleSet: markdownLintRuleSet, largeDocumentMode: false }, 0);
       }).catch(error => { if (isCurrent()) showVisibleError(error, t.saveFileFailed()); });
     }, 500);
   }
@@ -6588,6 +6588,13 @@
 
   const unsubscribe = editor.subscribe(syncFromEditor);
 
+  function applyMarkdownWindowingScale(value: number) {
+    markdownWindowingScalePercent = value;
+    const limits = resolveMarkdownWindowingLimits(value);
+    markdownResidentBudget(document).updateLimits(limits.resident, limits.mount);
+    for (const runtime of documentRuntimes.values()) runtime.session?.setWindowingScalePercent(value);
+  }
+
   async function applyAppPreferences(
     preferences: AppPreferences,
     options: {
@@ -6632,6 +6639,7 @@
     markdownLintEnabled = preferences.markdownLintEnabled;
     markdownLintRuleSet = preferences.markdownLintRuleSet;
     largeDocumentLimit = preferences.largeDocumentLimit;
+    applyMarkdownWindowingScale(preferences.markdownWindowingScalePercent);
     autoSaveDelayMs = preferences.autoSaveDelayMs;
     createSnapshotBeforeSave = preferences.createSnapshotBeforeSave;
     defaultCodeBlockLanguage = preferences.defaultCodeBlockLanguage;
@@ -6725,6 +6733,7 @@
       contentWidthPercent,
       largeDocumentLimit,
       openDefaultBehavior,
+      markdownWindowingScalePercent,
       filePreviewEnabled,
       closeWindowBehavior,
       externalFileChangeBehavior,
@@ -6763,6 +6772,10 @@
       shortcutPreferences: patch.shortcutPreferences ?? shortcutPreferences,
     });
     const patchKeys = Object.keys(patch);
+    if (patchKeys.length === 1 && patchKeys[0] === 'markdownWindowingScalePercent') {
+      applyMarkdownWindowingScale(preferences.markdownWindowingScalePercent);
+      return;
+    }
     const geometryOnly =
       patchKeys.length > 0 &&
       patchKeys.every((key) =>

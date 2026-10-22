@@ -2,6 +2,7 @@ import { MarkdownSessionController } from './controller';
 import { buildMarkdownIndex, type MarkdownIndexedSnapshot } from './incrementalIndex';
 import { invalidateMarkdownIndex, type MarkdownIndexInvalidation } from './indexInvalidation';
 import { MarkdownMountPolicy, type MarkdownMountMode } from './mountPolicy';
+import { DEFAULT_MARKDOWN_MOUNT_LIMITS, type MarkdownMountLimits } from './windowingLimits';
 import type { MarkdownDocumentPort, MarkdownSessionStatus, SnapshotReference } from './port';
 import { readCompleteSnapshot } from './port';
 import { DocumentConflictError, type DocumentWindow, type DocumentIndexProgress } from './protocol';
@@ -172,7 +173,11 @@ export class ProgressiveMarkdownDocument {
     listener(this.state);
     return () => this.listeners.delete(listener);
   }
-  private publish() {
+  updateMountLimits(limits: MarkdownMountLimits) {
+    if (this.closed || !this.policy.updateLimits(limits)) return;
+    if (!this.hidden) this.publish(true);
+  }
+  private publish(force = false) {
     if (this.closed) return;
     this.mode = this.policy.update(
       this.state.progress,
@@ -181,11 +186,20 @@ export class ProgressiveMarkdownDocument {
       this.pressureOwners.size > 0,
     );
     const state = this.state;
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+    const quietAt = this.latestInteraction + DEFAULT_MARKDOWN_MOUNT_LIMITS.idleMilliseconds;
+    const nextCheck = this.policy.recoveryAt ??
+      (state.windowLimited && quietAt > performance.now() ? quietAt : null);
+    if (!this.hidden && nextCheck !== null) {
+      this.idleTimer = setTimeout(() => { this.idleTimer = null; this.publish(); },
+        Math.max(1, nextCheck - performance.now() + 1));
+    }
     const signature = JSON.stringify([state.status.revision, state.status.dirty, state.status.canUndo, state.status.canRedo,
       state.status.persistenceWarning, this.session.state.viewGeneration, this.session.state.pendingTransactions,
       state.progress.state, state.progress.indexedBytes, state.progress.layoutUnits, state.progress.enhancements, state.mountMode, state.windowLimited, state.mountRestriction, state.timings]);
     // 滚动只更新时间和挂载策略；元数据没有变化时不让应用反复派生大纲、持久化标签。
-    if (signature === this.publishedSignature && this.publishedFailure === state.failure) return;
+    if (!force && signature === this.publishedSignature && this.publishedFailure === state.failure) return;
     this.publishedSignature = signature; this.publishedFailure = state.failure;
     for (const listener of this.listeners) listener(state);
   }
@@ -203,23 +217,17 @@ export class ProgressiveMarkdownDocument {
   interacting() {
     this.latestInteraction = performance.now();
     markdownWorkScheduler.interacting();
-    if (this.idleTimer) clearTimeout(this.idleTimer);
     this.publish();
-    // 回退到挂满必须连续空闲两秒；再触发一次策略检查，不能依赖用户继续操作。
-    this.idleTimer = setTimeout(() => {
-      this.idleTimer = null;
-      this.publish();
-      this.idleTimer = setTimeout(() => {
-        this.idleTimer = null;
-        this.publish();
-      }, 2001);
-    }, 2001);
   }
   setHidden(hidden: boolean) {
     this.hidden = hidden;
-    if (hidden) this.visibleDemands.clear();
+    if (hidden) {
+      this.visibleDemands.clear();
+      if (this.idleTimer) clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
     markdownWorkScheduler.pause(this, hidden);
-    if (!hidden) this.scheduleIndex();
+    if (!hidden) { this.publish(); this.scheduleIndex(); }
   }
   /** 需求只提升下一扫描批次，不创建另一个索引或从未知结构内部解析。 */
   requestVisibleStructure(owner: object, demand: MarkdownVisibleDemand | null) {

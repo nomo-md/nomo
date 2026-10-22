@@ -1,13 +1,8 @@
 import type { DocumentIndexProgress } from './protocol';
+import { DEFAULT_MARKDOWN_MOUNT_LIMITS, type MarkdownMountLimits } from './windowingLimits';
+export { DEFAULT_MARKDOWN_MOUNT_LIMITS } from './windowingLimits';
 
 export type MarkdownMountMode = 'windowed' | 'progressive-full';
-export const DEFAULT_MARKDOWN_MOUNT_LIMITS = Object.freeze({
-  bytes: 1_048_576,
-  layoutUnits: 6_000,
-  returnBytes: 838_860,
-  returnLayoutUnits: 4_800,
-  idleMilliseconds: 2_000,
-});
 
 /** 阈值只改变 DOM 驻留；完整正文、历史和编辑权限均不属于本策略。 */
 export class MarkdownMountPolicy {
@@ -18,7 +13,14 @@ export class MarkdownMountPolicy {
   private incomplete = false;
   get windowLimited() { return this.mode === 'windowed' && (this.limited || this.pressure); }
   get restriction() { return this.pressure ? 'resource-pressure' : this.limited ? 'document-size' : this.mode === 'windowed' ? this.incomplete ? 'structure-incomplete' : 'index-pending' : null; }
-  constructor(private readonly limits = DEFAULT_MARKDOWN_MOUNT_LIMITS) {}
+  constructor(private limits: MarkdownMountLimits = DEFAULT_MARKDOWN_MOUNT_LIMITS) {}
+  get recoveryAt() { return this.belowSince === null ? null : this.belowSince + this.limits.idleMilliseconds; }
+  updateLimits(limits: MarkdownMountLimits) {
+    if (Object.keys(limits).every(key => limits[key as keyof MarkdownMountLimits] === this.limits[key as keyof MarkdownMountLimits])) return false;
+    this.limits = { ...limits };
+    this.belowSince = null;
+    return true;
+  }
   update(progress: DocumentIndexProgress, now: number, interacting: boolean, pressure = false): MarkdownMountMode {
     this.pressure = pressure;
     this.incomplete = progress.state === 'ready' && progress.metricsComplete === false;
@@ -51,6 +53,7 @@ export class MarkdownMountPolicy {
     if (now - this.belowSince >= this.limits.idleMilliseconds) {
       this.mode = 'progressive-full';
       this.limited = false;
+      this.belowSince = null;
     }
     return this.mode;
   }

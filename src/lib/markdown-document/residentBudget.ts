@@ -1,10 +1,8 @@
 import type { DocumentIndexProgress } from './protocol';
-import { DEFAULT_MARKDOWN_MOUNT_LIMITS } from './mountPolicy';
+import { DEFAULT_MARKDOWN_MOUNT_LIMITS, MARKDOWN_RESIDENT_LIMITS, type MarkdownMountLimits } from './windowingLimits';
+export { MARKDOWN_RESIDENT_LIMITS } from './windowingLimits';
 
 export interface MarkdownResidentCost { views: number; sourceBytes: number; domNodes: number; imageBytes: number; }
-export const MARKDOWN_RESIDENT_LIMITS: Readonly<MarkdownResidentCost> = Object.freeze({
-  views: 32, sourceBytes: 1024 * 1024, domNodes: 20_000, imageBytes: 128 * 1024 * 1024,
-});
 export const UNKNOWN_IMAGE_BYTES = 8 * 1024 * 1024;
 const RECOVERY_LOW_WATERMARK = 0.7;
 const DOCUMENT_REDUCTION_RATIO = 0.8;
@@ -41,7 +39,30 @@ export class MarkdownResidentBudget {
   private queued = false;
   private sequence = 0;
   private reasons = new Set<keyof MarkdownResidentCost>();
-  constructor(readonly limits = MARKDOWN_RESIDENT_LIMITS, private readonly now = () => performance.now()) {}
+  private mountLimits: MarkdownMountLimits = DEFAULT_MARKDOWN_MOUNT_LIMITS;
+  private currentLimits: Readonly<MarkdownResidentCost>;
+  constructor(limits: Readonly<MarkdownResidentCost> = MARKDOWN_RESIDENT_LIMITS, private readonly now = () => performance.now()) {
+    this.currentLimits = { ...limits };
+  }
+  get limits() { return this.currentLimits; }
+
+  /** 原位更新以保留预占 token、成本和跨栏压力状态。 */
+  updateLimits(limits: Readonly<MarkdownResidentCost>, mountLimits: MarkdownMountLimits) {
+    const capacityChanged = keys.some(key => limits[key] !== this.limits[key]);
+    const admissionChanged = mountLimits.bytes !== this.mountLimits.bytes || mountLimits.layoutUnits !== this.mountLimits.layoutUnits;
+    if (!capacityChanged && !admissionChanged) return;
+    const increased = keys.some(key => limits[key] > this.limits[key]) ||
+      mountLimits.bytes > this.mountLimits.bytes || mountLimits.layoutUnits > this.mountLimits.layoutUnits;
+    this.currentLimits = { ...limits };
+    this.mountLimits = { ...mountLimits };
+    for (const doc of this.documents.values()) {
+      doc.lowSince = undefined;
+      if (increased && doc.pressured) doc.eligible = true;
+    }
+    this.checkPressure();
+    this.recoveries();
+    for (const host of this.hosts.keys()) this.notify(host);
+  }
 
   register(host: object, documentId: string, changed: () => void) {
     if (this.hosts.has(host)) throw new Error('驻留宿主重复注册。');
@@ -178,12 +199,12 @@ export class MarkdownResidentBudget {
     const low = keys.every(key => this.actual[key] + this.reserved[key] < this.limits[key] * RECOVERY_LOW_WATERMARK);
     const active = [...this.hosts.values()].some(host => host.activity && this.documents.get(host.documentId) === doc);
     if (!doc.eligible || !low || active || !progress || progress.state !== 'ready' || progress.metricsComplete === false ||
-      progress.totalBytes > DEFAULT_MARKDOWN_MOUNT_LIMITS.bytes || progress.layoutUnits > DEFAULT_MARKDOWN_MOUNT_LIMITS.layoutUnits) {
+      progress.totalBytes > this.mountLimits.bytes || progress.layoutUnits > this.mountLimits.layoutUnits) {
       doc.lowSince = undefined; return;
     }
     const now = this.now();
     doc.lowSince ??= now;
-    const remaining = Math.max(doc.lowSince, doc.interaction) + DEFAULT_MARKDOWN_MOUNT_LIMITS.idleMilliseconds - now;
+    const remaining = Math.max(doc.lowSince, doc.interaction) + this.mountLimits.idleMilliseconds - now;
     if (remaining > 0) { doc.timer = setTimeout(() => this.checkRecovery(doc), remaining); return; }
     doc.pressured = false; doc.eligible = false; doc.baseline = undefined; doc.lowSince = undefined;
     for (const [host, entry] of this.hosts) if (this.documents.get(entry.documentId) === doc) this.notify(host);

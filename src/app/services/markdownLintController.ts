@@ -6,6 +6,8 @@ import type {
 } from '../../lib/markdown-lint/types';
 import { createMarkdownLintState } from '../../lib/markdown-lint/types';
 
+export const MARKDOWN_LINT_MAX_CHARACTERS = 500_000;
+
 export interface MarkdownLintController {
   schedule(input: MarkdownLintInput, delayMs: number): void;
   checkNow(input: MarkdownLintInput): void;
@@ -74,7 +76,7 @@ export function createMarkdownLintController(
     clearTimer();
     latestInput = input;
     latestRequestId = ++requestId;
-    if (input.largeDocumentMode || input.markdown.length > input.largeDocumentLimit) {
+    if (input.largeDocumentMode || input.markdown.length > MARKDOWN_LINT_MAX_CHARACTERS) {
       onStateChange(createMarkdownLintState('skipped', input));
       return null;
     }

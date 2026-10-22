@@ -5,6 +5,7 @@ import { MarkdownStructureScanner } from './structure';
 import { createMemoryMarkdownPort } from './port';
 import { utf8Length } from './utf8Text';
 import { MarkdownTaskPriority, markdownWorkScheduler } from './scheduler';
+import { resolveMarkdownWindowingLimits } from './windowingLimits';
 
 const localBuild: typeof buildMarkdownIndex = (port, snapshot, options) =>
   buildMarkdownIndex(port, snapshot, {
@@ -28,6 +29,43 @@ const localBuild: typeof buildMarkdownIndex = (port, snapshot, options) =>
   });
 
 describe('渐进 Markdown 文档运行时', () => {
+  it('配置更新通知同模式宿主，静止恢复且隐藏和关闭取消复查', async () => {
+    const port = createMemoryMarkdownPort();
+    const runtime = new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '完整正文\n\n尾段' }), localBuild);
+    const normal = resolveMarkdownWindowingLimits(100).mount;
+    const tiny = { ...normal, bytes: 1, returnBytes: 0 };
+    try {
+      await vi.waitFor(() => expect(runtime.state.progress.state).toBe('ready'));
+      const changed = vi.fn();
+      runtime.subscribe(changed); changed.mockClear();
+      runtime.updateMountLimits(resolveMarkdownWindowingLimits(200).mount);
+      expect(runtime.state.mountMode).toBe('progressive-full');
+      expect(changed).toHaveBeenCalledOnce();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+      runtime.updateMountLimits(tiny);
+      expect(runtime.state.mountMode).toBe('windowed');
+      runtime.updateMountLimits(normal);
+      await vi.advanceTimersByTimeAsync(4500);
+      expect(runtime.state.mountMode).toBe('progressive-full');
+      runtime.updateMountLimits(tiny);
+      runtime.updateMountLimits(normal);
+      expect(vi.getTimerCount()).toBe(1);
+      runtime.setHidden(true);
+      expect(vi.getTimerCount()).toBe(0);
+      changed.mockClear();
+      runtime.updateMountLimits(resolveMarkdownWindowingLimits(200).mount);
+      expect(changed).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      runtime.setHidden(false);
+      await vi.advanceTimersByTimeAsync(2100);
+      expect(runtime.state.mountMode).toBe('progressive-full');
+      expect(await runtime.readMarkdown()).toBe('完整正文\n\n尾段');
+      runtime.updateMountLimits(tiny);
+      runtime.updateMountLimits(normal);
+      await runtime.close(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { await runtime.close(true); vi.useRealTimers(); }
+  });
   it('重试重新接回同版本恢复资料，保留正文、选区和撤销历史', async () => {
     const port = createMemoryMarkdownPort();
     const runtime = new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '原文' }), localBuild);

@@ -4,7 +4,6 @@ import type { MarkdownMountRange } from './viewport';
 export const MARKDOWN_VIEWPORT_POLICY = Object.freeze({
   baseScreens: 3, forwardScreens: 6, retainScreens: 3, quietMs: 300,
   batchMs: 4, groupBytes: 32 * 1024, groupBlocks: 64,
-  softViews: 32, softWindowBytes: 1024 * 1024,
 });
 
 export interface MarkdownBlockGroup extends MarkdownMountRange {

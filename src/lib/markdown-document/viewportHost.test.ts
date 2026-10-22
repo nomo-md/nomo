@@ -10,6 +10,7 @@ import { ProseMirrorEditorCore } from '../editor-core/ProseMirrorEditorCore';
 import { estimateMarkdownBlockHeight } from './viewport';
 import { MarkdownSemanticWindow } from './semanticWindow';
 import { markdownResidentBudget } from './residentBudget';
+import { resolveMarkdownWindowingLimits } from './windowingLimits';
 
 const localBuild: typeof buildMarkdownIndex = (port, snapshot, options) =>
   buildMarkdownIndex(port, snapshot, {
@@ -34,6 +35,8 @@ const localBuild: typeof buildMarkdownIndex = (port, snapshot, options) =>
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  const defaults = resolveMarkdownWindowingLimits(100);
+  markdownResidentBudget(document).updateLimits(defaults.resident, defaults.mount);
   expect(markdownResidentBudget(document).diagnostics).toMatchObject({ hosts: 0, documents: 0, entries: 0,
     actual: { views: 0, sourceBytes: 0, domNodes: 0, imageBytes: 0 },
     reserved: { views: 0, sourceBytes: 0, domNodes: 0, imageBytes: 0 } });
@@ -875,6 +878,31 @@ describe('完整会话的真实窗口宿主', () => {
     expect(document.activeElement).toBe(button);
     } finally { focus.mockRestore(); }
   });
+  it('调低比例收缩现有视图，保留可见 DOM 与完整正文，再调高后空闲恢复', async () => {
+    const text = ('x'.repeat(1022) + '\n\n').repeat(900);
+    const { runtime, host, target, failures } = await setup(text);
+    const budget = markdownResidentBudget(document);
+    await vi.waitFor(() => expect(host.diagnostics.mounted).toBeGreaterThan(2));
+    const before = host.diagnostics.mounted;
+    const first = target.querySelector('.markdown-session-window');
+    const smaller = resolveMarkdownWindowingLimits(75);
+    budget.updateLimits(smaller.resident, smaller.mount);
+    runtime.updateMountLimits(smaller.mount);
+    await vi.waitFor(() => expect(host.diagnostics.mounted).toBeLessThan(before));
+    const shrunk = host.diagnostics.mounted;
+    expect(runtime.state.mountMode).toBe('windowed');
+    expect(target.querySelector('.markdown-session-window')).toBe(first);
+    expect(await runtime.readMarkdown()).toBe(text);
+    const larger = resolveMarkdownWindowingLimits(200);
+    budget.updateLimits(larger.resident, larger.mount);
+    runtime.updateMountLimits(larger.mount);
+    await vi.waitFor(() => expect(runtime.state.mountMode).toBe('progressive-full'), { timeout: 6500 });
+    await vi.waitFor(() => expect(host.diagnostics.mounted).toBeGreaterThan(shrunk));
+    expect(target.querySelector('.markdown-session-window')).toBe(first);
+    expect(runtime.state.status.revision).toBe(0);
+    expect(failures).toEqual([]);
+  }, 15000);
+
   it('连续滚动原位保留重叠 DOM，边界往返不销毁保留带视图', async () => {
     const { host, target, failures } = await setup('段落内容\n\n'.repeat(4000));
     const pane = target.parentElement!;

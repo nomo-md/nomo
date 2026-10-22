@@ -34,7 +34,6 @@ export interface MarkdownLintInput {
   version: number;
   markdown: string;
   ruleSet: MarkdownLintRuleSet;
-  largeDocumentLimit: number;
   largeDocumentMode: boolean;
 }
 

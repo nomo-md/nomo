@@ -1181,8 +1181,8 @@ export class MarkdownViewportHost {
         const top = requestedTop ?? this.localScrollTop;
         const demand = this.demand.range(height, performance.now());
         if (navigating) demand.before = demand.after = 0;
-        const pressure = this.budget.pressured(this) || this.mounted.length > MARKDOWN_VIEWPORT_POLICY.softViews ||
-          this.mounted.reduce((sum, view) => sum + this.windowBytes(view), 0) > MARKDOWN_VIEWPORT_POLICY.softWindowBytes;
+        const pressure = this.budget.pressured(this) || this.mounted.length > this.budget.limits.views ||
+          this.mounted.reduce((sum, view) => sum + this.windowBytes(view), 0) > this.budget.limits.sourceBytes;
         if (pressure) { if (!navigating) demand.before = demand.after = height * 3; demand.retainBefore = demand.retainAfter = height * 3; }
         const from = this.heights.indexAt(Math.max(0, top - demand.before));
         const to = this.heights.indexAt(top + height + demand.after) + 1;

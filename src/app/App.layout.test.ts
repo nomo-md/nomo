@@ -1094,7 +1094,7 @@ describe('App outline layout', () => {
     expect(settingsWindowSource).toContain('settings-nav');
     expect(settingsWindowSource).toContain('t.createSnapshotBeforeSave()');
     expect(settingsWindowSource).toContain('autoSaveDelayMs');
-    expect(settingsWindowSource).toContain('t.largeDocumentLimit()');
+    expect(settingsWindowSource).toContain('t.markdownWindowingThreshold()');
     expect(settingsWindowSource).toContain('t.folderOpenDefaultBehavior()');
     expect(settingsWindowSource).toContain('filePreviewEnabled');
     expect(settingsWindowSource).toContain('writingStatsVisible');

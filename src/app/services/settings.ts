@@ -6,6 +6,7 @@ import {
 } from '../../lib/desktop/tauriStorage';
 import type { DiagramType } from '../../lib/editor-core/diagramTemplates';
 import { DEFAULT_QUICK_INSERT_TRIGGER, isQuickInsertTrigger } from '../../lib/editor-core/quickInsert';
+import { normalizeMarkdownWindowingScalePercent } from '../../lib/markdown-document/windowingLimits';
 import { setTypographyOptions } from '../../lib/typography/options';
 import {
   beginTypographyInteraction,
@@ -99,6 +100,7 @@ export interface AppPreferences {
   typographyEnabled: boolean;
   contentWidthPercent: number;
   largeDocumentLimit: number;
+  markdownWindowingScalePercent: number;
   openDefaultBehavior: OpenDefaultBehavior;
   filePreviewEnabled: boolean;
   closeWindowBehavior: CloseWindowBehavior;
@@ -184,6 +186,7 @@ export const DEFAULT_APP_PREFERENCES: AppPreferences = {
   typographyEnabled: DEFAULT_TYPOGRAPHY.enabled,
   contentWidthPercent: 60,
   largeDocumentLimit: 500_000,
+  markdownWindowingScalePercent: 100,
   openDefaultBehavior: 'ask-every-time',
   filePreviewEnabled: true,
   closeWindowBehavior: 'ask-every-time',
@@ -307,6 +310,7 @@ export async function loadAppPreferences(
     typographyEnabled: parseSetting<unknown>(settings, 'typographyEnabled'),
     contentWidthPercent: parseSetting<unknown>(settings, 'contentWidthPercent'),
     largeDocumentLimit: parseSetting<unknown>(settings, 'largeDocumentLimit'),
+    markdownWindowingScalePercent: parseSetting<unknown>(settings, 'markdownWindowingScalePercent'),
     openDefaultBehavior:
       parseSetting<unknown>(settings, 'openDefaultBehavior') ??
       parseSetting<unknown>(settings, 'folderOpenDefaultBehavior'),
@@ -438,6 +442,7 @@ export function normalizeAppPreferences(
       90,
       DEFAULT_APP_PREFERENCES.contentWidthPercent,
     ),
+    markdownWindowingScalePercent: normalizeMarkdownWindowingScalePercent(value.markdownWindowingScalePercent),
     largeDocumentLimit: clampNumber(
       value.largeDocumentLimit,
       100_000,
@@ -665,6 +670,7 @@ function toPersistedPreferenceEntries(
     typographyEnabled: preferences.typographyEnabled,
     contentWidthPercent: preferences.contentWidthPercent,
     largeDocumentLimit: preferences.largeDocumentLimit,
+    markdownWindowingScalePercent: preferences.markdownWindowingScalePercent,
     openDefaultBehavior: preferences.openDefaultBehavior,
     filePreviewEnabled: preferences.filePreviewEnabled,
     closeWindowBehavior: preferences.closeWindowBehavior,

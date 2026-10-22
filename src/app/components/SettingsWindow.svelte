@@ -155,6 +155,7 @@
 
   let activeCategory: CategoryId = 'general';
   let draftSettings: AppPreferences = { ...DEFAULT_APP_PREFERENCES };
+  let windowingScalePreview: number | null = null;
   let lastPersistedSettings: AppPreferences = { ...DEFAULT_APP_PREFERENCES };
   let effectiveSystemScheme: ColorScheme =
     document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
@@ -1230,6 +1231,11 @@
     updateDraft({ [key]: Number((event.currentTarget as HTMLInputElement).value) });
   }
 
+  function commitWindowingScale(event: Event) {
+    updateNumberSetting('markdownWindowingScalePercent', event);
+    windowingScalePreview = null;
+  }
+
   function updateStringSetting(key: keyof AppPreferences, event: Event) {
     updateDraft({ [key]: (event.currentTarget as HTMLInputElement).value });
   }
@@ -1986,22 +1992,23 @@
 
               <div class="setting-row">
                 <div>
-                  <label for="largeDocumentLimit" class="setting-label"
-                    >{t.largeDocumentLimit()}</label
+                  <label for="markdownWindowingScalePercent" class="setting-label"
+                    >{t.markdownWindowingThreshold()}</label
                   >
-                  <p>{t.largeDocumentLimitDescription()}</p>
+                  <p>{t.markdownWindowingThresholdDescription()}</p>
                 </div>
-                <div class="number-field">
+                <div class="range-setting">
                   <input
-                    id="largeDocumentLimit"
-                    type="number"
-                    min="100000"
-                    max="1000000"
-                    step="10000"
-                    value={draftSettings.largeDocumentLimit}
-                    on:input={(event) => updateNumberSetting('largeDocumentLimit', event)}
+                    id="markdownWindowingScalePercent"
+                    type="range"
+                    min="75"
+                    max="400"
+                    step="25"
+                    value={windowingScalePreview ?? draftSettings.markdownWindowingScalePercent}
+                    on:input={(event) => { windowingScalePreview = Number(event.currentTarget.value); }}
+                    on:change={commitWindowingScale}
                   />
-                  <span>{t.charByte()}</span>
+                  <output for="markdownWindowingScalePercent">{windowingScalePreview ?? draftSettings.markdownWindowingScalePercent}%</output>
                 </div>
               </div>
 
@@ -3678,24 +3685,15 @@
     accent-color: var(--md-editor-accent);
   }
 
-  .range-setting output,
-  .number-field span {
+  .range-setting output {
     color: var(--md-editor-muted-fg);
     font-family: var(--md-editor-font-mono);
     font-size: var(--md-editor-ui-font-size-sm);
     text-align: right;
   }
 
-  .number-field {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 10px;
-  }
-
   .text-input,
-  .select-input,
-  .number-field input {
+  .select-input {
     width: 100%;
     min-width: 0;
     height: var(--md-editor-control-height-md);

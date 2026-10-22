@@ -34,6 +34,23 @@ beforeEach(() => {
 });
 
 describe('settings', () => {
+  it('keeps old limits independent and persists only the new windowing percentage', async () => {
+    const preferences = await loadAppPreferences(true, [
+      createSetting('largeDocumentLimit', 750000),
+    ]);
+    expect(preferences.largeDocumentLimit).toBe(750000);
+    expect(preferences.markdownWindowingScalePercent).toBe(100);
+    await saveAppPreferences(true, { ...preferences, markdownWindowingScalePercent: 200 }, ['markdownWindowingScalePercent']);
+    expect(storageMock.updateAppSettings).toHaveBeenCalledWith({ markdownWindowingScalePercent: 200 });
+    const reloaded = await loadAppPreferences(true, [createSetting('markdownWindowingScalePercent', 200)]);
+    expect(reloaded.markdownWindowingScalePercent).toBe(200);
+  });
+  it.each([
+    [undefined, 100], [NaN, 100], [Infinity, 100], ['200', 100],
+    [0, 75], [75, 75], [100, 100], [138, 150], [400, 400], [1000, 400],
+  ])('normalizes windowing scale %s to %s', (value, expected) => {
+    expect(normalizeAppPreferences({ markdownWindowingScalePercent: value }).markdownWindowingScalePercent).toBe(expected);
+  });
   it('uses one typography switch and ignores retired secondary preferences', () => {
     const previous = getTypographyOptions();
     const legacyPreferences = {
