@@ -228,6 +228,33 @@ describe('完整会话的真实窗口宿主', () => {
     internal.onFont();
     expect(internal.layoutCache.get('unrelated')).toBeUndefined();
   });
+  it('卸载视图保留文档布局分区，关闭文档才释放；源码和语义互不污染', async () => {
+    const { host, runtime } = await setup('# 标题\n\n正文');
+    runtime.layouts.semantic.put('saved', { height: 777 });
+    runtime.layouts.source.put('saved', { height: 222 });
+    await host.dispose();
+    expect(runtime.layouts.semantic.get('saved')?.height).toBe(777);
+    expect(runtime.layouts.source.get('saved')?.height).toBe(222);
+    await runtime.close(true);
+    expect(runtime.layouts.semantic.size).toBe(0);
+    expect(runtime.layouts.source.size).toBe(0);
+  });
+  it('完整索引的普通挂载在接入 DOM 前完成权限交接，不再挂载后重复大布局', async () => {
+    const prepare = MarkdownSemanticWindow.prototype.prepareAttachment;
+    const connected: boolean[] = [];
+    const preparing = vi.spyOn(MarkdownSemanticWindow.prototype, 'prepareAttachment').mockImplementation(function(this: MarkdownSemanticWindow) {
+      connected.push((this as any).options.target.isConnected);
+      prepare.call(this);
+      expect(this.editable).toBe(false);
+    });
+    try {
+      const { host, target } = await setup('| 列 | 内容 |\n| --- | --- |\n| a | 内容 |');
+      await vi.waitFor(() => expect(host.writable).toBe(true));
+      expect(connected.length).toBeGreaterThan(0);
+      expect(connected.every(value => !value)).toBe(true);
+      expect(target.querySelector('.ProseMirror')?.getAttribute('contenteditable')).toBe('true');
+    } finally { preparing.mockRestore(); }
+  });
 
   it('减少动态效果使用同一 140ms 时钟，正文就绪和动画完成分别记录', async () => {
     const { host, target, runtime } = await setup('# 一\n\n正文\n\n# 二\n\n尾声');

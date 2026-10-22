@@ -1,6 +1,7 @@
 import type { DiagramRenderer } from './render';
 import type { MermaidThemeDefinition } from '../theme/types';
 import { createRenderTaskQueue } from './renderTaskQueue';
+import { MermaidSvgCache } from './mermaidSvgCache';
 
 type MermaidApi = typeof import('mermaid').default;
 
@@ -9,6 +10,13 @@ let initializedThemeKey: string | null = null;
 let renderSequence = 0;
 // Mermaid 的主题配置是全局状态；初始化与渲染必须在同一串行任务内。
 const renderTask = createRenderTaskQueue(1);
+const svgCache = new MermaidSvgCache();
+let fontGeneration = 0;
+// 渲染服务与 WebView 同寿命；唯一监听只清理纯字符串缓存，不引用任何编辑器实例。
+if (typeof document !== 'undefined') document.fonts?.addEventListener('loadingdone', () => {
+  fontGeneration++;
+  svgCache.clear();
+});
 
 export function createMermaidDiagramRenderer(): DiagramRenderer {
   return {
@@ -17,9 +25,22 @@ export function createMermaidDiagramRenderer(): DiagramRenderer {
       const id = `nomo-${hashText(code)}-${renderSequence}`;
       try {
         return await renderTask(async () => {
+          const key = JSON.stringify([code, options.theme, fontGeneration]);
+          const saved = svgCache.get(key, id);
+          if (saved !== undefined) return { svg: saved };
           const mermaid = await loadMermaid(options.theme);
-          const result = await mermaid.render(id, code);
-          return { svg: result.svg };
+          options.signal?.throwIfAborted();
+          const fonts = fontGeneration;
+          // 大图测量限制在独立布局容器内，避免逐节点测量牵动整个编辑区。
+          const surface = document.createElement('div');
+          surface.style.cssText = `position:fixed;left:0;top:0;width:${document.documentElement.clientWidth}px;height:0;overflow:hidden;contain:layout style paint;visibility:hidden;pointer-events:none`;
+          document.body.append(surface);
+          try {
+            const result = await mermaid.render(id, code, surface);
+            options.signal?.throwIfAborted();
+            if (fonts === fontGeneration) svgCache.put(key, result.svg);
+            return { svg: result.svg };
+          } finally { surface.remove(); }
         }, options.signal);
       } catch (error) {
         return {

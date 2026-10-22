@@ -30,6 +30,18 @@ function replaceText(source: string, old: string, replacement: string) {
 }
 
 describe('语义窗口的源文写回', () => {
+  it('Mermaid 后含下划线的普通文本可映射并恢复正反向选区端点', () => {
+    const source = '# 图表\n\n```mermaid\nflowchart TD\n' + Array.from({ length: 399 }, (_, i) => `N${i}[步骤 ${i}] --> N${i + 1}[步骤 ${i + 1}]`).join('\n') + '\n```\n\n\n\nNOMO_END — 文件终点。\n';
+    const doc = parseMarkdown(source), projection = new MarkdownSourceProjection(source, doc);
+    let start = 0;
+    doc.descendants((node, pos) => { if (node.isText && node.text?.startsWith('NOMO_END')) start = pos; });
+    expect(start).toBeGreaterThan(0);
+    for (const offset of [1, 6]) {
+      const byte = new TextEncoder().encode(source.slice(0, source.indexOf('NOMO_END') + offset)).length;
+      expect(projection.positionToByte(start + offset)).toBe(byte);
+      expect(projection.byteToPosition(byte)).toBe(start + offset);
+    }
+  });
   it.each(['', '正文', '# 标题', '正文\r\n\r\n'])('空格输入可写回并继续中文输入，保留原有换行：%j', (source) => {
     const doc = parseMarkdown(source);
     const pos = 1 + doc.firstChild!.content.size;

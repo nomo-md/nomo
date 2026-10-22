@@ -72,4 +72,16 @@ describe('稳定块组与有界准备', () => {
     cache.clear();
     expect(cache.size).toBe(0); expect(cache.estimatedBytes).toBe(0);
   });
+  it('多个文档和模式共用总预算，清理一个分区不删除其他文档', () => {
+    const pool = new MarkdownLayoutCache(3, 600);
+    const first = pool.scope('1:semantic:'), second = pool.scope('2:semantic:'), source = pool.scope('1:source:');
+    first.put('a', { height: 20 }); second.put('a', { height: 30 }); source.put('a', { height: 40 });
+    expect(first.get('a')?.height).toBe(20);
+    second.put('b', { height: 50 });
+    expect(second.get('a')).toBeUndefined();
+    expect(pool.size).toBe(3); expect(pool.estimatedBytes).toBeLessThanOrEqual(600);
+    first.clear();
+    expect(first.size).toBe(0); expect(first.estimatedBytes).toBe(0);
+    expect(second.get('b')?.height).toBe(50); expect(source.get('a')?.height).toBe(40);
+  });
 });

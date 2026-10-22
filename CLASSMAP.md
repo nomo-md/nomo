@@ -67,7 +67,7 @@
 | 代码块 NodeView | `src/lib/editor-core/nodeViews/CodeBlockNodeView.ts` | `src/lib/services/shikiCodeTokenizer.ts`, `src/lib/services/logger.ts`, `renderers.ts`, `ProseMirrorEditorCore.ts`, `nodeViews/activeEditRegistry.ts` | 代码块展示/编辑/高亮、WebView2 中文输入边界与展示换行偏移、Tab / Shift+Tab 选区整行缩进与原生撤销、后台提交保留选区、滚动位置保留及同文档刷新恢复 |
 | 图片 NodeView | `src/lib/editor-core/nodeViews/ImageNodeView.ts` | `src/app/services/desktopImageLoader.ts`, `ProseMirrorEditorCore.ts`, `App.svelte` | 图片加载/对齐/尺寸/右键、资源更新等待与导出快照变更 |
 | 公式 NodeView | `src/lib/editor-core/nodeViews/MathBlockNodeView.ts`, `MathInlineNodeView.ts` | `src/lib/services/katexMathRenderer.ts` | 公式渲染/编辑体验变更 |
-| 图表 NodeView | `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts` | `src/lib/services/mermaidDiagramRenderer.ts` | Mermaid 图表渲染变更 |
+| 图表 NodeView | `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts` | `src/lib/services/mermaidDiagramRenderer.ts`, `mermaidSvgCache.ts` | Mermaid 图表渲染、主题/字体失效与有界 SVG 复用 |
 | Callout NodeView | `src/lib/editor-core/nodeViews/CalloutNodeView.ts` | `src/lib/editor-core/callout/` | 提示块展示/编辑变更 |
 | 折叠块 NodeView | `src/lib/editor-core/nodeViews/DetailsNodeView.ts` | `details/detailsState.ts`, `details/detailsCommands.ts`, `src/app/styles/editor-document.css`, `src/lib/typography/exportPrint.ts`, `exportRuntime.ts` | 修改箭头/块菜单、组字结束后收起与光标恢复、共享正文 DOM 显隐、原生 HTML 展开重排及打印前递归展开 |
 | HTML 块 NodeView | `src/lib/editor-core/nodeViews/HtmlBlockNodeView.ts` | `src/lib/editor-core/html/` | 可编辑 HTML 块行为变更 |
@@ -154,7 +154,7 @@
 | 有界语义和原文窗口 | `src/lib/markdown-document/semanticWindow.ts`, `sourceWindow.ts` | `sourceProjection.ts`, `positions.ts`, `textChanges.ts`, `src/lib/editor-core/ProseMirrorEditorCore.ts` | 修改同实例语义预览、初始就绪与统一写入门禁、PM/CM 共用历史、源文精确补丁、混合换行、UTF-8/UTF-16 映射或局部编辑保留 |
 | 渐进索引与运行时 | `src/lib/markdown-document/runtime.ts` | `structure.ts`, `structure.worker.ts`, `structureIndex.ts`, `incrementalIndex.ts`, `indexInvalidation.ts` | 修改纯文本结构检查点、可撤销可见结构需求、全局引用、标题 ID 去重、增量收敛、版本门禁、后台取消或加载阶段计时 |
 | 全文准入与共享驻留预算 | `src/lib/markdown-document/mountPolicy.ts`, `residentBudget.ts`, `windowingLimits.ts` | `residentTracker.ts`, `enhancements.ts`, `structure.ts`, `structureIndex.ts`, `runtime.ts`, `viewportHost.ts` | 修改窗口化比例（75%–400%，默认 100% 对应 1 MiB / 6000 排版单元）、共享容量派生与原位更新、增强分类统计、同窗语义/源码宿主的可撤销预占与 DOM/图片增量计量、压力锁存和恢复；窗口挂载与回收仍由现有宿主执行 |
-| 真实窗口与布局策略 | `src/lib/markdown-document/viewportHost.ts` | `mountWindow.ts`, `layoutCache.ts`, `mountPolicy.ts`, `viewport.ts`, `scheduler.ts`, `editor-document.css` | 修改首屏呈现与覆盖计时、受限结构提示与导航、稳定块组、3–6 屏自适应准备、回收滞回、原位 DOM 更新、交互保护、全局选区、边界导航、大纲挂载后的精确定位与几何高亮、阅读锚点或有界高度/表格布局缓存 |
+| 真实窗口与布局策略 | `src/lib/markdown-document/viewportHost.ts` | `mountWindow.ts`, `layoutCache.ts`, `runtime.ts`, `mountPolicy.ts`, `viewport.ts`, `scheduler.ts`, `editor-document.css` | 首屏与覆盖计时、稳定块组、3–6 屏准备和回收、原位 DOM 更新、全局选区与阅读锚点、大纲定位；完整索引挂载前完成权限交接，文档持有布局分区并共用全窗 2048 项/2 MiB 预算，关闭文档释放 |
 | 语义窗口标题锚点 | `src/lib/editor-core/plugins/headingAnchors.ts` | `src/lib/editor-core/ProseMirrorEditorCore.ts`, `src/lib/markdown-document/viewportHost.ts` | 修改全局标题 ID 的 PM decoration、跨窗口重名标题定位或大纲点击后的显式滚动；宿主不得直接修改标题 DOM 属性 |
 | 全文选区与任务 | `src/lib/markdown-document/selection.ts`, `tasks.ts` | `runtime.ts`, `controller.ts`, `port.ts` | 修改跨窗口选区、完整快照复制、剪切冲突保护、全文搜索替换及取消 |
 | 自动目录派生 | `src/lib/markdown-document/automaticToc.ts` | `runtime.ts`, `controller.ts`, `session.ts`, `markdown_session.rs`, `src/lib/toc/tocService.ts` | 修改完整索引物化目录、原始目录保留、派生事务及撤销/重做语义 |
@@ -191,7 +191,7 @@
 | 渲染器注册表 | `src/lib/editor-core/renderers.ts` | `src/lib/services/render.ts` | 全局渲染器注册/获取 |
 | 代码高亮 | `src/lib/services/shikiCodeTokenizer.ts` | `src/lib/editor-core/nodeViews/CodeBlockNodeView.ts` | Shiki 代码 token 化 |
 | 公式渲染 | `src/lib/services/katexMathRenderer.ts` | `src/lib/editor-core/nodeViews/MathBlockNodeView.ts`, `MathInlineNodeView.ts` | KaTeX 公式渲染 |
-| 图表渲染 | `src/lib/services/mermaidDiagramRenderer.ts` | `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts` | Mermaid 图表渲染 |
+| 图表渲染 | `src/lib/services/mermaidDiagramRenderer.ts` | `src/lib/services/mermaidSvgCache.ts`, `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts` | 串行渲染、临时测量容器、16 项/8 MiB SVG 缓存及复用时的 ID/引用隔离 |
 | 增强渲染调度与可见性 | `src/lib/services/renderTaskQueue.ts`, `src/lib/editor-core/nodeViews/renderVisibility.ts` | 代码块与 Mermaid NodeView、图表渲染器、`plugins/typography.ts`、`markdown-document/viewportHost.ts` | 有界并发、排队取消、视口及后台暂停、宿主导航目标首屏资格与截止预算、结果提交阅读锚点；导出主动补齐 |
 | 图表查看与缩放 | `src/lib/services/mermaidDiagramView.ts` | `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts`, `src/quicklook/preview.ts`, `src/app/services/exportService.ts` | 可读适配、全图/原始尺寸、全屏交互、导出尺寸还原 |
 | 图片加载器 | `src/app/services/desktopImageLoader.ts` | `src/lib/editor-core/nodeViews/ImageNodeView.ts` | 本地/asset/远程图片解析 |

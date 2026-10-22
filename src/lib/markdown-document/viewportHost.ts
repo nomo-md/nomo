@@ -7,12 +7,11 @@ import {
   estimateMarkdownBlockHeight,
 } from './viewport';
 import { MarkdownStableGroups, MarkdownScrollDemand, MARKDOWN_VIEWPORT_POLICY, type MarkdownBlockGroup } from './mountWindow';
-import { MarkdownLayoutCache } from './layoutCache';
 import { markdownResidentBudget, UNKNOWN_IMAGE_BYTES, type MarkdownResidentBudget, type ResidentToken } from './residentBudget';
 import { MarkdownResidentTracker } from './residentTracker';
 import { MarkdownLayoutBatch, markdownWorkScheduler, MarkdownTaskPriority } from './scheduler';
 import { TABLE_LAYOUT_READY_EVENT } from '../table-layout/dom';
-import { subscribeTypographyInteraction } from '../typography/interaction';
+import { getTypographyInteraction, subscribeTypographyInteraction } from '../typography/interaction';
 import { DocumentConflictError, type DocumentSelection, type DocumentWindow } from './protocol';
 import { utf8ToUtf16, utf8Length } from './utf8Text';
 import type { MarkdownStructureIndex } from './structureIndex';
@@ -109,7 +108,7 @@ export class MarkdownViewportHost {
   private compositionWaiters = new Set<() => void>();
   private detachInput: () => void;
   private renderDone: Promise<void> = Promise.resolve();
-  private readonly layoutCache = new MarkdownLayoutCache();
+  private readonly layoutCache: ProgressiveMarkdownDocument['layouts']['semantic'];
   private readonly grouping = new MarkdownStableGroups();
   private groups: readonly MarkdownBlockGroup[] = [];
   private groupById = new Map<string, MarkdownBlockGroup>();
@@ -117,7 +116,7 @@ export class MarkdownViewportHost {
   private readonly demand = new MarkdownScrollDemand();
   private quietTimer?: ReturnType<typeof setTimeout>;
   private layoutContext = '';
-  private geometryVersion = 0;
+  private geometryVersion = getTypographyInteraction().geometryRevision;
   private assetVersion = 0;
   private programScroll?: number;
   private navigation = 0;
@@ -168,6 +167,7 @@ export class MarkdownViewportHost {
       onOpenSource?(range: { fromByte: number; toByte: number; byte: number }): void;
     },
   ) {
+    this.layoutCache = document.layouts[mode];
     this.budget = markdownResidentBudget(target.ownerDocument);
     this.resources = new MarkdownResidentTracker(this.budget);
     this.scroll = target.closest<HTMLElement>('.semantic-pane, .source-pane') ?? target;
@@ -1491,7 +1491,7 @@ export class MarkdownViewportHost {
       this.stats.ranges++;
       const anchor = requestedTop === undefined || this.outlineNavigation ? this.captureAnchor() : undefined;
       // 脱离 DOM 时完成权限交接，随后连续写入占位和窗口，不穿插几何读取。
-      if (this.outlineNavigation && !this.outlineNavigation.aligned)
+      if (state.progress.state === 'ready' || (this.outlineNavigation && !this.outlineNavigation.aligned))
         for (const view of created) view.semantic?.prepareAttachment();
       for (const view of this.mounted) if (!next.includes(view)) this.destroyView(view);
       const desired: Node[] = [];
@@ -2040,7 +2040,6 @@ export class MarkdownViewportHost {
     this.typographySubscription.destroy();
     this.layoutBatch.cancel(this);
     markdownWorkScheduler.cancel(this);
-    this.layoutCache.clear();
     this.grouping.clear();
     this.navigationSamples.length = 0;
     this.groups = [];

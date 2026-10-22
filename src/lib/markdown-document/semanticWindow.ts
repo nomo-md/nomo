@@ -90,7 +90,7 @@ export class MarkdownSemanticWindow {
   get preview() { return !this.opened; }
   /** DOM 插入后启用，生命周期未就绪时仍保持预览；不重建 PM 或源文映射。 */
   activate() { this.attached = true; this.syncPermission(); }
-  /** 仅在导航发布 DOM 的同步批次调用；未接入前仍不报告正文或交互就绪。 */
+  /** 仅在发布 DOM 的同步批次调用；未接入前仍不报告正文或交互就绪。 */
   prepareAttachment() {
     if (this.disposed || this.attached || !this.options.target || this.options.target.isConnected) return;
     this.core.prepareDetachedProjection();

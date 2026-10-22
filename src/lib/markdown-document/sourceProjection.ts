@@ -143,6 +143,21 @@ export class MarkdownSourceProjection {
         position,
         new Slice(Fragment.from(this.doc.type.schema.text(marker, resolved.marks())), 0, 0),
       );
+      const markedCanonical = serialized(marked);
+      const markerOffset = markedCanonical.indexOf(marker);
+      if (markerOffset >= 0 &&
+        markedCanonical.slice(0, markerOffset) + markedCanonical.slice(markerOffset + marker.length) === this.canonical) {
+        // 重复文本会让 diff 将一次标记插入表示为替换，不能仅从“纯插入补丁”猜坐标。
+        // 先定位规范文本中的唯一标记，再映回原文；必须正向解析回同一个 PM 位置。
+        for (const changes of [this.toSource, getSourceTextChanges(this.canonical, this.source)]) {
+          for (const side of [1, -1] as const) {
+            const offset = mapBoundary(markerOffset, changes, side);
+            if (offset === null || !completeBoundary(this.source, offset)) continue;
+            const byte = this.fromByte + utf16ToUtf8(this.source, offset);
+            if (this.byteToPosition(byte) === position) return byte;
+          }
+        }
+      }
       try {
         const change = this.project(marked);
         const insertion = change.edits.find(

@@ -11,6 +11,7 @@ import type { MarkdownStructureIndex } from './structureIndex';
 import { MarkdownGlobalSelection } from './selection';
 import { AutomaticMarkdownToc } from './automaticToc';
 import { emptyEnhancements } from './enhancements';
+import { createMarkdownDocumentLayouts } from './layoutCache';
 import {
   searchMarkdownSnapshot,
   replaceMarkdownSnapshotMatches,
@@ -51,6 +52,7 @@ export interface MarkdownVisibleDemand {
 export class ProgressiveMarkdownDocument {
   readonly session: MarkdownSessionController;
   readonly selection: MarkdownGlobalSelection;
+  readonly layouts = createMarkdownDocumentLayouts();
   private toc: AutomaticMarkdownToc;
   private completed: MarkdownIndexedSnapshot | null = null;
   private indexingSnapshot: SnapshotReference | undefined;
@@ -481,6 +483,7 @@ export class ProgressiveMarkdownDocument {
     await this.toc.dispose();
     if (this.completed) { await this.port.releaseSnapshot(this.completed.snapshot); this.completed = null; }
     this.unsubscribe(); this.unsubscribeChanges(); this.selection.dispose(); this.listeners.clear(); this.pressureOwners.clear();
+    this.layouts.dispose();
     await this.port.detach?.(this.session.documentId);
   }
   /** 卸载使用 setHidden；只有完成关闭/丢弃流程才释放会话和磁盘历史。 */
@@ -516,6 +519,7 @@ export class ProgressiveMarkdownDocument {
     this.unsubscribe();
     this.unsubscribeChanges();
     this.selection.dispose();
+    this.layouts.dispose();
     this.listeners.clear();
     this.pressureOwners.clear();
   }
