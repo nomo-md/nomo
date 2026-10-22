@@ -1,11 +1,48 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import * as markdownParser from '../editor-core/markdown';
+import { DecorationSet, type EditorView } from 'prosemirror-view';
 import { MarkdownSessionController } from './controller';
 import { createMemoryMarkdownPort, readCompleteSnapshot } from './port';
 import { MarkdownSemanticWindow } from './semanticWindow';
 import { utf8Length } from './utf8Text';
 
 describe('真实 ProseMirror 窗口接入会话', () => {
+  it('窗口构建与结构测量共享解析，纯排版只刷新几何版本，编辑后重新建立来源', async () => {
+    const text = '# 标题\n\n| 列 | 内容 |\n| --- | --- |\n| a | [引用][ref] |\n\n末段';
+    const port = createMemoryMarkdownPort();
+    const session = new MarkdownSessionController(port, await port.openDocument({ text }));
+    const parse = vi.spyOn(markdownParser, 'parseMarkdownWithSyncAnchors');
+    const target = document.createElement('div');
+    const view = new MarkdownSemanticWindow(session, await port.readWindow(session.documentId, 0, 0, utf8Length(text)),
+      { target, references: { REF: { href: 'https://example.com', title: '' } },
+        onStale() {}, onHistory() {}, onFailure(error) { throw error; } });
+    try {
+      view.prepareAttachment(); document.body.append(target); view.activate();
+      const before = view.core.getScrollSyncSnapshot();
+      view.core.measureStructureBlocks();
+      expect(parse).toHaveBeenCalledTimes(1);
+      expect(before.ready).toBe(true);
+      expect(target.querySelector('a')?.getAttribute('href')).toBe('https://example.com');
+      const editorView = (view.core as unknown as { view: EditorView }).view;
+      editorView.dispatch(editorView.state.tr.setMeta('nomo:typography', DecorationSet.empty));
+      const layout = view.core.getScrollSyncSnapshot();
+      expect(layout.anchors).toBe(before.anchors);
+      expect(layout.renderRevision).toBeGreaterThan(before.renderRevision);
+      expect(parse).toHaveBeenCalledTimes(1);
+      view.core.restoreSelectionSnapshot({ anchor: 1, head: 1 });
+      view.core.execute({ type: 'insertText', text: '新' });
+      await session.flushEdits();
+      const after = view.core.getScrollSyncSnapshot();
+      expect(after.revision).toBeGreaterThan(before.revision);
+      expect(after.markdown).toContain('新标题');
+      expect(after.anchors).not.toBe(before.anchors);
+      expect(after.anchors.some(anchor => anchor.kind === 'table')).toBe(true);
+      expect(await session.withSnapshot(snapshot => readCompleteSnapshot(port, snapshot))).toBe(text.replace('标题', '新标题'));
+    } finally {
+      parse.mockRestore(); view.dispose(); target.remove(); await session.close(true);
+    }
+  });
   it.each(['ready', 'readonly', 'stale', 'failure'] as const)('导航接入前准备保留正文就绪和编辑门禁：%s', async (mode) => {
     const port = createMemoryMarkdownPort();
     const session = new MarkdownSessionController(port, await port.openDocument({ text: '正文' }));

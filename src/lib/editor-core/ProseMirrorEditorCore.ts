@@ -218,7 +218,8 @@ export class ProseMirrorEditorCore implements EditorCore {
   private initialEditableFrame: number | null = null;
   private sourceOperationDepth = 0;
   private projectionCompositionTimer: ReturnType<typeof setTimeout> | null = null;
-  private parsedDocument: { markdown: string; references: unknown; value: TrailingParagraphNormalization } | null = null;
+  private parsedDocument: { markdown: string; references: unknown; value: TrailingParagraphNormalization;
+    source?: ReturnType<typeof parseMarkdownWithSyncAnchors> } | null = null;
 
   private withProjectionOperation<T>(operation: () => T): T {
     if (!this.options.documentProjection) return operation();
@@ -648,8 +649,13 @@ export class ProseMirrorEditorCore implements EditorCore {
       return { revision: this.contentRevision, renderRevision: this.syncRenderRevision,
         ready: false, markdown: this.markdown, anchors: [] };
     }
-    if (this.syncSnapshot?.revision === this.contentRevision) return this.syncSnapshot;
-    const parsed = parseMarkdownWithSyncAnchors(this.markdown, this.options.documentProjection);
+    if (this.syncSnapshot?.revision === this.contentRevision) {
+      if (this.syncSnapshot.renderRevision !== this.syncRenderRevision)
+        this.syncSnapshot = { ...this.syncSnapshot, renderRevision: this.syncRenderRevision };
+      return this.syncSnapshot;
+    }
+    this.parseSemanticDocument(this.markdown, true);
+    const parsed = this.parsedDocument!.source!;
     const currentDoc = this.view.state.doc;
     // 复杂块的序列化可能多出软换行。用结构差异的已确认前后缀换算偏移，
     // 不能因局部节点长度不同而丢弃后续整篇锚点，也不按块数或文字搜索猜位置。
@@ -2017,12 +2023,19 @@ export class ProseMirrorEditorCore implements EditorCore {
     });
   }
 
-  private parseSemanticDocument(markdown: string): TrailingParagraphNormalization {
+  private parseSemanticDocument(markdown: string, withSource = !!this.options.documentProjection): TrailingParagraphNormalization {
     const references = this.options.documentProjection?.references;
-    if (this.parsedDocument?.markdown === markdown && this.parsedDocument.references === references) return this.parsedDocument.value;
-    const value = ensureTrailingParagraph(parseMarkdown(markdown, this.options.documentProjection));
+    if (this.parsedDocument?.markdown === markdown && this.parsedDocument.references === references) {
+      if (withSource && !this.parsedDocument.source)
+        this.parsedDocument.source = parseMarkdownWithSyncAnchors(markdown, this.options.documentProjection);
+      return this.parsedDocument.value;
+    }
+    // 会话窗口必需测量结构位置，在同一次解析中记录来源；尾段规范化共享原节点。
+    // 非窗口编辑器仍按需生成映射，不为未使用的同步功能增加初始化工作。
+    const source = withSource ? parseMarkdownWithSyncAnchors(markdown, this.options.documentProjection) : undefined;
+    const value = ensureTrailingParagraph(source?.doc ?? parseMarkdown(markdown, this.options.documentProjection));
     // 单个不可变解析结果，与当前模型共享节点；不保留正文历史、DOM 或回调。
-    this.parsedDocument = { markdown, references, value };
+    this.parsedDocument = { markdown, references, value, source };
     return value;
   }
 
@@ -2040,7 +2053,6 @@ export class ProseMirrorEditorCore implements EditorCore {
 
     if (isTypographyTransaction(transaction) && !docChanged) {
       this.syncRenderRevision += 1;
-      this.syncSnapshot = null;
       return;
     }
     if (isSemanticBlockAlignmentTransaction(transaction) && !docChanged) {
@@ -2050,7 +2062,6 @@ export class ProseMirrorEditorCore implements EditorCore {
     const visibilityOnly = transaction.getMeta(detailsKey) && !docChanged;
     if (!docChanged && detailsKey.getState(currentState)?.decorations !== detailsKey.getState(nextState)?.decorations) {
       this.syncRenderRevision += 1;
-      this.syncSnapshot = null;
       // 显式切换和搜索/历史引起的自动展开均改变双栏几何，不改变正文修订。
     }
 

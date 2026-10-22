@@ -317,6 +317,14 @@ describe('完整会话的真实窗口宿主', () => {
       if (args[2] > 0) { started(); await gate; }
       return read(...args);
     });
+    const connectedNotifications: boolean[] = [];
+    const onNavigation = () => {
+      const destinationView = (host as any).mounted.find((view: any) =>
+        end.byte >= view.window.fromByte && end.byte < view.window.toByte);
+      if (destinationView?.element.isConnected)
+        connectedNotifications.push(destinationView.semantic.bodyReady);
+    };
+    target.addEventListener('nomo:navigation-render', onNavigation);
     try {
       host.focus();
       const originFocus = document.activeElement;
@@ -347,7 +355,9 @@ describe('完整会话的真实窗口宿主', () => {
       } else expect(uncovered.length).toBeGreaterThan(0);
       expect(host.diagnostics.peakMounted).toBeLessThan(20);
       expect(failures).toEqual([]);
-    } finally { release(); measured.mockRestore(); geometry.mockRestore(); reads.mockRestore(); state.mockRestore(); }
+      expect(connectedNotifications.length).toBeGreaterThan(0);
+      expect(connectedNotifications.every(Boolean)).toBe(true);
+    } finally { target.removeEventListener('nomo:navigation-render', onNavigation); release(); measured.mockRestore(); geometry.mockRestore(); reads.mockRestore(); state.mockRestore(); }
   }, 10000);
 
   it.each(['windowed', 'progressive-full'] as const)('已加载目标在 %s 中始终保留动画', async mountMode => {

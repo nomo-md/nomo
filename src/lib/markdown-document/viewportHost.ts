@@ -527,9 +527,8 @@ export class MarkdownViewportHost {
       this.stats.preparationHints++;
     }, 100);
   }
-  private hasVisibleContent() {
+  private hasVisibleContent(top = this.localScrollTop) {
     if (this.document.state.status.byteLength === 0 && this.mounted.some(view => !!view.semantic || !!view.source)) return true;
-    const top = this.localScrollTop;
     return this.mounted.some(view => {
       if (this.preferredByte !== undefined && (this.preferredByte < view.window.fromByte ||
         this.preferredByte > view.window.toByte)) return false;
@@ -541,8 +540,8 @@ export class MarkdownViewportHost {
       return rect.height > 0 && rect.top <= viewport.top + 4 && rect.bottom > viewport.top;
     });
   }
-  private finishPreparation() {
-    if (!this.hasVisibleContent()) return;
+  private finishPreparation(visible = this.hasVisibleContent()) {
+    if (!visible) return;
     if (this.preparationStarted) this.stats.maxJumpWaitMs = Math.max(this.stats.maxJumpWaitMs, performance.now() - this.preparationStarted);
     this.preparationStarted = 0;
     clearTimeout(this.preparationTimer); this.preparationTimer = undefined;
@@ -1464,9 +1463,13 @@ export class MarkdownViewportHost {
       }
       this.installedLayout = layout;
       const navigationScroll = this.outlineNavigation?.kind === 'animated' ? this.scroll.scrollTop : undefined;
+      const navigationTop = this.outlineNavigation ? this.localScrollTop : undefined;
       this.stats.batches++;
       this.stats.ranges++;
       const anchor = requestedTop === undefined || this.outlineNavigation ? this.captureAnchor() : undefined;
+      // 脱离 DOM 时完成权限交接，随后连续写入占位和窗口，不穿插几何读取。
+      if (this.outlineNavigation && !this.outlineNavigation.aligned)
+        for (const view of created) view.semantic?.prepareAttachment();
       for (const view of this.mounted) if (!next.includes(view)) this.destroyView(view);
       const desired: Node[] = [];
       const neededSpacers = new Set<string>();
@@ -1494,9 +1497,6 @@ export class MarkdownViewportHost {
       for (const [key, spacer] of this.spacers) if (!neededSpacers.has(key)) { spacer.remove(); this.spacers.delete(key); }
       if (this.input) desired.push(this.input);
       if (this.preparationIndicator) desired.push(this.preparationIndicator);
-      // 已构建的导航窗口先通过原编辑门禁，再接入 DOM；不产生只读树的中间布局。
-      if (this.outlineNavigation && !this.outlineNavigation.aligned)
-        for (const view of created) view.semantic?.prepareAttachment();
       let cursor = this.target.firstChild;
       for (const node of desired) {
         if (node === cursor) cursor = cursor.nextSibling;
@@ -1506,13 +1506,13 @@ export class MarkdownViewportHost {
         }
       }
       this.mounted = next;
-      this.refreshNavigationTargets();
       // 正文及占位高度安装后再次应用同一目标，避免新建源码栏停在文首。
       if (requestedTop !== undefined && !this.outlineNavigation) { this.scrollTo(requestedTop); this.scrollByte = undefined; }
-      this.publishPresentation();
       for (const view of next) view.semantic?.activate();
-      this.finishPreparation();
-      if (!this.hasVisibleContent()) this.requestPreparation();
+      // 本同步接入批次尚未推进动画；仅提示状态使用接入前位置，正文就绪仍须真实测量。
+      const visibleContent = this.hasVisibleContent(navigationTop);
+      this.finishPreparation(visibleContent);
+      if (!visibleContent) this.requestPreparation();
       this.stats.peakMounted = Math.max(this.stats.peakMounted, next.length);
       this.restoreAnchor(anchor);
       this.measureDirty();
@@ -1549,6 +1549,8 @@ export class MarkdownViewportHost {
       if (navigationScroll !== undefined)
         this.scrollTo((navigationScroll - this.contentTop) / this.scale);
       if (this.globalSelection) this.paintSelection();
+      // 删除准备提示、激活和滚动恢复完成后再读取几何并通知增强，避免接入半途强制布局。
+      this.refreshNavigationTargets();
       this.publishPresentation();
       if (!navigating && state.mountMode === 'progressive-full' && this.expanded < (index?.blocks.length ?? 0))
         this.again = true;
