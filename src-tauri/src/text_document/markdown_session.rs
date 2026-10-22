@@ -262,6 +262,16 @@ impl MarkdownDocumentSessionManager {
         path: Option<PathBuf>,
         text: Option<String>,
     ) -> TextDocumentResult<MarkdownStatus> {
+        self.open_with_policy(owner, path, text, false)
+    }
+    /// 重新加载先捕获独立的磁盘基线，替换成功后再释放旧会话；仍校验同路径的窗口归属。
+    pub(crate) fn open_with_policy(
+        &self,
+        owner: &str,
+        path: Option<PathBuf>,
+        text: Option<String>,
+        fresh: bool,
+    ) -> TextDocumentResult<MarkdownStatus> {
         let _path_operation = lock(&self.path_operations)?;
         if path.is_some() == text.is_some() {
             return Err(error(
@@ -276,7 +286,9 @@ impl MarkdownDocumentSessionManager {
                 let session = lock(&session)?;
                 if session.manifest.path.as_ref() == Some(path) {
                     session.owner(owner)?;
-                    return Ok(session.status());
+                    if !fresh {
+                        return Ok(session.status());
+                    }
                 }
             }
         }
@@ -385,6 +397,13 @@ impl MarkdownDocumentSessionManager {
             return Ok(session.status());
         }
         let root = self.root.join(document_id);
+        match fs::metadata(&root) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(error("recovery-missing", "文档恢复资料已不存在"));
+            }
+            Err(e) => return Err(e.into()),
+            Ok(_) => {}
+        }
         let mut manifest: Manifest =
             serde_json::from_reader(File::open(root.join("manifest.json"))?)
                 .map_err(|e| error("recovery-corrupt", e.to_string()))?;
@@ -1076,6 +1095,53 @@ impl MarkdownDocumentSessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fresh_open_reads_the_new_baseline_and_survives_closing_the_old_session() {
+        let (root, manager) = fixture();
+        let path = root.join("document.md");
+        fs::write(&path, "旧正文").unwrap();
+        let old = manager.open("main", Some(path.clone()), None).unwrap();
+        let snapshot = manager.capture("main", &old.document_id).unwrap();
+        fs::write(&path, "磁盘新正文").unwrap();
+        let fresh = manager
+            .open_with_policy("main", Some(path.clone()), None, true)
+            .unwrap();
+        assert_ne!(fresh.document_id, old.document_id);
+        assert_eq!(content(&manager, &old), "旧正文");
+        assert_eq!(content(&manager, &fresh), "磁盘新正文");
+        assert!(manager
+            .open_with_policy("other", Some(path), None, true)
+            .is_err());
+        manager.release("main", &snapshot.snapshot_id).unwrap();
+        manager.close("main", &old.document_id, true).unwrap();
+        manager.detach("main", &fresh.document_id).unwrap();
+        let recovered = manager.recover("main", &fresh.document_id).unwrap();
+        assert_eq!(content(&manager, &recovered), "磁盘新正文");
+        manager.close("main", &fresh.document_id, true).unwrap();
+        drop(manager);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn only_an_absent_recovery_directory_is_classified_as_missing() {
+        let (root, manager) = fixture();
+        assert_eq!(
+            manager.recover("main", "md-missing").unwrap_err().code,
+            "recovery-missing"
+        );
+        let damaged = manager.root.join("md-damaged");
+        fs::create_dir_all(&damaged).unwrap();
+        assert_eq!(
+            manager.recover("main", "md-damaged").unwrap_err().code,
+            "io-error"
+        );
+        fs::write(damaged.join("manifest.json"), "invalid").unwrap();
+        assert_eq!(
+            manager.recover("main", "md-damaged").unwrap_err().code,
+            "recovery-corrupt"
+        );
+        drop(manager);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn detaching_releases_memory_without_deleting_recovery_or_the_new_owner() {
         let (root, manager) = fixture();

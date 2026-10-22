@@ -6,6 +6,8 @@ import { createDocumentActionsController } from './documentActionsController';
 import { confirmAction } from './confirmAction';
 import { saveNativeMarkdownFile, getExternalFileChange } from './documentFiles';
 import { createMarkdownTab, createSegmentedTextTab, isMarkdownTab } from './tabs';
+import * as applicationSessions from './markdownApplicationSession';
+import * as desktopStorage from '../../lib/desktop/tauriStorage';
 
 vi.mock('./confirmAction', () => ({
   confirmAction: vi.fn(),
@@ -31,7 +33,7 @@ vi.mock('./documentFiles', () => ({
 function createTab(
   overrides: Omit<Partial<MarkdownTabState>, 'documentKind'> = {},
 ): MarkdownTabState {
-  return createMarkdownTab({
+  return Object.assign(createMarkdownTab({
     id: 'tab-1',
     fileName: 'old.md',
     filePath: 'C:/docs/old.md',
@@ -47,7 +49,7 @@ function createTab(
     externalFileChange: createEmptyExternalFileChange(),
     version: 1,
     ...overrides,
-  });
+  }), { documentId: overrides.documentId });
 }
 
 function createOptions(initialTabs: Tab[]) {
@@ -170,11 +172,85 @@ function createOptions(initialTabs: Tab[]) {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.mocked(applicationSessions.getMarkdownApplicationSession).mockRestore?.();
+  vi.mocked(desktopStorage.statMarkdownFile).mockRestore?.();
   vi.clearAllMocks();
   localStorage.clear();
 });
 
 describe('documentActionsController', () => {
+  it.each([false, true])('重新加载使用独立会话，替换失败只释放候选正文：失败=%s', async fails => {
+    const tab = createTab({ documentId: 'md-old', dirty: false,
+      externalFileChange: { ...createEmptyExternalFileChange(), type: 'modified' } });
+    const { options, getState } = createOptions([tab]);
+    const candidate = { documentId: 'md-fresh', revision: 0, byteLength: 12, dirty: false, encoding: 'gb18030' };
+    const openDocument = vi.fn().mockResolvedValue(candidate);
+    const close = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(applicationSessions, 'getMarkdownApplicationSession').mockReturnValue({
+      ready: Promise.resolve({ port: { openDocument, close }, session: {
+        documentId: 'md-old', flushEdits: vi.fn().mockResolvedValue(undefined), state: { viewGeneration: 2 },
+      } }),
+    } as any);
+    vi.spyOn(desktopStorage, 'statMarkdownFile').mockResolvedValue({
+      path: tab.nativePath!, exists: true, isFile: true, sizeBytes: 12, modifiedAt: 10, readonly: false,
+    });
+    const replace = vi.fn(async () => {
+      expect(tab.documentId).toBe('md-old');
+      if (fails) throw new Error('替换失败');
+    });
+    const controller = createDocumentActionsController({ ...options, replaceTabRuntime: replace } as any);
+    const reloading = controller.reloadExternalFile();
+    if (fails) {
+      await expect(reloading).rejects.toThrow('替换失败');
+      expect(close).toHaveBeenCalledOnce();
+      expect(close).toHaveBeenCalledWith('md-fresh', true);
+      expect(tab.documentId).toBe('md-old');
+      expect(tab.externalFileChange.type).toBe('modified');
+    } else {
+      await reloading;
+      expect(close).not.toHaveBeenCalled();
+      expect(tab.documentId).toBe('md-fresh');
+      expect(tab.encoding).toBe('gb18030');
+      expect(getState().tabs[0]).toBe(tab);
+      expect(tab.externalFileChange.type).toBe('none');
+    }
+    expect(openDocument).toHaveBeenCalledWith({ path: tab.nativePath, fresh: true });
+    expect(replace).toHaveBeenCalledOnce();
+  });
+
+  it('端口返回原会话时拒绝重新加载，不能关闭原正文', async () => {
+    const tab = createTab({ documentId: 'md-old', externalFileChange: { ...createEmptyExternalFileChange(), type: 'modified' } });
+    const { options } = createOptions([tab]);
+    const close = vi.fn();
+    vi.spyOn(applicationSessions, 'getMarkdownApplicationSession').mockReturnValue({
+      ready: Promise.resolve({ port: { openDocument: async () => ({ documentId: 'md-old' }), close },
+        session: { documentId: 'md-old', flushEdits: async () => {}, state: { viewGeneration: 0 } } }),
+    } as any);
+    const replace = vi.fn();
+    const controller = createDocumentActionsController({ ...options, replaceTabRuntime: replace } as any);
+    await expect(controller.reloadExternalFile()).rejects.toThrow('独立文档');
+    expect(replace).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    expect(tab.documentId).toBe('md-old');
+  });
+  it('同一标签的重复重新加载复用进行中的操作，结束后允许重试', async () => {
+    const tab = createTab({ externalFileChange: { ...createEmptyExternalFileChange(), type: 'modified' } });
+    const { options } = createOptions([tab]);
+    let release!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    const flush = vi.fn(async () => { await ready; throw new Error('打开失败'); });
+    vi.spyOn(applicationSessions, 'getMarkdownApplicationSession').mockReturnValue({
+      ready: Promise.resolve({ session: { flushEdits: flush } }),
+    } as any);
+    const controller = createDocumentActionsController(options as any);
+    const first = controller.reloadExternalFile();
+    const second = controller.reloadExternalFile();
+    expect(second).toBe(first);
+    release();
+    await expect(first).rejects.toThrow('打开失败');
+    await expect(controller.reloadExternalFile()).rejects.toThrow('打开失败');
+    expect(flush).toHaveBeenCalledTimes(2);
+  });
   it('publishes the new tab and its runtime together after asynchronous replacement', async () => {
     const oldTab = createTab();
     const { options, getState } = createOptions([oldTab]);

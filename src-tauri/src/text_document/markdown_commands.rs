@@ -16,6 +16,8 @@ pub(crate) enum MarkdownRequest {
     Open {
         path: Option<String>,
         text: Option<String>,
+        #[serde(default)]
+        fresh: bool,
     },
     Recover {
         document_id: String,
@@ -82,8 +84,12 @@ pub(crate) async fn markdown_document_command(
     let owner = window.label().to_owned();
     let manager = manager.inner().clone();
     tauri::async_runtime::spawn_blocking(move || match request {
-        MarkdownRequest::Open { path, text } => {
-            value(manager.open(&owner, path.map(Into::into), text)?)
+        MarkdownRequest::Open { path, text, fresh } => {
+            value(if fresh {
+                manager.open_with_policy(&owner, path.map(Into::into), text, true)?
+            } else {
+                manager.open(&owner, path.map(Into::into), text)?
+            })
         }
         MarkdownRequest::Recover { document_id } => value(manager.recover(&owner, &document_id)?),
         MarkdownRequest::Detach { document_id } => value(manager.detach(&owner, &document_id)?),

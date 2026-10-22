@@ -122,6 +122,7 @@ interface DocumentActionsOptions {
 
 export function createDocumentActionsController(options: DocumentActionsOptions) {
   const pendingSaveOperations = new Set<Promise<unknown>>();
+  const pendingReloads = new Map<string, Promise<void>>();
 
   function trackPendingSave<T>(operation: () => Promise<T>): Promise<T> {
     const promise = operation();
@@ -643,7 +644,17 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     if (generation === recentRefreshGeneration) options.setRecentFiles(entries);
   }
 
-  async function reloadExternalFile() {
+  function reloadExternalFile(): Promise<void> {
+    const tabId = options.getActiveTabId();
+    const pending = pendingReloads.get(tabId);
+    if (pending) return pending;
+    const operation = reloadExternalFileNow();
+    pendingReloads.set(tabId, operation);
+    void operation.then(() => pendingReloads.delete(tabId), () => pendingReloads.delete(tabId));
+    return operation;
+  }
+
+  async function reloadExternalFileNow() {
     const activeTab = options.getTabs().find((tab) => tab.id === options.getActiveTabId());
     if (!isMarkdownTab(activeTab)) {
       return;
@@ -658,7 +669,10 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       const doc = await application.ready;
       await doc.session.flushEdits();
       const generation = doc.session.state.viewGeneration;
-      const candidate = await doc.port.openDocument({ path });
+      const candidate = await doc.port.openDocument({ path, fresh: true });
+      // 防止兼容端口误把已有会话当成候选；绝不能在回滚时关闭当前正文。
+      if (candidate.documentId === doc.session.documentId)
+        throw new Error('重新加载未能创建独立文档，请重试。');
       if (generation !== doc.session.state.viewGeneration || !options.getTabs().includes(activeTab)) {
         await doc.port.close(candidate.documentId, true);
         options.setStatusMessage(t.externalChangeChooseAction()); return;
@@ -666,13 +680,16 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       let status;
       try {
         status = await statMarkdownFile(path);
-        if (generation !== doc.session.state.viewGeneration) throw new Error(t.externalChangeChooseAction());
+        if (generation !== doc.session.state.viewGeneration || !options.getTabs().includes(activeTab) ||
+          activeTab.nativePath !== path) throw new Error(t.externalChangeChooseAction());
+        if (!status.exists || !status.isFile) throw new Error(t.reloadExternalFailed());
         await options.replaceTabRuntime?.(tabId);
       } catch (error) { await doc.port.close(candidate.documentId, true); throw error; }
       activeTab.documentId = candidate.documentId;
       activeTab.byteLength = candidate.byteLength;
       activeTab.markdown = ''; activeTab.savedMarkdown = ''; activeTab.dirty = candidate.dirty;
       activeTab.version = candidate.revision; activeTab.lastKnownModifiedAt = status.modifiedAt;
+      activeTab.encoding = candidate.encoding ?? activeTab.encoding;
       activeTab.externalFileChange = createEmptyExternalFileChange();
       options.setTabs([...options.getTabs()]);
       if (options.getActiveTabId() === tabId) options.loadTabState(activeTab);

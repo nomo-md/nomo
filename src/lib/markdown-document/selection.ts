@@ -112,17 +112,14 @@ export class MarkdownGlobalSelection {
       generation: this.session.state.viewGeneration,
       selectionVersion: this.version,
     };
-    const snapshot = await this.session.port.captureSnapshot(this.session.documentId);
-    try {
+    return this.session.withSnapshot(async snapshot => {
       if (
         selected.generation !== this.session.state.viewGeneration ||
         snapshot.revision !== this.session.state.committed.revision
       )
         throw new DocumentConflictError();
       return await run({ ...selected, snapshot });
-    } finally {
-      await this.session.port.releaseSnapshot(snapshot);
-    }
+    });
   }
   private async read(selected: SelectedSnapshot, signal?: AbortSignal) {
     const fromByte = Math.min(selected.selection.anchorByte, selected.selection.headByte);

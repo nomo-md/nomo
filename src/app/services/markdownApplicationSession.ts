@@ -41,6 +41,7 @@ export class MarkdownApplicationSession {
   private sourceHost?: MarkdownViewportHost;
   private listeners = new Set<(event: EditorChangeEvent) => void>();
   private disposed = false;
+  private detaching?: Promise<void>;
   private generation = 0;
   private unsubscribe?: () => void;
   private unsubscribeSelection?: () => void;
@@ -182,7 +183,14 @@ export class MarkdownApplicationSession {
         : desktop && tab.nativePath
           ? { path: tab.nativePath }
           : { text: savedText };
-      const doc = await ProgressiveMarkdownDocument.open(port, input);
+      const doc = await ProgressiveMarkdownDocument.open(port, input).catch(async error => {
+        // 只对已保存且恢复目录确实缺失的文件回退。损坏资料或未保存修改必须保留恢复入口。
+        if (desktop && tab.documentId && !tab.dirty && tab.nativePath &&
+          error instanceof Error && 'code' in error && error.code === 'recovery-missing') {
+          return ProgressiveMarkdownDocument.open(port, { path: tab.nativePath });
+        }
+        throw error;
+      });
       if (!tab.documentId && tab.dirty && originalText !== savedText) {
         await doc.session.applyEdits({
           viewGeneration: 0,
@@ -191,6 +199,7 @@ export class MarkdownApplicationSession {
         });
       }
       this.document = doc;
+      if (this.disposed) return doc;
       this.unsubscribeSelection = doc.selection.subscribe((selection) =>
         this.onSelection?.(selection),
       );
@@ -254,10 +263,9 @@ export class MarkdownApplicationSession {
         } as EditorChangeEvent;
         for (const listener of this.listeners) listener(event);
       });
-      if (this.disposed) await this.detach();
       return doc;
     })();
-    void this.ready.catch(onFailure);
+    void this.ready.catch(error => { if (!this.disposed) onFailure(error); });
   }
   private beginOpening(target: HTMLElement) {
     if (this.document || this.openings.has(target)) return;
@@ -804,9 +812,12 @@ export class MarkdownApplicationSession {
     void this.mountViews().catch(this.onFailure);
   }
   /** 移交只释放本窗口引用；不能关闭已经交给目标窗口的同一原生会话。 */
-  async detach() {
-    if (this.disposed && !this.document) return;
+  detach(): Promise<void> {
+    if (this.detaching) return this.detaching;
     this.disposed = true;
+    return this.detaching = this.detachResources();
+  }
+  private async detachResources() {
     for (const target of this.openings.keys()) this.clearOpening(target);
     this.sourceRequest++; this.pendingSourceByte = undefined; this.presentations.clear();
     this.generation++;
@@ -814,11 +825,13 @@ export class MarkdownApplicationSession {
     await this.sourceHost?.dispose();
     this.sourceHost = undefined;
     this.sourceTarget = undefined;
+    // 打开仍在途时也要等它收口；此后不再有 ready 分支迟到注册元数据监听或再次 detach。
+    const doc = await this.ready.catch(() => this.document);
     this.unsubscribe?.();
     this.unsubscribeSelection?.();
     this.listeners.clear();
     this.fallback.destroy();
-    await this.document?.detach();
+    await doc?.detach();
   }
   async close(discard: boolean) {
     this.clearPendingFocus();
@@ -834,11 +847,21 @@ export class MarkdownApplicationSession {
       this.fallback.destroy();
       return;
     }
-    await this.unmount();
-    await this.sourceHost?.dispose();
-    this.sourceHost = undefined;
-    await doc.session.awaitSnapshotTasks();
-    await doc.close(discard);
+    const semanticTarget = this.semanticTarget;
+    const sourceTarget = this.sourceTarget;
+    try {
+      await this.unmount();
+      await this.sourceHost?.dispose();
+      this.sourceHost = undefined;
+      await doc.session.awaitSnapshotTasks();
+      await doc.close(discard);
+    } catch (error) {
+      // 关闭失败仍归当前标签所有，恢复挂载，不能留下空白且无法编辑的正文区域。
+      if (semanticTarget?.isConnected && !this.semanticTarget) this.semanticTarget = semanticTarget;
+      if (sourceTarget?.isConnected && !this.sourceTarget) this.sourceTarget = sourceTarget;
+      await this.mountViews().catch(this.onFailure);
+      throw error;
+    }
     this.unsubscribe?.();
     this.unsubscribeSelection?.();
     this.listeners.clear();

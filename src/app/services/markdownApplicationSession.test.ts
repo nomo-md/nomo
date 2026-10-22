@@ -8,6 +8,7 @@ import { MarkdownStructureScanner } from '../../lib/markdown-document/structure'
 import { captureWordSnapshot } from './word/snapshot';
 import { createPersistedWorkspaceState } from './workspacePersistence';
 import { utf8Length } from '../../lib/markdown-document/utf8Text';
+import { createMemoryMarkdownPort } from '../../lib/markdown-document/port';
 
 const localBuild: typeof buildMarkdownIndex = (port, snapshot, options) =>
   buildMarkdownIndex(port, snapshot, {
@@ -56,6 +57,93 @@ async function setup(text: string, onRequestSource?: (isCurrent: () => boolean) 
 }
 
 describe('应用 Markdown 会话入口', () => {
+  it('打开尚未结束时销毁宿主，清理等待打开收口且只执行一次，不发布迟到元数据', async () => {
+    const port = createMemoryMarkdownPort();
+    let release!: () => void;
+    const opening = new Promise<void>(resolve => { release = resolve; });
+    let detached!: ReturnType<typeof vi.spyOn>;
+    vi.spyOn(ProgressiveMarkdownDocument, 'open').mockImplementation(async () => {
+      await opening;
+      const doc = new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '恢复正文' }), localBuild);
+      detached = vi.spyOn(doc, 'detach');
+      return doc;
+    });
+    const metadata = vi.fn(), failure = vi.fn();
+    const app = new MarkdownApplicationSession(createMarkdownTab(), false, { markdown: '' }, failure, metadata);
+    const disposal = app.detach();
+    expect(app.detach()).toBe(disposal);
+    let done = false;
+    void disposal.then(() => { done = true; });
+    await Promise.resolve();
+    expect(done).toBe(false);
+    release();
+    const doc = await app.ready;
+    await disposal;
+    expect(detached).toHaveBeenCalledOnce();
+    expect(metadata).not.toHaveBeenCalled();
+    expect(failure).not.toHaveBeenCalled();
+    await port.close(doc.session.documentId, true);
+  });
+
+  it('已销毁宿主的迟到打开失败不再通知当前标签', async () => {
+    let reject!: (error: Error) => void;
+    vi.spyOn(ProgressiveMarkdownDocument, 'open').mockImplementation(() => new Promise((_, fail) => { reject = fail; }));
+    const failure = vi.fn();
+    const app = new MarkdownApplicationSession(createMarkdownTab(), false, { markdown: '' }, failure, () => {});
+    const disposal = app.detach();
+    reject(new Error('Markdown 会话不存在或已关闭'));
+    await disposal;
+    expect(failure).not.toHaveBeenCalled();
+  });
+  it('关闭存储失败后恢复正文挂载，并能继续编辑、派生目录和保存快照', async () => {
+    const { application, doc } = await setup('# 原标题\n\n<!-- toc -->\n- 手写目录\n<!-- /toc -->');
+    const target = document.body.appendChild(document.createElement('div'));
+    application.editor.mount(target);
+    await vi.waitFor(() => expect(application.writable).toBe(true));
+    vi.spyOn(doc.port, 'close').mockRejectedValueOnce(new Error('关闭存储失败'));
+    await expect(application.close(true)).rejects.toThrow('关闭存储失败');
+    await vi.waitFor(() => expect(application.writable).toBe(true));
+    expect(target.querySelector('.ProseMirror')).not.toBeNull();
+    await doc.session.applyEdits({ viewGeneration: doc.session.state.viewGeneration,
+      historyGroupId: 'after-close-failed', edits: [{ fromByte: 0, toByte: 0, insertedText: '# 新标题\n\n' }] });
+    expect(await application.readMarkdown()).toContain('[新标题](#新标题)');
+    await doc.session.save('after-close-failed.md');
+    expect(doc.state.status.dirty).toBe(false);
+  });
+  it('已保存文件的恢复目录缺失时从原文件重新建立会话并更新持久化身份', async () => {
+    const port = createMemoryMarkdownPort();
+    const open = vi.spyOn(ProgressiveMarkdownDocument, 'open').mockImplementation(async (_, input) => {
+      if ('recoveryId' in input) throw Object.assign(new Error('恢复资料已不存在'), { code: 'recovery-missing' });
+      expect(input).toEqual({ path: 'C:/docs/saved.md' });
+      return new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '磁盘原文' }), localBuild);
+    });
+    const tab = Object.assign(createMarkdownTab({ nativePath: 'C:/docs/saved.md', dirty: false }), { documentId: 'md-missing' });
+    const failures = vi.fn();
+    const app = new MarkdownApplicationSession(tab, true, { markdown: '' }, failures, () => {});
+    applications.push(app);
+    await app.ready;
+    expect(await app.readMarkdown()).toBe('磁盘原文');
+    expect(open).toHaveBeenCalledTimes(2);
+    expect(tab.documentId).not.toBe('md-missing');
+    expect(failures).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { dirty: true, path: 'C:/docs/saved.md', code: 'recovery-missing' },
+    { dirty: false, path: null, code: 'recovery-missing' },
+    { dirty: false, path: 'C:/docs/saved.md', code: 'recovery-corrupt' },
+    { dirty: false, path: 'C:/docs/saved.md', code: 'io-error' },
+  ])('未保存修改、无原路径或恢复资料损坏时不自动替换正文：%j', async ({ dirty, path, code }) => {
+    const failure = Object.assign(new Error('恢复失败'), { code });
+    const open = vi.spyOn(ProgressiveMarkdownDocument, 'open').mockRejectedValue(failure);
+    const tab = Object.assign(createMarkdownTab({ nativePath: path, dirty }), { documentId: 'md-missing' });
+    const app = new MarkdownApplicationSession(tab, true, { markdown: '' }, () => {}, () => {});
+    applications.push(app);
+    await expect(app.ready).rejects.toBe(failure);
+    expect(open).toHaveBeenCalledOnce();
+    expect(tab.documentId).toBe('md-missing');
+    expect(tab.dirty).toBe(dirty);
+  });
   it('双栏的后台源码挂载不会接管语义栏的有效焦点目标', async () => {
     const { application } = await setup('正文');
     const semantic = document.body.appendChild(document.createElement('div'));

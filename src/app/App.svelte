@@ -531,8 +531,13 @@
     handleSoftwareUpdateSnapshot(softwareUpdateSnapshot);
   }
 
-  /** 后台/非活动标签没有自己的状态栏，错误必须同时进入全局 toast 才对用户可见。 */
+  /** 实际操作失败需让后台标签用户可见；内部快照占用只进入诊断日志。 */
   function showVisibleError(error: unknown, fallback: string) {
+    if (error instanceof Error && 'code' in error &&
+      (error.code === 'document-busy' || error.code === 'document-closed')) {
+      logError('MarkdownDocument', '文档会话内部状态异常', { code: error.code, error: String(error) });
+      return;
+    }
     const message = error instanceof Error ? error.message : fallback;
     statusMessage = message;
     showToast(message, 3500);
@@ -651,6 +656,7 @@
   let activeItemId = '';
   let activeComparison: ComparisonWorkspaceItem | null = null;
   const documentRuntimes = new Map<string, MarkdownDocumentRuntime>();
+  const pendingMarkdownRuntimeDisposals = new Set<Promise<void>>();
   const mountedDocumentRuntimes = new WeakSet<MarkdownDocumentRuntime>();
   let comparisonRuntimes: MarkdownDocumentRuntime[] = [];
   let comparisonTabs: MarkdownTabState[] = [];
@@ -1097,6 +1103,18 @@
       }
       const order = new Map(state.tabs.map((tab, index) => [tab.id, index]));
       restoredTabs.sort((left, right) => order.get(left.id)! - order.get(right.id)!);
+      // 同一 documentId 的恢复必须等旧宿主 detach 完成，否则迟到清理会关闭新宿主的正文。
+      for (const [id, runtime] of documentRuntimes) {
+        disposeMarkdownRuntime(runtime);
+        documentRuntimes.delete(id);
+      }
+      while (pendingMarkdownRuntimeDisposals.size) {
+        await Promise.all([...pendingMarkdownRuntimeDisposals]);
+      }
+      if (generation !== workspaceRestoreGeneration) {
+        await discardRestoredSegmentedTabs(restoredTabs);
+        return;
+      }
       tabs = restoredTabs;
       workspaceItems = normalizeWorkspaceItems(tabs, state.items);
       activeTabId = tabs.some((tab) => tab.id === state.activeTabId)
@@ -1244,11 +1262,9 @@
     }
 
     if (persistedTab.documentId) {
-      // 恢复引用先由原生会话验证；失败继续保留旧草稿，不能将空正文替换为已恢复。
-      const restored = createRuntimeTabFromPersisted(persistedTab, '', { largeDocumentMode: false, readonlyDocumentMode: false });
-      const runtime = getDocumentRuntime(restored);
-      try { await runtime.session!.ready; return restored; }
-      catch (error) { showVisibleError(error, t.openRecentFailed()); return restored; }
+      // 先发布标签元数据，可见宿主再验证恢复引用。不能在 tabs 之外创建会话，
+      // 否则首个元数据通知会触发 reconcile，将尚未发布的会话当作已关闭标签回收。
+      return createRuntimeTabFromPersisted(persistedTab, '', { largeDocumentMode: false, readonlyDocumentMode: false });
     }
     const draft = persistedTab.draftId
       ? await readWorkspaceDraft(persistedTab.draftId).catch(() => null)
@@ -3893,6 +3909,21 @@
   const bootEditor = editor;
   let restoringWorkspaceItems: WorkspaceItem[] | null = null;
 
+  function disposeMarkdownRuntime(runtime: MarkdownDocumentRuntime) {
+    runtime.disposed = true;
+    runtime.unsubscribe();
+    const disposal = runtime.session ? runtime.session.detach() : Promise.resolve(runtime.editor.destroy());
+    pendingMarkdownRuntimeDisposals.add(disposal);
+    void disposal.then(
+      () => pendingMarkdownRuntimeDisposals.delete(disposal),
+      error => {
+        pendingMarkdownRuntimeDisposals.delete(disposal);
+        logError('MarkdownDocument', '释放旧文档宿主失败，保留恢复资料', { error: String(error) });
+      },
+    );
+    return disposal;
+  }
+
   function reconcileWorkspaceItems(currentTabs: Tab[], focusedTabId: string) {
     const next = normalizeWorkspaceItems(currentTabs, restoringWorkspaceItems ?? workspaceItems);
     const owner = findWorkspaceItemForTab(next, focusedTabId);
@@ -3911,9 +3942,7 @@
           sourcePane = undefined!;
           semanticPane = undefined!;
         }
-        runtime.disposed = true;
-        runtime.unsubscribe();
-        runtime.editor.destroy();
+        disposeMarkdownRuntime(runtime);
         documentRuntimes.delete(id);
       }
     }
@@ -3939,9 +3968,12 @@
       getImageContext: () => getImageContext(tab.id),
       onImagesDeleted: (event) => handleDeletedImageResources(event, tab.id, core),
       onContextMenuOpen: (event) => { focusComparisonDocument(tab.id); handleContextMenuOpen(event); },
-    }, (error) => showVisibleError(error, t.saveFileFailed()), () => {
+    }, (error) => {
       const current = documentRuntimes.get(tab.id);
-      if (!current || current.disposed) return;
+      if (current?.session === application && !current.disposed) showVisibleError(error, t.saveFileFailed());
+    }, () => {
+      const current = documentRuntimes.get(tab.id);
+      if (!current || current.disposed || current.session !== application) return;
       const indexed = application.document?.state.index;
       const outlineChanged = !!indexed && (observedOutlineRevision !== indexed.revision || observedOutlineCount !== indexed.outline.length || observedOutline !== indexed.outline);
       if (indexed && outlineChanged) {

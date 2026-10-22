@@ -17,7 +17,7 @@ export interface SnapshotReference {
 }
 export interface MarkdownDocumentPort {
   openDocument(
-    input: { path: string } | { text: string } | { recoveryId: string },
+    input: { path: string; fresh?: boolean } | { text: string } | { recoveryId: string },
   ): Promise<MarkdownSessionStatus>;
   status(documentId: string): Promise<MarkdownSessionStatus>;
   readWindow(

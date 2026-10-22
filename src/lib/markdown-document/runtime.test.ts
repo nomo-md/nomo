@@ -28,6 +28,60 @@ const localBuild: typeof buildMarkdownIndex = (port, snapshot, options) =>
   });
 
 describe('渐进 Markdown 文档运行时', () => {
+  it('重试重新接回同版本恢复资料，保留正文、选区和撤销历史', async () => {
+    const port = createMemoryMarkdownPort();
+    const runtime = new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '原文' }), localBuild);
+    await runtime.session.applyEdits({ viewGeneration: 0, historyGroupId: 'input',
+      edits: [{ fromByte: 0, toByte: 0, insertedText: '新' }] });
+    runtime.selection.set({ anchorByte: 3, headByte: 6 });
+    const status = runtime.state.status;
+    vi.spyOn(port, 'status').mockRejectedValueOnce(Object.assign(new Error('会话已关闭'), { code: 'document-closed' }));
+    const recover = vi.spyOn(port, 'openDocument').mockResolvedValueOnce(status);
+    await runtime.retry();
+    expect(recover).toHaveBeenCalledWith({ recoveryId: status.documentId });
+    expect(await runtime.readMarkdown()).toBe('新原文');
+    expect(runtime.selection.selection).toEqual({ anchorByte: 3, headByte: 6 });
+    await runtime.session.undo();
+    expect(await runtime.readMarkdown()).toBe('原文');
+    await runtime.close(true);
+  });
+
+  it('重试发现恢复资料版本不同，不重置当前正文及待确认输入', async () => {
+    const port = createMemoryMarkdownPort();
+    const runtime = new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '保留正文' }), localBuild);
+    const status = runtime.state.status;
+    vi.spyOn(port, 'status').mockRejectedValueOnce(Object.assign(new Error('会话已关闭'), { code: 'document-closed' }));
+    vi.spyOn(port, 'openDocument').mockResolvedValueOnce({ ...status, revision: status.revision + 1 });
+    await expect(runtime.retry()).rejects.toThrow('恢复资料版本已变化');
+    expect(runtime.state.status).toBe(status);
+    expect(await runtime.readMarkdown()).toBe('保留正文');
+    await runtime.close(true);
+  });
+  it.each(['close', 'detach'] as const)('%s 等待正在复制的完整快照，并阻止新的快照任务', async action => {
+    const port = createMemoryMarkdownPort();
+    const runtime = new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '正在复制的正文' }), localBuild);
+    runtime.selection.selectAll();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const read = port.readSnapshot.bind(port);
+    const reading = vi.spyOn(port, 'readSnapshot').mockImplementation(async (...args) => {
+      await gate;
+      return read(...args);
+    });
+    const copying = runtime.selection.copy();
+    await vi.waitFor(() => expect(reading).toHaveBeenCalled());
+    let finished = false;
+    const ending = (action === 'close' ? runtime.close(true) : runtime.detach()).then(() => { finished = true; });
+    try {
+      await vi.waitFor(() => expect(runtime.session.state.closing).toBe(true));
+      expect(finished).toBe(false);
+      await expect(runtime.readMarkdown()).rejects.toThrow('正在关闭');
+    } finally { release(); }
+    expect(await copying).toBe('正在复制的正文');
+    await ending;
+    if (action === 'detach') await port.close(runtime.session.documentId, true);
+    expect(finished).toBe(true);
+  });
   it('未索引远跳从安全起点逐批推进，批间让出输入与其他视口并接受撤销', async () => {
     const port = createMemoryMarkdownPort();
     const status = await port.openDocument({ text: '正文\n\n'.repeat(6000) });

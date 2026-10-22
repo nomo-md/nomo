@@ -423,6 +423,16 @@ export class ProgressiveMarkdownDocument {
     }, 'explicit', options.signal);
   }
   async retry() {
+    try {
+      await this.port.status(this.session.documentId);
+    } catch (error) {
+      if (!(error instanceof Error) || !('code' in error) || error.code !== 'document-closed') throw error;
+      const recovered = await this.port.openDocument({ recoveryId: this.session.documentId });
+      // 只接回同一份持久化正文；版本不一致时保留前端待确认输入，不把它套到未知基线上。
+      if (recovered.documentId !== this.session.documentId ||
+        recovered.revision !== this.session.state.committed.revision)
+        throw new DocumentConflictError('恢复资料版本已变化，当前编辑仍保留，请重新打开文档核对。');
+    }
     this.failure = null;
     await this.session.retryPendingEdits();
     this.scheduleIndex();
@@ -445,8 +455,8 @@ export class ProgressiveMarkdownDocument {
     if (this.timer) clearTimeout(this.timer);
     if (this.idleTimer) clearTimeout(this.idleTimer);
     markdownWorkScheduler.cancel(this); this.queuedYield?.(); this.queuedYield = null;
+    await this.session.prepareClose(true);
     await this.building;
-    await this.session.awaitSnapshotTasks();
     await this.toc.dispose();
     if (this.completed) { await this.port.releaseSnapshot(this.completed.snapshot); this.completed = null; }
     this.unsubscribe(); this.unsubscribeChanges(); this.selection.dispose(); this.listeners.clear();
@@ -464,15 +474,20 @@ export class ProgressiveMarkdownDocument {
     markdownWorkScheduler.cancel(this);
     this.queuedYield?.();
     this.queuedYield = null;
-    await this.building;
-    await this.toc.dispose();
-    if (this.completed) {
-      await this.port.releaseSnapshot(this.completed.snapshot);
-      this.completed = null;
-    }
+    let tocDisposed = false;
     try {
-      await this.session.close(discard);
+      await this.session.prepareClose(discard);
+      await this.building;
+      await this.toc.dispose();
+      tocDisposed = true;
+      if (this.completed) {
+        await this.port.releaseSnapshot(this.completed.snapshot);
+        this.completed = null;
+      }
+      await this.session.closePrepared(discard);
     } catch (error) {
+      this.session.cancelClose();
+      if (tocDisposed) this.toc = new AutomaticMarkdownToc(this.session, this.build);
       this.closed = false;
       this.scheduleIndex();
       throw error;

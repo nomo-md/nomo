@@ -246,6 +246,8 @@ export class MarkdownSessionController {
     intent: 'explicit' | 'automatic' = 'explicit',
     signal?: AbortSignal,
   ): Promise<T> {
+    this.assertOpen();
+    if (this.closing) throw new Error('文档正在关闭。');
     const operation = (async () => {
       const snapshot = await this.captureSnapshot(intent, signal);
       try { return await task(snapshot); }
@@ -275,17 +277,16 @@ export class MarkdownSessionController {
         return this.committed;
   }
   async close(discard = false) {
-    if (!discard) await this.flushEdits();
-    if (this.closing) throw new Error('文档正在关闭。');
-    this.closing = true;
-    this.emit();
+    await this.prepareClose(discard);
+    await this.closePrepared(discard);
+  }
+  async closePrepared(discard: boolean) {
+    this.assertOpen();
+    if (!this.closing) throw new Error('文档尚未准备关闭。');
     try {
-      if (!discard) await this.flushQueue();
-      else await this.running;
       await this.port.close(this.documentId, discard);
     } catch (error) {
-      this.closing = false;
-      this.emit();
+      this.cancelClose();
       throw error;
     }
     for (const pending of this.pending)
@@ -295,5 +296,25 @@ export class MarkdownSessionController {
     this.mounted.clear();
     this.listeners.clear();
     this.changeListeners.clear();
+  }
+  /** 先阻止新快照和输入，再排空已开始的任务；索引快照由文档运行时随后释放。 */
+  async prepareClose(discard = false) {
+    this.assertOpen();
+    if (!discard) await this.flushEdits();
+    if (this.closing) throw new Error('文档正在关闭。');
+    this.closing = true;
+    this.emit();
+    try {
+      if (!discard) await this.flushQueue();
+      else await this.running;
+      await this.awaitSnapshotTasks();
+    } catch (error) {
+      this.cancelClose();
+      throw error;
+    }
+  }
+  cancelClose() {
+    this.closing = false;
+    this.emit();
   }
 }
