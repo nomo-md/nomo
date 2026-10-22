@@ -177,7 +177,7 @@
 | 后台统计调度 | `src/app/services/writingStatsController.ts` | `src/lib/outline/writingStats.worker.ts`, `src/app/App.svelte` | 120 ms 防抖、单 Worker、快照缓存、失效门禁及统计状态 |
 | 章节结构重排 | `src/lib/outline/outlineReorder.ts` | `src/lib/editor-core/editorCommands.ts` | 计算章节子树、落点、层级变化、Markdown 重排与标题索引映射 |
 | 大纲交互控制器 | `src/app/services/outlineInteractionController.ts` | `src/app/services/outlineNavigation.ts`, `src/lib/outline/outlineReorder.ts` | 点击定位、章节拖拽编排、源码模式可撤销替换 |
-| 大纲滚动定位 | `src/app/services/outlineNavigation.ts`, `src/lib/markdown-document/viewportHost.ts` | `src/lib/outline/outlineViewport.ts`, `src/app/services/markdownApplicationSession.ts`, `src/app/services/editorInteractionController.ts` | 会话大纲在语义/源码/双栏按编辑区高度 20%（64–180px）定位与高亮，取消过期导航；兼容视图的 PM/DOM 标题匹配及模式切换阅读锚点 |
+| 大纲滚动定位 | `src/app/services/outlineNavigation.ts`, `src/lib/markdown-document/viewportHost.ts` | `src/lib/outline/outlineViewport.ts`, `src/app/services/markdownApplicationSession.ts`, `src/lib/markdown-document/mountPolicy.ts`, `src/app/services/editorInteractionController.ts` | 会话大纲在语义/源码/双栏按编辑区高度 20%（64–180px）定位与高亮；仅受限窗口模式的未加载目标准备就绪后直跳，其他情况保留固定动画；双栏逐栏判定、原位置保护与过期导航取消；兼容视图的 PM/DOM 标题匹配 |
 | Markdown 源码 CodeMirror | `src/app/components/MarkdownSourceEditor.svelte` | `src/app/components/markdownSourceEditor.ts`, `src/app/components/EditorWorkspace.svelte` | 修改源码输入、选区、历史、行坐标、滚动容器或块 spacer |
 | 大纲状态 | `src/app/services/outlineState.ts` | — | 大纲展开/折叠/可见性/激活项计算 |
 | 大纲浮窗定位 | `src/app/actions/outlinePanelDrag.ts`, `src/app/services/outlinePanelPosition.ts` | `EditorWorkspace.svelte`, `AppTitleBar.svelte`, `appCommands.ts` | 顶部区域拖动、编辑区边界约束、位置记忆与菜单重置；不参与章节重排或正文排版 |
@@ -191,7 +191,7 @@
 | 代码高亮 | `src/lib/services/shikiCodeTokenizer.ts` | `src/lib/editor-core/nodeViews/CodeBlockNodeView.ts` | Shiki 代码 token 化 |
 | 公式渲染 | `src/lib/services/katexMathRenderer.ts` | `src/lib/editor-core/nodeViews/MathBlockNodeView.ts`, `MathInlineNodeView.ts` | KaTeX 公式渲染 |
 | 图表渲染 | `src/lib/services/mermaidDiagramRenderer.ts` | `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts` | Mermaid 图表渲染 |
-| 增强渲染调度与可见性 | `src/lib/services/renderTaskQueue.ts`, `src/lib/editor-core/nodeViews/renderVisibility.ts` | 代码块与 Mermaid NodeView、图表渲染器 | 有界并发、排队取消、视口及后台暂停、结果提交阅读锚点；导出主动补齐 |
+| 增强渲染调度与可见性 | `src/lib/services/renderTaskQueue.ts`, `src/lib/editor-core/nodeViews/renderVisibility.ts` | 代码块与 Mermaid NodeView、图表渲染器、`plugins/typography.ts`、`markdown-document/viewportHost.ts` | 有界并发、排队取消、视口及后台暂停、宿主导航目标首屏资格与截止预算、结果提交阅读锚点；导出主动补齐 |
 | 图表查看与缩放 | `src/lib/services/mermaidDiagramView.ts` | `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts`, `src/quicklook/preview.ts`, `src/app/services/exportService.ts` | 可读适配、全图/原始尺寸、全屏交互、导出尺寸还原 |
 | 图片加载器 | `src/app/services/desktopImageLoader.ts` | `src/lib/editor-core/nodeViews/ImageNodeView.ts` | 本地/asset/远程图片解析 |
 

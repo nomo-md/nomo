@@ -31,6 +31,7 @@ import {
 import { analyzeInlineSource } from '../InlineSourceCodec';
 import { inlineSourceEditingPluginKey } from './inlineSourceEditing';
 import { TABLE_LAYOUT_EVENT } from '../../table-layout/dom';
+import { navigationRenderAllowed, navigationRenderSignal, navigationRenderViewport, observeNavigationRender, trackNavigationEnhancement } from '../nodeViews/renderVisibility';
 
 const key = new PluginKey<DecorationSet>('nomo-typography');
 const meta = 'nomo:typography';
@@ -279,7 +280,8 @@ function createViewController(view: EditorView) {
   const isPreviewing = () => interaction.phase === 'preview';
   const isZoomPreview = () => isPreviewing() && interaction.geometrySource === 'zoom';
   const isLayoutDeferred = () =>
-    isZoomPreview() || (isPreviewing() && interaction.geometrySource === 'window-mode');
+    isZoomPreview() || (isPreviewing() && interaction.geometrySource === 'window-mode') ||
+    navigationRenderAllowed(view.dom, 'typography') === false;
 
   const isComposing = () =>
     composing ||
@@ -761,20 +763,23 @@ function createViewController(view: EditorView) {
       interactionSubscription?.complete(interaction.generation);
       return;
     }
+    const finishNavigationEnhancement = trackNavigationEnhancement(view.dom, 'typography');
+    const navigationSignal = navigationRenderSignal(view.dom);
     running = (async () => {
       const startedAt = performance.now();
       const timings = { measureMs: 0, solveMs: 0, renderMs: 0, publishMs: 0 };
       const generation = interaction.generation;
       // 宽度输入复用在途测量；缩放则先让出交互帧，停止后再追补。
       const stale = () =>
-        destroyed || document.hidden ||
+        destroyed || document.hidden || navigationSignal?.aborted ||
         isLayoutDeferred() ||
         revision !== token ||
         view.state.doc !== doc ||
         isComposing() ||
         dragging ||
         (!interactivePass && isPreviewing());
-      const viewport = pane?.getBoundingClientRect();
+      const navigationViewport = navigationRenderViewport(view.dom);
+      const viewport = navigationViewport ?? pane?.getBoundingClientRect();
       const viewportTop = viewport?.top ?? 0;
       const viewportBottom = viewport?.bottom ?? window.innerHeight;
       const viewportHeight = Math.max(1, viewportBottom - viewportTop);
@@ -785,9 +790,9 @@ function createViewController(view: EditorView) {
       const targets: Target[] = [];
       indexParagraphs(doc);
       // 首次交集回调前不以全文几何测量猜测首屏；回调会重新安排当前窗口。
-      if (visibilityObserver && !visibilityReady) return;
+      if (visibilityObserver && !visibilityReady && !navigationViewport) return;
       const available =
-        visibilityReady
+        visibilityReady && !navigationViewport
           ? Array.from(visibleParagraphs, (element) => paragraphTargets.get(element)!)
           : paragraphTargets.values();
       for (const target of available) {
@@ -799,7 +804,7 @@ function createViewController(view: EditorView) {
         }
         if (element.clientWidth <= 0) continue;
         const rect =
-          !visibilityReady || visibleParagraphs.has(element)
+          navigationViewport || !visibilityReady || visibleParagraphs.has(element)
             ? element.getBoundingClientRect()
             : null;
         const buffer = Math.min(160, viewportHeight * 0.25);
@@ -1020,6 +1025,7 @@ function createViewController(view: EditorView) {
         cancelledPasses,
       });
     })().finally(() => {
+      finishNavigationEnhancement();
       running = null;
       if (
         !destroyed &&
@@ -1298,6 +1304,7 @@ function createViewController(view: EditorView) {
       view.dom.removeAttribute('data-kp-reflow');
       geometryProjectionStyle?.remove();
       interactionSubscription?.destroy();
+      stopNavigationRender();
       pane?.removeEventListener('scroll', viewportScrolled);
       document.removeEventListener('visibilitychange', visibilityChanged);
       measureCache.clear();
@@ -1323,6 +1330,10 @@ function createViewController(view: EditorView) {
     },
   };
   controllers.set(view, controller);
+  const stopNavigationRender = observeNavigationRender(view.dom, () => {
+    viewportOnly = true;
+    schedule();
+  });
   initializing = false;
   if (pendingDisableClear) queueMicrotask(clearDisabledLayout);
   schedule();

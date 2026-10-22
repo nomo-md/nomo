@@ -145,11 +145,15 @@ describe('mount policy', () => {
   it('keeps unknown structure windowed and classifies small complex documents', () => {
     const policy = new MarkdownMountPolicy();
     expect(policy.update({ ...complete, state: 'partial' }, 0, false)).toBe('windowed');
+    expect(policy.windowLimited).toBe(false);
     expect(policy.update(complete, 0, false)).toBe('progressive-full');
     expect(policy.update({ ...complete, layoutUnits: 3_017 }, 1, false)).toBe('windowed');
+    expect(policy.windowLimited).toBe(true);
     expect(policy.update(complete, 100, false)).toBe('windowed');
     expect(policy.update(complete, 2_099, false)).toBe('windowed');
+    expect(policy.windowLimited).toBe(true);
     expect(policy.update(complete, 2_100, false)).toBe('progressive-full');
+    expect(policy.windowLimited).toBe(false);
   });
   it('requires all lower thresholds and an uninterrupted idle interval', () => {
     const policy = new MarkdownMountPolicy();

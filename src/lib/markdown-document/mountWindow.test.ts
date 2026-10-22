@@ -4,6 +4,27 @@ import { MarkdownStructureScanner } from './structure';
 import { MarkdownLayoutCache } from './layoutCache';
 
 describe('稳定块组与有界准备', () => {
+  it('同一索引追加保留已封口组对象，仅更新尾部', () => {
+    const blocks = new MarkdownStructureScanner(0).push('段落\n\n'.repeat(200), true).blocks;
+    const incremental = blocks.slice(0, 70), grouping = new MarkdownStableGroups();
+    const before = [...grouping.update(incremental)];
+    incremental.push(...blocks.slice(70));
+    const after = grouping.update(incremental);
+    expect(after[0]).toBe(before[0]); expect(after[1]).toBe(before[1]);
+    expect(after[2].from).toBe(70);
+    incremental[incremental.length - 1] = { ...incremental.at(-1)!, toByte: blocks.at(-1)!.toByte + 10 };
+    expect(grouping.update(incremental)[0]).toBe(before[0]);
+  });
+  it('单项失效只扣除所属缓存字节，重复删除不改变计数', () => {
+    const cache = new MarkdownLayoutCache(10, 4096);
+    cache.put('a', { height: 20 }); cache.put('b', { height: 30 });
+    const bytes = cache.estimatedBytes;
+    expect(cache.delete('a')).toBe(true);
+    expect(cache.estimatedBytes).toBe(bytes / 2);
+    expect(cache.delete('a')).toBe(false);
+    expect(cache.get('b')?.height).toBe(30);
+    cache.delete('b'); expect(cache.estimatedBytes).toBe(0);
+  });
   it('追加索引封口旧组，前方新增块不重新划分后方组', () => {
     const blocks = new MarkdownStructureScanner(0).push('段落\n\n'.repeat(200), true).blocks;
     const grouping = new MarkdownStableGroups();

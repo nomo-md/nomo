@@ -16,6 +16,7 @@ export class MarkdownMountPolicy {
   private mode: MarkdownMountMode = 'windowed';
   private limited = false;
   private belowSince: number | null = null;
+  get windowLimited() { return this.mode === 'windowed' && this.limited; }
   constructor(private readonly limits = DEFAULT_MARKDOWN_MOUNT_LIMITS) {}
   update(progress: DocumentIndexProgress, now: number, interacting: boolean): MarkdownMountMode {
     const high =

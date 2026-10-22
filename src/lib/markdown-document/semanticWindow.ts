@@ -86,6 +86,7 @@ export class MarkdownSemanticWindow {
     });
   }
   get editable() { return !this.effectiveReadonly; }
+  get bodyReady() { return this.attached && this.ready && !this.disposed && !this.bridge.isStale; }
   get preview() { return !this.opened; }
   /** DOM 插入后启用，生命周期未就绪时仍保持预览；不重建 PM 或源文映射。 */
   activate() { this.attached = true; this.syncPermission(); }

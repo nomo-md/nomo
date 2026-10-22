@@ -160,7 +160,12 @@ describe('应用 Markdown 会话入口', () => {
     expect(source.contains(document.activeElement)).toBe(true);
   });
 
-  it('双栏大纲分别按两栏高度对齐，跟随栏不会抢走活动栏焦点', async () => {
+  it.each([
+    { semanticLoaded: true, sourceLoaded: true },
+    { semanticLoaded: false, sourceLoaded: false },
+    { semanticLoaded: true, sourceLoaded: false },
+    { semanticLoaded: false, sourceLoaded: true },
+  ])('双栏分别决策与定位，不抢焦点：语义已加载=$semanticLoaded，源码已加载=$sourceLoaded', async ({ semanticLoaded, sourceLoaded }) => {
     const { application, doc, failures } = await setup('# 第一章\n\n正文\n\n# 第二章\n\n结尾');
     const makePane = (mode: string, height: number) => {
       const pane = document.body.appendChild(document.createElement('section'));
@@ -183,13 +188,29 @@ describe('应用 Markdown 会话入口', () => {
     headings.forEach((heading, i) => {
       heading.getBoundingClientRect = () => new DOMRect(0, 100 + i * 900 - semantic.pane.scrollTop, 500, 40);
     });
+    for (const { target } of [semantic, source]) {
+      for (const view of target.querySelectorAll<HTMLElement>('.markdown-session-window')) Object.defineProperty(view, 'offsetHeight', { value: 3000 });
+      target.querySelector('.markdown-session-window')?.dispatchEvent(new Event('load', { bubbles: true }));
+    }
     const second = doc.state.index!.outline[1];
     const sourceHost = (application as any).sourceHost;
+    const semanticHost = (application as any).semanticHost;
+    const getState = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(doc), 'state')!.get!;
+    vi.spyOn(doc, 'state', 'get').mockImplementation(() => ({ ...getState.call(doc), mountMode: 'windowed', windowLimited: true }));
+    // 加载判定本身由宿主测试覆盖；这里锁定双栏不会互相覆盖执行方式。
+    vi.spyOn(semanticHost, 'isOutlineTargetLoaded').mockReturnValueOnce(semanticLoaded);
+    vi.spyOn(sourceHost, 'isOutlineTargetLoaded').mockReturnValueOnce(sourceLoaded);
     vi.spyOn(sourceHost.activeSource, 'byteTop').mockImplementation((byte: unknown) => 100 + (byte === second.byte ? 900 : 0) - source.pane.scrollTop);
     application.editor.focus();
     await application.revealOutlineHeading(second.byte);
-    expect(semantic.pane.scrollTop).toBe(740);
-    expect(source.pane.scrollTop).toBe(820);
+    expect(semanticHost.diagnostics.navigation.kind).toBe(semanticLoaded ? 'animated' : 'direct');
+    expect(sourceHost.diagnostics.navigation.kind).toBe(sourceLoaded ? 'animated' : 'direct');
+    if (semanticLoaded && sourceLoaded) {
+      const left = semanticHost.diagnostics.navigation, right = sourceHost.diagnostics.navigation;
+      expect(left.requestedAt + left.inputGateMs).toBe(right.requestedAt + right.inputGateMs);
+    }
+    expect(semantic.pane.scrollTop).toBeCloseTo(740);
+    expect(source.pane.scrollTop).toBeCloseTo(820);
     expect(semantic.target.contains(document.activeElement)).toBe(true);
     expect(application.activeOutlineId).toBe(second.id);
     source.target.querySelector<HTMLElement>('.cm-content')!.focus();

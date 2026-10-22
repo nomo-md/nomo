@@ -10,7 +10,7 @@ import { onInterfaceLocaleChanged, t } from '../../../app/i18n';
 import type { EditorThemeOptions } from '../../theme/types';
 import { registerActiveEdit, unregisterActiveEdit } from './activeEditRegistry';
 import { createRenderTaskQueue } from '../../services/renderTaskQueue';
-import { observeRenderVisibility } from './renderVisibility';
+import { observeRenderVisibility, trackNavigationEnhancement } from './renderVisibility';
 
 const highlightTask = createRenderTaskQueue(2);
 
@@ -421,7 +421,7 @@ export class CodeBlockNodeView {
         this.highlightAbort?.abort();
         this.displayHighlightDirty = true;
       }
-    });
+    }, 'code', () => this.displayHighlightDirty && !this.editing);
     // 先展示完整纯文本以稳定几何，增强高亮按可见范围调度。
     this.renderDisplay();
   }
@@ -660,6 +660,8 @@ export class CodeBlockNodeView {
     }
     const controller = new AbortController();
     this.highlightAbort = controller;
+    const finishNavigationEnhancement = isDisplay && !force
+      ? trackNavigationEnhancement(this.dom, 'code', controller) : () => {};
     try {
       const input = {
         code,
@@ -675,6 +677,7 @@ export class CodeBlockNodeView {
       if (id !== this.renderId || controller.signal.aborted) return;
       setContent(null);
     } finally {
+      finishNavigationEnhancement();
       if (this.highlightAbort === controller) this.highlightAbort = null;
     }
   }

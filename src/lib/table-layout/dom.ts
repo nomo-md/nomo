@@ -5,6 +5,7 @@ import {
   type CellMetrics,
   type ColumnConstraint,
 } from './widths';
+import { navigationRenderAllowed, navigationRenderViewport, observeNavigationRender } from '../editor-core/nodeViews/renderVisibility';
 
 export const TABLE_LAYOUT_EVENT = 'nomo:table-layout';
 export const TABLE_LAYOUT_READY_EVENT = 'nomo:table-layout-ready';
@@ -152,8 +153,10 @@ export class TableLayoutController {
   private sizes = new WeakMap<Element, string>();
   private assets = new Set<Element>();
   private assetsDirty = true;
+  private stopNavigation: () => void;
 
   constructor(private root: HTMLElement) {
+    this.stopNavigation = observeNavigationRender(root, this.schedule);
     if (typeof ResizeObserver !== 'undefined') {
       this.observer = new ResizeObserver((entries) => {
         let widthChanged = false;
@@ -364,8 +367,17 @@ export class TableLayoutController {
       (a, b) =>
         Number(this.visible.has(b.source.wrapper)) - Number(this.visible.has(a.source.wrapper)),
     );
+    const eligible = new Set(entries.filter(entry => {
+      if (force) return true;
+      const allowed = navigationRenderAllowed(entry.source.wrapper, 'typography');
+      if (allowed === undefined) return !this.visibility || this.visible.has(entry.source.wrapper);
+      if (!allowed) return false;
+      const viewport = navigationRenderViewport(entry.source.wrapper);
+      const rect = entry.source.wrapper.getBoundingClientRect();
+      return !!viewport && rect.bottom >= viewport.top && rect.top <= viewport.bottom;
+    }));
     for (const entry of entries) {
-      if (!force && this.visibility && !this.visible.has(entry.source.wrapper)) continue;
+      if (!eligible.has(entry)) continue;
       if (!entry.source.wrapper.isConnected || entry.source.wrapper.clientWidth <= 0) continue;
       const font = getComputedStyle(entry.source.table);
       const signature = fontSignature(font);
@@ -468,7 +480,7 @@ export class TableLayoutController {
       (entry) =>
         entry.dirty &&
         !entry.error &&
-        (force || !this.visibility || this.visible.has(entry.source.wrapper)) &&
+        eligible.has(entry) &&
         entry.source.wrapper.clientWidth > 0,
     );
     if (unfinished && !force) {
@@ -533,6 +545,7 @@ export class TableLayoutController {
 
   destroy() {
     this.destroyed = true;
+    this.stopNavigation();
     cancelAnimationFrame(this.frame);
     clearTimeout(this.timer);
     this.observer?.disconnect();

@@ -12,7 +12,7 @@ import {
   readCompleteSnapshot,
 } from '../../lib/markdown-document/port';
 import { ProgressiveMarkdownDocument } from '../../lib/markdown-document/runtime';
-import { MarkdownViewportHost, type MarkdownPresentation } from '../../lib/markdown-document/viewportHost';
+import { MarkdownViewportHost, type MarkdownPresentation, type OutlineNavigationClock } from '../../lib/markdown-document/viewportHost';
 import { utf8Length, utf16ToUtf8 } from '../../lib/markdown-document/utf8Text';
 import { getSourceTextChanges } from '../../lib/markdown-document/textChanges';
 import { DocumentConflictError } from '../../lib/markdown-document/protocol';
@@ -799,8 +799,9 @@ export class MarkdownApplicationSession {
     this.scrollOrigin = origin?.mode;
     this.scrollUntil = 0;
     const hosts = this.viewMode === 'split' ? [this.semanticHost, this.sourceHost] : [origin];
+    const clock: OutlineNavigationClock = { requestedAt: performance.now() };
     // 两栏各按自己的可见高度精确定位；跟随栏不能抢夺焦点或接管活动栏。
-    await Promise.all(hosts.map(host => host?.reveal(byte, host === origin, 'outline')));
+    await Promise.all(hosts.map(host => host?.reveal(byte, host === origin, 'outline', clock)));
   }
   selectRange(fromByte: number, toByte: number) {
     return this.currentHost?.selectRange({ anchorByte: fromByte, headByte: toByte });

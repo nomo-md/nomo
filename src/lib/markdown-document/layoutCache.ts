@@ -14,6 +14,12 @@ export class MarkdownLayoutCache {
   constructor(readonly maxEntries = 2048, readonly maxBytes = 2 * 1024 * 1024) {}
   get size() { return this.entries.size; }
   get estimatedBytes() { return this.bytes; }
+  delete(key: string) {
+    const entry = this.entries.get(key);
+    if (!entry) return false;
+    this.bytes -= entry.bytes;
+    return this.entries.delete(key);
+  }
   get(key: string) {
     const entry = this.entries.get(key);
     if (!entry) { this.misses++; return undefined; }

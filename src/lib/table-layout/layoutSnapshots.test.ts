@@ -1,8 +1,37 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { TableLayoutController } from './dom';
+import { setNavigationRenderContext, type NavigationRenderContext } from '../editor-core/nodeViews/renderVisibility';
 
 describe('表格纯数据布局恢复', () => {
+  it('导航提前准备目标表格列宽，沿途让路，强制导出不受导航门禁限制', async () => {
+    const root = document.body.appendChild(document.createElement('div'));
+    root.className = 'markdown-session-host';
+    const controller = new TableLayoutController(root);
+    const wrappers = [0, 3000].map(top => {
+      const wrapper = root.appendChild(document.createElement('div'));
+      Object.defineProperty(wrapper, 'clientWidth', { value: 800 });
+      wrapper.getBoundingClientRect = () => new DOMRect(0, top, 800, 200);
+      const table = wrapper.appendChild(document.createElement('table'));
+      table.style.font = '14px Arial';
+      const colgroup = table.appendChild(document.createElement('colgroup'));
+      controller.register({ table, wrapper, colgroup, columns: () => 2, cells: () => [] });
+      return { wrapper, colgroup };
+    });
+    const context: NavigationRenderContext = { revision: 0, generation: 1, deadline: performance.now() + 2000,
+      signal: new AbortController().signal, ready: false, targets: new Set([wrappers[1].wrapper]),
+      viewport: () => ({ top: 2900, bottom: 3700 }), deferred() {}, started: () => () => {} };
+    try {
+      setNavigationRenderContext(root, context);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      expect(wrappers[1].colgroup.childElementCount).toBe(0);
+      context.ready = true; setNavigationRenderContext(root, context);
+      await vi.waitFor(() => expect(wrappers[1].colgroup.childElementCount).toBe(2));
+      expect(wrappers[0].colgroup.childElementCount).toBe(0);
+      await controller.flush();
+      expect(wrappers[0].colgroup.childElementCount).toBe(2);
+    } finally { setNavigationRenderContext(root, undefined); controller.destroy(); root.remove(); }
+  });
   it('同组远处表格未就绪时仍保留已完成列宽，并按原序号恢复', async () => {
     const root = document.body.appendChild(document.createElement('div'));
     const controller = new TableLayoutController(root);

@@ -20,6 +20,7 @@ export interface MarkdownLoadingState {
   index: MarkdownStructureIndex | null;
   progress: DocumentIndexProgress;
   mountMode: MarkdownMountMode;
+  windowLimited: boolean;
   failure: unknown | null;
   timings: {
     captured: number;
@@ -155,6 +156,7 @@ export class ProgressiveMarkdownDocument {
       index: this.currentIndex,
       progress,
       mountMode: this.mode,
+      windowLimited: this.policy.windowLimited,
       failure: this.failure,
       timings: { ...this.timings },
     };
@@ -175,7 +177,7 @@ export class ProgressiveMarkdownDocument {
     const state = this.state;
     const signature = JSON.stringify([state.status.revision, state.status.dirty, state.status.canUndo, state.status.canRedo,
       state.status.persistenceWarning, this.session.state.viewGeneration, this.session.state.pendingTransactions,
-      state.progress.state, state.progress.indexedBytes, state.progress.layoutUnits, state.mountMode, state.timings]);
+      state.progress.state, state.progress.indexedBytes, state.progress.layoutUnits, state.mountMode, state.windowLimited, state.timings]);
     // 滚动只更新时间和挂载策略；元数据没有变化时不让应用反复派生大纲、持久化标签。
     if (signature === this.publishedSignature && this.publishedFailure === state.failure) return;
     this.publishedSignature = signature; this.publishedFailure = state.failure;

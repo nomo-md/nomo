@@ -15,6 +15,7 @@ import { DocumentConflictError, type DocumentSelection, type DocumentWindow } fr
 import { utf8ToUtf16, utf8Length } from './utf8Text';
 import type { MarkdownStructureIndex } from './structureIndex';
 import { getOutlineViewportOffset } from '../outline/outlineViewport';
+import { setNavigationRenderContext, type NavigationRenderContext, type NavigationEnhancement } from '../editor-core/nodeViews/renderVisibility';
 
 interface Mounted {
   key: string;
@@ -29,6 +30,30 @@ interface Mounted {
   source?: MarkdownSourceWindow;
   restricted?: boolean;
   restrictedByte?: number;
+  measured?: boolean;
+}
+export interface OutlineNavigationClock { requestedAt: number; startedAt?: number; }
+interface OutlineNavigationSample {
+  revision: number; byte: number; duration?: number; inputGateMs: number;
+  kind: 'animated' | 'direct'; windowLimited: boolean; targetLoaded: boolean;
+  requestedAt: number; positionedMs?: number;
+  firstMotionMs?: number; animationMs?: number; basicReadyMs?: number; enhancementMs?: number;
+  readMs: number; buildMs: number; measureMs: number; created: number; pendingEnhancements: number;
+  deferred: Record<NavigationEnhancement, number>;
+  deadlineMiss?: boolean; status: 'preparing' | 'ready' | 'late' | 'cancelled' | 'failed' | 'restricted';
+}
+interface ReadingAnchor { id: string; offset: number; screen?: number; fallback: number; generation: number; }
+interface OutlineNavigation {
+  kind: 'animated' | 'direct';
+  originAnchor?: ReadingAnchor; originGroups?: Set<string>;
+  overflowAnchor: string;
+  notifiedGoal?: number;
+  id: string; byte: number; revision: number; aligned: boolean;
+  startedAt: number; goal: number; elapsed: number; initialTop: number;
+  frame: number; animationDone: boolean; ready: boolean; recorded: boolean;
+  firstFrame?: Promise<void>; motionStarted?: () => void;
+  controller: AbortController; context: NavigationRenderContext;
+  sample: OutlineNavigationSample; settle?: () => void;
 }
 export interface MarkdownPresentation {
   documentId: string;
@@ -69,7 +94,9 @@ export class MarkdownViewportHost {
   private scrollByte: number | undefined;
   private locatedByte: number | undefined;
   // 只保留一次大纲导航的语义目标；资源重排后继续校准，用户接管或修订变化即释放。
-  private outlineNavigation?: { id: string; byte: number; revision: number; aligned: boolean };
+  private outlineNavigation?: OutlineNavigation;
+  private readonly navigationSamples: OutlineNavigationSample[] = [];
+  private interruptRead?: () => void;
   private publishedOutlineId = '';
   private input: HTMLTextAreaElement | undefined;
   private composing = false;
@@ -171,7 +198,7 @@ export class MarkdownViewportHost {
       this.observer = new ResizeObserver(entries => {
         for (const entry of entries) {
           const view = this.mounted.find(view => view.element === entry.target);
-          if (view) this.dirty.add(view);
+          if (view) this.markDirty(view);
         }
         this.measureDirty();
         this.schedule();
@@ -185,6 +212,8 @@ export class MarkdownViewportHost {
       commitPendingEdits() {},
     });
     this.unsubscribe = document.subscribe(() => {
+      if (this.outlineNavigation && this.outlineNavigation.revision !== document.state.status.revision)
+        this.cancelOutlineNavigation();
       for (const view of this.mounted) {
         view.semantic?.setFailure(!!document.state.failure || !!this.viewFailure);
         view.source?.setReadonly(!!this.options.readonly || !!document.state.failure || !!this.viewFailure);
@@ -312,6 +341,7 @@ export class MarkdownViewportHost {
   }
   /** 章节高亮读取参考线的真实几何位置，不使用 locatedByte 的导航意图。 */
   get activeOutlineId(): string {
+    if (this.outlineNavigation && !this.outlineNavigation.aligned) return this.outlineNavigation.id;
     const headings = this.index?.outline;
     if (!headings?.length) return '';
     if (this.outlineNavigation && !this.outlineNavigation.aligned) return this.outlineNavigation.id;
@@ -345,6 +375,15 @@ export class MarkdownViewportHost {
     const target = this.outlineNavigation;
     if (!target) return false;
     this.outlineNavigation = undefined;
+    this.interruptRead?.();
+    cancelAnimationFrame(target.frame);
+    target.motionStarted?.(); target.motionStarted = undefined;
+    target.controller.abort();
+    this.scroll.style.overflowAnchor = target.overflowAnchor;
+    setNavigationRenderContext(this.target, undefined);
+    if (target.sample.status === 'preparing') target.sample.status = 'cancelled';
+    this.recordNavigation(target);
+    target.settle?.();
     if (this.preferredByte === target.byte) this.preferredByte = undefined;
     this.locatedByte = undefined;
     this.preferredFocus = false;
@@ -400,7 +439,20 @@ export class MarkdownViewportHost {
   };
   private onScroll = () => {
     if (this.programScroll !== undefined && Math.abs(this.scroll.scrollTop - this.programScroll) < 1) {
-      this.programScroll = undefined;
+      if (!this.outlineNavigation || this.outlineNavigation.animationDone) this.schedule();
+      return;
+    }
+    const target = this.outlineNavigation;
+    if (target?.kind === 'direct' && !target.aligned) {
+      // 实际输入已由前置意图事件取消；准备导致的浏览器几何调整仍保持原阅读锚点。
+      this.programScroll = this.scroll.scrollTop;
+      this.schedule();
+      return;
+    }
+    const maximum = Math.max(0, this.scroll.scrollHeight - this.scroll.clientHeight);
+    if (target && target.goal >= maximum && Math.abs(this.scroll.scrollTop - maximum) < 1) {
+      // 文末占位实测缩短时浏览器会截断 scrollTop；真实输入已由前置意图事件取消。
+      this.programScroll = this.scroll.scrollTop;
       this.schedule();
       return;
     }
@@ -462,6 +514,8 @@ export class MarkdownViewportHost {
   }
   private showFailure() {
     if (this.hidden || this.disposed) return;
+    if (this.outlineNavigation) this.outlineNavigation.sample.status = 'failed';
+    this.cancelOutlineNavigation();
     this.document.requestVisibleStructure(this, null);
     clearTimeout(this.preparationTimer); this.preparationTimer = undefined;
     this.invalidateStable();
@@ -511,29 +565,41 @@ export class MarkdownViewportHost {
     return { ...this.stats, mounted: this.mounted.length, cacheEntries: this.layoutCache.size,
       residentWindowBytes: this.mounted.reduce((sum, view) => sum + this.windowBytes(view), 0),
       cacheBytes: this.layoutCache.estimatedBytes, cacheHits: this.layoutCache.hits,
-      cacheMisses: this.layoutCache.misses, preparationMs: this.demand.preparationMs };
+      cacheMisses: this.layoutCache.misses, preparationMs: this.demand.preparationMs,
+      navigation: this.outlineNavigation ? this.copyNavigationSample(this.outlineNavigation.sample) : undefined,
+      navigations: this.navigationSamples.map(sample => this.copyNavigationSample(sample)) };
   }
   private windowBytes(view: Mounted) { return view.restricted ? 0 : view.window.toByte - view.window.fromByte; }
   private invalidateGeometry() {
     this.invalidateStable();
     this.layoutContext = '';
     this.layoutCache.clear();
-    for (const view of this.mounted) { view.layoutKey = undefined; this.dirty.add(view); }
+    for (const view of this.mounted) { view.layoutKey = undefined; this.markDirty(view); }
     this.schedule();
   }
   private onFont = () => { this.assetVersion++; this.invalidateGeometry(); };
-  private onAsset = () => { this.assetVersion++; this.invalidateGeometry(); };
+  private onAsset = (event: Event) => {
+    const view = this.mounted.find(view => event.target instanceof Node && view.element.contains(event.target));
+    if (!view) return;
+    this.invalidateStable();
+    if (view.layoutKey) this.layoutCache.delete(view.layoutKey);
+    if (this.index && view.from !== undefined && view.to !== undefined)
+      for (let i = view.from; i < view.to; i++) this.layoutCache.delete(this.blockLayoutKey(this.index.blocks[i]));
+    this.markDirty(view);
+    this.measureDirty();
+  };
   private onTableLayout = (event: Event) => {
     this.stats.tablePublications++;
     const view = this.mounted.find(view => event.target instanceof Node && view.element.contains(event.target));
-    if (view) { this.dirty.add(view); this.measureDirty(); }
+    if (view) { this.markDirty(view); this.measureDirty(); }
   };
   private blockLayoutKey(block: MarkdownStructureIndex['blocks'][number]) {
     if (this.mode === 'semantic' && block.mode === 'raw') return `restricted:${block.id}:${this.layoutContext}`;
     return `${block.id}:${block.contentVersion ?? block.version}:${block.sourceHash}:${JSON.stringify(block.references.map(key => this.index?.references[key]))}:${this.layoutContext}`;
   }
-  private captureAnchor() {
-    if (this.preferredByte !== undefined || !this.index) return undefined;
+  private captureAnchor(forDirect = false): ReadingAnchor | undefined {
+    if (!forDirect && this.outlineNavigation && !this.outlineNavigation.aligned) return undefined;
+    if ((!forDirect && this.preferredByte !== undefined && !this.outlineNavigation) || !this.index) return undefined;
     const index = this.heights.indexAt(this.localScrollTop);
     const block = this.index.blocks[index];
     if (!block) return undefined;
@@ -550,9 +616,11 @@ export class MarkdownViewportHost {
       fallback: this.localScrollTop - this.heights.top(this.blockPositions.get(hit.id) ?? index),
       generation: this.generation };
   }
-  private restoreAnchor(value: unknown) {
+  private restoreAnchor(value: unknown, forDirect = false) {
+    if (this.outlineNavigation && !forDirect) return;
     const anchor = value as ReturnType<MarkdownViewportHost['captureAnchor']>;
-    if (!anchor || anchor.generation !== this.generation || this.preferredByte !== undefined) return;
+    if (!anchor || anchor.generation !== this.generation ||
+      (!forDirect && this.preferredByte !== undefined && !this.outlineNavigation)) return;
     const index = this.blockPositions.get(anchor.id);
     if (index === undefined) return;
     const block = this.index!.blocks[index];
@@ -564,17 +632,29 @@ export class MarkdownViewportHost {
       : this.heights.top(index) + anchor.fallback;
     if (Math.abs(top - this.localScrollTop) >= 1) { this.stats.anchorCorrections++; this.scrollTo(top); }
   }
+  private markDirty(view: Mounted) {
+    view.measured = false;
+    this.dirty.add(view);
+    const target = this.outlineNavigation;
+    if (target && !target.aligned && target.context.targets.has(view.element)) {
+      target.ready = false;
+      target.context.ready = false;
+    }
+  }
   private measureDirty() {
     if (!this.dirty.size || this.hidden || this.disposed) return;
     this.layoutBatch.enqueue(this, () => {
+      const started = performance.now();
       const values = [...this.dirty].filter(view => this.mounted.includes(view)).map(view =>
         ({ view, height: view.element.offsetHeight, top: view.element.getBoundingClientRect().top,
           blocks: view.semantic?.core.measureStructureBlocks(), tables: view.semantic?.core.snapshotTableLayout() }));
       this.dirty.clear();
       this.stats.measurements += values.length;
+      if (this.outlineNavigation && !this.outlineNavigation.aligned) this.outlineNavigation.sample.measureMs += performance.now() - started;
       return values;
     }, values => {
       for (const { view, height, top, blocks, tables } of values) {
+        view.measured = height > 0;
         if (view.layoutKey && height > 0 && this.hasOriginalSource(view)) this.layoutCache.put(view.layoutKey, { height, tables });
         if (height < 1 || view.from === undefined || view.to === undefined || !this.index) continue;
         if (view.window.fromByte !== this.index.blocks[view.from]?.fromByte ||
@@ -601,6 +681,7 @@ export class MarkdownViewportHost {
         });
         if (changed) this.stats.heightChanges++;
       }
+      this.alignOutlineHeading();
       this.schedule();
     });
   }
@@ -975,6 +1056,7 @@ export class MarkdownViewportHost {
         index !== this.index ? this.captureAnchor() : undefined;
       this.layoutContext = context;
       const previousLength = this.heights.length;
+      const appendOnly = index === this.index && (index?.blocks.length ?? 0) >= previousLength;
       const structureChanged = index !== this.index || (index?.blocks.length ?? 0) !== previousLength || index?.blocks.at(-1) !== this.lastIndexedBlock;
       if (index !== this.index || (index?.blocks.length ?? 0) < previousLength || geometryChanged) {
         this.index = index;
@@ -987,15 +1069,23 @@ export class MarkdownViewportHost {
       for (let i = this.heights.length; i < (index?.blocks.length ?? 0); i++) this.heights.append(heightFor(index!.blocks[i]));
       this.lastIndexedBlock = index?.blocks.at(-1);
       if (structureChanged) {
+        const previousGroups = this.groups.length;
         this.groups = this.grouping.update(index?.blocks ?? []);
-        this.groupById = new Map(this.groups.map(group => [group.id, group]));
-        this.blockPositions = new Map(index?.blocks.map((block, i) => [block.id, i]) ?? []);
+        if (appendOnly) {
+          for (let i = Math.max(0, previousGroups - 1); i < this.groups.length; i++) this.groupById.set(this.groups[i].id, this.groups[i]);
+          for (let i = Math.max(0, previousLength - 1); i < (index?.blocks.length ?? 0); i++) this.blockPositions.set(index!.blocks[i].id, i);
+        } else {
+          this.groupById = new Map(this.groups.map(group => [group.id, group]));
+          this.blockPositions = new Map(index?.blocks.map((block, i) => [block.id, i]) ?? []);
+        }
       }
-      if (geometryChanged) for (const view of this.mounted) this.dirty.add(view);
+      if (geometryChanged) for (const view of this.mounted) this.markDirty(view);
       this.restoreAnchor(previousAnchor);
+      this.alignOutlineHeading();
+      const navigating = this.outlineNavigation && !this.outlineNavigation.aligned;
       const requestedByte = this.preferredByte ?? this.scrollByte;
-      let requestedTop: number | undefined;
-      if (requestedByte !== undefined && index) {
+      let requestedTop = navigating ? Math.max(0, (this.outlineNavigation!.goal - this.contentTop) / this.scale) : undefined;
+      if (requestedTop === undefined && requestedByte !== undefined && index) {
         const blockIndex = this.blockPositions.get(index.blockAt(requestedByte)?.id ?? '') ?? -1;
         if (blockIndex >= 0) {
           const block = index.blocks[blockIndex];
@@ -1004,7 +1094,7 @@ export class MarkdownViewportHost {
               ? (requestedByte - block.fromByte) / Math.max(1, block.toByte - block.fromByte)
               : 0;
           requestedTop = this.heights.top(blockIndex) + this.heights.height(blockIndex) * fraction;
-          this.scrollTo(requestedTop);
+          if (!this.outlineNavigation) this.scrollTo(requestedTop);
           if (this.mode === 'semantic' && block.mode === 'raw') this.preferredByte = requestedByte;
         }
       }
@@ -1034,38 +1124,46 @@ export class MarkdownViewportHost {
         if (this.mode === 'source') plans.push({ from: 0, to: 0, fromByte, toByte: Math.min(state.status.byteLength, fromByte + 16 * 1024), semantic: false, top: fromByte / 100 * 24, height: 16 * 1024 / 100 * 24 });
       } else if (index?.blocks.length) {
         const selected =
-          this.preferredByte === undefined ? this.selection() : { headByte: this.preferredByte };
+          this.outlineNavigation ? { headByte: this.outlineNavigation.byte } :
+            this.preferredByte === undefined ? this.selection() : { headByte: this.preferredByte };
         const pinned =
           this.target.contains(globalThis.document.activeElement) && selected
             ? [
                 this.blockPositions.get(index.blockAt(selected.headByte)?.id ?? '') ?? -1,
               ]
             : [];
+        // 只额外保留目标所在组，沿途仍按可见窗口准备，不把两点间的正文全部挂载。
+        const outlineBlock = this.outlineNavigation && this.blockPositions.get(index.blockAt(this.outlineNavigation.byte)?.id ?? '');
+        if (outlineBlock !== undefined) pinned.push(outlineBlock);
         const height = (this.scroll.clientHeight || 800) / this.scale;
         // 空宿主尚无可滚动高度，浏览器会截断 scrollTop；计划仍应覆盖目标位置。
         const top = requestedTop ?? this.localScrollTop;
         const demand = this.demand.range(height, performance.now());
+        if (navigating) demand.before = demand.after = 0;
         const pressure = this.mounted.length > MARKDOWN_VIEWPORT_POLICY.softViews ||
           this.mounted.reduce((sum, view) => sum + this.windowBytes(view), 0) > MARKDOWN_VIEWPORT_POLICY.softWindowBytes;
-        if (pressure) { demand.before = demand.after = height * 3; demand.retainBefore = demand.retainAfter = height * 3; }
+        if (pressure) { if (!navigating) demand.before = demand.after = height * 3; demand.retainBefore = demand.retainAfter = height * 3; }
         const from = this.heights.indexAt(Math.max(0, top - demand.before));
         const to = this.heights.indexAt(top + height + demand.after) + 1;
-        if (state.mountMode === 'progressive-full') {
+        if (state.mountMode === 'progressive-full' && !navigating) {
           this.expanded = Math.min(
             index.blocks.length,
             Math.max(this.expanded, to) + 16,
           );
         }
         const retained = new Set(this.mounted.filter(view => this.pinned(view) || (demand.scrolling && !pressure) ||
+          (navigating && view.groupId && this.outlineNavigation?.originGroups?.has(view.groupId)) ||
+          (this.outlineNavigation && !this.outlineNavigation.aligned && view.from !== undefined &&
+            this.heights.top(view.to!) > this.localScrollTop && this.heights.top(view.from) < this.localScrollTop + height) ||
           (view.from !== undefined && this.heights.top(view.to!) >= top - demand.retainBefore &&
             this.heights.top(view.from) <= top + height + demand.retainAfter)).map(view => view.groupId));
         // 二分定位空间候选；只额外查找已挂载/交互保护组，不在滚动热路径遍历全文块。
         const candidateIds = new Set(retained);
-        const wanted = state.mountMode === 'progressive-full' ? 0 : from;
+        const wanted = state.mountMode === 'progressive-full' && !navigating ? 0 : from;
         let low = 0, high = this.groups.length;
         while (low < high) { const middle = (low + high) >>> 1;
           if (this.groups[middle].to <= wanted) low = middle + 1; else high = middle; }
-        const end = state.mountMode === 'progressive-full' ? this.expanded : to;
+        const end = state.mountMode === 'progressive-full' && !navigating ? this.expanded : to;
         const candidates = new Map<string, MarkdownBlockGroup>();
         for (let i = low; i < this.groups.length && this.groups[i].from < end; i++) candidates.set(this.groups[i].id, this.groups[i]);
         for (const group of this.mountedGroups(candidateIds, pinned)) candidates.set(group.id, group);
@@ -1132,14 +1230,17 @@ export class MarkdownViewportHost {
           fromByte: view.window.fromByte, toByte: view.window.toByte, semantic: !!view.semantic, restricted: view.restricted,
           top: this.heights.top(from), height: this.heights.top(last + 1) - this.heights.top(from) });
       }
-      const viewportTop = this.localScrollTop;
+      const viewportTop = requestedTop ?? this.localScrollTop;
       const bottom = viewportTop + (this.scroll.clientHeight || 800) / this.scale;
       const distance = (plan: typeof plans[number]) => Math.max(0, plan.top - bottom, viewportTop - plan.top - plan.height);
-      plans.sort((a, b) => distance(a) - distance(b));
+      const targetByte = this.outlineNavigation?.byte;
+      const containsTarget = (plan: typeof plans[number]) => targetByte !== undefined && plan.fromByte <= targetByte && plan.toByte > targetByte ? 1 : 0;
+      plans.sort((a, b) => containsTarget(b) - containsTarget(a) || distance(a) - distance(b));
       const batchStart = performance.now();
       let createdCount = 0;
       const focused = this.focusAfterRemount || this.target.contains(globalThis.document.activeElement);
-      const selected = this.globalSelection
+      // 标题导航已有经过索引确认的全局坐标；调度不重复序列化表格来反算当前光标。
+      const selected = this.outlineNavigation ? { anchorByte: this.outlineNavigation.byte, headByte: this.outlineNavigation.byte } : this.globalSelection
         ? this.document.selection.selection
         : (this.selection() ?? this.document.selection.selection);
       for (const plan of plans) {
@@ -1154,7 +1255,8 @@ export class MarkdownViewportHost {
         );
         if (!view) {
           // 软预算优先释放远处保留带；可见区、基础缓冲和交互保护不被预算挤掉。
-          if (distance(plan) > ((this.scroll.clientHeight || 800) / this.scale) * 3 &&
+          if (!(this.outlineNavigation && plan.fromByte <= this.outlineNavigation.byte && plan.toByte > this.outlineNavigation.byte) &&
+            distance(plan) > ((this.scroll.clientHeight || 800) / this.scale) * 3 &&
             (next.length >= MARKDOWN_VIEWPORT_POLICY.softViews ||
              next.reduce((sum, view) => sum + this.windowBytes(view), 0) + (plan.restricted ? 0 : plan.toByte - plan.fromByte) > MARKDOWN_VIEWPORT_POLICY.softWindowBytes)) continue;
           // 屏内也遵守同一批次预算，先发布已准备的完整组，不等整屏准备完毕。
@@ -1163,16 +1265,28 @@ export class MarkdownViewportHost {
             continue;
           }
           const started = performance.now();
-          const window: DocumentWindow = plan.restricted ? {
+          let interrupt!: () => void;
+          const cancelled = new Promise<undefined>(resolve => { interrupt = () => resolve(undefined); });
+          this.interruptRead = interrupt;
+          const window: DocumentWindow | undefined = plan.restricted ? {
             documentId: state.status.documentId, revision: state.status.revision,
             fromByte: plan.fromByte, toByte: plan.toByte, text: '',
-          } : await this.document.port.readWindow(
+          } : await Promise.race([this.document.port.readWindow(
             state.status.documentId,
             state.status.revision,
             plan.fromByte,
             plan.toByte,
-          );
+          ), cancelled]);
+          const readFinished = performance.now();
+          if (this.interruptRead === interrupt) this.interruptRead = undefined;
+          const preparing = this.outlineNavigation;
+          if (window && preparing?.kind === 'animated' && preparing.elapsed === 0 && this.scroll.clientHeight > 0) {
+            // 读取与运动并行；新编辑器的同步构建放在首个运动帧之后的任务，避免挡住首次绘制。
+            await preparing.firstFrame;
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
+          }
           if (
+            !window ||
             this.disposed ||
             this.hidden ||
             generation !== this.generation ||
@@ -1180,6 +1294,8 @@ export class MarkdownViewportHost {
             this.document.state.status.revision !== state.status.revision
           )
             return;
+          const buildStarted = performance.now();
+          if (this.outlineNavigation && !this.outlineNavigation.aligned) this.outlineNavigation.sample.readMs += readFinished - started;
           const element = globalThis.document.createElement('div');
           element.className = 'markdown-session-window';
           view = { key, element, window, groupId: plan.groupId, signature: plan.signature };
@@ -1214,6 +1330,9 @@ export class MarkdownViewportHost {
                 if (this.hidden || this.disposed || !this.mounted.includes(view!)) return;
                 if (this.input) this.input.readOnly = !this.writable;
                 this.publishPresentation();
+                this.markDirty(view!);
+                this.measureDirty();
+                this.schedule();
                 if (view === this.active && this.focusAfterRemount && !this.pointerView && view!.semantic?.editable) this.focus();
               },
             });
@@ -1239,11 +1358,15 @@ export class MarkdownViewportHost {
           if (elapsed > MARKDOWN_VIEWPORT_POLICY.batchMs) this.stats.overBudget++;
           createdCount++;
           this.stats.created++;
+          if (this.outlineNavigation && !this.outlineNavigation.aligned) {
+            this.outlineNavigation.sample.created++;
+            this.outlineNavigation.sample.buildMs += performance.now() - buildStarted;
+          }
           view.semantic?.core.prepareTableViewport(this.scroll,
             (this.scroll.clientHeight || 800) * MARKDOWN_VIEWPORT_POLICY.forwardScreens);
           const saved = this.layoutCache.get(`${key}:${plan.signature ?? state.status.revision}:${this.layoutContext}`);
           if (saved?.tables && view.semantic?.core.restoreTableLayout(saved.tables)) this.stats.tableRestores++;
-          this.dirty.add(view);
+          this.markDirty(view);
           this.observer?.observe(view.element);
         }
         view.from = plan.from;
@@ -1281,7 +1404,7 @@ export class MarkdownViewportHost {
         next.every((view, i) => view === this.mounted[i]) &&
         layout === this.installedLayout;
       if (unchanged) {
-        if (requestedTop !== undefined) { this.scrollTo(requestedTop); this.scrollByte = undefined; }
+        if (requestedTop !== undefined && !this.outlineNavigation) { this.scrollTo(requestedTop); this.scrollByte = undefined; }
         this.finishPreparation();
         if (!this.hasVisibleContent()) this.requestPreparation();
         this.measureDirty();
@@ -1290,9 +1413,10 @@ export class MarkdownViewportHost {
         return;
       }
       this.installedLayout = layout;
+      const navigationScroll = this.outlineNavigation?.kind === 'animated' ? this.scroll.scrollTop : undefined;
       this.stats.batches++;
       this.stats.ranges++;
-      const anchor = requestedTop === undefined ? this.captureAnchor() : undefined;
+      const anchor = requestedTop === undefined || this.outlineNavigation ? this.captureAnchor() : undefined;
       for (const view of this.mounted) if (!next.includes(view)) this.destroyView(view);
       const desired: Node[] = [];
       const neededSpacers = new Set<string>();
@@ -1329,8 +1453,9 @@ export class MarkdownViewportHost {
         }
       }
       this.mounted = next;
+      this.refreshNavigationTargets();
       // 正文及占位高度安装后再次应用同一目标，避免新建源码栏停在文首。
-      if (requestedTop !== undefined) { this.scrollTo(requestedTop); this.scrollByte = undefined; }
+      if (requestedTop !== undefined && !this.outlineNavigation) { this.scrollTo(requestedTop); this.scrollByte = undefined; }
       this.publishPresentation();
       for (const view of next) view.semantic?.activate();
       this.finishPreparation();
@@ -1338,14 +1463,15 @@ export class MarkdownViewportHost {
       this.stats.peakMounted = Math.max(this.stats.peakMounted, next.length);
       this.restoreAnchor(anchor);
       this.measureDirty();
-      this.active =
+      const preparingDirect = this.outlineNavigation?.kind === 'direct' && !this.outlineNavigation.aligned;
+      if (!preparingDirect) this.active =
         next.find(
           (view) =>
             selected &&
             selected.headByte >= view.window.fromByte &&
             selected.headByte <= view.window.toByte,
         ) ?? next[0];
-      if (this.active && selected && !this.pinned(this.active) && created.includes(this.active)) {
+      if (!this.outlineNavigation && this.active && selected && !this.pinned(this.active) && created.includes(this.active)) {
         const selection = {
           anchorByte: Math.max(
             this.active.window.fromByte,
@@ -1359,17 +1485,19 @@ export class MarkdownViewportHost {
         this.active.source?.restoreSelection(selection);
         this.active.semantic?.core.restoreSourceSelection(selection);
       }
-      if (
+      if (!preparingDirect && (
         focused ||
         !globalThis.document.activeElement ||
         globalThis.document.activeElement === globalThis.document.body
-      )
+      ))
         this.callbacks.onActive(this.active?.semantic?.core, this.active?.source);
-      if (focused && (this.focusAfterRemount || this.target.contains(globalThis.document.activeElement)) &&
+      if (!preparingDirect && focused && (this.focusAfterRemount || this.target.contains(globalThis.document.activeElement)) &&
         this.active && created.includes(this.active)) this.focus();
+      if (navigationScroll !== undefined)
+        this.scrollTo((navigationScroll - this.contentTop) / this.scale);
       if (this.globalSelection) this.paintSelection();
       this.publishPresentation();
-      if (state.mountMode === 'progressive-full' && this.expanded < (index?.blocks.length ?? 0))
+      if (!navigating && state.mountMode === 'progressive-full' && this.expanded < (index?.blocks.length ?? 0))
         this.again = true;
       this.restorePreferred();
       if (performance.now() - this.demand.lastScroll >= MARKDOWN_VIEWPORT_POLICY.quietMs)
@@ -1423,12 +1551,17 @@ export class MarkdownViewportHost {
     this.scrollByte = byte;
     this.schedule();
   }
-  async reveal(byte: number, focus = false, alignment: 'selection' | 'outline' = 'selection') {
+  private isOutlineTargetLoaded(byte: number) {
+    return this.mounted.some(view => byte >= view.window.fromByte && byte < view.window.toByte &&
+      view.window.revision === this.document.state.status.revision && view.element.isConnected &&
+      (!!view.semantic?.bodyReady || (!!view.source && !view.source.bridge.isStale)));
+  }
+  async reveal(byte: number, focus = false, alignment: 'selection' | 'outline' = 'selection',
+    clock: OutlineNavigationClock = { requestedAt: performance.now() }) {
     this.cancelOutlineNavigation();
+    this.interruptRead?.();
     const heading = alignment === 'outline' ? this.document.state.index?.outline.find(item => item.byte === byte) : undefined;
-    if (heading) this.outlineNavigation = { id: heading.id, byte, revision: this.document.state.status.revision, aligned: false };
     this.locatedByte = byte;
-    // 在异步等待前登记意图，等待期间的外部焦点事件可以撤销它。
     this.preferredFocus = focus;
     this.document.requestVisibleStructure(this, null);
     this.invalidateStable();
@@ -1441,30 +1574,224 @@ export class MarkdownViewportHost {
     this.removeInput();
     this.clearSelectionPaint();
     this.preferredByte = byte;
+    let completion: Promise<void> | undefined;
+    if (heading) {
+      const targetLoaded = this.isOutlineTargetLoaded(byte);
+      const windowLimited = this.document.state.mountMode === 'windowed' && this.document.state.windowLimited;
+      const kind = windowLimited && !targetLoaded ? 'direct' : 'animated';
+      if (kind === 'animated') clock.startedAt ??= performance.now();
+      const startedAt = kind === 'animated' ? clock.startedAt! : performance.now();
+      this.scrollByte = undefined;
+      let settle!: () => void;
+      completion = new Promise<void>(resolve => { settle = resolve; });
+      const reduced = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const duration = kind === 'animated' ? (reduced ? 140 : 260) : undefined;
+      const controller = new AbortController();
+      let motionStarted: (() => void) | undefined;
+      const firstFrame = kind === 'animated' ? new Promise<void>(resolve => { motionStarted = resolve; }) : undefined;
+      const sample: OutlineNavigationSample = { revision: this.document.state.status.revision, byte, duration,
+        kind, windowLimited, targetLoaded, requestedAt: clock.requestedAt,
+        inputGateMs: startedAt - clock.requestedAt, readMs: 0, buildMs: 0, measureMs: 0, created: 0,
+        pendingEnhancements: 0, deferred: { code: 0, typography: 0, diagram: 0 },
+        deadlineMiss: kind === 'animated' ? false : undefined, status: 'preparing' };
+      const deferred = { code: new WeakSet<HTMLElement>(), typography: new WeakSet<HTMLElement>(), diagram: new WeakSet<HTMLElement>() };
+      const originTop = this.localScrollTop, originBottom = originTop + (this.scroll.clientHeight || 800) / this.scale;
+      const target: OutlineNavigation = { kind, id: heading.id, byte, revision: sample.revision, aligned: false,
+        originAnchor: kind === 'direct' ? this.captureAnchor(true) : undefined,
+        originGroups: kind === 'direct' ? new Set(this.mounted.filter(view => view.groupId && view.from !== undefined &&
+          this.heights.top(view.to!) > originTop && this.heights.top(view.from) < originBottom).map(view => view.groupId!)) : undefined,
+        overflowAnchor: this.scroll.style.overflowAnchor,
+        startedAt, goal: this.scroll.scrollTop,
+        elapsed: 0, initialTop: this.scroll.scrollTop, frame: 0, animationDone: false, ready: false, recorded: false,
+        firstFrame, motionStarted,
+        controller, sample, settle, context: {
+          revision: sample.revision, generation: navigation,
+          deadline: duration === undefined ? undefined : startedAt + duration, preparationOnly: kind === 'direct',
+          signal: controller.signal, ready: false, targets: new Set(),
+          viewport: () => { const top = this.scroll.getBoundingClientRect().top + target.goal - this.scroll.scrollTop;
+            return { top, bottom: top + this.scroll.clientHeight }; },
+          deferred: (kind, element) => {
+            if (!deferred[kind].has(element)) { deferred[kind].add(element); sample.deferred[kind]++; }
+          },
+          started: () => {
+            sample.pendingEnhancements++;
+            let finished = false;
+            return () => { if (finished) return; finished = true; sample.pendingEnhancements--;
+              if (!controller.signal.aborted && !sample.pendingEnhancements)
+                sample.enhancementMs = performance.now() - target.startedAt;
+            };
+          },
+        } };
+      this.outlineNavigation = target;
+      this.scroll.style.overflowAnchor = 'none';
+      const block = this.index?.blockAt(byte);
+      const position = block && this.blockPositions.get(block.id);
+      if (position !== undefined) target.goal = Math.max(0, Math.min(this.scroll.scrollHeight - this.scroll.clientHeight,
+        this.contentTop + this.heights.top(position) * this.scale - getOutlineViewportOffset(this.scroll.clientHeight)));
+      this.refreshNavigationTargets();
+      if (kind === 'animated') target.frame = requestAnimationFrame(this.advanceOutlineMotion);
+      this.document.interacting();
+      this.publishOutlinePosition();
+    }
+    // 先登记导航策略（动画分支同时启动时钟），再读取目标；旧读取不允许发布。
     if (this.busy) await this.renderDone;
     if (navigation !== this.navigation || this.disposed || this.hidden) return;
     await this.render();
     const view = this.active;
-    if (view?.semantic && byte >= view.window.fromByte && byte <= view.window.toByte)
+    if (!heading && view?.semantic && byte >= view.window.fromByte && byte <= view.window.toByte)
       await view.semantic.whenReady;
     if (navigation !== this.navigation || this.disposed || this.hidden) return;
     this.alignOutlineHeading();
     if (this.preferredByte !== undefined) this.schedule();
+    if (this.scroll.clientHeight > 0) await completion;
+  }
+  private copyNavigationSample(sample: OutlineNavigationSample): OutlineNavigationSample {
+    return { ...sample, deferred: { ...sample.deferred } };
+  }
+  private recordNavigation(target: OutlineNavigation) {
+    if (target.recorded) return;
+    target.recorded = true;
+    this.navigationSamples.push(target.sample);
+    if (this.navigationSamples.length > 32) this.navigationSamples.shift();
+  }
+  private refreshNavigationTargets() {
+    const target = this.outlineNavigation;
+    if (!target || target.aligned) return;
+    const top = Math.max(0, (target.goal - this.contentTop) / this.scale);
+    const bottom = top + (this.scroll.clientHeight || 800) / this.scale;
+    const targets = new Set(this.mounted.filter(view => view.from !== undefined &&
+      this.heights.top(view.to!) > top && this.heights.top(view.from) < bottom).map(view => view.element));
+    const ready = target.kind === 'animated' && target.ready && target.elapsed > 0;
+    if (target.context.ready === ready && target.notifiedGoal === target.goal &&
+      targets.size === target.context.targets.size && [...targets].every(element => target.context.targets.has(element))) return;
+    target.context.targets = targets;
+    target.notifiedGoal = target.goal;
+    target.context.ready = ready;
+    setNavigationRenderContext(this.target, target.context);
   }
   private alignOutlineHeading() {
     const target = this.outlineNavigation;
     if (!target) return;
     if (target.revision !== this.document.state.status.revision) { this.cancelOutlineNavigation(); return; }
+    if (target.kind === 'direct' && !target.aligned) {
+      this.restoreAnchor(target.originAnchor, true);
+      const view = this.mounted.find(view => target.byte >= view.window.fromByte && target.byte < view.window.toByte);
+      if (view?.restricted) {
+        target.sample.status = 'restricted';
+        this.cancelOutlineNavigation();
+        this.callbacks.onFailure(new Error('目标内容暂不支持排版显示。'));
+        return;
+      }
+    }
     const top = this.headingTop(target.byte, target.id);
     if (top === undefined || this.scroll.clientHeight <= 0) return;
     const delta = top - this.scroll.getBoundingClientRect().top - getOutlineViewportOffset(this.scroll.clientHeight);
-    const moved = Math.abs(delta) >= 1;
-    const firstAlignment = !target.aligned;
-    if (moved) this.scrollTo((this.scroll.scrollTop + delta - this.contentTop) / this.scale);
+    target.goal = Math.max(0, Math.min(this.scroll.scrollHeight - this.scroll.clientHeight, this.scroll.scrollTop + delta));
+    const localGoal = Math.max(0, (target.goal - this.contentTop) / this.scale);
+    if (target.kind === 'direct' && !target.aligned) {
+      const bottom = Math.min(localGoal + this.scroll.clientHeight / this.scale, this.heights.totalHeight);
+      if (this.mounted.some(view => view.restricted && view.from !== undefined &&
+        this.heights.top(view.to!) > localGoal && this.heights.top(view.from) < bottom)) {
+        target.sample.status = 'restricted';
+        this.cancelOutlineNavigation();
+        this.callbacks.onFailure(new Error('目标首屏包含暂不支持排版显示的内容。'));
+        return;
+      }
+    }
+    const ready = this.outlineViewportCovered(localGoal);
+    if (!target.aligned) {
+      if (ready && !target.ready) target.sample.basicReadyMs = performance.now() - target.startedAt;
+      target.ready = ready;
+      this.refreshNavigationTargets();
+    }
+    if (target.kind === 'direct' && !target.aligned) {
+      if (ready && !target.frame) target.frame = requestAnimationFrame(() => this.commitDirectNavigation(target));
+      return;
+    }
+    if (target.animationDone) {
+      if (Math.abs(target.goal - this.scroll.scrollTop) >= 1) this.scrollTo(localGoal);
+      if (ready && !target.aligned) {
+        this.finishOutlineNavigation(target);
+      }
+    }
+  }
+  private commitDirectNavigation(target: OutlineNavigation) {
+    if (this.outlineNavigation !== target || target.controller.signal.aborted || this.hidden || this.disposed) return;
+    // 保留 frame 标识直到校验结束，避免 align 在本次回调内重复安排定位。
+    this.alignOutlineHeading();
+    target.frame = 0;
+    if (this.outlineNavigation !== target || !target.ready) return;
+    target.animationDone = true;
+    this.scrollTo(Math.max(0, (target.goal - this.contentTop) / this.scale));
+    this.finishOutlineNavigation(target);
+    this.restorePreferred();
+    this.publishOutlinePosition();
+  }
+  private finishOutlineNavigation(target: OutlineNavigation) {
     target.aligned = true;
-    if (moved || firstAlignment) this.readingAnchor = this.captureAnchor();
+    target.originAnchor = undefined;
+    target.originGroups = undefined;
+    target.sample.positionedMs = performance.now() - target.sample.requestedAt;
+    target.sample.status = target.sample.deadlineMiss ? 'late' : 'ready';
+    this.recordNavigation(target);
+    // 通知增强观察者可能启动工作，留给普通调度任务，避免挤入动画最后一帧。
+    queueMicrotask(() => {
+      target.context.targets = new Set();
+      if (this.outlineNavigation === target) setNavigationRenderContext(this.target, undefined, true);
+    });
+    target.settle?.(); target.settle = undefined;
+    this.schedule();
+  }
+  private advanceOutlineMotion = () => {
+    const target = this.outlineNavigation;
+    if (!target || target.kind !== 'animated' || target.animationDone || this.hidden || this.disposed) return;
+    target.frame = 0;
+    const now = performance.now();
+    const duration = target.sample.duration!;
+    const elapsed = Math.min(duration, Math.max(0, now - target.startedAt));
+    const remaining = duration - target.elapsed;
+    const fraction = remaining > 0 ? 1 - Math.pow((duration - elapsed) / remaining, 3) : 1;
+    const next = this.scroll.scrollTop + (target.goal - this.scroll.scrollTop) * fraction;
+    this.scrollTo((next - this.contentTop) / this.scale);
+    if (target.sample.firstMotionMs === undefined && Math.abs(this.scroll.scrollTop - target.initialTop) >= 1)
+      target.sample.firstMotionMs = now - target.startedAt;
+    this.readingAnchor = undefined;
+    target.elapsed = elapsed;
+    if (target.motionStarted) {
+      target.motionStarted(); target.motionStarted = undefined;
+      markdownWorkScheduler.enqueue(this, 'navigation-enhancements', MarkdownTaskPriority.VisibleText, () => this.refreshNavigationTargets());
+    }
+    if (elapsed >= duration) {
+      target.animationDone = true;
+      target.sample.animationMs = now - target.startedAt;
+      target.sample.deadlineMiss = !target.ready || (target.sample.basicReadyMs ?? Infinity) > duration;
+      if (target.ready) this.finishOutlineNavigation(target);
+      // 局部几何测量和正文就绪检查由调度批次执行，动画帧只写滚动位置。
+      this.schedule();
+      return;
+    }
+    target.frame = requestAnimationFrame(this.advanceOutlineMotion);
+  };
+  private outlineViewportCovered(top: number) {
+    let through = Math.max(0, top);
+    const bottom = Math.min(through + (this.scroll.clientHeight || 800) / this.scale, this.heights.totalHeight);
+    if (bottom <= through) return false;
+    for (const view of this.mounted) {
+      if (view.from === undefined || view.to! <= view.from || this.heights.top(view.to!) <= through) continue;
+      if (this.heights.top(view.from) > through + 1) break;
+      if (!view.measured || !view.element.isConnected || view.window.revision !== this.document.state.status.revision ||
+        (view.semantic && !view.semantic.bodyReady) || view.source?.bridge.isStale) return false;
+      through = Math.max(through, this.heights.top(view.to!));
+      if (through >= bottom - 1) return true;
+    }
+    return false;
   }
   private restorePreferred() {
+    if (this.outlineNavigation?.kind === 'direct' && !this.outlineNavigation.aligned) {
+      this.alignOutlineHeading();
+      this.publishOutlinePosition();
+      return;
+    }
     const byte = this.preferredByte;
     if (byte === undefined) { this.alignOutlineHeading(); this.publishOutlinePosition(); return; }
     const view = this.mounted.find(
@@ -1537,6 +1864,7 @@ export class MarkdownViewportHost {
   async setHidden(hidden: boolean) {
     if (this.hidden === hidden) return;
     this.cancelOutlineNavigation();
+    this.interruptRead?.();
     this.hidden = hidden;
     this.document.requestVisibleStructure(this, null);
     this.invalidateStable();
@@ -1565,6 +1893,7 @@ export class MarkdownViewportHost {
   async dispose() {
     if (this.disposed) return;
     this.cancelOutlineNavigation();
+    this.interruptRead?.();
     this.hidden = true;
     this.document.requestVisibleStructure(this, null);
     this.invalidateStable();
@@ -1578,6 +1907,7 @@ export class MarkdownViewportHost {
     markdownWorkScheduler.cancel(this);
     this.layoutCache.clear();
     this.grouping.clear();
+    this.navigationSamples.length = 0;
     this.groups = [];
     this.groupById.clear();
     this.blockPositions.clear();

@@ -5,7 +5,7 @@ import { onInterfaceLocaleChanged, t } from '../../../app/i18n';
 import { getDiagramRenderer } from '../renderers';
 import type { MermaidThemeDefinition } from '../../theme/types';
 import { registerActiveEdit, unregisterActiveEdit } from './activeEditRegistry';
-import { observeRenderVisibility, preserveRenderScrollAnchor } from './renderVisibility';
+import { observeRenderVisibility, preserveRenderScrollAnchor, trackNavigationEnhancement } from './renderVisibility';
 import {
   bindMermaidFullscreen,
   bindMermaidViewport,
@@ -79,7 +79,7 @@ export class MermaidBlockNodeView {
         this.clearPendingRender();
         this.themeDirty = true;
       }
-    });
+    }, 'diagram', () => !this.editing && (this.themeDirty || this.renderedCode !== this.node.attrs.code));
 
     this.dom.addEventListener('click', (event) => {
       if (
@@ -304,6 +304,8 @@ export class MermaidBlockNodeView {
 
     const controller = new AbortController();
     this.renderAbort = controller;
+    const finishNavigationEnhancement = !force
+      ? trackNavigationEnhancement(this.dom, 'diagram', controller) : () => {};
     return this.trackPendingRender((async () => {
       try {
         const result = await renderer.renderMermaid(code, { theme: this.getTheme(), signal: controller.signal });
@@ -319,7 +321,7 @@ export class MermaidBlockNodeView {
         this.renderError(error instanceof Error ? error.message : t.mermaidRenderFailed(), code);
         this.renderedCode = code;
       }
-    })());
+    })().finally(finishNavigationEnhancement));
   }
 
   private enterEdit(caret: 'start' | 'end' = 'start'): boolean {

@@ -16,7 +16,23 @@ export interface MarkdownBlockGroup extends MarkdownMountRange {
 export class MarkdownStableGroups {
   private groups: MarkdownBlockGroup[] = [];
   private serial = 0;
+  private indexedBlocks: readonly MarkdownStructureBlock[] | undefined;
+  private indexedLength = 0;
+  private lastBlock: MarkdownStructureBlock | undefined;
   update(blocks: readonly MarkdownStructureBlock[]): readonly MarkdownBlockGroup[] {
+    // 同一索引只会追加或延长尾块；已发布组仍封口，不再扫描已确认前缀。
+    if (blocks === this.indexedBlocks && blocks.length >= this.indexedLength) {
+      const tail = this.groups.at(-1);
+      if (this.indexedLength && blocks[this.indexedLength - 1]?.id !== this.lastBlock?.id) {
+        // 身份改变由完整匹配路径处理，不能用追加假设掩盖索引替换。
+      } else {
+        if (tail && blocks[this.indexedLength - 1] !== this.lastBlock)
+          this.groups[this.groups.length - 1] = { ...tail };
+        this.append(blocks, this.indexedLength);
+        this.remember(blocks);
+        return this.groups;
+      }
+    }
     const old = new Map(this.groups.map(group => [group.blockIds[0], group]));
     const next: MarkdownBlockGroup[] = [];
     for (let from = 0; from < blocks.length;) {
@@ -36,9 +52,25 @@ export class MarkdownStableGroups {
         blockIds: blocks.slice(from, to).map(block => block.id) });
       from = to;
     }
-    return this.groups = next;
+    this.groups = next;
+    this.remember(blocks);
+    return this.groups;
   }
-  clear() { this.groups = []; }
+  private append(blocks: readonly MarkdownStructureBlock[], start: number) {
+    for (let from = start; from < blocks.length;) {
+      let to = from + 1;
+      while (to < blocks.length && blocks[from].mode === 'semantic' && blocks[to].mode === 'semantic' &&
+        to - from < MARKDOWN_VIEWPORT_POLICY.groupBlocks &&
+        blocks[to].toByte - blocks[from].fromByte <= MARKDOWN_VIEWPORT_POLICY.groupBytes) to++;
+      this.groups.push({ id: `group-${++this.serial}`, from, to, visible: false,
+        blockIds: blocks.slice(from, to).map(block => block.id) });
+      from = to;
+    }
+  }
+  private remember(blocks: readonly MarkdownStructureBlock[]) {
+    this.indexedBlocks = blocks; this.indexedLength = blocks.length; this.lastBlock = blocks.at(-1);
+  }
+  clear() { this.groups = []; this.indexedBlocks = undefined; this.indexedLength = 0; this.lastBlock = undefined; }
 }
 
 /** 只保存标量和最近 32 次耗时；程序定位及大幅离散跳转不参与速度预测。 */
