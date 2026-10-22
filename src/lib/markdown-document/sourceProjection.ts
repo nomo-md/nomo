@@ -7,7 +7,7 @@ import {
 } from '../editor-core/markdown';
 import { removeEmptyTrailingParagraph } from '../editor-core/plugins/trailingParagraph';
 import { getSourceTextChanges } from './textChanges';
-import { utf16ToUtf8 } from './utf8Text';
+import { utf16ToUtf8, utf8ToUtf16 } from './utf8Text';
 import type { SourceEdit } from './protocol';
 
 type TextChange = ReturnType<typeof getSourceTextChanges>[number];
@@ -72,6 +72,9 @@ export interface SourceProjectionChange {
 export class MarkdownSourceProjection {
   private readonly canonical: string;
   private readonly toSource: TextChange[];
+  // 只缓存当前不可变局部文档的标量坐标，最多各 32 项；随视图/修订释放，不保留 DOM。
+  private readonly bytePositions = new Map<number, number | null>();
+  private readonly positionBytes = new Map<number, number | null>();
   constructor(
     readonly source: string,
     readonly doc: ProseMirrorNode,
@@ -87,39 +90,49 @@ export class MarkdownSourceProjection {
     if (byte === this.fromByte) return 0;
     if (byte === this.fromByte + utf16ToUtf8(this.source, this.source.length))
       return this.doc.content.size;
+    const relative = byte - this.fromByte;
+    if (this.bytePositions.has(relative)) return this.bytePositions.get(relative)!;
     let found: number | null = null;
-    this.doc.descendants((node, start) => {
-      if (found !== null || !node.isText) return found === null;
-      let low = start;
-      let high = start + node.nodeSize;
-      while (low <= high) {
-        let middle = Math.floor((low + high) / 2);
-        const textOffset = middle - start;
-        if (
-          textOffset > 0 &&
-          /[\uD800-\uDBFF]/.test(node.text![textOffset - 1]) &&
-          /[\uDC00-\uDFFF]/.test(node.text![textOffset] ?? '')
-        )
-          middle--;
-        const mapped = this.positionToByte(middle);
-        if (mapped === byte) {
-          found = middle;
-          break;
-        }
-        if (mapped === null) break;
-        if (mapped < byte)
-          low = Math.max(
-            low + 1,
-            middle + (node.text!.codePointAt(middle - start)! > 0xffff ? 2 : 1),
-          );
-        else high = middle - 1;
+    try {
+      const offset = utf8ToUtf16(this.source, relative);
+      if (!completeBoundary(this.source, offset)) return null;
+      // 从唯一原文位置正向解析一次，避免对每个文本节点二分并反复序列化整个窗口。
+      // 标记只存在于临时字符串/不可变节点中，绝不进入正文、事务或撤销历史。
+      const marker = `NOMOCARET${globalThis.crypto.randomUUID().replace(/-/g, '')}`;
+      const marked = parseMarkdown(this.source.slice(0, offset) + marker + this.source.slice(offset), this.context);
+      marked.descendants((node, start) => {
+        if (found !== null) return false;
+        const index = node.isText ? node.text!.indexOf(marker) : -1;
+        if (index >= 0) found = start + index;
+      });
+      if (found !== null) {
+        const restored = marked.replace(found, found + marker.length, Slice.empty);
+        // 语法符号、链接地址等位置不能误当正文；去掉标记后必须仍是完全相同的语义文档。
+        if (!removeEmptyTrailingParagraph(restored).eq(removeEmptyTrailingParagraph(this.doc))) found = null;
       }
-      return false;
-    });
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+    }
+    this.remember(this.bytePositions, relative, found);
     return found;
   }
 
   positionToByte(position: number): number | null {
+    if (this.positionBytes.has(position)) {
+      const relative = this.positionBytes.get(position)!;
+      return relative === null ? null : this.fromByte + relative;
+    }
+    const byte = this.resolvePositionByte(position);
+    this.remember(this.positionBytes, position, byte === null ? null : byte - this.fromByte);
+    return byte;
+  }
+
+  private remember(cache: Map<number, number | null>, key: number, value: number | null) {
+    if (cache.size >= 32) cache.delete(cache.keys().next().value!);
+    cache.set(key, value);
+  }
+
+  private resolvePositionByte(position: number): number | null {
     if (position < 0 || position > this.doc.content.size) return null;
     const resolved = this.doc.resolve(position);
     if (resolved.parent.inlineContent) {

@@ -242,7 +242,7 @@ export class ProseMirrorEditorCore implements EditorCore {
   restoreSourceSelection(selection: DocumentSelection): boolean {
     if (!this.sourceProjection) return false;
     const anchor = this.sourceProjection.byteToPosition(selection.anchorByte);
-    const head = this.sourceProjection.byteToPosition(selection.headByte);
+    const head = selection.anchorByte === selection.headByte ? anchor : this.sourceProjection.byteToPosition(selection.headByte);
     if (anchor === null || head === null) return false;
     const state = this.view?.state ?? this.suspendedState;
     if (!state) return false;

@@ -40,6 +40,8 @@ export class MarkdownApplicationSession {
   private source?: MarkdownSourceWindow;
   private semanticHost?: MarkdownViewportHost;
   private sourceHost?: MarkdownViewportHost;
+  private semanticReadingPosition?: ReturnType<MarkdownViewportHost['captureReadingPosition']>;
+  private sourceReadingPosition?: ReturnType<MarkdownViewportHost['captureReadingPosition']>;
   private listeners = new Set<(event: EditorChangeEvent) => void>();
   private disposed = false;
   private detaching?: Promise<void>;
@@ -355,6 +357,8 @@ export class MarkdownApplicationSession {
       this.semanticHost.scrollToByte(
         this.tab.globalScrollAnchor?.byteOffset ?? doc.selection.selection.headByte,
       );
+      this.semanticHost.restoreReadingPosition(this.semanticReadingPosition);
+      this.semanticReadingPosition = undefined;
     }
     if (this.sourceTarget && !this.sourceHost) {
       this.clearOpening(this.sourceTarget);
@@ -368,6 +372,8 @@ export class MarkdownApplicationSession {
       this.sourceHost.scrollToByte(
         this.tab.globalScrollAnchor?.byteOffset ?? doc.selection.selection.headByte,
       );
+      this.sourceHost.restoreReadingPosition(this.sourceReadingPosition);
+      this.sourceReadingPosition = undefined;
     }
     await this.semanticHost?.setHidden(this.viewMode === 'source');
     await this.sourceHost?.setHidden(this.viewMode === 'semantic');
@@ -391,6 +397,7 @@ export class MarkdownApplicationSession {
       this.sourceTarget = undefined;
       this.source = undefined;
       const host = this.sourceHost;
+      this.sourceReadingPosition = host?.captureReadingPosition() ?? this.sourceReadingPosition;
       this.sourceHost = undefined;
       this.teardown = this.teardown.then(() => host?.dispose());
       void this.teardown.catch(this.onFailure);
@@ -443,6 +450,7 @@ export class MarkdownApplicationSession {
       (this.source ? this.sourceHost : this.semanticHost)?.position ?? this.tab.globalScrollAnchor;
     this.semanticTarget = undefined;
     const host = this.semanticHost;
+    this.semanticReadingPosition = host?.captureReadingPosition() ?? this.semanticReadingPosition;
     this.semanticHost = undefined;
     this.teardown = this.teardown.then(() => host?.dispose());
     await this.teardown;

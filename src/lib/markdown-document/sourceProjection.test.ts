@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { EditorState } from 'prosemirror-state';
 import { parseMarkdown } from '../editor-core/markdown';
 import { MarkdownSourceProjection } from './sourceProjection';
@@ -92,5 +92,55 @@ describe('语义窗口的源文写回', () => {
       expect(restored).not.toBeNull();
       expect(projection.positionToByte(restored!)).toBe(byte);
     }
+  });
+
+  it.each([
+    '前😀 **粗体** *斜体* ~~删除~~ `行内代码` [链接][x]\r\n\r\n[x]: https://example.com\n',
+    '> 引用中文\r\n> 第二行\r\n\r\n- 列表\n  - 嵌套😀\n',
+    '| 列一 | 列二 |\n| --- | --- |\n| 重复文字 | **重复文字** |\n| 中文😀 | a\\|b |\n',
+    '~~~js\r\nconst 中文 = "😀";\r\n~~~\r\n\r\n尾部',
+    '转义 \\*星号\\* &amp; &#32; 空格  \n下一行\n\n![图片](image.png)\n\n尾段',
+    '> [!NOTE]\n> 提示正文\n\n<details>\n<summary>摘要</summary>\n\n里面正文\n\n</details>\n',
+  ])('重新挂载后逐个恢复文本光标，保留格式、重复内容及 Unicode：%s', source => {
+    const doc = parseMarkdown(source);
+    const before = new MarkdownSourceProjection(source, doc, 123);
+    const after = new MarkdownSourceProjection(source, parseMarkdown(source), 123);
+    doc.descendants((node, start) => {
+      if (!node.isText) return;
+      for (let offset = 0; offset <= node.nodeSize; offset++) {
+        if (offset && /[\uD800-\uDBFF]/.test(node.text![offset - 1]) && /[\uDC00-\uDFFF]/.test(node.text![offset] ?? '')) continue;
+        const byte = before.positionToByte(start + offset);
+        if (byte === null) continue;
+        const restored = after.byteToPosition(byte);
+        expect(restored, `source byte ${byte}, PM ${start + offset}`).not.toBeNull();
+        expect(after.positionToByte(restored!)).toBe(byte);
+      }
+    });
+  });
+
+  it('深表格定位不再为每个候选反复投影，缓存只保留有界标量并支持窗口重定位', () => {
+    const source = '| 列 | 内容 |\n| --- | --- |\n' + Array.from({ length: 400 }, (_, i) => `| ${i} | 正文😀${i} |\n`).join('');
+    const projection = new MarkdownSourceProjection(source, parseMarkdown(source), 100);
+    const project = vi.spyOn(projection, 'project');
+    const byte = new TextEncoder().encode(source.slice(0, source.indexOf('正文😀398'))).length;
+    const pos = projection.byteToPosition(100 + byte);
+    expect(pos).not.toBeNull();
+    expect(project).not.toHaveBeenCalled();
+    expect(projection.positionToByte(pos!)).toBe(100 + byte);
+    projection.fromByte = 500;
+    expect(projection.byteToPosition(500 + byte)).toBe(pos);
+    expect(projection.positionToByte(pos!)).toBe(500 + byte);
+    for (let i = 0; i < 100; i++) projection.byteToPosition(500 + i);
+    expect((projection as any).bytePositions.size).toBeLessThanOrEqual(32);
+  });
+
+  it('拒绝 Unicode、CRLF 和格式语法内部的无效落点，不修改原文', () => {
+    const source = '前😀后\r\n\r\n**粗体** [文字](https://example.com)';
+    const projection = new MarkdownSourceProjection(source, parseMarkdown(source));
+    expect(projection.byteToPosition(4)).toBeNull();
+    expect(projection.byteToPosition(11)).toBeNull();
+    const offset = source.indexOf('example');
+    expect(projection.byteToPosition(new TextEncoder().encode(source.slice(0, offset)).length)).toBeNull();
+    expect(projection.project(projection.doc)).toEqual({ source, edits: [] });
   });
 });

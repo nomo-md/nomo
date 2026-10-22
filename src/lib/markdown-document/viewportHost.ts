@@ -91,6 +91,8 @@ export class MarkdownViewportHost {
   private expanded = 0;
   private active: Mounted | undefined;
   private globalSelection = false;
+  // 只有成功恢复或用户实际操作过的局部视图，才有权覆盖完整会话的选区。
+  private selectionOwner?: Mounted;
   private pointerAnchor: number | undefined;
   private pointerView?: Mounted;
   private preferredByte: number | undefined;
@@ -131,6 +133,7 @@ export class MarkdownViewportHost {
   private visibleGeometry = '';
   private viewFailure: unknown;
   private readingAnchor: ReturnType<MarkdownViewportHost['captureAnchor']>;
+  private restoredReadingAnchor: ReadingAnchor | undefined;
   private readonly dirty = new Set<Mounted>();
   private blockPositions = new Map<string, number>();
   private layoutBatch: MarkdownLayoutBatch;
@@ -423,6 +426,7 @@ export class MarkdownViewportHost {
     return true;
   }
   private onNavigationIntent = () => {
+    this.restoredReadingAnchor = undefined;
     this.budget.interacting(this);
     if (this.cancelOutlineNavigation()) this.callbacks.onNavigationIntent?.();
   };
@@ -447,6 +451,7 @@ export class MarkdownViewportHost {
     );
   }
   private selection(view = this.active): DocumentSelection | undefined {
+    if (view !== this.selectionOwner) return undefined;
     if (view?.restricted) {
       const byte = view.restrictedByte ?? view.window.fromByte;
       return { anchorByte: byte, headByte: byte };
@@ -454,9 +459,11 @@ export class MarkdownViewportHost {
     return view?.source?.selection ?? view?.semantic?.core.getSourceSelection(false);
   }
   private onSelectionChanged = () => {
+    this.selectionOwner = this.active;
     if (!this.composing) this.captureSelection();
   };
   private onInput = () => {
+    this.selectionOwner = this.active;
     this.onNavigationIntent();
     this.focusAfterRemount = this.target.contains(globalThis.document.activeElement);
     this.document.interacting();
@@ -475,6 +482,13 @@ export class MarkdownViewportHost {
   private onScroll = () => {
     if (this.programScroll !== undefined && Math.abs(this.scroll.scrollTop - this.programScroll) < 1) {
       if (!this.outlineNavigation || this.outlineNavigation.animationDone) this.schedule();
+      return;
+    }
+    // 重挂载后占位和异步增强仍会改变 scrollTop。真实 wheel/触摸/键盘/滚动条意图
+    // 已由 onNavigationIntent 取消恢复；这里的布局滚动不能冒充用户操作丢掉原锚点。
+    if (this.restoredReadingAnchor) {
+      this.programScroll = this.scroll.scrollTop;
+      this.schedule();
       return;
     }
     this.budget.interacting(this);
@@ -655,8 +669,8 @@ export class MarkdownViewportHost {
   }
   private restoreAnchor(value: unknown, forDirect = false) {
     if (this.outlineNavigation && !forDirect) return;
-    const anchor = value as ReturnType<MarkdownViewportHost['captureAnchor']>;
-    if (!anchor || anchor.generation !== this.generation ||
+    const anchor = this.restoredReadingAnchor ?? value as ReturnType<MarkdownViewportHost['captureAnchor']>;
+    if (!anchor || (!this.restoredReadingAnchor && anchor.generation !== this.generation) ||
       (!forDirect && this.preferredByte !== undefined && !this.outlineNavigation)) return;
     const index = this.blockPositions.get(anchor.id);
     if (index === undefined) return;
@@ -664,10 +678,12 @@ export class MarkdownViewportHost {
     const view = this.mounted.find(view => block.fromByte >= view.window.fromByte && block.fromByte < view.window.toByte);
     const rect = anchor.screen === undefined || view?.from === undefined ? undefined :
       view.semantic?.core.blockReadingAnchorRect(block.fromLine - this.index!.blocks[view.from].fromLine + 1, anchor.offset);
+    if (this.restoredReadingAnchor && !view?.measured) return;
     const top = rect && anchor.screen !== undefined
       ? this.localScrollTop + (rect.top - this.scroll.getBoundingClientRect().top - anchor.screen) / this.scale
       : this.heights.top(index) + anchor.fallback;
     if (Math.abs(top - this.localScrollTop) >= 1) { this.stats.anchorCorrections++; this.scrollTo(top); }
+    if (this.restoredReadingAnchor === anchor) this.readingAnchor = { ...anchor, generation: this.generation };
   }
   private markDirty(view: Mounted) {
     view.measured = false;
@@ -743,6 +759,7 @@ export class MarkdownViewportHost {
     this.removeInput();
     this.clearSelectionPaint();
     this.pointerView = this.mounted.find((view) => view.element.contains(event.target as Node));
+    this.selectionOwner = this.pointerView;
     this.pointerAnchor =
       this.byteAtCoords(this.pointerView, event) ?? this.selection(this.pointerView)?.headByte;
     this.budget.holdInteraction(this, 'pointer', this.pointerAnchor !== undefined);
@@ -1183,7 +1200,12 @@ export class MarkdownViewportHost {
         if (navigating) demand.before = demand.after = 0;
         const pressure = this.budget.pressured(this) || this.mounted.length > this.budget.limits.views ||
           this.mounted.reduce((sum, view) => sum + this.windowBytes(view), 0) > this.budget.limits.sourceBytes;
-        if (pressure) { if (!navigating) demand.before = demand.after = height * 3; demand.retainBefore = demand.retainAfter = height * 3; }
+        if (pressure) {
+          if (!navigating) demand.before = demand.after = height * 3;
+          // 压力下仍给已挂载组留一屏回收滞回；准入与回收共用 3H 边界会因
+          // 图片布局/滚动锚定的数十像素变化反复创建、销毁边缘组，阻止资源收敛。
+          demand.retainBefore = demand.retainAfter = height * 4;
+        }
         const from = this.heights.indexAt(Math.max(0, top - demand.before));
         const to = this.heights.indexAt(top + height + demand.after) + 1;
         if (state.mountMode === 'progressive-full' && !navigating) {
@@ -1283,7 +1305,7 @@ export class MarkdownViewportHost {
       // 标题导航已有经过索引确认的全局坐标；调度不重复序列化表格来反算当前光标。
       const selected = this.outlineNavigation ? { anchorByte: this.outlineNavigation.byte, headByte: this.outlineNavigation.byte } : this.globalSelection
         ? this.document.selection.selection
-        : (this.selection() ?? this.document.selection.selection);
+        : this.captureSelection();
       for (const plan of plans) {
         const required = containsTarget(plan) > 0 || distance(plan) <= ((this.scroll.clientHeight || 800) / this.scale) * 3;
         const key = `${plan.groupId ?? `${plan.fromByte}:${plan.toByte}`}:${plan.restricted ? 'restricted' : plan.semantic}`;
@@ -1457,6 +1479,7 @@ export class MarkdownViewportHost {
         this.finishPreparation();
         if (!this.hasVisibleContent()) this.requestPreparation();
         this.measureDirty();
+        if (this.restoredReadingAnchor) this.restoreAnchor(this.restoredReadingAnchor);
         this.restorePreferred();
         this.publishPresentation();
         return;
@@ -1535,8 +1558,12 @@ export class MarkdownViewportHost {
             Math.min(selected.headByte, this.active.window.toByte),
           ),
         };
-        this.active.source?.restoreSelection(selection);
-        this.active.semantic?.core.restoreSourceSelection(selection);
+        const restored = this.active.source
+          ? (this.active.source.restoreSelection(selection), true)
+          : this.active.semantic?.core.restoreSourceSelection(selection);
+        // 屏外光标/跨窗口选区的局部交集仅用于显示，不能回写成完整选区。
+        if (restored && selection.anchorByte === selected.anchorByte && selection.headByte === selected.headByte)
+          this.selectionOwner = this.active;
       }
       if (!preparingDirect && (
         focused ||
@@ -1583,6 +1610,7 @@ export class MarkdownViewportHost {
     return element;
   }
   private destroyView(view: Mounted) {
+    if (this.selectionOwner === view) this.selectionOwner = undefined;
     this.resources.release(view.element);
     // 布局结果已由测量批次发布；回收只释放视图，避免 DOM 写入之间再同步读布局。
     this.observer?.unobserve(view.element);
@@ -1596,7 +1624,23 @@ export class MarkdownViewportHost {
   preserveReadingPosition() {
     this.readingAnchor = this.captureAnchor();
   }
+  /** 标签重挂载只保存块身份与几何标量，不保留旧视图或 DOM。 */
+  captureReadingPosition() {
+    // 尚未索引的虚拟占位不是可阅读内容，不能把它与末个已知块的巨大距离存成块内偏移。
+    const anchor = this.captureAnchor();
+    const index = anchor && this.blockPositions.get(anchor.id);
+    return index !== undefined && this.localScrollTop < this.heights.totalHeight &&
+      // 表格刚发布布局时 measured 会短暂失效，但已取得的正文坐标仍可保存；
+      // 否则恰在测量批次前切标签，会丢掉整个块内阅读偏移。
+      this.mounted.some(view => (view.measured || anchor!.screen !== undefined) &&
+        view.from !== undefined && view.from <= index && view.to! > index)
+      ? anchor : undefined;
+  }
+  restoreReadingPosition(anchor: ReadingAnchor | undefined) {
+    if (anchor) this.restoredReadingAnchor = { ...anchor, generation: this.generation };
+  }
   scrollToByte(byte: number) {
+    this.restoredReadingAnchor = undefined;
     this.cancelOutlineNavigation();
     this.locatedByte = byte;
     this.document.requestVisibleStructure(this, null);
@@ -1641,6 +1685,7 @@ export class MarkdownViewportHost {
   }
   async reveal(byte: number, focus = false, alignment: 'selection' | 'outline' = 'selection',
     clock: OutlineNavigationClock = { requestedAt: performance.now() }) {
+    this.restoredReadingAnchor = undefined;
     this.cancelOutlineNavigation();
     this.interruptRead?.();
     const heading = alignment === 'outline' ? this.document.state.index?.outline.find(item => item.byte === byte) : undefined;
@@ -1889,6 +1934,7 @@ export class MarkdownViewportHost {
     if (view) {
       this.preferredByte = undefined;
       this.active = view;
+      this.selectionOwner = view;
       if (view.restricted) {
         view.restrictedByte = byte;
         this.document.selection.set({ anchorByte: byte, headByte: byte });

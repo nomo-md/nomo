@@ -99,6 +99,48 @@ function outlineGeometry(target: HTMLElement, positions: number[]) {
 }
 
 describe('完整会话的真实窗口宿主', () => {
+  it('重挂载阅读锚点跨多次迟到布局保持原屏幕位置，用户滚动后停止恢复', async () => {
+    const { host, target } = await setup('# 标题\n\n正文\n\n尾声');
+    const pane = target.parentElement!, core = host.activeCore!;
+    pane.getBoundingClientRect = () => new DOMRect(0, 100, 600, 800);
+    let shift = 0;
+    vi.spyOn(core, 'captureBlockReadingAnchor').mockImplementation(() => ({ line: 1, offset: 1, top: 110 + shift - pane.scrollTop }));
+    vi.spyOn(core, 'blockReadingAnchorRect').mockImplementation(() => ({ top: 110 + shift - pane.scrollTop, bottom: 130 + shift - pane.scrollTop, left: 0, right: 100 }));
+    const view = (host as any).active;
+    view.measured = true;
+    const anchor = host.captureReadingPosition();
+    // 迟到的表格布局暂时使测量失效，真实正文坐标仍须供切标签保存。
+    view.measured = false;
+    expect(host.captureReadingPosition()).toMatchObject({ id: anchor!.id, offset: anchor!.offset, screen: anchor!.screen });
+    view.measured = true;
+    host.restoreReadingPosition(anchor);
+    shift = 80;
+    (host as any).restoreAnchor(undefined);
+    expect(pane.scrollTop).toBe(80);
+    // 浏览器因布局修正产生滚动事件，不能当成用户手动滚动取消锚点。
+    pane.scrollTop = 100;
+    pane.dispatchEvent(new Event('scroll'));
+    shift = 200;
+    (host as any).restoreAnchor(undefined);
+    expect(pane.scrollTop).toBe(200);
+    pane.dispatchEvent(new Event('wheel'));
+    pane.scrollTop = 450;
+    (host as any).restoreAnchor(undefined);
+    expect(pane.scrollTop).toBe(450);
+  });
+
+  it('未挂载或未索引区域不保存虚拟占位到末块的伪阅读偏移', async () => {
+    const { host, target } = await setup('正文\n\n第二段');
+    const pane = target.parentElement!;
+    (host as any).active.measured = true;
+    expect(host.captureReadingPosition()).toBeDefined();
+    pane.scrollTop = (host as any).heights.totalHeight + 100000;
+    expect(host.captureReadingPosition()).toBeUndefined();
+    pane.scrollTop = 0;
+    (host as any).active.measured = false;
+    expect(host.captureReadingPosition()).toBeUndefined();
+  });
+
   it('异步增强触发共享压力，隐藏及销毁释放登记，保护中的全文编辑和撤销仍完整', async () => {
     const text = '# 开头\n\n' + '完整正文\n\n'.repeat(300) + '末段';
     const first = await setup(text), second = await setup('另一个宿主', 'source');

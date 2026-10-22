@@ -57,6 +57,48 @@ async function setup(text: string, onRequestSource?: (isCurrent: () => boolean) 
 }
 
 describe('应用 Markdown 会话入口', () => {
+  it.each([[0, 0], [7, 7], [7, 19], [19, 7]])('切走再挂载保留光标和正反向选区 %j，恢复不产生编辑历史', async (offsetAnchor, offsetHead) => {
+    const text = '# 标题\n\n前😀中间文字 **加粗** 后面\n\n最后一段';
+    const { application, doc, failures } = await setup(text);
+    const base = utf8Length(text.slice(0, text.indexOf('前')));
+    const selection = { anchorByte: base + offsetAnchor, headByte: base + offsetHead };
+    doc.selection.set(selection);
+    for (let i = 0; i < 3; i++) {
+      const pane = document.body.appendChild(document.createElement('div'));
+      const target = pane.appendChild(document.createElement('div'));
+      application.editor.mount(target);
+      await vi.waitFor(() => expect(application.writable).toBe(true));
+      expect(application.captureSelection()).toEqual(selection);
+      expect((application as any).semanticHost.activeCore.getSourceSelection()).toEqual(selection);
+      await application.unmount();
+      pane.remove();
+      expect(doc.selection.selection).toEqual(selection);
+    }
+    expect(await application.readMarkdown()).toBe(text);
+    expect(doc.state.status.canUndo).toBe(false);
+    expect(failures).toEqual([]);
+  });
+
+  it('阅读位置在中部而光标留在屏外时，切回与再次切走不把光标覆盖为局部窗口起点', async () => {
+    const text = '开头光标\n\n' + Array.from({ length: 3000 }, (_, i) => `第 ${i} 段正文。\n\n`).join('');
+    const { application, doc, tab, failures } = await setup(text);
+    await vi.waitFor(() => expect(doc.state.progress.state).toBe('ready'));
+    const selection = { anchorByte: 3, headByte: 3 };
+    doc.selection.set(selection);
+    const block = doc.state.index!.blocks[1500];
+    tab.globalScrollAnchor = { byteOffset: block.fromByte, line: block.fromLine };
+    const pane = document.body.appendChild(document.createElement('div'));
+    pane.className = 'semantic-pane';
+    const target = pane.appendChild(document.createElement('div'));
+    application.editor.mount(target);
+    await vi.waitFor(() => expect(application.writable).toBe(true));
+    expect((application as any).semanticHost.active.window.fromByte).toBeGreaterThan(selection.headByte);
+    expect(application.captureSelection()).toEqual(selection);
+    await application.unmount();
+    expect(doc.selection.selection).toEqual(selection);
+    expect(failures).toEqual([]);
+  });
+
   it('打开尚未结束时销毁宿主，清理等待打开收口且只执行一次，不发布迟到元数据', async () => {
     const port = createMemoryMarkdownPort();
     let release!: () => void;
