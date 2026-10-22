@@ -37,6 +37,7 @@ interface OutlineNavigationSample {
   revision: number; byte: number; duration?: number; inputGateMs: number;
   kind: 'animated' | 'direct'; windowLimited: boolean; targetLoaded: boolean;
   requestedAt: number; positionedMs?: number;
+  reusedViewport?: boolean;
   firstMotionMs?: number; animationMs?: number; basicReadyMs?: number; enhancementMs?: number;
   readMs: number; buildMs: number; measureMs: number; created: number; pendingEnhancements: number;
   deferred: Record<NavigationEnhancement, number>;
@@ -45,6 +46,7 @@ interface OutlineNavigationSample {
 interface ReadingAnchor { id: string; offset: number; screen?: number; fallback: number; generation: number; }
 interface OutlineNavigation {
   kind: 'animated' | 'direct';
+  lightweight?: boolean;
   originAnchor?: ReadingAnchor; originGroups?: Set<string>;
   overflowAnchor: string;
   notifiedGoal?: number;
@@ -1014,6 +1016,7 @@ export class MarkdownViewportHost {
   private async render() {
     if (this.disposed || this.hidden) return;
     if (this.document.state.failure || this.viewFailure) { this.showFailure(); return; }
+    if (this.outlineNavigation?.lightweight && !this.outlineNavigation.animationDone && this.reuseOutlineViewport()) return;
     for (const view of this.mounted) {
       view.semantic?.setFailure(false);
       view.source?.setReadonly(!!this.options.readonly);
@@ -1444,6 +1447,9 @@ export class MarkdownViewportHost {
       for (const [key, spacer] of this.spacers) if (!neededSpacers.has(key)) { spacer.remove(); this.spacers.delete(key); }
       if (this.input) desired.push(this.input);
       if (this.preparationIndicator) desired.push(this.preparationIndicator);
+      // 已构建的导航窗口先通过原编辑门禁，再接入 DOM；不产生只读树的中间布局。
+      if (this.outlineNavigation && !this.outlineNavigation.aligned)
+        for (const view of created) view.semantic?.prepareAttachment();
       let cursor = this.target.firstChild;
       for (const node of desired) {
         if (node === cursor) cursor = cursor.nextSibling;
@@ -1556,6 +1562,32 @@ export class MarkdownViewportHost {
       view.window.revision === this.document.state.status.revision && view.element.isConnected &&
       (!!view.semantic?.bodyReady || (!!view.source && !view.source.bridge.isStale)));
   }
+  /** 只复用已测量的完整首屏；不改变目标加载判定，也不略过邻接正文准备。 */
+  private reuseOutlineViewport() {
+    const target = this.outlineNavigation, state = this.document.state;
+    if (!target || target.kind !== 'animated' || !target.sample.targetLoaded || this.busy ||
+      this.dirty.size || this.viewFailure || state.failure || this.document.session.state.pendingTransactions ||
+      this.index !== state.index || this.index?.revision !== target.revision ||
+      this.heights.length !== this.index.blocks.length || this.lastIndexedBlock !== this.index.blocks.at(-1)) {
+      if (target) target.lightweight = false;
+      return false;
+    }
+    const rect = this.target.getBoundingClientRect();
+    const scale = this.target.offsetWidth > 0 ? rect.width / this.target.offsetWidth || 1 : 1;
+    const style = getComputedStyle(this.target);
+    const context = `${this.target.clientWidth}|${style.font}|${style.lineHeight}|${style.letterSpacing}|${scale}|${this.geometryVersion}|${this.assetVersion}`;
+    const contentTop = rect.width || rect.height ? rect.top - this.scroll.getBoundingClientRect().top + this.scroll.scrollTop : 0;
+    if (context !== this.layoutContext || Math.abs(contentTop - this.contentTop) >= 1) {
+      target.lightweight = false;
+      return false;
+    }
+    this.alignOutlineHeading();
+    if (!target.ready) { target.lightweight = false; return false; }
+    target.lightweight = true;
+    target.sample.reusedViewport = true;
+    this.finishPreparation();
+    return true;
+  }
   async reveal(byte: number, focus = false, alignment: 'selection' | 'outline' = 'selection',
     clock: OutlineNavigationClock = { requestedAt: performance.now() }) {
     this.cancelOutlineNavigation();
@@ -1634,6 +1666,11 @@ export class MarkdownViewportHost {
       this.publishOutlinePosition();
     }
     // 先登记导航策略（动画分支同时启动时钟），再读取目标；旧读取不允许发布。
+    if (heading && this.reuseOutlineViewport()) {
+      if (this.scroll.clientHeight > 0) await completion;
+      if (navigation === this.navigation && !this.disposed && !this.hidden) this.restorePreferred();
+      return;
+    }
     if (this.busy) await this.renderDone;
     if (navigation !== this.navigation || this.disposed || this.hidden) return;
     await this.render();

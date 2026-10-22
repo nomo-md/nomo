@@ -2241,6 +2241,17 @@ export class ProseMirrorEditorCore implements EditorCore {
     });
   }
 
+  /** 导航窗口在接入 DOM 前完成同一就绪交接，避免先布局只读树再切换可编辑性。 */
+  prepareDetachedProjection(): void {
+    const view = this.view;
+    if (!view || view.dom.isConnected || this.destroyed || !this.options.documentProjection?.onViewReady ||
+      this.initialEditableFrame === null) return;
+    cancelAnimationFrame(this.initialEditableFrame);
+    this.initialEditableFrame = null;
+    view.setProps({ editable: () => this.isEditable() });
+    this.options.documentProjection.onViewReady();
+  }
+
   private runProseMirrorCommand(command: EditorCommand): boolean {
     if (!this.view || !this.canExecute(command)) {
       return false;

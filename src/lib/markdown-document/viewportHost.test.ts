@@ -340,11 +340,37 @@ describe('完整会话的真实窗口宿主', () => {
       const pending = host.reveal(runtime.state.index!.outline[1].byte, false, 'outline');
       await vi.waitFor(() => expect(host.diagnostics.navigation?.animationMs).toBeGreaterThanOrEqual(260));
       expect(host.diagnostics.navigation).toMatchObject({ kind: 'animated', targetLoaded: true, deadlineMiss: true });
+      expect(host.diagnostics.navigation?.reusedViewport).not.toBe(true);
       coverage.mockRestore();
       target.querySelector('.markdown-session-window')!.dispatchEvent(new Event('load', { bubbles: true }));
       await pending;
       expect(host.diagnostics.navigation?.kind).toBe('animated');
     } finally { coverage.mockRestore(); state.mockRestore(); }
+  });
+
+  it.each([140, 260])('完整已测量首屏复用窗口，%ims 动画期间不重做挂载计划，失效后恢复准备', async duration => {
+    const { runtime, host, target, port } = await setup('# 一\n\n正文\n\n# 二\n\n尾声');
+    const { pane } = outlineGeometry(target, [0, 900]);
+    await host.reveal(0, false, 'outline');
+    await new Promise(resolve => setTimeout(resolve, 60));
+    const reads = vi.spyOn(port, 'readWindow');
+    const plans = vi.spyOn((host as any).demand, 'range');
+    const matchMedia = window.matchMedia;
+    window.matchMedia = (() => ({ matches: duration === 140 })) as unknown as typeof window.matchMedia;
+    try {
+      const pending = host.reveal(runtime.state.index!.outline[1].byte, false, 'outline');
+      await vi.waitFor(() => expect(host.diagnostics.navigation?.reusedViewport).toBe(true));
+      expect(host.diagnostics.navigation).toMatchObject({ kind: 'animated', targetLoaded: true, duration });
+      expect(reads).not.toHaveBeenCalled();
+      expect(plans).not.toHaveBeenCalled();
+      expect(pane.scrollTop).toBeGreaterThan(40);
+      (host as any).onFont();
+      await pending;
+      expect(host.diagnostics.navigation!.animationMs).toBeGreaterThanOrEqual(duration);
+      expect(plans).toHaveBeenCalled();
+      expect(pane.scrollTop).toBeCloseTo(940);
+      expect(host.diagnostics.navigation?.kind).toBe('animated');
+    } finally { reads.mockRestore(); plans.mockRestore(); window.matchMedia = matchMedia; }
   });
 
   it.each(['wheel', 'touchstart', 'pointerdown', 'keydown', 'hidden', 'dispose', 'revision'])(

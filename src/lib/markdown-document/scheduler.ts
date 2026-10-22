@@ -21,6 +21,7 @@ export class MarkdownWorkScheduler {
   private ownerGenerations = new WeakMap<object, number>();
   private paused = new WeakSet<object>();
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private scheduledAt = Infinity;
   private busyUntil = 0;
   constructor(
     private readonly budgetMilliseconds = 4,
@@ -52,12 +53,24 @@ export class MarkdownWorkScheduler {
     if (!this.tasks.length && this.timer !== null) {
       clearTimeout(this.timer);
       this.timer = null;
+      this.scheduledAt = Infinity;
     }
   }
-  private schedule(delay = 0) {
-    if (this.timer !== null || !this.tasks.length) return;
+  private schedule() {
+    const active = this.tasks.filter(task => !this.paused.has(task.owner));
+    if (!active.length) return;
+    const now = this.now();
+    const delay = active.some(task => task.priority <= MarkdownTaskPriority.NearViewport)
+      ? 0 : Math.max(0, this.busyUntil - now);
+    const scheduledAt = now + delay;
+    if (this.timer !== null) {
+      if (this.scheduledAt <= scheduledAt) return;
+      clearTimeout(this.timer);
+    }
+    this.scheduledAt = scheduledAt;
     this.timer = setTimeout(() => {
       this.timer = null;
+      this.scheduledAt = Infinity;
       this.flush();
     }, delay);
   }
@@ -88,8 +101,7 @@ export class MarkdownWorkScheduler {
       // now 在确定性的测试时钟上可能不变化；同一批最多处理 64 个独立任务。
       if (++consumed >= 64) break;
     }
-    if (this.tasks.some((task) => !this.paused.has(task.owner)))
-      this.schedule(Math.max(0, this.busyUntil - this.now()));
+    this.schedule();
   }
 }
 

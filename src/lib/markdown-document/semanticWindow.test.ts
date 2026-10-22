@@ -6,6 +6,31 @@ import { MarkdownSemanticWindow } from './semanticWindow';
 import { utf8Length } from './utf8Text';
 
 describe('真实 ProseMirror 窗口接入会话', () => {
+  it.each(['ready', 'readonly', 'stale', 'failure'] as const)('导航接入前准备保留正文就绪和编辑门禁：%s', async (mode) => {
+    const port = createMemoryMarkdownPort();
+    const session = new MarkdownSessionController(port, await port.openDocument({ text: '正文' }));
+    const target = document.createElement('div');
+    const view = new MarkdownSemanticWindow(session, await port.readWindow(session.documentId, 0, 0, 6),
+      { target, readonly: mode === 'readonly', onStale() {}, onHistory() {}, onFailure(error) { throw error; } });
+    if (mode === 'failure') view.setFailure(true);
+    if (mode === 'stale') await session.applyEdits({ viewGeneration: 0, historyGroupId: 'other',
+      edits: [{ fromByte: 0, toByte: 6, insertedText: '新版' }] });
+    const dom = target.querySelector('.ProseMirror');
+    view.prepareAttachment();
+    expect(view.bodyReady).toBe(false);
+    expect(view.editable).toBe(false);
+    expect(dom?.getAttribute('contenteditable')).toBe(mode === 'ready' ? 'true' : 'false');
+    document.body.append(target); view.activate(); await view.whenReady;
+    expect(view.bodyReady).toBe(mode !== 'stale');
+    expect(view.editable).toBe(mode === 'ready');
+    expect(target.querySelector('.ProseMirror')).toBe(dom);
+    view.core.restoreSelectionSnapshot({ anchor: 1, head: 1 });
+    expect(view.core.execute({ type: 'insertText', text: '新' })).toBe(mode === 'ready');
+    await session.flushEdits();
+    expect(await session.withSnapshot(snapshot => readCompleteSnapshot(port, snapshot)))
+      .toBe(mode === 'ready' ? '新正文' : mode === 'stale' ? '新版' : '正文');
+    view.dispose(); target.remove(); await session.close(true);
+  });
   it('粘贴与之前的连续键入分组撤销，视图回收不制造历史', async () => {
     const port = createMemoryMarkdownPort();
     const session = new MarkdownSessionController(port, await port.openDocument({ text: '正文' }));

@@ -85,11 +85,17 @@ export class MarkdownSemanticWindow {
       hasUnconfirmedDraft: () => this.core.hasPendingMathInlineDraft(),
     });
   }
-  get editable() { return !this.effectiveReadonly; }
-  get bodyReady() { return this.attached && this.ready && !this.disposed && !this.bridge.isStale; }
+  get editable() { return this.attached && !this.effectiveReadonly; }
+  get bodyReady() { return this.attached && !!this.options.target?.isConnected && this.ready && !this.disposed && !this.bridge.isStale; }
   get preview() { return !this.opened; }
   /** DOM 插入后启用，生命周期未就绪时仍保持预览；不重建 PM 或源文映射。 */
   activate() { this.attached = true; this.syncPermission(); }
+  /** 仅在导航发布 DOM 的同步批次调用；未接入前仍不报告正文或交互就绪。 */
+  prepareAttachment() {
+    if (this.disposed || this.attached || !this.options.target || this.options.target.isConnected) return;
+    this.core.prepareDetachedProjection();
+    this.syncPermission(true);
+  }
   setFailure(failed: boolean) { this.failed = failed; this.syncPermission(); }
   updateOptions(options: Partial<EditorRuntimeOptions>) {
     if (options.readonly !== undefined) this.applicationReadonly = options.readonly;
@@ -97,13 +103,13 @@ export class MarkdownSemanticWindow {
     this.core.updateOptions({ ...rest, readonly: this.effectiveReadonly });
     this.syncPermission();
   }
-  private syncPermission() {
+  private syncPermission(preparingAttachment = false) {
     if (!this.core || this.disposed) return;
     const state = this.session.state;
     const blocked = this.applicationReadonly || this.failed || !!state.failure ||
       state.historyBusy || state.closing || this.bridge.isStale;
     // 开放后允许原窗口连续乐观输入；不能因自己的待确认事务中断 IME。
-    if (!this.opened && this.attached && this.ready && !blocked && !state.pendingTransactions)
+    if (!this.opened && (this.attached || preparingAttachment) && this.ready && !blocked && !state.pendingTransactions)
       this.opened = true;
     const readonly = !this.opened || blocked;
     if (readonly === this.effectiveReadonly) return;
