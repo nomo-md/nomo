@@ -25,6 +25,8 @@ it('PM 和 CM 交替编辑共用全文、保存点及撤销，混合换行不随
     session.state.committed.byteLength,
   );
   const semantic = new MarkdownSemanticWindow(session, initial, options);
+  semantic.activate();
+  await semantic.whenReady;
   semantic.core.restoreSelectionSnapshot({ anchor: 3, head: 3 });
   semantic.core.execute({ type: 'insertText', text: '新' });
   await session.flushEdits();

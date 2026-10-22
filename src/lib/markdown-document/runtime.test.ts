@@ -4,6 +4,7 @@ import { buildMarkdownIndex } from './incrementalIndex';
 import { MarkdownStructureScanner } from './structure';
 import { createMemoryMarkdownPort } from './port';
 import { utf8Length } from './utf8Text';
+import { MarkdownTaskPriority, markdownWorkScheduler } from './scheduler';
 
 const localBuild: typeof buildMarkdownIndex = (port, snapshot, options) =>
   buildMarkdownIndex(port, snapshot, {
@@ -27,6 +28,60 @@ const localBuild: typeof buildMarkdownIndex = (port, snapshot, options) =>
   });
 
 describe('渐进 Markdown 文档运行时', () => {
+  it('未索引远跳从安全起点逐批推进，批间让出输入与其他视口并接受撤销', async () => {
+    const port = createMemoryMarkdownPort();
+    const status = await port.openDocument({ text: '正文\n\n'.repeat(6000) });
+    const read = port.readSnapshot.bind(port);
+    const owner = {}, other = {};
+    const calls: string[] = [];
+    const offsets: number[] = [];
+    const priorities: MarkdownTaskPriority[] = [];
+    vi.spyOn(port, 'readSnapshot').mockImplementation(async (...args) => {
+      offsets.push(args[1]);
+      calls.push('scan');
+      priorities.push(runtime.structurePriority);
+      if (offsets.length === 1) {
+        markdownWorkScheduler.enqueue(other, 'visible', MarkdownTaskPriority.VisibleText, () => {
+          calls.push('visible');
+          runtime.requestVisibleStructure(owner, null);
+        });
+        markdownWorkScheduler.enqueue(other, 'input', MarkdownTaskPriority.Input, () => calls.push('input'));
+      }
+      return read(...args);
+    });
+    const runtime = new ProgressiveMarkdownDocument(port, status, localBuild);
+    runtime.requestVisibleStructure(owner, { byte: status.byteLength - 1, revision: 0, generation: 1 });
+    try {
+      await vi.waitFor(() => expect(runtime.state.progress.state).toBe('ready'));
+      expect(offsets[0]).toBe(0);
+      expect(offsets.length).toBeGreaterThan(1);
+      expect(calls.slice(0, 4)).toEqual(['scan', 'input', 'visible', 'scan']);
+      expect(priorities[0]).toBe(MarkdownTaskPriority.VisibleText);
+      expect(priorities.slice(1).every(priority => priority === MarkdownTaskPriority.Index)).toBe(true);
+    } finally { markdownWorkScheduler.cancel(other); await runtime.close(true); }
+  });
+
+  it('多个宿主共享可撤销提权，修订变化和隐藏清除过期需求', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const port = createMemoryMarkdownPort();
+    const runtime = new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '正文\n\n'.repeat(1000) }),
+      async (...args) => { await gate; return localBuild(...args); });
+    const left = {}, right = {};
+    try {
+      runtime.requestVisibleStructure(left, { byte: 0, revision: 0, generation: 1 });
+      runtime.requestVisibleStructure(right, { byte: 8000, revision: 0, generation: 1 });
+      runtime.requestVisibleStructure(left, null);
+      expect(runtime.structurePriority).toBe(MarkdownTaskPriority.VisibleText);
+      await runtime.session.applyEdits({ viewGeneration: 0, historyGroupId: 'new', edits: [{ fromByte: 0, toByte: 0, insertedText: '新' }] });
+      expect(runtime.structurePriority).toBe(MarkdownTaskPriority.Index);
+      runtime.requestVisibleStructure(left, { byte: 0, revision: runtime.state.status.revision, generation: 2 });
+      expect(runtime.structurePriority).toBe(MarkdownTaskPriority.VisibleText);
+      runtime.setHidden(true);
+      expect(runtime.structurePriority).toBe(MarkdownTaskPriority.Index);
+    } finally { release(); await runtime.close(true); }
+  });
+
   it('首轮索引尚未完成时编辑，继承已发布的未变化块身份', async () => {
     const port = createMemoryMarkdownPort();
     let release!: () => void;
@@ -103,8 +158,12 @@ describe('渐进 Markdown 文档运行时', () => {
       localBuild,
     );
     const first = await runtime.prepareWindow(0);
-    expect(first.window.text.length).toBeLessThan(16 * 1024);
-    expect(first.window.text).not.toContain('搜索尾部');
+    expect(first.mode).toBe('preparing');
+    const sourceWindow = await runtime.prepareWindow(0, 'source');
+    expect(sourceWindow.mode).toBe('source');
+    if (!('window' in sourceWindow)) throw new Error('缺少源码窗口');
+    expect(sourceWindow.window.text.length).toBeLessThan(16 * 1024);
+    expect(sourceWindow.window.text).not.toContain('搜索尾部');
     await vi.waitFor(() => expect(runtime.state.progress.state).toBe('ready'), { timeout: 5000 });
     expect(runtime.state.progress.indexedBytes).toBe(runtime.state.status.byteLength);
     const matches = await runtime.search('搜索尾部', { signal: new AbortController().signal });

@@ -163,14 +163,16 @@ export class MarkdownSourceProjection {
     const canonical = serialized(next);
     const changes = getSourceTextChanges(this.canonical, canonical);
     if (!changes.length) return { source: this.source, edits: [] };
+    let reparsedCanonical: string | undefined;
+    // 行尾空白应插在该段落后、原文已有空行/引用定义前，不能落到被省略的尾部之后。
+    const whitespaceOnly = changes.every(change => /^[ \t\r\n]*$/.test(change.insert) &&
+      /^[ \t\r\n]*$/.test(this.canonical.slice(change.from, change.to)));
+    const boundaries = whitespaceOnly
+      ? [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const
+      : [[1, -1], [-1, -1], [1, 1], [-1, 1]] as const;
     // 端点可能与被序列化器省略的空行/引用定义相邻；只尝试有限的精确边界组合。
     for (const toSource of [this.toSource, getSourceTextChanges(this.canonical, this.source)]) {
-      for (const [startSide, endSide] of [
-        [1, -1],
-        [-1, -1],
-        [1, 1],
-        [-1, 1],
-      ] as const) {
+      for (const [startSide, endSide] of boundaries) {
         const patches: TextChange[] = [];
         let valid = true;
         for (const change of changes) {
@@ -200,7 +202,13 @@ export class MarkdownSourceProjection {
         let source = this.source;
         for (const patch of [...patches].reverse())
           source = source.slice(0, patch.from) + patch.insert + source.slice(patch.to);
-        if (serialized(parseMarkdown(source, this.context)) !== canonical) continue;
+        const projected = serialized(parseMarkdown(source, this.context));
+        if (projected !== canonical) {
+          // PM 编辑态允许段首/段尾空格及空段；Markdown 解析会规范化这些空白。
+          // 仅在严格比较不等时校验目标的同一往返语义，仍保留原文补丁及未编辑字节。
+          reparsedCanonical ??= serialized(parseMarkdown(canonical, this.context));
+          if (projected !== reparsedCanonical) continue;
+        }
         return {
           source,
           edits: patches.map((patch) => ({

@@ -175,14 +175,18 @@ export class MarkdownGlobalSelection {
       this.assign({ anchorByte: after, headByte: after });
     return pending;
   }
-  replaceSelection(insertedText: string) {
-    return this.withSelectedSnapshot((selected) => this.replace(selected, insertedText));
+  replaceSelection(insertedText: string, canWrite?: () => boolean) {
+    return this.withSelectedSnapshot((selected) => {
+      if (canWrite && !canWrite()) throw new DocumentConflictError('目标区域已不可编辑。');
+      return this.replace(selected, insertedText);
+    });
   }
-  async cut(writeClipboard: (text: string) => Promise<void>, signal?: AbortSignal) {
+  async cut(writeClipboard: (text: string) => Promise<void>, signal?: AbortSignal, canWrite?: () => boolean) {
     return this.withSelectedSnapshot(async (selected) => {
       const text = await this.read(selected, signal);
       await writeClipboard(text);
       signal?.throwIfAborted();
+      if (canWrite && !canWrite()) throw new DocumentConflictError('目标区域已不可编辑。');
       return this.replace(selected, '');
     });
   }

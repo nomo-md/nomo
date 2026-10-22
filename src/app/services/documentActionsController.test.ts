@@ -175,6 +175,32 @@ afterEach(() => {
 });
 
 describe('documentActionsController', () => {
+  it('publishes the new tab and its runtime together after asynchronous replacement', async () => {
+    const oldTab = createTab();
+    const { options, getState } = createOptions([oldTab]);
+    let finishReplacement!: () => void;
+    const replacing = new Promise<void>(resolve => { finishReplacement = resolve; });
+    const load = vi.fn(options.loadTabState);
+    const controller = createDocumentActionsController({
+      ...options, loadTabState: load, replaceTabRuntime: () => replacing,
+    } as any);
+    const opening = controller.applyNativeDocument({
+      path: 'C:/docs/semantic.md', fileName: 'semantic.md', markdown: '# Ready',
+      modifiedAt: 1, sizeBytes: 7, readonly: false,
+    }, 'opened');
+    await Promise.resolve();
+    expect(getState().tabs).toEqual([oldTab]);
+    expect(getState().activeTabId).toBe(oldTab.id);
+    expect(load).not.toHaveBeenCalled();
+    finishReplacement();
+    await opening;
+    const current = getState().tabs[1];
+    expect(getState().activeTabId).toBe(current.id);
+    expect(load).toHaveBeenCalledOnce();
+    expect(load).toHaveBeenCalledWith(current);
+    expect(current.fileName).toBe('semantic.md');
+  });
+
   it('background external-file polling does not flush an inline formula draft', async () => {
     const { options, getMarkdown } = createOptions([createTab()]);
     let drafting = true;

@@ -26,6 +26,20 @@ interface Mounted {
   window: DocumentWindow;
   semantic?: MarkdownSemanticWindow;
   source?: MarkdownSourceWindow;
+  restricted?: boolean;
+  restrictedByte?: number;
+}
+export interface MarkdownPresentation {
+  documentId: string;
+  revision: number;
+  generation: number;
+  mode: 'semantic' | 'source';
+  /** 所有时间均相对于本次会话打开；started 是当前目标开始时刻。 */
+  started: number;
+  phase: 'preparing' | 'preview' | 'editable' | 'restricted' | 'failed';
+  coverage: 'pending' | 'semantic' | 'mixed' | 'source';
+  /** 生命周期代理计时，不能代替实机实际绘制测量。每个目标只保留当前记录。 */
+  timings: { preview?: number; editable?: number; covered?: number; stable?: number; indexed?: number };
 }
 
 /** 真实滚动宿主。占位只存在于宿主 DOM；所有编辑器都绑定完整会话的局部投影。 */
@@ -52,6 +66,7 @@ export class MarkdownViewportHost {
   private preferredByte: number | undefined;
   private preferredFocus = false;
   private scrollByte: number | undefined;
+  private locatedByte: number | undefined;
   private input: HTMLTextAreaElement | undefined;
   private composing = false;
   private compositionWaiters = new Set<() => void>();
@@ -72,6 +87,14 @@ export class MarkdownViewportHost {
   private preparationTimer?: ReturnType<typeof setTimeout>;
   private preparationIndicator?: HTMLDivElement;
   private preparationStarted = 0;
+  private stableTimer?: ReturnType<typeof setTimeout>;
+  private presentationRevision = -1;
+  private presentationGeneration = -1;
+  private presentationStarted = 0;
+  private presentationTimings: MarkdownPresentation['timings'] = {};
+  private presentationSignature = '';
+  private visibleGeometry = '';
+  private viewFailure: unknown;
   private readingAnchor: ReturnType<MarkdownViewportHost['captureAnchor']>;
   private readonly dirty = new Set<Mounted>();
   private blockPositions = new Map<string, number>();
@@ -99,9 +122,14 @@ export class MarkdownViewportHost {
       onFailure(error: unknown): void;
       writeClipboard(text: string): Promise<void>;
       onScroll?(byte: number): void;
+      onPresentation?(state: MarkdownPresentation): void;
+      onOpenSource?(range: { fromByte: number; toByte: number; byte: number }): void;
     },
   ) {
     this.scroll = target.closest<HTMLElement>('.semantic-pane, .source-pane') ?? target;
+    this.presentationStarted = document.elapsed;
+    this.presentationRevision = document.state.status.revision;
+    this.presentationGeneration = this.navigation;
     this.layoutBatch = new MarkdownLayoutBatch(() => this.captureAnchor(), anchor => this.restoreAnchor(anchor));
     this.typographySubscription = subscribeTypographyInteraction(snapshot => {
       if (snapshot.geometryRevision === this.geometryVersion) return;
@@ -118,6 +146,8 @@ export class MarkdownViewportHost {
     target.addEventListener('copy', this.onCopy, true);
     target.addEventListener('cut', this.onCopy, true);
     target.addEventListener('beforeinput', this.onBeforeInput, true);
+    target.addEventListener('paste', this.guardWrite, true);
+    target.addEventListener('drop', this.guardWrite, true);
     target.addEventListener('pointerdown', this.onPointer, true);
     globalThis.document.addEventListener('pointerup', this.onPointerUp, true);
     globalThis.document.addEventListener('pointercancel', this.onPointerUp, true);
@@ -146,7 +176,14 @@ export class MarkdownViewportHost {
           : Promise.resolve(),
       commitPendingEdits() {},
     });
-    this.unsubscribe = document.subscribe(() => this.schedule());
+    this.unsubscribe = document.subscribe(() => {
+      for (const view of this.mounted) {
+        view.semantic?.setFailure(!!document.state.failure || !!this.viewFailure);
+        view.source?.setReadonly(!!this.options.readonly || !!document.state.failure || !!this.viewFailure);
+      }
+      this.schedule();
+    });
+    this.requestPreparation();
   }
   get activeCore() {
     return this.active?.semantic?.core;
@@ -157,6 +194,98 @@ export class MarkdownViewportHost {
   get hasGlobalSelection() {
     return this.globalSelection;
   }
+  get writable() {
+    const state = this.document.session.state;
+    if (this.hidden || this.disposed || this.options.readonly || this.viewFailure ||
+      this.document.state.failure || state.historyBusy || state.closing || state.failure) return false;
+    return !!(this.active?.semantic?.editable ||
+      (this.active?.source && !this.active.source.bridge.isStale));
+  }
+  private guardWrite = (event: Event) => {
+    const view = this.mounted.find(view => view.element.contains(event.target as Node));
+    const allowed = this.writable && (!view?.semantic || view.semantic.editable);
+    if (allowed) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  private visibleViews() {
+    const top = this.localScrollTop;
+    const bottom = top + (this.scroll.clientHeight || 800) / this.scale;
+    return this.mounted.filter(view => view.from !== undefined && view.to! > view.from
+      ? this.heights.top(view.from) < bottom && this.heights.top(view.to!) > top
+      : this.document.state.status.byteLength === 0 || this.hasVisibleContent());
+  }
+  get presentation(): MarkdownPresentation {
+    const state = this.document.state;
+    const visible = this.visibleViews();
+    const target = this.preferredByte ?? this.scrollByte;
+    const atTarget = target === undefined || visible.some(view => target >= view.window.fromByte && target <= view.window.toByte);
+    let through = this.localScrollTop;
+    for (const view of visible) {
+      if (view.from === undefined || view.to! <= view.from) continue;
+      if (this.heights.top(view.from) > through + 1) break;
+      through = Math.max(through, this.heights.top(view.to!));
+    }
+    const bottom = this.localScrollTop + (this.scroll.clientHeight || 800) / this.scale;
+    const covered = visible.length > 0 && atTarget && (state.status.byteLength === 0 ||
+      through >= bottom - 1 || (state.progress.state === 'ready' && through >= this.heights.totalHeight - 1));
+    const semantic = visible.some(view => !!view.semantic);
+    return {
+      documentId: state.status.documentId, revision: state.status.revision,
+      generation: this.navigation, mode: this.mode, started: this.presentationStarted,
+      phase: state.failure || this.viewFailure ? 'failed' : !visible.length || !atTarget ? 'preparing' :
+        visible.some(view => view.semantic?.editable || (this.mode === 'source' && view.source)) ? 'editable' :
+          semantic ? 'preview' : 'restricted',
+      coverage: !covered ? 'pending' : this.mode === 'source' ? 'source' :
+        visible.every(view => !!view.semantic) ? 'semantic' : 'mixed',
+      timings: { ...this.presentationTimings, indexed: state.timings.indexed },
+    };
+  }
+  private publishPresentation() {
+    if (this.hidden || this.disposed) return;
+    if (this.input) this.input.readOnly = !this.writable;
+    if (this.presentationRevision !== this.document.state.status.revision || this.presentationGeneration !== this.navigation) {
+      this.presentationRevision = this.document.state.status.revision;
+      this.presentationGeneration = this.navigation;
+      this.presentationStarted = this.document.elapsed;
+      this.presentationTimings = {};
+    }
+    const state = this.presentation;
+    const visible = this.visibleViews();
+    const geometry = JSON.stringify([this.localScrollTop, this.scroll.clientHeight, state.coverage,
+      visible.map(view => [view.key, view.from === undefined ? 0 : this.heights.top(view.from),
+        view.to === undefined ? 0 : this.heights.top(view.to)])]);
+    if (geometry !== this.visibleGeometry) { this.visibleGeometry = geometry; this.invalidateStable(); }
+    const elapsed = this.document.elapsed;
+    const semantic = visible.some(view => !!view.semantic);
+    if (semantic && state.phase !== 'preparing' && state.phase !== 'failed') {
+      this.presentationTimings.preview ??= elapsed;
+      this.document.noteVisible('readable');
+      if (state.phase === 'editable') {
+        this.presentationTimings.editable ??= elapsed;
+        this.document.noteVisible('editable');
+      }
+    }
+    if (state.coverage !== 'pending') this.presentationTimings.covered ??= elapsed;
+    if (!this.stableTimer && state.coverage !== 'pending' && this.presentationTimings.stable === undefined)
+      this.stableTimer = setTimeout(() => {
+        this.stableTimer = undefined;
+        if (this.hidden || this.disposed || this.presentation.coverage === 'pending') return;
+        this.presentationTimings.stable = this.document.elapsed;
+        this.publishPresentation();
+      }, MARKDOWN_VIEWPORT_POLICY.quietMs);
+    const next = this.presentation;
+    const signature = JSON.stringify(next);
+    if (signature !== this.presentationSignature) {
+      this.presentationSignature = signature;
+      this.target.dataset.presentation = next.phase;
+      this.callbacks.onPresentation?.(next);
+    }
+  }
+  private invalidateStable() {
+    clearTimeout(this.stableTimer); this.stableTimer = undefined;
+    this.presentationTimings.stable = undefined;
+  }
   captureSelection() {
     if (!this.globalSelection) {
       const selection = this.selection();
@@ -166,8 +295,10 @@ export class MarkdownViewportHost {
   }
   get position() {
     const first = this.index?.blocks[this.heights.indexAt(this.localScrollTop)];
+    const restricted = this.mounted.find(view => view.restricted && view.from !== undefined &&
+      this.index?.blocks[view.from]?.id === first?.id);
     return {
-      byteOffset: first?.fromByte ?? this.active?.window.fromByte ?? 0,
+      byteOffset: this.locatedByte ?? restricted?.restrictedByte ?? first?.fromByte ?? this.active?.window.fromByte ?? 0,
       line: first?.fromLine ?? 1,
     };
   }
@@ -189,6 +320,10 @@ export class MarkdownViewportHost {
     );
   }
   private selection(view = this.active): DocumentSelection | undefined {
+    if (view?.restricted) {
+      const byte = view.restrictedByte ?? view.window.fromByte;
+      return { anchorByte: byte, headByte: byte };
+    }
     return view?.source?.selection ?? view?.semantic?.core.getSourceSelection(false);
   }
   private onSelectionChanged = () => {
@@ -199,12 +334,15 @@ export class MarkdownViewportHost {
     this.document.interacting();
   };
   private onOutsidePointer = (event: PointerEvent) => {
-    if (event.target instanceof Node && !this.target.contains(event.target)) this.focusAfterRemount = false;
+    if (event.target instanceof Node && !this.target.contains(event.target)) {
+      this.focusAfterRemount = false;
+      this.preferredFocus = false;
+    }
   };
   private onDocumentFocus = (event: FocusEvent) => {
     // WebView2 在过期投影变为只读时会暂时把焦点交给 body；这不代表用户离开编辑区。
     if (event.target !== globalThis.document.body && event.target instanceof Node &&
-      !this.target.contains(event.target)) this.focusAfterRemount = false;
+      !this.target.contains(event.target)) { this.focusAfterRemount = false; this.preferredFocus = false; }
   };
   private onScroll = () => {
     if (this.programScroll !== undefined && Math.abs(this.scroll.scrollTop - this.programScroll) < 1) {
@@ -213,6 +351,9 @@ export class MarkdownViewportHost {
       return;
     }
     this.programScroll = undefined;
+    this.locatedByte = undefined;
+    this.document.requestVisibleStructure(this, null);
+    this.invalidateStable();
     this.requestPreparation();
     this.generation++;
     this.readingAnchor = undefined;
@@ -228,7 +369,7 @@ export class MarkdownViewportHost {
     this.callbacks.onScroll?.(this.position.byteOffset);
   };
   private requestPreparation() {
-    if (this.preparationTimer || this.preparationIndicator || this.hidden) return;
+    if (this.preparationTimer || this.preparationIndicator || this.hidden || this.disposed) return;
     this.preparationStarted = performance.now();
     this.preparationTimer = setTimeout(() => {
       this.preparationTimer = undefined;
@@ -236,7 +377,7 @@ export class MarkdownViewportHost {
       const indicator = this.preparationIndicator = globalThis.document.createElement('div');
       indicator.className = 'markdown-session-preparing';
       indicator.setAttribute('role', 'status');
-      indicator.textContent = '正在准备此处内容…';
+      indicator.textContent = '正在准备正文…';
       Object.assign(indicator.style, { position: 'absolute', top: `${this.localScrollTop + 12}px`,
         left: '12px', pointerEvents: 'none', fontSize: '0.875em', opacity: '0.7' });
       this.target.append(indicator);
@@ -244,6 +385,7 @@ export class MarkdownViewportHost {
     }, 100);
   }
   private hasVisibleContent() {
+    if (this.document.state.status.byteLength === 0 && this.mounted.some(view => !!view.semantic || !!view.source)) return true;
     const top = this.localScrollTop;
     return this.mounted.some(view => {
       if (this.preferredByte !== undefined && (this.preferredByte < view.window.fromByte ||
@@ -263,6 +405,45 @@ export class MarkdownViewportHost {
     clearTimeout(this.preparationTimer); this.preparationTimer = undefined;
     this.preparationIndicator?.remove(); this.preparationIndicator = undefined;
   }
+  private showFailure() {
+    if (this.hidden || this.disposed) return;
+    this.document.requestVisibleStructure(this, null);
+    clearTimeout(this.preparationTimer); this.preparationTimer = undefined;
+    this.invalidateStable();
+    for (const view of this.mounted) view.semantic?.setFailure(true);
+    for (const view of this.mounted) view.source?.setReadonly(true);
+    if (!this.preparationIndicator || this.preparationIndicator.dataset.failure !== 'true') {
+      this.preparationIndicator?.remove();
+      const element = this.preparationIndicator = globalThis.document.createElement('div');
+      element.className = 'markdown-session-preparing';
+      element.dataset.failure = 'true';
+      element.setAttribute('role', 'alert');
+      const message = globalThis.document.createElement('span');
+      const error = this.viewFailure ?? this.document.state.failure;
+      message.textContent = `正文准备失败：${error instanceof Error ? error.message : String(error)}`;
+      const retry = globalThis.document.createElement('button');
+      retry.type = 'button'; retry.textContent = '重试';
+      retry.onclick = () => {
+        this.viewFailure = undefined;
+        element.remove(); this.preparationIndicator = undefined;
+        void this.document.retry().then(() => {
+          if (!this.hidden && !this.disposed) { this.requestPreparation(); this.schedule(); }
+        }).catch(error => { this.viewFailure = error; this.showFailure(); });
+      };
+      element.append(message, retry); this.target.append(element);
+      if (this.mode === 'semantic' && this.callbacks.onOpenSource && !this.document.session.state.failure) {
+        const source = globalThis.document.createElement('button');
+        source.type = 'button'; source.textContent = '在源码中打开';
+        source.onclick = () => {
+          if (this.hidden || this.disposed) return;
+          const byte = this.preferredByte ?? this.scrollByte ?? this.position.byteOffset;
+          this.callbacks.onOpenSource?.({ fromByte: byte, toByte: byte, byte });
+        };
+        element.append(source);
+      }
+    }
+    this.publishPresentation();
+  }
   private onFocus = (event: FocusEvent) => {
     const view = this.mounted.find((view) => view.element.contains(event.target as Node));
     if (view) {
@@ -273,11 +454,13 @@ export class MarkdownViewportHost {
   };
   get diagnostics() {
     return { ...this.stats, mounted: this.mounted.length, cacheEntries: this.layoutCache.size,
-      residentWindowBytes: this.mounted.reduce((sum, view) => sum + view.window.toByte - view.window.fromByte, 0),
+      residentWindowBytes: this.mounted.reduce((sum, view) => sum + this.windowBytes(view), 0),
       cacheBytes: this.layoutCache.estimatedBytes, cacheHits: this.layoutCache.hits,
       cacheMisses: this.layoutCache.misses, preparationMs: this.demand.preparationMs };
   }
+  private windowBytes(view: Mounted) { return view.restricted ? 0 : view.window.toByte - view.window.fromByte; }
   private invalidateGeometry() {
+    this.invalidateStable();
     this.layoutContext = '';
     this.layoutCache.clear();
     for (const view of this.mounted) { view.layoutKey = undefined; this.dirty.add(view); }
@@ -291,6 +474,7 @@ export class MarkdownViewportHost {
     if (view) { this.dirty.add(view); this.measureDirty(); }
   };
   private blockLayoutKey(block: MarkdownStructureIndex['blocks'][number]) {
+    if (this.mode === 'semantic' && block.mode === 'raw') return `restricted:${block.id}:${this.layoutContext}`;
     return `${block.id}:${block.contentVersion ?? block.version}:${block.sourceHash}:${JSON.stringify(block.references.map(key => this.index?.references[key]))}:${this.layoutContext}`;
   }
   private captureAnchor() {
@@ -366,6 +550,7 @@ export class MarkdownViewportHost {
     });
   }
   private hasOriginalSource(view: Mounted) {
+    if (view.restricted) return true;
     return (view.semantic?.bridge.text ?? view.source?.bridge.text) === view.window.text;
   }
   private mountedGroups(ids: Set<string | undefined>, pinned: number[]) {
@@ -380,6 +565,7 @@ export class MarkdownViewportHost {
     return result;
   }
   private onPointer = (event: PointerEvent) => {
+    this.focusAfterRemount = true;
     this.globalSelection = false;
     this.removeInput();
     this.clearSelectionPaint();
@@ -389,6 +575,7 @@ export class MarkdownViewportHost {
     if (this.pointerView) this.active = this.pointerView;
   };
   private byteAtCoords(view: Mounted | undefined, event: PointerEvent) {
+    if (view?.restricted) return view.restrictedByte ?? view.window.fromByte;
     return (
       view?.source?.sourceByteAtCoords(event.clientX, event.clientY) ??
       view?.semantic?.core.sourceByteAtCoords(event.clientX, event.clientY)
@@ -413,19 +600,22 @@ export class MarkdownViewportHost {
     this.pointerAnchor = undefined;
     this.pointerView = undefined;
     if (this.globalSelection) this.focusGlobalInput();
+    else if (this.focusAfterRemount && this.active?.semantic?.editable) this.focus();
     this.schedule();
   };
   private onCopy = (event: ClipboardEvent) => {
+    if (event.type === 'cut' && !this.writable) { this.guardWrite(event); return; }
     if (!this.globalSelection) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     const action =
       event.type === 'cut'
-        ? this.document.selection.cut(this.callbacks.writeClipboard)
+        ? this.document.selection.cut(this.callbacks.writeClipboard, undefined, () => this.writable)
         : this.document.selection.copy().then(this.callbacks.writeClipboard);
     void action.catch(this.callbacks.onFailure);
   };
   private onBeforeInput = (event: InputEvent) => {
+    if (!this.writable) { this.guardWrite(event); return; }
     if (!this.globalSelection || event.isComposing || this.composing) return;
     if (!event.inputType.startsWith('delete') && !event.inputType.startsWith('insert')) return;
     event.preventDefault();
@@ -436,6 +626,7 @@ export class MarkdownViewportHost {
     this.commitGlobalInput(inserted);
   };
   private commitGlobalInput(text: string) {
+    if (!this.writable) return;
     const selection = this.document.selection.selection;
     const range = this.document.selection.range;
     const byte = range.fromByte + utf8Length(text);
@@ -458,10 +649,12 @@ export class MarkdownViewportHost {
       return;
     }
     const input = (this.input = globalThis.document.createElement('textarea'));
+    input.readOnly = !this.writable;
     input.className = 'markdown-session-input';
     input.style.top = `${this.localScrollTop}px`;
     input.setAttribute('aria-label', '文档选区输入');
     input.addEventListener('compositionstart', () => {
+      if (!this.writable) return;
       this.composing = true;
     });
     input.addEventListener('compositionend', () => {
@@ -490,6 +683,21 @@ export class MarkdownViewportHost {
     }
   }
   private onKey = (event: KeyboardEvent) => {
+    if (event.target instanceof HTMLElement && event.target.closest('button') &&
+      ['Enter', ' '].includes(event.key)) return;
+    if (this.active?.restricted && (event.ctrlKey || event.metaKey) && ['z', 'y'].includes(event.key.toLowerCase())) {
+      event.preventDefault(); event.stopImmediatePropagation();
+      const state = this.document.session.state;
+      if (!this.options.readonly && !this.hidden && !state.failure && !this.document.state.failure && !state.closing && !state.historyBusy)
+        void this.document.session.undo(event.key.toLowerCase() === 'y' || event.shiftKey)
+          .then(() => this.reveal(this.document.selection.selection.headByte, true)).catch(this.callbacks.onFailure);
+      return;
+    }
+    if (!this.writable && (['Backspace', 'Delete', 'Enter'].includes(event.key) ||
+      (!event.ctrlKey && !event.metaKey && !event.altKey && (event.key.length === 1 || event.key === 'Process')) ||
+      ((event.ctrlKey || event.metaKey) && ['v', 'x', 'z', 'y'].includes(event.key.toLowerCase())))) {
+      event.preventDefault(); event.stopImmediatePropagation(); return;
+    }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -531,6 +739,15 @@ export class MarkdownViewportHost {
       return;
     }
     if (!this.active) return;
+    if (this.active.restricted && ['ArrowLeft', 'ArrowUp', 'ArrowRight', 'ArrowDown'].includes(event.key)) {
+      event.preventDefault(); event.stopImmediatePropagation();
+      const left = event.key === 'ArrowLeft' || event.key === 'ArrowUp';
+      const edge = left ? this.active.window.fromByte : this.active.window.toByte;
+      if ((left && edge === 0) || (!left && edge === this.document.state.status.byteLength)) return;
+      void (left ? this.adjacentByte(edge, -1) : Promise.resolve(edge))
+        .then(byte => this.navigate(byte, event.shiftKey)).catch(this.callbacks.onFailure);
+      return;
+    }
     const left = ['ArrowLeft', 'ArrowUp', 'Backspace'].includes(event.key);
     const right = ['ArrowRight', 'ArrowDown', 'Delete'].includes(event.key);
     if (!left && !right) return;
@@ -550,8 +767,9 @@ export class MarkdownViewportHost {
     void this.adjacentByte(edge, left ? -1 : 1)
       .then(async (byte) => {
         if (event.key === 'Backspace' || event.key === 'Delete') {
+          if (!this.writable) return;
           this.document.selection.set({ anchorByte: edge, headByte: byte });
-          await this.document.selection.replaceSelection('');
+          await this.document.selection.replaceSelection('', () => this.writable);
           await this.reveal(Math.min(edge, byte), true);
         } else await this.navigate(byte, event.shiftKey);
       })
@@ -623,6 +841,7 @@ export class MarkdownViewportHost {
       if (selection.anchorByte > selection.headByte) continue;
       if (selection.anchorByte === selection.headByte) continue;
       const rects =
+        (view.restricted ? [view.element.getBoundingClientRect()] : undefined) ??
         view.source?.sourceRangeRects(selection.anchorByte, selection.headByte) ??
         view.semantic?.core.sourceRangeRects(selection.anchorByte, selection.headByte) ??
         [];
@@ -651,12 +870,17 @@ export class MarkdownViewportHost {
           (error as { code?: string })?.code === 'revision-conflict'
         )
           this.schedule();
-        else this.callbacks.onFailure(error);
+        else { this.viewFailure = error; this.showFailure(); this.callbacks.onFailure(error); }
       });
     });
   }
   private async render() {
     if (this.disposed || this.hidden) return;
+    if (this.document.state.failure || this.viewFailure) { this.showFailure(); return; }
+    for (const view of this.mounted) {
+      view.semantic?.setFailure(false);
+      view.source?.setReadonly(!!this.options.readonly);
+    }
     if (this.busy) {
       this.again = true;
       await this.renderDone;
@@ -679,6 +903,7 @@ export class MarkdownViewportHost {
     const created: Mounted[] = [];
     try {
       await this.document.session.awaitTransactions();
+      if (this.disposed || this.hidden || generation !== this.generation) return;
       const state = this.document.state;
       const rect = this.target.getBoundingClientRect();
       this.scale = this.target.offsetWidth > 0 ? rect.width / this.target.offsetWidth || 1 : 1;
@@ -699,7 +924,8 @@ export class MarkdownViewportHost {
         this.index = index;
         this.heights = new MarkdownHeightIndex();
       }
-      const heightFor = (block: MarkdownStructureIndex['blocks'][number]) => this.layoutCache.get(this.blockLayoutKey(block))?.height ?? estimateMarkdownBlockHeight(block);
+      const heightFor = (block: MarkdownStructureIndex['blocks'][number]) => this.layoutCache.get(this.blockLayoutKey(block))?.height ??
+        (this.mode === 'semantic' && block.mode === 'raw' ? 104 : estimateMarkdownBlockHeight(block));
       if (previousLength && this.heights.length === previousLength && index?.blocks[previousLength - 1] !== this.lastIndexedBlock)
         this.heights.update(previousLength - 1, heightFor(index!.blocks[previousLength - 1]));
       for (let i = this.heights.length; i < (index?.blocks.length ?? 0); i++) this.heights.append(heightFor(index!.blocks[i]));
@@ -712,16 +938,18 @@ export class MarkdownViewportHost {
       if (geometryChanged) for (const view of this.mounted) this.dirty.add(view);
       this.restoreAnchor(previousAnchor);
       const requestedByte = this.preferredByte ?? this.scrollByte;
+      let requestedTop: number | undefined;
       if (requestedByte !== undefined && index) {
         const blockIndex = this.blockPositions.get(index.blockAt(requestedByte)?.id ?? '') ?? -1;
         if (blockIndex >= 0) {
           const block = index.blocks[blockIndex];
           const fraction =
-            block.mode === 'raw' || this.mode === 'source'
+            this.mode === 'source'
               ? (requestedByte - block.fromByte) / Math.max(1, block.toByte - block.fromByte)
               : 0;
-          this.scrollTo(this.heights.top(blockIndex) + this.heights.height(blockIndex) * fraction);
-          this.scrollByte = undefined;
+          requestedTop = this.heights.top(blockIndex) + this.heights.height(blockIndex) * fraction;
+          this.scrollTo(requestedTop);
+          if (this.mode === 'semantic' && block.mode === 'raw') this.preferredByte = requestedByte;
         }
       }
       const plans: Array<{
@@ -732,15 +960,22 @@ export class MarkdownViewportHost {
         fromByte: number;
         toByte: number;
         semantic: boolean;
+        restricted?: boolean;
         top: number;
         height: number;
       }> = [];
       const unindexed = index && index.progress.state !== 'ready' && (
-        (this.preferredByte ?? 0) > index.progress.indexedBytes || this.localScrollTop > this.heights.totalHeight);
+        (this.preferredByte ?? this.scrollByte ?? 0) >= index.progress.indexedBytes || this.localScrollTop > this.heights.totalHeight);
+      const needsStructure = this.mode === 'semantic' && state.progress.state !== 'ready' &&
+        (!index?.blocks.length || unindexed || this.localScrollTop + (this.scroll.clientHeight || 800) / this.scale > this.heights.totalHeight);
+      this.document.requestVisibleStructure(this, needsStructure ? {
+        byte: Math.max(this.preferredByte ?? this.scrollByte ?? 0, index?.progress.indexedBytes ?? 0),
+        revision: state.status.revision, generation: this.navigation,
+      } : null);
       if (unindexed) {
-        const estimatedByte = this.preferredByte ?? Math.floor(this.localScrollTop / 24 * 100);
+        const estimatedByte = this.preferredByte ?? this.scrollByte ?? Math.floor(this.localScrollTop / 24 * 100);
         const fromByte = Math.min(Math.max(0, state.status.byteLength - 16 * 1024), Math.max(0, estimatedByte - 8192));
-        plans.push({ from: 0, to: 0, fromByte, toByte: Math.min(state.status.byteLength, fromByte + 16 * 1024), semantic: false, top: fromByte / 100 * 24, height: 16 * 1024 / 100 * 24 });
+        if (this.mode === 'source') plans.push({ from: 0, to: 0, fromByte, toByte: Math.min(state.status.byteLength, fromByte + 16 * 1024), semantic: false, top: fromByte / 100 * 24, height: 16 * 1024 / 100 * 24 });
       } else if (index?.blocks.length) {
         const selected =
           this.preferredByte === undefined ? this.selection() : { headByte: this.preferredByte };
@@ -751,10 +986,11 @@ export class MarkdownViewportHost {
               ]
             : [];
         const height = (this.scroll.clientHeight || 800) / this.scale;
-        const top = this.localScrollTop;
+        // 空宿主尚无可滚动高度，浏览器会截断 scrollTop；计划仍应覆盖目标位置。
+        const top = requestedTop ?? this.localScrollTop;
         const demand = this.demand.range(height, performance.now());
         const pressure = this.mounted.length > MARKDOWN_VIEWPORT_POLICY.softViews ||
-          this.mounted.reduce((sum, view) => sum + view.window.toByte - view.window.fromByte, 0) > MARKDOWN_VIEWPORT_POLICY.softWindowBytes;
+          this.mounted.reduce((sum, view) => sum + this.windowBytes(view), 0) > MARKDOWN_VIEWPORT_POLICY.softWindowBytes;
         if (pressure) { demand.before = demand.after = height * 3; demand.retainBefore = demand.retainAfter = height * 3; }
         const from = this.heights.indexAt(Math.max(0, top - demand.before));
         const to = this.heights.indexAt(top + height + demand.after) + 1;
@@ -781,14 +1017,15 @@ export class MarkdownViewportHost {
           const first = index.blocks[range.from];
           const last = index.blocks[range.to - 1];
           const semantic = this.mode === 'semantic' && first.mode === 'semantic';
+          const restricted = this.mode === 'semantic' && first.mode === 'raw';
           let fromByte = first.fromByte;
           let toByte = last.toByte;
-          if (!semantic && toByte - fromByte > 32 * 1024) {
+          if (!semantic && !restricted && toByte - fromByte > 32 * 1024) {
             const fraction = Math.max(
               0,
               Math.min(
                 1,
-                (this.localScrollTop - this.heights.top(range.from)) /
+                (top - this.heights.top(range.from)) /
                   Math.max(1, this.heights.height(range.from)),
               ),
             );
@@ -809,13 +1046,14 @@ export class MarkdownViewportHost {
             fromByte,
             toByte,
             semantic,
+            restricted,
             top:
               this.heights.top(range.from) +
               (wholeHeight * (fromByte - first.fromByte)) / wholeBytes,
             height: (wholeHeight * (toByte - fromByte)) / wholeBytes,
           });
         }
-      } else {
+      } else if (this.mode === 'source' || state.status.byteLength === 0) {
         const fromByte = Math.max(0, (this.preferredByte ?? 0) - 8192);
         plans.push({
           from: 0,
@@ -835,7 +1073,7 @@ export class MarkdownViewportHost {
         const from = index ? this.blockPositions.get(index.blockAt(view.window.fromByte)?.id ?? '') ?? 0 : 0;
         const last = index ? this.blockPositions.get(index.blockAt(Math.max(view.window.fromByte, view.window.toByte - 1))?.id ?? '') ?? from : from;
         plans.push({ groupId: view.groupId, signature: view.signature, from, to: last + 1,
-          fromByte: view.window.fromByte, toByte: view.window.toByte, semantic: !!view.semantic,
+          fromByte: view.window.fromByte, toByte: view.window.toByte, semantic: !!view.semantic, restricted: view.restricted,
           top: this.heights.top(from), height: this.heights.top(last + 1) - this.heights.top(from) });
       }
       const viewportTop = this.localScrollTop;
@@ -849,11 +1087,11 @@ export class MarkdownViewportHost {
         ? this.document.selection.selection
         : (this.selection() ?? this.document.selection.selection);
       for (const plan of plans) {
-        const key = `${plan.groupId ?? `${plan.fromByte}:${plan.toByte}`}:${plan.semantic}`;
+        const key = `${plan.groupId ?? `${plan.fromByte}:${plan.toByte}`}:${plan.restricted ? 'restricted' : plan.semantic}`;
         let view = this.mounted.find(
           (view) =>
             (view.key === key || !plan.groupId) &&
-            (this.pinned(view) || (view.signature === plan.signature && view.window.fromByte === plan.fromByte &&
+            ((view.restricted && plan.restricted) || this.pinned(view) || (view.signature === plan.signature && view.window.fromByte === plan.fromByte &&
               view.window.toByte === plan.toByte &&
               !!view.semantic === plan.semantic &&
               !(view.source?.bridge.isStale || view.semantic?.bridge.isStale))),
@@ -862,13 +1100,17 @@ export class MarkdownViewportHost {
           // 软预算优先释放远处保留带；可见区、基础缓冲和交互保护不被预算挤掉。
           if (distance(plan) > ((this.scroll.clientHeight || 800) / this.scale) * 3 &&
             (next.length >= MARKDOWN_VIEWPORT_POLICY.softViews ||
-             next.reduce((sum, view) => sum + view.window.toByte - view.window.fromByte, 0) + plan.toByte - plan.fromByte > MARKDOWN_VIEWPORT_POLICY.softWindowBytes)) continue;
-          if (createdCount && distance(plan) > 0 && performance.now() - batchStart >= MARKDOWN_VIEWPORT_POLICY.batchMs) {
+             next.reduce((sum, view) => sum + this.windowBytes(view), 0) + (plan.restricted ? 0 : plan.toByte - plan.fromByte) > MARKDOWN_VIEWPORT_POLICY.softWindowBytes)) continue;
+          // 屏内也遵守同一批次预算，先发布已准备的完整组，不等整屏准备完毕。
+          if (createdCount && performance.now() - batchStart >= MARKDOWN_VIEWPORT_POLICY.batchMs) {
             this.again = true;
             continue;
           }
           const started = performance.now();
-          const window = await this.document.port.readWindow(
+          const window: DocumentWindow = plan.restricted ? {
+            documentId: state.status.documentId, revision: state.status.revision,
+            fromByte: plan.fromByte, toByte: plan.toByte, text: '',
+          } : await this.document.port.readWindow(
             state.status.documentId,
             state.status.revision,
             plan.fromByte,
@@ -876,6 +1118,7 @@ export class MarkdownViewportHost {
           );
           if (
             this.disposed ||
+            this.hidden ||
             generation !== this.generation ||
             this.document.session.state.pendingTransactions ||
             this.document.state.status.revision !== state.status.revision
@@ -886,7 +1129,22 @@ export class MarkdownViewportHost {
           view = { key, element, window, groupId: plan.groupId, signature: plan.signature };
           created.push(view);
           const stale = () => this.schedule();
-          if (plan.semantic) {
+          if (plan.restricted) {
+            view.restricted = true;
+            element.classList.add('markdown-session-restricted');
+            element.contentEditable = 'false';
+            const message = globalThis.document.createElement('p');
+            message.textContent = '此内容暂不支持排版显示';
+            const button = globalThis.document.createElement('button');
+            button.type = 'button'; button.textContent = '在源码中打开';
+            const restrictedView = view;
+            button.onclick = () => {
+              if (this.hidden || this.disposed || !this.mounted.includes(restrictedView)) return;
+              this.callbacks.onOpenSource?.({ fromByte: restrictedView.window.fromByte,
+                toByte: restrictedView.window.toByte, byte: restrictedView.restrictedByte ?? restrictedView.window.fromByte });
+            };
+            element.append(message, button);
+          } else if (plan.semantic) {
             view.semantic = new MarkdownSemanticWindow(this.document.session, window, {
               ...this.options,
               target: element,
@@ -896,10 +1154,17 @@ export class MarkdownViewportHost {
                 void this.reveal(this.document.selection.selection.headByte, true);
               },
               onFailure: this.callbacks.onFailure,
+              onPresentationChange: () => {
+                if (this.hidden || this.disposed || !this.mounted.includes(view!)) return;
+                if (this.input) this.input.readOnly = !this.writable;
+                this.publishPresentation();
+                if (view === this.active && this.focusAfterRemount && !this.pointerView && view!.semantic?.editable) this.focus();
+              },
             });
           } else {
             view.source = new MarkdownSourceWindow(this.document.session, window, {
               target: element,
+              readonly: this.options.readonly,
               onStale: stale,
               onHistory: () => {
                 void this.reveal(this.document.selection.selection.headByte, true);
@@ -927,6 +1192,11 @@ export class MarkdownViewportHost {
         }
         view.from = plan.from;
         view.to = plan.to;
+        if (view.restricted) {
+          Object.assign(view.window, { fromByte: plan.fromByte, toByte: plan.toByte, revision: state.status.revision });
+          view.signature = plan.signature;
+          if (view.restrictedByte !== undefined) view.restrictedByte = Math.max(plan.fromByte, Math.min(view.restrictedByte, plan.toByte));
+        }
         view.layoutKey = `${key}:${plan.signature ?? state.status.revision}:${this.layoutContext}`;
         view.element.dataset.markdownGroup = plan.groupId ?? key;
         next.push(view);
@@ -955,15 +1225,18 @@ export class MarkdownViewportHost {
         next.every((view, i) => view === this.mounted[i]) &&
         layout === this.installedLayout;
       if (unchanged) {
+        if (requestedTop !== undefined) { this.scrollTo(requestedTop); this.scrollByte = undefined; }
         this.finishPreparation();
+        if (!this.hasVisibleContent()) this.requestPreparation();
         this.measureDirty();
         this.restorePreferred();
+        this.publishPresentation();
         return;
       }
       this.installedLayout = layout;
       this.stats.batches++;
       this.stats.ranges++;
-      const anchor = this.captureAnchor();
+      const anchor = requestedTop === undefined ? this.captureAnchor() : undefined;
       for (const view of this.mounted) if (!next.includes(view)) this.destroyView(view);
       const desired: Node[] = [];
       const neededSpacers = new Set<string>();
@@ -1000,7 +1273,12 @@ export class MarkdownViewportHost {
         }
       }
       this.mounted = next;
+      // 正文及占位高度安装后再次应用同一目标，避免新建源码栏停在文首。
+      if (requestedTop !== undefined) { this.scrollTo(requestedTop); this.scrollByte = undefined; }
+      this.publishPresentation();
+      for (const view of next) view.semantic?.activate();
       this.finishPreparation();
+      if (!this.hasVisibleContent()) this.requestPreparation();
       this.stats.peakMounted = Math.max(this.stats.peakMounted, next.length);
       this.restoreAnchor(anchor);
       this.measureDirty();
@@ -1034,13 +1312,18 @@ export class MarkdownViewportHost {
       if (focused && (this.focusAfterRemount || this.target.contains(globalThis.document.activeElement)) &&
         this.active && created.includes(this.active)) this.focus();
       if (this.globalSelection) this.paintSelection();
-      this.document.noteVisible('readable');
-      this.document.noteVisible('editable');
+      this.publishPresentation();
       if (state.mountMode === 'progressive-full' && this.expanded < (index?.blocks.length ?? 0))
         this.again = true;
       this.restorePreferred();
       if (performance.now() - this.demand.lastScroll >= MARKDOWN_VIEWPORT_POLICY.quietMs)
         this.readingAnchor = this.captureAnchor();
+    } catch (error) {
+      if (!(error instanceof DocumentConflictError) && (error as { code?: string })?.code !== 'revision-conflict') {
+        this.viewFailure = error;
+        this.showFailure();
+      }
+      throw error;
     } finally {
       for (const view of created) if (!this.mounted.includes(view)) this.destroyView(view);
       this.busy = false;
@@ -1068,7 +1351,14 @@ export class MarkdownViewportHost {
     view.element.remove();
     this.stats.destroyed++;
   }
+  /** 模式改变宽度前保留现有块锚点，后续仍由批量测量恢复屏幕偏移。 */
+  preserveReadingPosition() {
+    this.readingAnchor = this.captureAnchor();
+  }
   scrollToByte(byte: number) {
+    this.locatedByte = byte;
+    this.document.requestVisibleStructure(this, null);
+    this.invalidateStable();
     this.requestPreparation();
     this.navigation++;
     this.generation++;
@@ -1077,6 +1367,11 @@ export class MarkdownViewportHost {
     this.schedule();
   }
   async reveal(byte: number, focus = false) {
+    this.locatedByte = byte;
+    // 在异步等待前登记意图，等待期间的外部焦点事件可以撤销它。
+    this.preferredFocus = focus;
+    this.document.requestVisibleStructure(this, null);
+    this.invalidateStable();
     this.requestPreparation();
     const navigation = ++this.navigation;
     this.generation++;
@@ -1086,21 +1381,29 @@ export class MarkdownViewportHost {
     this.removeInput();
     this.clearSelectionPaint();
     this.preferredByte = byte;
-    this.preferredFocus = focus;
     if (this.busy) await this.renderDone;
     if (navigation !== this.navigation || this.disposed || this.hidden) return;
     await this.render();
+    const view = this.active;
+    if (view?.semantic && byte >= view.window.fromByte && byte <= view.window.toByte)
+      await view.semantic.whenReady;
+    if (navigation !== this.navigation || this.disposed || this.hidden) return;
     if (this.preferredByte !== undefined) this.schedule();
   }
   private restorePreferred() {
     const byte = this.preferredByte;
     if (byte === undefined) return;
     const view = this.mounted.find(
-      (view) => byte >= view.window.fromByte && byte <= view.window.toByte,
+      (view) => byte >= view.window.fromByte && (byte < view.window.toByte ||
+        byte === this.document.state.status.byteLength && byte === view.window.toByte),
     );
     if (view) {
       this.preferredByte = undefined;
       this.active = view;
+      if (view.restricted) {
+        view.restrictedByte = byte;
+        this.document.selection.set({ anchorByte: byte, headByte: byte });
+      }
       // readWindow 会修正 UTF-8 边界，导航到窗口边缘时使用其确认坐标。
       const selection = { anchorByte: byte, headByte: byte };
       try {
@@ -1123,7 +1426,8 @@ export class MarkdownViewportHost {
     if (this.globalSelection) this.focusGlobalInput();
     else {
       this.active?.source?.view.focus();
-      this.active?.semantic?.core.focus();
+      if (this.active?.semantic?.editable) this.active.semantic.core.focus();
+      if (this.active?.restricted) this.active.element.querySelector('button')?.focus({ preventScroll: true });
       const active = this.active;
       // 新 PM 视图首帧才启用 contenteditable，必须在其启用后补一次有条件的聚焦。
       if (active && !this.target.contains(globalThis.document.activeElement))
@@ -1131,14 +1435,17 @@ export class MarkdownViewportHost {
           this.focusFrame = 0;
           if (!this.hidden && !this.disposed && this.focusAfterRemount && this.active === active) {
             active.source?.view.focus();
-            active.semantic?.core.focus();
+            if (active.semantic?.editable) active.semantic.core.focus();
           }
         });
     }
   }
   updateOptions(options: Partial<EditorRuntimeOptions>) {
     this.options = { ...this.options, ...options };
-    for (const view of this.mounted) view.semantic?.core.updateOptions(options);
+    for (const view of this.mounted) view.semantic?.updateOptions(options);
+    for (const view of this.mounted) view.source?.setReadonly(!!this.options.readonly || !!this.document.state.failure || !!this.viewFailure);
+    if (this.input) this.input.readOnly = !this.writable;
+    this.publishPresentation();
   }
   updateTheme(theme: NonNullable<EditorCoreOptions['theme']>) {
     this.options.theme = theme;
@@ -1148,7 +1455,9 @@ export class MarkdownViewportHost {
   async setHidden(hidden: boolean) {
     if (this.hidden === hidden) return;
     this.hidden = hidden;
-    if (hidden) this.focusAfterRemount = false;
+    this.document.requestVisibleStructure(this, null);
+    this.invalidateStable();
+    if (hidden) { this.focusAfterRemount = false; this.preferredFocus = false; }
     if (hidden) cancelAnimationFrame(this.focusFrame);
     clearTimeout(this.preparationTimer); this.preparationTimer = undefined;
     this.preparationIndicator?.remove(); this.preparationIndicator = undefined;
@@ -1173,6 +1482,8 @@ export class MarkdownViewportHost {
   async dispose() {
     if (this.disposed) return;
     this.hidden = true;
+    this.document.requestVisibleStructure(this, null);
+    this.invalidateStable();
     this.generation++;
     await this.unmountViews();
     this.disposed = true;
@@ -1200,6 +1511,8 @@ export class MarkdownViewportHost {
     this.target.removeEventListener('copy', this.onCopy, true);
     this.target.removeEventListener('cut', this.onCopy, true);
     this.target.removeEventListener('beforeinput', this.onBeforeInput, true);
+    this.target.removeEventListener('paste', this.guardWrite, true);
+    this.target.removeEventListener('drop', this.guardWrite, true);
     this.target.removeEventListener('pointerdown', this.onPointer, true);
     globalThis.document.removeEventListener('pointerup', this.onPointerUp, true);
     globalThis.document.removeEventListener('pointercancel', this.onPointerUp, true);

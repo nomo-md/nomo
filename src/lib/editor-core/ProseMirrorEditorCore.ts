@@ -215,6 +215,7 @@ export class ProseMirrorEditorCore implements EditorCore {
   private syncSnapshot: EditorSyncSnapshot | null = null;
   private compositionWaiters = new Set<() => void>();
   private sourceProjection: MarkdownSourceProjection | null = null;
+  private initialEditableFrame: number | null = null;
   private sourceOperationDepth = 0;
   private projectionCompositionTimer: ReturnType<typeof setTimeout> | null = null;
   private parsedDocument: { markdown: string; references: unknown; value: TrailingParagraphNormalization } | null = null;
@@ -516,6 +517,8 @@ export class ProseMirrorEditorCore implements EditorCore {
 
   unmount(): void {
     this.assertActive();
+    if (this.initialEditableFrame !== null) cancelAnimationFrame(this.initialEditableFrame);
+    this.initialEditableFrame = null;
     if (this.view) cancelMathInlineDraft(this.view);
     this.commitPendingEdits();
     this.clearPlainTextPasteRequest();
@@ -2213,16 +2216,18 @@ export class ProseMirrorEditorCore implements EditorCore {
 
   private refreshInitialEditableState(): void {
     const view = this.view;
-    if (!view || !this.isEditable()) {
+    if (!view || (!this.isEditable() && !this.options.documentProjection?.onViewReady)) {
       return;
     }
 
     view.setProps({ editable: () => false });
-    requestAnimationFrame(() => {
+    this.initialEditableFrame = requestAnimationFrame(() => {
+      this.initialEditableFrame = null;
       if (this.destroyed || this.view !== view) {
         return;
       }
       view.setProps({ editable: () => this.isEditable() });
+      this.options.documentProjection?.onViewReady?.();
     });
   }
 

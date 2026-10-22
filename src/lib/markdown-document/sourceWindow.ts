@@ -70,6 +70,7 @@ export class MarkdownSourceWindow {
   private group = '';
   private lastEdit = 0;
   private composing = false;
+  private applicationReadonly = false;
   private compositionWaiters = new Set<() => void>();
   constructor(
     readonly session: MarkdownSessionController,
@@ -82,8 +83,10 @@ export class MarkdownSourceWindow {
       onSelectAll?(): boolean;
       onBoundary?(direction: -1 | 1, extend: boolean): boolean;
       emojiSuggestions?: boolean;
+      readonly?: boolean;
     },
   ) {
+    this.applicationReadonly = !!options.readonly;
     this.coordinates = new SourceWindowCoordinates(window.text);
     let view: EditorView | undefined;
     this.bridge = new MarkdownWindowBridge(session, window, {
@@ -92,7 +95,7 @@ export class MarkdownSourceWindow {
       onState: () =>
         queueMicrotask(() => {
           if (this.destroyed || !view) return;
-          const blocked = this.bridge.isStale || session.state.historyBusy || session.state.closing;
+          const blocked = this.applicationReadonly || this.bridge.isStale || !!session.state.failure || session.state.historyBusy || session.state.closing;
           if (view.state.readOnly !== blocked)
             view.dispatch({
               effects: this.readonly.reconfigure([
@@ -247,6 +250,13 @@ export class MarkdownSourceWindow {
   }
   get pinned() {
     return this.composing || this.bridge.pinned;
+  }
+  setReadonly(readonly: boolean) {
+    this.applicationReadonly = readonly;
+    const state = this.session.state;
+    const blocked = readonly || this.bridge.isStale || !!state.failure || state.historyBusy || state.closing;
+    if (!this.destroyed && this.view.state.readOnly !== blocked)
+      this.view.dispatch({ effects: this.readonly.reconfigure([EditorState.readOnly.of(blocked), EditorView.editable.of(!blocked)]) });
   }
   dispose() {
     if (this.composing || this.bridge.pinned) throw new Error('正在编辑的源码区域不能回收。');

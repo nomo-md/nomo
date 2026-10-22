@@ -3009,9 +3009,10 @@
     );
   }
 
-  async function changeEditorMode(nextMode: EditorViewMode, persistPreference: boolean) {
+  async function changeEditorMode(nextMode: EditorViewMode, persistPreference: boolean, isCurrent = () => true) {
     if (workspaceInteractionDisabled) return false;
     await awaitPendingEditorOperations();
+    if (!isCurrent()) return false;
     const application = getMarkdownApplicationSession(editor);
     if (application) {
       const owner = findWorkspaceItemForTab(workspaceItems, activeTabId);
@@ -3025,7 +3026,13 @@
         runtime.mode = nextMode;
         runtime.session?.setViewMode(nextMode);
       }
-      await tick(); notifyModePaneReady(nextMode, 0);
+      await tick();
+      // 组合标签的每个成员都有独立的模式动画；只通知活动栏会让另一栏一直隐藏。
+      for (const id of members) {
+        const runtime = documentRuntimes.get(id);
+        if (!runtime || runtime.disposed || runtime.mode !== nextMode || !runtime.host?.isConnected) continue;
+        notifyModePaneReady(nextMode, 0, runtime);
+      }
       if (persistPreference) persistEditorModePreference(nextMode);
       persistWorkspaceState(); return true;
     }
@@ -3616,9 +3623,10 @@
     const core = editor;
     const runtime = documentRuntimes.get(sourceTabId);
     if (runtime?.session) {
+      if (!runtime.session.writable) return;
       runtime.session.captureSelection();
       return trackEditorOperation(async () => {
-        try { const doc = await runtime.session!.ready; await doc.selection.cut(text => writeEditorClipboard({ text, html: '' }, desktopEnabled)); }
+        try { const doc = await runtime.session!.ready; await doc.selection.cut(text => writeEditorClipboard({ text, html: '' }, desktopEnabled), undefined, () => runtime.session!.writable); }
         catch { statusMessage = t.cutFailed(); }
       });
     }
@@ -3894,6 +3902,7 @@
     if (activeItemId !== nextActiveId) activeItemId = nextActiveId;
     for (const [id, runtime] of documentRuntimes) {
       if (!currentTabs.some((tab) => tab.id === id)) {
+        if (sessionAnalysisKey.startsWith(`${id}:`)) cancelSessionAnalysis();
         if (editor === runtime.editor) {
           detachMountedEditorHostEvents();
           editor = bootEditor;
@@ -3953,6 +3962,15 @@
     }, selection => {
       if (activeTabId !== tab.id || isSwitchingTab) return;
       writingStatsController.setSelection({ from: selection.anchorByte, to: selection.headByte, sourceCoordinates: 'utf8' });
+    }, async (isCurrent) => {
+      if (!isCurrent() || workspaceInteractionDisabled || !currentDocument()) return false;
+      focusComparisonDocument(tab.id);
+      if (activeTabId !== tab.id) await switchTab(tab.id);
+      if (!isCurrent() || activeTabId !== tab.id) return false;
+      if (mode === 'split') setSplitActivePane('source');
+      else if (!await changeEditorMode('source', false, isCurrent)) return false;
+      await tick();
+      return activeTabId === tab.id && (mode === 'source' || mode === 'split');
     });
     const core = application.editor;
     const runtime = {
@@ -3991,6 +4009,11 @@
     runtime.unsubscribe = core.subscribe((event) => {
       const target = currentDocument();
       if (runtime.disposed || !target) return;
+      // 展示就绪只刷新活动门面，不进入全文同步、统计或工作区持久化路径。
+      if (event.reason === 'presentation') {
+        if (activeTabId === tab.id) editor = core;
+        return;
+      }
       if (event.reason === 'session-metadata') {
         if (event.dirty && previewTabId === tab.id) previewTabId = null;
         if (activeTabId === tab.id) { dirty = target.dirty; version = target.version; }
@@ -4110,7 +4133,8 @@
       // 新建只在对应文档挂载后聚焦一次；已经开始输入或主动进入正文时保留现有光标。
       if (pendingNewDocumentFocusId === binding.documentId) {
         pendingNewDocumentFocusId = '';
-        if (!readonlyDocumentMode && (runtime.session ? runtime.session.document?.state.status.byteLength === 0 : runtime.editor.getMarkdown() === '') && (!binding.sourceEditor || binding.sourceEditor.getMarkdown() === '') &&
+        // 新建空白会话可能尚未完成 IPC 打开；现在登记焦点意图，由会话就绪信号接续。
+        if (!readonlyDocumentMode && (runtime.session ? !runtime.session.document || runtime.session.document.state.status.byteLength === 0 : runtime.editor.getMarkdown() === '') && (!binding.sourceEditor || binding.sourceEditor.getMarkdown() === '') &&
           !binding.host.contains(document.activeElement) && !binding.sourceEditor?.getContentElement().contains(document.activeElement)) {
           if (getActiveEditorMode() === 'source' && binding.sourceEditor) {
             binding.sourceEditor.setSelection(0);
@@ -4527,6 +4551,11 @@
   let sessionAnalysisTimer: ReturnType<typeof setTimeout> | undefined;
   let sessionAnalysisAbort: AbortController | undefined;
   let sessionAnalysisKey = '';
+  function cancelSessionAnalysis() {
+    sessionAnalysisAbort?.abort(); sessionAnalysisAbort = undefined;
+    if (sessionAnalysisTimer) clearTimeout(sessionAnalysisTimer);
+    sessionAnalysisTimer = undefined; sessionAnalysisKey = '';
+  }
   function scheduleSessionAnalysis(tabId: string, application: MarkdownApplicationSession) {
     const state = application.document?.state;
     if (activeTabId !== tabId || state?.progress.state !== 'ready') return;
@@ -4536,20 +4565,28 @@
     sessionAnalysisAbort?.abort();
     if (sessionAnalysisTimer) clearTimeout(sessionAnalysisTimer);
     const abort = new AbortController(); sessionAnalysisAbort = abort;
+    const isCurrent = () => {
+      const runtime = documentRuntimes.get(tabId);
+      return !abort.signal.aborted && activeTabId === tabId && runtime?.session === application &&
+        !runtime.disposed && !application.document?.session.state.closing &&
+        application.document?.state.status.revision === state.status.revision;
+    };
     statsStatus = 'pending';
     sessionAnalysisTimer = setTimeout(() => {
       sessionAnalysisTimer = undefined;
+      if (!isCurrent()) return;
       if (application.editor.hasPendingMathInlineDraft?.()) { sessionAnalysisKey = ''; return; }
       void application.capture(abort.signal, 'automatic').then(snapshot => {
-        if (abort.signal.aborted || activeTabId !== tabId || application.document?.state.status.revision !== snapshot.revision) return;
+        if (!isCurrent() || application.document?.state.status.revision !== snapshot.revision) return;
         writingStatsController.setDocument({ documentId: tabId, markdown: snapshot.markdown, mode: 'source', revision: snapshot.revision, semanticSnapshot: () => null });
         const selected = application.captureSelection();
         if (selected) writingStatsController.setSelection({ from: selected.anchorByte, to: selected.headByte, sourceCoordinates: 'utf8' });
         if (markdownLintEnabled) markdownLintController.schedule({ tabId, version: snapshot.revision, markdown: snapshot.markdown,
           ruleSet: markdownLintRuleSet, largeDocumentLimit, largeDocumentMode: false }, 0);
-      }).catch(error => { if (!abort.signal.aborted) showVisibleError(error, t.saveFileFailed()); });
+      }).catch(error => { if (isCurrent()) showVisibleError(error, t.saveFileFailed()); });
     }, 500);
   }
+  $: if (sessionAnalysisKey && !sessionAnalysisKey.startsWith(`${activeTabId}:`)) cancelSessionAnalysis();
   $: if (activeTabId && isMarkdownTab(tabs.find((tab) => tab.id === activeTabId)) && !getMarkdownApplicationSession(editor)) {
     const activeMode = mode === 'split' ? splitActivePane : mode;
     writingStatsController.setDocument({
@@ -5297,6 +5334,7 @@
     replaceTabRuntime: async (id) => {
       const runtime = documentRuntimes.get(id);
       if (!runtime) return;
+      if (sessionAnalysisKey.startsWith(`${id}:`)) cancelSessionAnalysis();
       await runtime.session?.close(true);
       runtime.disposed = true; runtime.unsubscribe(); documentRuntimes.delete(id);
       if (editor === runtime.editor) editor = bootEditor;

@@ -30,6 +30,22 @@ function replaceText(source: string, old: string, replacement: string) {
 }
 
 describe('语义窗口的源文写回', () => {
+  it.each(['', '正文', '# 标题', '正文\r\n\r\n'])('空格输入可写回并继续中文输入，保留原有换行：%j', (source) => {
+    const doc = parseMarkdown(source);
+    const pos = 1 + doc.firstChild!.content.size;
+    const next = EditorState.create({ doc }).tr.insertText(' ', pos).doc;
+    const result = new MarkdownSourceProjection(source, doc).project(next);
+    expect(result.source).toBe(source.replace(/(?=\r?\n|$)/, ' '));
+    const continued = EditorState.create({ doc: next }).tr.insertText('你', pos + 1).doc;
+    const following = new MarkdownSourceProjection(result.source, next).project(continued);
+    expect(following.source).toBe(source ? source.replace(/(?=\r?\n|$)/, ' 你') : '&#32;你');
+    const session = new MarkdownDocumentSession('whitespace', source);
+    session.applyTransaction({ baseRevision: 0, operationId: 'space', historyGroupId: 'space', edits: result.edits });
+    expect(session.captureSnapshot().text.read()).toBe(result.source);
+    session.undo(1);
+    expect(session.captureSnapshot().text.read()).toBe(source);
+  });
+
   it.each([
     '# 标题\r\n\r\n正文  \r\n\r\n尾部\t\n\n\n',
     '+ 正文\r\n+ 第二项   \r\n    + 嵌套项\r\n\r\n尾部\n',

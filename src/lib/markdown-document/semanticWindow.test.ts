@@ -17,6 +17,8 @@ describe('真实 ProseMirror 窗口接入会话', () => {
       await port.readWindow(session.documentId, 0, 0, 6),
       { target, onStale() {}, onHistory() {}, onFailure: (error) => failures.push(error) },
     );
+    view.activate();
+    await view.whenReady;
     view.core.restoreSelectionSnapshot({ anchor: 1, head: 1 });
     view.core.execute({ type: 'insertText', text: 'A' });
     view.core.execute({ type: 'insertText', text: 'B' });
@@ -70,6 +72,8 @@ describe('真实 ProseMirror 窗口接入会话', () => {
         onFailure: (error) => failures.push(error),
       },
     );
+    first.activate(); second.activate();
+    await Promise.all([first.whenReady, second.whenReady]);
     first.core.restoreSelectionSnapshot({ anchor: 1, head: 1 });
     first.core.execute({ type: 'insertText', text: 'A' });
     first.core.commitPendingEdits();
@@ -111,6 +115,8 @@ describe('真实 ProseMirror 窗口接入会话', () => {
       onFailure: (error) => failures.push(error),
     });
     expect(target.textContent).not.toContain('未挂载');
+    view.activate();
+    await view.whenReady;
     view.core.restoreSelectionSnapshot({ anchor: 3, head: 3 });
     expect(view.core.execute({ type: 'insertText', text: '新' })).toBe(true);
     await session.flushEdits();
@@ -126,5 +132,22 @@ describe('真实 ProseMirror 窗口接入会话', () => {
       prefix + middle + tail,
     );
     await session.close();
+  });
+  it('预览期间修订过期，生命周期就绪或选项更新都不能重新开放写入', async () => {
+    const port = createMemoryMarkdownPort();
+    const session = new MarkdownSessionController(port, await port.openDocument({ text: '正文' }));
+    const target = document.body.appendChild(document.createElement('div'));
+    const view = new MarkdownSemanticWindow(session, await port.readWindow(session.documentId, 0, 0, 6),
+      { target, onStale() {}, onHistory() {}, onFailure(error) { throw error; } });
+    const dom = target.querySelector('.ProseMirror');
+    view.updateOptions({ readonly: false });
+    expect(view.core.execute({ type: 'insertText', text: '误' })).toBe(false);
+    await session.applyEdits({ viewGeneration: 0, historyGroupId: 'other', edits: [{ fromByte: 0, toByte: 6, insertedText: '新版' }] });
+    view.activate(); await view.whenReady;
+    view.updateOptions({ readonly: false });
+    expect(view.editable).toBe(false);
+    expect(target.querySelector('.ProseMirror')).toBe(dom);
+    expect(await session.withSnapshot(snapshot => readCompleteSnapshot(port, snapshot))).toBe('新版');
+    view.dispose(); target.remove(); await session.close(true);
   });
 });

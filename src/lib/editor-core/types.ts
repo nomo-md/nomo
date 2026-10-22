@@ -227,6 +227,8 @@ export interface EditorCoreOptions {
     history(redo: boolean): boolean;
     canHistory(redo: boolean): boolean;
     historyBoundary?(kind: 'operation' | 'composition-start' | 'composition-end'): void;
+    /** 复用初次挂载的就绪时机，局部窗口可在同一实例上解除预览门禁。 */
+    onViewReady?(): void;
   };
   target?: HTMLElement;
   markdown: string;

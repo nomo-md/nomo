@@ -29,10 +29,15 @@ export interface MarkdownLoadingState {
     stable?: number;
   };
 }
-export interface PreparedMarkdownWindow {
+export type PreparedMarkdownWindow = {
   window: DocumentWindow;
-  mode: 'semantic' | 'raw';
+  mode: 'semantic' | 'source';
   blockIds: string[];
+} | { mode: 'preparing' | 'restricted'; fromByte: number; toByte: number; blockIds: string[] };
+export interface MarkdownVisibleDemand {
+  byte: number;
+  revision: number;
+  generation: number;
 }
 
 /**
@@ -68,6 +73,7 @@ export class ProgressiveMarkdownDocument {
   private tocPossible: boolean | null = null;
   private publishedSignature = '';
   private publishedFailure: unknown;
+  private visibleDemands = new Map<object, MarkdownVisibleDemand>();
 
   constructor(
     readonly port: MarkdownDocumentPort,
@@ -82,6 +88,7 @@ export class ProgressiveMarkdownDocument {
     this.session.beforeSnapshot = signal => this.materializeToc(signal);
     this.selection = new MarkdownGlobalSelection(this.session);
     this.unsubscribeChanges = this.session.subscribeChanges((change) => {
+      this.visibleDemands.clear();
       this.abort?.abort();
       this.generation++;
       // 编辑发生于首轮渐进索引期间时，保留已经发布的结构身份及对应不可变快照。
@@ -152,6 +159,7 @@ export class ProgressiveMarkdownDocument {
       timings: { ...this.timings },
     };
   }
+  get elapsed() { return performance.now() - this.started; }
   subscribe(listener: (state: MarkdownLoadingState) => void) {
     this.listeners.add(listener);
     listener(this.state);
@@ -196,15 +204,41 @@ export class ProgressiveMarkdownDocument {
   }
   setHidden(hidden: boolean) {
     this.hidden = hidden;
+    if (hidden) this.visibleDemands.clear();
     markdownWorkScheduler.pause(this, hidden);
     if (!hidden) this.scheduleIndex();
+  }
+  /** 需求只提升下一扫描批次，不创建另一个索引或从未知结构内部解析。 */
+  requestVisibleStructure(owner: object, demand: MarkdownVisibleDemand | null) {
+    if (!demand && !this.visibleDemands.has(owner)) return;
+    if (demand && !this.hidden && !this.closed && demand.revision === this.session.state.committed.revision)
+      this.visibleDemands.set(owner, demand);
+    else this.visibleDemands.delete(owner);
+    if (this.queuedYield) this.enqueueIndexYield();
+    else if (!this.building) this.scheduleIndex();
+  }
+  get structurePriority(): MarkdownTaskPriority {
+    const status = this.session.state.committed;
+    for (const [owner, demand] of this.visibleDemands) {
+      const index = this.currentIndex?.revision === status.revision ? this.currentIndex : null;
+      if (demand.revision !== status.revision || index?.progress.state === 'ready' ||
+        (index && demand.byte < index.progress.indexedBytes)) this.visibleDemands.delete(owner);
+    }
+    return this.visibleDemands.size ? MarkdownTaskPriority.VisibleText : MarkdownTaskPriority.Index;
+  }
+  private enqueueIndexYield() {
+    markdownWorkScheduler.enqueue(this, 'index-yield', this.structurePriority, () => {
+      const resolve = this.queuedYield;
+      this.queuedYield = null;
+      resolve?.();
+    });
   }
   private scheduleIndex() {
     if (this.closed || this.hidden || this.timer) return;
     this.timer = setTimeout(
       () => {
         this.timer = null;
-        markdownWorkScheduler.enqueue(this, 'index', MarkdownTaskPriority.Index, () => {
+        markdownWorkScheduler.enqueue(this, 'index', this.structurePriority, () => {
           void this.refreshIndex();
         });
       },
@@ -244,10 +278,7 @@ export class ProgressiveMarkdownDocument {
           shouldYield: () =>
             new Promise<void>((resolve) => {
               this.queuedYield = resolve;
-              markdownWorkScheduler.enqueue(this, 'index-yield', MarkdownTaskPriority.Index, () => {
-                this.queuedYield = null;
-                resolve();
-              });
+              this.enqueueIndexYield();
             }),
           onProgress: (index) => {
             if (
@@ -294,7 +325,7 @@ export class ProgressiveMarkdownDocument {
     });
     await this.building;
   }
-  /** 读取的是当前完整会话中的有界范围；未证明结构安全的区域先用原文编辑。 */
+  /** 语义请求明确区分等待与受限，只有主动源码请求才返回原文投影。 */
   async prepareWindow(
     byte: number,
     requestedMode: 'semantic' | 'source' = 'semantic',
@@ -306,6 +337,11 @@ export class ProgressiveMarkdownDocument {
     byte = Math.max(0, Math.min(byte, status.byteLength));
     const index = this.currentIndex?.revision === status.revision ? this.currentIndex : null;
     const block = index?.blockAt(byte);
+    if (requestedMode === 'semantic' && status.byteLength > 0 &&
+      (!block || byte > block.toByte || (byte === block.toByte && byte < status.byteLength)))
+      return { mode: 'preparing', fromByte: byte, toByte: byte, blockIds: [] };
+    if (requestedMode === 'semantic' && block && (block.mode === 'raw' || block.toByte - block.fromByte > 32 * 1024))
+      return { mode: 'restricted', fromByte: block.fromByte, toByte: block.toByte, blockIds: [block.id] };
     const semantic =
       requestedMode === 'semantic' &&
       block?.mode === 'semantic' &&
@@ -318,7 +354,7 @@ export class ProgressiveMarkdownDocument {
     }
     const window = await this.port.readWindow(status.documentId, status.revision, from, to);
     if (generation !== this.session.state.viewGeneration) throw new DocumentConflictError();
-    return { window, mode: semantic ? 'semantic' : 'raw', blockIds: block ? [block.id] : [] };
+    return { window, mode: requestedMode === 'semantic' ? 'semantic' : 'source', blockIds: block ? [block.id] : [] };
   }
   readMarkdown(signal?: AbortSignal) {
     return this.session.withSnapshot((snapshot) =>
@@ -405,6 +441,7 @@ export class ProgressiveMarkdownDocument {
   async detach() {
     if (this.closed) return;
     this.closed = true; this.abort?.abort();
+    this.visibleDemands.clear();
     if (this.timer) clearTimeout(this.timer);
     if (this.idleTimer) clearTimeout(this.idleTimer);
     markdownWorkScheduler.cancel(this); this.queuedYield?.(); this.queuedYield = null;
@@ -420,6 +457,7 @@ export class ProgressiveMarkdownDocument {
     if (this.closed) return;
     if (!discard) await this.session.flushEdits();
     this.closed = true;
+    this.visibleDemands.clear();
     this.abort?.abort();
     if (this.timer) clearTimeout(this.timer);
     if (this.idleTimer) clearTimeout(this.idleTimer);

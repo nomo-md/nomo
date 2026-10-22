@@ -12,7 +12,7 @@ import {
   readCompleteSnapshot,
 } from '../../lib/markdown-document/port';
 import { ProgressiveMarkdownDocument } from '../../lib/markdown-document/runtime';
-import { MarkdownViewportHost } from '../../lib/markdown-document/viewportHost';
+import { MarkdownViewportHost, type MarkdownPresentation } from '../../lib/markdown-document/viewportHost';
 import { utf8Length, utf16ToUtf8 } from '../../lib/markdown-document/utf8Text';
 import { getSourceTextChanges } from '../../lib/markdown-document/textChanges';
 import { DocumentConflictError } from '../../lib/markdown-document/protocol';
@@ -53,7 +53,13 @@ export class MarkdownApplicationSession {
   private scrollUntil = 0;
   private frontMatterRevision = -1;
   private pendingFocus = false;
+  private sourceFocus = false;
   private activeHostMode: 'semantic' | 'source' | undefined;
+  private presentations = new Map<'semantic' | 'source', MarkdownPresentation>();
+  private sourceRequest = 0;
+  private modeGeneration = 0;
+  private pendingSourceByte?: { byte: number; revision: number };
+  private openings = new Map<HTMLElement, { timer: ReturnType<typeof setTimeout>; node?: HTMLElement }>();
 
   constructor(
     readonly tab: MarkdownTabState,
@@ -62,6 +68,7 @@ export class MarkdownApplicationSession {
     private onFailure: (error: unknown) => void,
     private onMetadata: () => void,
     private onSelection?: (selection: DocumentSelection) => void,
+    private onRequestSource?: (isCurrent: () => boolean) => Promise<boolean>,
   ) {
     // 门面与窗口都不能携带旧的整篇正文/保存基线，否则每个局部 PM 又会解析一份全文。
     this.options = { ...options, markdown: '', savedMarkdown: undefined, dirty: false };
@@ -70,7 +77,8 @@ export class MarkdownApplicationSession {
     const overrides: Partial<EditorCore> = {
       mount: (target) => {
         this.semanticTarget = target;
-        void this.mountViews().catch(onFailure);
+        this.beginOpening(target);
+        void this.mountViews().catch(error => this.failOpening(target, error));
       },
       unmount: () => {
         void this.unmount().catch(onFailure);
@@ -103,6 +111,7 @@ export class MarkdownApplicationSession {
         await doc.session.flushEdits();
       },
       setMarkdown: (text) => {
+        if (!this.writable) return;
         void this.replaceMarkdown(text).catch(onFailure);
       },
       setDirty: () => {},
@@ -113,14 +122,14 @@ export class MarkdownApplicationSession {
         return true;
       },
       focus: () => {
-        if (this.currentHost?.activeCore || this.currentHost?.activeSource)
-          this.currentHost.focus();
-        else this.pendingFocus = true;
+        if (this.currentHost) this.currentHost.focus();
+        else this.queueFocus();
       },
       updateOptions: (next) => {
         this.options = { ...this.options, ...next };
         this.fallback.updateOptions(next);
         this.semanticHost?.updateOptions(next);
+        this.sourceHost?.updateOptions(next);
         void this.mountViews().catch(onFailure);
       },
       updateTheme: (theme) => {
@@ -131,9 +140,11 @@ export class MarkdownApplicationSession {
       },
       execute: (command) => {
         if (command.type === 'undo' || command.type === 'redo') {
+          if (!this.historyWritable) return false;
           void this.ready.then((doc) => doc.session.undo(command.type === 'redo')).catch(onFailure);
           return true;
         }
+        if (!this.writable) return false;
         if (
           this.source ||
           this.currentHost?.hasGlobalSelection ||
@@ -145,12 +156,11 @@ export class MarkdownApplicationSession {
         }
         return this.active?.execute(command) ?? false;
       },
-      canExecute: (command) =>
-        command.type === 'undo'
-          ? !!this.document?.state.status.canUndo
+      canExecute: (command) => command.type === 'undo'
+          ? this.historyWritable && !!this.document?.state.status.canUndo
           : command.type === 'redo'
-            ? !!this.document?.state.status.canRedo
-            : !this.disposed &&
+            ? this.historyWritable && !!this.document?.state.status.canRedo
+            : this.writable && !this.disposed &&
               (this.source || this.currentHost?.hasGlobalSelection
                 ? this.supportsSourceCommand(command) && !this.document?.state.failure
                 : command.type === 'insertImage' || (this.active?.canExecute(command) ?? false)),
@@ -225,7 +235,10 @@ export class MarkdownApplicationSession {
               this.onMetadata();
             })
             .catch((error) => {
-              if (!(error instanceof DocumentConflictError)) this.onFailure(error);
+              // 标签已关闭或修订已更新时，迟到的元数据读取失败不属于当前正文。
+              if (!this.disposed && !doc.session.state.closing &&
+                state.status.revision === doc.state.status.revision &&
+                !(error instanceof DocumentConflictError)) this.onFailure(error);
             });
         }
         this.onMetadata();
@@ -234,7 +247,7 @@ export class MarkdownApplicationSession {
           markdown: '',
           dirty: tab.dirty,
           mode: this.options.mode ?? 'semantic',
-          readonly: !!state.failure,
+          readonly: !this.writable,
           reason: 'session-metadata',
           pendingInlineMarks: {},
           contentRevision: doc.session.state.viewGeneration,
@@ -246,6 +259,30 @@ export class MarkdownApplicationSession {
     })();
     void this.ready.catch(onFailure);
   }
+  private beginOpening(target: HTMLElement) {
+    if (this.document || this.openings.has(target)) return;
+    const opening = { timer: setTimeout(() => {
+      if (this.disposed || !this.openings.has(target)) return;
+      const node = globalThis.document.createElement('div');
+      node.className = 'markdown-session-preparing'; node.setAttribute('role', 'status');
+      node.textContent = '正在准备正文…'; opening.node = node; target.append(node);
+    }, 100), node: undefined as HTMLElement | undefined };
+    this.openings.set(target, opening);
+  }
+  private clearOpening(target?: HTMLElement) {
+    if (!target) return;
+    const opening = this.openings.get(target);
+    if (opening) { clearTimeout(opening.timer); opening.node?.remove(); this.openings.delete(target); }
+  }
+  private failOpening(target: HTMLElement, error: unknown) {
+    if (this.disposed || (target !== this.semanticTarget && target !== this.sourceTarget)) return;
+    this.clearOpening(target);
+    const node = globalThis.document.createElement('div');
+    node.className = 'markdown-session-preparing'; node.setAttribute('role', 'alert');
+    node.textContent = `正文准备失败：${error instanceof Error ? error.message : String(error)}`;
+    target.append(node);
+    this.onFailure(error);
+  }
   private async mountViews() {
     const doc = await this.ready;
     await this.teardown;
@@ -253,15 +290,27 @@ export class MarkdownApplicationSession {
     const callbacks = (mode: 'semantic' | 'source') => ({
       onActive: (core: EditorCore | undefined, source: MarkdownSourceWindow | undefined) => {
         if (!core && !source && this.activeHostMode !== mode) return;
+        const target = mode === 'source' ? this.sourceTarget : this.semanticTarget;
+        const expected = this.viewMode === 'split' ? this.activeHostMode ?? 'semantic' : this.viewMode;
+        // 另一栏首次完成挂载不等于用户切换操作目标；只有真实焦点才接管活动栏。
+        if ((core || source) && expected !== mode && !target?.contains(globalThis.document.activeElement)) return;
         this.activeHostMode = core || source ? mode : undefined;
         this.active = core;
         this.source = source;
         if (this.pendingFocus && (core || source)) {
-          this.pendingFocus = false;
-          source?.view.focus();
-          core?.focus();
+          this.clearPendingFocus();
+          (mode === 'source' ? this.sourceHost : this.semanticHost)?.focus();
         }
       },
+      onPresentation: (state: MarkdownPresentation) => {
+        this.presentations.set(mode, state);
+        if ((this.activeHostMode ?? (this.viewMode === 'source' ? 'source' : 'semantic')) !== mode) return;
+        const event = { ...this.fallback.getSnapshot(), markdown: '', dirty: this.tab.dirty,
+          mode: this.options.mode ?? 'semantic', readonly: !this.writable, reason: 'presentation',
+          pendingInlineMarks: {}, contentRevision: doc.session.state.viewGeneration } as EditorChangeEvent;
+        for (const listener of this.listeners) listener(event);
+      },
+      onOpenSource: (range: { byte: number }) => { void this.openSource(range.byte).catch(this.onFailure); },
       onFailure: this.onFailure,
       writeClipboard: (text: string) => writeEditorClipboard({ text, html: '' }, this.desktop),
       onScroll: (byte: number) => {
@@ -276,6 +325,7 @@ export class MarkdownApplicationSession {
       },
     });
     if (this.semanticTarget && !this.semanticHost) {
+      this.clearOpening(this.semanticTarget);
       this.semanticHost = new MarkdownViewportHost(
         doc,
         this.semanticTarget,
@@ -288,6 +338,7 @@ export class MarkdownApplicationSession {
       );
     }
     if (this.sourceTarget && !this.sourceHost) {
+      this.clearOpening(this.sourceTarget);
       this.sourceHost = new MarkdownViewportHost(
         doc,
         this.sourceTarget,
@@ -300,14 +351,24 @@ export class MarkdownApplicationSession {
       );
     }
     await this.semanticHost?.setHidden(this.viewMode === 'source');
-    await this.sourceHost?.setHidden(false);
+    await this.sourceHost?.setHidden(this.viewMode === 'semantic');
+    const pending = this.pendingSourceByte;
+    if (pending && this.sourceHost && this.viewMode !== 'semantic') {
+      this.pendingSourceByte = undefined;
+      const focus = this.sourceFocus;
+      this.clearSourceFocus();
+      if (pending.revision === doc.state.status.revision) await this.sourceHost.reveal(pending.byte, focus);
+    }
+    if (this.pendingFocus && this.currentHost) { this.clearPendingFocus(); this.currentHost.focus(); }
     doc.setHidden(!this.semanticTarget && !this.sourceTarget);
   }
   mountSource(target: HTMLElement) {
     this.sourceTarget = target;
-    void this.mountViews().catch(this.onFailure);
+    this.beginOpening(target);
+    void this.mountViews().catch(error => this.failOpening(target, error));
     return () => {
       if (this.sourceTarget !== target) return;
+      this.clearOpening(target);
       this.sourceTarget = undefined;
       this.source = undefined;
       const host = this.sourceHost;
@@ -317,19 +378,47 @@ export class MarkdownApplicationSession {
     };
   }
   setViewMode(mode: 'semantic' | 'source' | 'split') {
+    const generation = ++this.modeGeneration;
+    if (mode === 'semantic') { this.sourceRequest++; this.pendingSourceByte = undefined; this.clearSourceFocus(); }
     this.captureSelection();
-    const anchor = this.currentHost?.position.byteOffset;
+    const origin = this.currentHost;
+    const anchor = origin?.position;
+    origin?.preserveReadingPosition();
+    // 源码宿主可能由稍后的 Svelte action 创建，必须接续模式切换前的位置。
+    if (anchor) this.tab.globalScrollAnchor = anchor;
     this.viewMode = mode;
     this.options.mode = mode === 'source' ? 'source' : 'semantic';
-    void this.mountViews()
+    return this.mountViews()
       .then(() => {
-        if (anchor !== undefined)
-          (mode === 'source' ? this.sourceHost : this.semanticHost)?.scrollToByte(anchor);
+        if (this.disposed || generation !== this.modeGeneration || !anchor) return;
+        const visible = mode === 'split' ? [this.semanticHost, this.sourceHost] :
+          [mode === 'source' ? this.sourceHost : this.semanticHost];
+        for (const host of visible) if (host && host !== origin) host.scrollToByte(anchor.byteOffset);
       })
       .catch(this.onFailure);
   }
+  async openSource(byte: number) {
+    const request = ++this.sourceRequest;
+    this.sourceFocus = true;
+    this.watchFocusIntent();
+    try {
+      const doc = await this.ready;
+      const revision = doc.state.status.revision;
+      if (this.disposed || request !== this.sourceRequest) return;
+      if (this.onRequestSource) {
+        if (!await this.onRequestSource(() => !this.disposed && request === this.sourceRequest && revision === doc.state.status.revision)) return;
+      } else await this.setViewMode('source');
+      if (this.disposed || request !== this.sourceRequest || revision !== doc.state.status.revision || this.viewMode === 'semantic') return;
+      this.pendingSourceByte = { byte, revision };
+      await this.mountViews();
+    } finally {
+      if (request === this.sourceRequest && !this.pendingSourceByte) this.clearSourceFocus();
+    }
+  }
   async unmount() {
-    this.pendingFocus = false;
+    this.sourceRequest++; this.pendingSourceByte = undefined;
+    this.clearOpening(this.semanticTarget);
+    this.clearPendingFocus();
     this.captureSelection();
     this.tab.globalScrollAnchor =
       (this.source ? this.sourceHost : this.semanticHost)?.position ?? this.tab.globalScrollAnchor;
@@ -381,6 +470,7 @@ export class MarkdownApplicationSession {
     });
   }
   async transformMarkdown(transform: (text: string) => string) {
+    this.assertWritable();
     const doc = await this.ready;
     await doc.session.flushEdits();
     const generation = doc.session.state.viewGeneration;
@@ -388,15 +478,56 @@ export class MarkdownApplicationSession {
     if (generation !== doc.session.state.viewGeneration) throw new DocumentConflictError();
     const next = transform(current);
     if (next !== current) {
+      this.assertWritable();
       await this.replaceMarkdown(next, generation);
       this.frontMatter = extractFrontMatterBlock(next);
       this.onMetadata();
     }
   }
   private get currentHost() {
-    return this.sourceHost?.activeSource === this.source && this.source
-      ? this.sourceHost
-      : this.semanticHost;
+    return this.viewMode === 'source' || (this.viewMode === 'split' && this.activeHostMode === 'source')
+      ? this.sourceHost : this.semanticHost;
+  }
+  private cancelFocusOutside = (event: Event) => {
+    if (event.target === globalThis.document.body && event.type === 'focusin') return;
+    if (event.target instanceof Node && !this.semanticTarget?.contains(event.target) && !this.sourceTarget?.contains(event.target))
+      this.clearPendingFocus();
+  };
+  private queueFocus() {
+    this.pendingFocus = true;
+    this.watchFocusIntent();
+  }
+  private watchFocusIntent() {
+    globalThis.document.addEventListener('pointerdown', this.cancelFocusOutside, true);
+    globalThis.document.addEventListener('focusin', this.cancelFocusOutside, true);
+  }
+  private clearSourceFocus() {
+    this.sourceFocus = false;
+    if (!this.pendingFocus) this.releaseFocusIntent();
+  }
+  private clearPendingFocus() {
+    this.pendingFocus = false;
+    this.sourceFocus = false;
+    this.releaseFocusIntent();
+  }
+  private releaseFocusIntent() {
+    globalThis.document.removeEventListener('pointerdown', this.cancelFocusOutside, true);
+    globalThis.document.removeEventListener('focusin', this.cancelFocusOutside, true);
+  }
+  get presentation() { return this.presentations.get(this.activeHostMode ?? (this.viewMode === 'source' ? 'source' : 'semantic')); }
+  private get sessionWritable() {
+    const state = this.document?.session.state;
+    return !!state && !this.disposed && !this.options.readonly && !state.failure &&
+      !this.document?.state.failure && !state.closing && !state.historyBusy;
+  }
+  get writable() { return this.sessionWritable && !!this.currentHost?.writable; }
+  private get historyWritable() {
+    if (this.currentHost?.mode === 'source') return this.writable;
+    const phase = this.currentHost?.presentation.phase;
+    return this.sessionWritable && !!phase && phase !== 'preparing' && phase !== 'preview';
+  }
+  private assertWritable() {
+    if (!this.writable) throw new DocumentConflictError('此处尚未开放编辑。');
   }
   get readingByte() {
     return this.currentHost?.position.byteOffset ?? 0;
@@ -409,6 +540,7 @@ export class MarkdownApplicationSession {
   }
   /** 异步资源导入保留文档字节书签，局部编辑映射位置；撤销/整版恢复后明确失效。 */
   createInsertionBookmark() {
+    this.assertWritable();
     this.active?.commitPendingEdits();
     this.captureSelection();
     const doc = this.document;
@@ -423,7 +555,8 @@ export class MarkdownApplicationSession {
       dispose: unsubscribe,
       insert: async (text: string) => {
         await doc.session.flushEdits();
-        if (!valid || this.disposed) throw new DocumentConflictError('图片插入位置已失效。');
+        // 已授权的书签可在标签隐藏后提交；仍需校验会话权限和映射有效性。
+        if (!valid || !this.sessionWritable) throw new DocumentConflictError('图片插入位置已失效。');
         const fromByte = Math.min(selection.anchorByte, selection.headByte);
         const toByte = Math.max(selection.anchorByte, selection.headByte);
         const after = fromByte + utf8Length(text);
@@ -440,6 +573,7 @@ export class MarkdownApplicationSession {
   }
   insertAt(selection: DocumentSelection, generation: number, text: string) {
     if (
+      !this.writable ||
       !this.document ||
       generation !== this.document.session.state.viewGeneration ||
       this.disposed
@@ -449,16 +583,19 @@ export class MarkdownApplicationSession {
     return true;
   }
   async insertText(text: string, selection?: DocumentSelection, generation?: number) {
+    this.assertWritable();
     const doc = await this.ready;
     await doc.session.flushEdits();
+    this.assertWritable();
     if (generation !== undefined && generation !== doc.session.state.viewGeneration)
       throw new DocumentConflictError();
     if (selection) doc.selection.set(selection);
     else this.captureSelection();
-    await doc.selection.replaceSelection(text);
+    await doc.selection.replaceSelection(text, () => this.writable);
     await this.reveal(doc.selection.selection.headByte);
   }
   async paste(input: Parameters<EditorCore['pasteClipboard']>[0], mode: 'auto' | 'plain') {
+    this.assertWritable();
     if (this.active && !this.source && !this.currentHost?.hasGlobalSelection) {
       this.active.pasteClipboard(input, { mode });
       await this.flush();
@@ -503,6 +640,7 @@ export class MarkdownApplicationSession {
     });
   }
   private async executeSourceCommand(command: EditorCommand) {
+    this.assertWritable();
     const doc = await this.ready;
     this.captureSelection();
     const before = doc.selection.selection;
@@ -603,7 +741,8 @@ export class MarkdownApplicationSession {
       JSON.stringify(before) !== JSON.stringify(doc.selection.selection)
     )
       throw new DocumentConflictError();
-    await doc.selection.replaceSelection(replacement);
+    this.assertWritable();
+    await doc.selection.replaceSelection(replacement, () => this.writable);
     await this.reveal(doc.selection.selection.headByte);
   }
   private supportsSourceCommand(command: EditorCommand) {
@@ -668,6 +807,8 @@ export class MarkdownApplicationSession {
   async detach() {
     if (this.disposed && !this.document) return;
     this.disposed = true;
+    for (const target of this.openings.keys()) this.clearOpening(target);
+    this.sourceRequest++; this.pendingSourceByte = undefined; this.presentations.clear();
     this.generation++;
     await this.unmount();
     await this.sourceHost?.dispose();
@@ -680,6 +821,9 @@ export class MarkdownApplicationSession {
     await this.document?.detach();
   }
   async close(discard: boolean) {
+    this.clearPendingFocus();
+    for (const target of this.openings.keys()) this.clearOpening(target);
+    this.sourceRequest++; this.pendingSourceByte = undefined; this.presentations.clear();
     const doc = await this.ready.catch((error) => {
       if (!discard) throw error;
       return this.document;

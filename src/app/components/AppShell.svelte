@@ -117,6 +117,13 @@
   export let previewTabId: string | null;
   export let markdown: string;
   export let sourceDocumentId: string;
+  // Svelte 对对象 key 的脏更新会重新创建片段；用引用变化生成稳定的原始值。
+  let workspaceCore: EditorCore | undefined;
+  let workspaceGeneration = 0;
+  $: if (workspaceCore !== editorCore) {
+    workspaceCore = editorCore;
+    workspaceGeneration += 1;
+  }
   export let sourceRuntimeState: MarkdownSourceRuntimeState | undefined = undefined;
   export let onSourceRuntimeStateChange: (state: MarkdownSourceRuntimeState) => void = () => undefined;
   export let onRuntimeReady: (binding: MarkdownWorkspaceRuntimeBinding) => void = () => undefined;
@@ -599,7 +606,8 @@
                 onResize={onComparisonResize}
               />
             {:else}
-            {#key sourceDocumentId}
+            <!-- 同一标签更换文档会话时重建绑定；预览转编辑和模式切换仍复用同一门面。 -->
+            {#key `${sourceDocumentId}:${workspaceGeneration}`}
             <EditorWorkspace
               {interfaceLocale}
               modeTransitionDisabled={markdownMiniTransitioning}

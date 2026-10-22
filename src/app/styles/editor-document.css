@@ -51,6 +51,28 @@
 .markdown-session-selection { position: absolute; pointer-events: none; background: Highlight; opacity: 0.28; z-index: 2; }
 .markdown-session-input { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0.01; resize: none; }
 .markdown-session-window .ProseMirror { min-height: 0; }
+.markdown-session-restricted {
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1px solid var(--md-editor-border);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+.markdown-session-restricted p { margin: 0 0 8px; }
+.markdown-session-restricted button,
+.markdown-session-preparing button {
+  color: inherit;
+  font: inherit;
+  background: transparent;
+  border: 1px solid var(--md-editor-border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.markdown-session-restricted button:focus-visible,
+.markdown-session-preparing button:focus-visible { outline: 2px solid var(--md-editor-accent); }
+.markdown-session-preparing { font-size: 0.875em; padding: 12px; }
+.markdown-session-preparing button { margin-inline-start: 8px; }
 .source-pane.markdown-session-scroll > .document-layout,
 .editor-grid.split-view .source-pane.markdown-session-scroll > .document-layout {
   height: auto;

@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ProgressiveMarkdownDocument } from './runtime';
-import { MarkdownViewportHost } from './viewportHost';
+import { MarkdownViewportHost, type MarkdownPresentation } from './viewportHost';
 import { buildMarkdownIndex } from './incrementalIndex';
 import { MarkdownStructureScanner } from './structure';
 import { createMemoryMarkdownPort } from './port';
+import { MarkdownTaskPriority } from './scheduler';
 
 const localBuild: typeof buildMarkdownIndex = (port, snapshot, options) =>
   buildMarkdownIndex(port, snapshot, {
@@ -31,7 +32,7 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
   document.body.replaceChildren();
 });
-async function setup(text: string, mode: 'semantic' | 'source' = 'semantic') {
+async function setup(text: string, mode: 'semantic' | 'source' = 'semantic', onOpenSource?: (range: { fromByte: number; toByte: number; byte: number }) => void) {
   const port = createMemoryMarkdownPort();
   const runtime = new ProgressiveMarkdownDocument(
     port,
@@ -51,14 +52,236 @@ async function setup(text: string, mode: 'semantic' | 'source' = 'semantic') {
     target,
     mode,
     {},
-    { onActive() {}, onFailure: (error) => failures.push(error), writeClipboard: async () => {} },
+    { onActive() {}, onFailure: (error) => failures.push(error), writeClipboard: async () => {}, onOpenSource },
   );
   cleanups.push(() => host.dispose());
-  await vi.waitFor(() => expect(host.activeCore ?? host.activeSource).toBeDefined());
+  await vi.waitFor(() => expect(target.querySelector('.markdown-session-window')).not.toBeNull());
   return { port, runtime, host, target, failures };
 }
 
 describe('完整会话的真实窗口宿主', () => {
+  it('首次挂载前被浏览器截断的滚动目标，在内容安装后恢复实际位置', async () => {
+    const port = createMemoryMarkdownPort();
+    const runtime = new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '正文段落\n\n'.repeat(4000) }), localBuild);
+    await vi.waitFor(() => expect(runtime.state.progress.state).toBe('ready'));
+    const pane = document.body.appendChild(document.createElement('div'));
+    pane.className = 'source-pane';
+    const target = pane.appendChild(document.createElement('div'));
+    let scrollTop = 0;
+    Object.defineProperty(pane, 'scrollTop', {
+      get: () => scrollTop,
+      set: value => { scrollTop = target.querySelector('.markdown-session-window') ? value : 0; },
+    });
+    const failures: unknown[] = [];
+    const host = new MarkdownViewportHost(runtime, target, 'source', {}, {
+      onActive() {}, onFailure: error => failures.push(error), writeClipboard: async () => {},
+    });
+    try {
+      const byte = runtime.state.index!.blocks[120].fromByte;
+      host.scrollToByte(byte);
+      await vi.waitFor(() => expect(scrollTop).toBeGreaterThan(0));
+      expect(target.querySelector('.cm-editor')).not.toBeNull();
+      expect(host.position.byteOffset).toBe(byte);
+      expect(failures).toEqual([]);
+    } finally { await host.dispose(); await runtime.close(true); }
+  });
+
+  it('屏内一批超过预算后先挂载安全块，不等待其余可见窗口读取', async () => {
+    const port = createMemoryMarkdownPort();
+    const runtime = new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '安全正文\n\n'.repeat(200) }), localBuild);
+    await vi.waitFor(() => expect(runtime.state.progress.state).toBe('ready'));
+    const target = document.body.appendChild(document.createElement('div'));
+    Object.defineProperty(target, 'clientHeight', { value: 20000 });
+    const read = port.readWindow.bind(port);
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    let reads = 0;
+    vi.spyOn(port, 'readWindow').mockImplementation(async (...args) => {
+      if (++reads === 1) await new Promise(resolve => setTimeout(resolve, 10));
+      else await waiting;
+      return read(...args);
+    });
+    const failures: unknown[] = [];
+    const host = new MarkdownViewportHost(runtime, target, 'semantic', {}, {
+      onActive() {}, onFailure: error => failures.push(error), writeClipboard: async () => {},
+    });
+    try {
+      await vi.waitFor(() => expect(host.writable).toBe(true));
+      expect(target.querySelectorAll('.ProseMirror')).toHaveLength(1);
+      expect(host.presentation.coverage).toBe('pending');
+      expect(host.presentation.timings.preview).toBeDefined();
+      expect(host.presentation.timings.editable).toBeDefined();
+      expect(host.presentation.timings.covered).toBeUndefined();
+      expect(failures).toEqual([]);
+    } finally { release(); await host.dispose(); await runtime.close(true); }
+  });
+
+  it('定位等待期间转向其他控件，完成后不重新登记旧焦点意图', async () => {
+    const { host, runtime } = await setup('正文');
+    const button = document.body.appendChild(document.createElement('button'));
+    let release!: () => void;
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(runtime.session, 'flushEdits').mockImplementationOnce(() => wait);
+    const navigation = host.reveal(0, true);
+    button.focus();
+    release();
+    await navigation;
+    expect(document.activeElement).toBe(button);
+    await host.setHidden(true);
+    await host.setHidden(false);
+    await vi.waitFor(() => expect(host.writable).toBe(true));
+    expect(document.activeElement).toBe(button);
+  });
+
+  it('窗口读取失败保留已有正文，重试沿用会话且不抢其他控件的焦点', async () => {
+    const text = '# 开头\n\n' + '正文\n\n'.repeat(5000) + '# 尾部\n';
+    const { host, port, runtime, target } = await setup(text);
+    const original = target.querySelector('.ProseMirror');
+    const failure = vi.spyOn(port, 'readWindow').mockRejectedValueOnce(new Error('读取失败样本'));
+    const button = document.body.appendChild(document.createElement('button'));
+    button.focus();
+    await expect(host.reveal(runtime.state.status.byteLength)).rejects.toThrow('读取失败样本');
+    expect(original?.isConnected).toBe(true);
+    expect(target.querySelector('[role="alert"]')?.textContent).toContain('读取失败样本');
+    target.querySelector<HTMLButtonElement>('[role="alert"] button')!.click();
+    await vi.waitFor(() => expect(target.querySelector('[role="alert"]')).toBeNull());
+    await vi.waitFor(() => expect(host.activeCore?.canExecute({ type: 'insertText', text: '' })).toBe(true));
+    expect(document.activeElement).toBe(button);
+    expect(await runtime.readMarkdown() === text).toBe(true);
+    failure.mockRestore();
+  });
+
+  it.each([
+    ['段落', '巨型段落'.repeat(10000)],
+    ['表格', '| 表头 | 内容 |\n| --- | --- |\n' + '| 行 | 内容 |\n'.repeat(4000)],
+    ['列表', '- 列表条目内容\n'.repeat(4000)],
+    ['HTML', '<pre>\n' + '正文内容\n'.repeat(10000) + '</pre>'],
+    ['Details', '<details>\n<summary>标题</summary>\n\n' + '正文\n\n'.repeat(10000) + '</details>'],
+  ])('巨型%s显示有界提示，完整会话内容仍可复制保存', async (_kind, text) => {
+    const openSource = vi.fn();
+    const { host, target, runtime, failures } = await setup(text, 'semantic', openSource);
+    expect(target.querySelector('.markdown-session-restricted')).not.toBeNull();
+    expect(target.querySelector('.cm-editor')).toBeNull();
+    expect(target.textContent!.length).toBeLessThan(1000);
+    expect(host.diagnostics.residentWindowBytes).toBeLessThan(32 * 1024);
+    const block = runtime.state.index!.blocks.find(block => block.mode === 'raw')!;
+    const byte = block.fromByte + 3;
+    await host.reveal(byte, true);
+    expect(host.position.byteOffset).toBe(byte);
+    target.querySelector<HTMLButtonElement>('.markdown-session-restricted button')!.click();
+    expect(openSource).toHaveBeenCalledWith({ fromByte: block.fromByte, toByte: block.toByte, byte });
+    host.selectAll();
+    expect(await runtime.selection.copy() === text).toBe(true);
+    await runtime.session.withSnapshot(snapshot => runtime.session.saveCaptured(snapshot, 'fixture.md'));
+    expect(await runtime.readMarkdown() === text).toBe(true);
+    expect(failures).toEqual([]);
+  });
+
+  it('受限提示按实际高度更新缓存，字节导航可跨越提示到相邻正文', async () => {
+    const text = '# 起点\n\n' + '巨'.repeat(20000) + '\n\n# 终点\n';
+    const { host, target, runtime } = await setup(text);
+    const raw = runtime.state.index!.blocks.find(block => block.mode === 'raw')!;
+    await host.reveal(raw.fromByte + 3, true);
+    const restricted = target.querySelector<HTMLElement>('.markdown-session-restricted')!;
+    Object.defineProperty(restricted, 'offsetHeight', { value: 96 });
+    Object.defineProperty(target, 'clientWidth', { value: 700 });
+    const measured = host.diagnostics.measurements;
+    await host.reveal(raw.fromByte + 3, true);
+    await vi.waitFor(() => expect(host.diagnostics.measurements).toBeGreaterThan(measured));
+    expect(host.diagnostics.cacheEntries).toBeGreaterThan(0);
+    expect([...target.querySelectorAll<HTMLElement>('.markdown-session-spacer')].every(el => parseFloat(el.style.height) < 1000)).toBe(true);
+    restricted.querySelector('button')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await vi.waitFor(() => expect(host.activeCore).toBeDefined());
+    expect(host.captureSelection().headByte).toBeGreaterThanOrEqual(raw.toByte);
+    await runtime.session.applyEdits({ viewGeneration: runtime.session.state.viewGeneration,
+      historyGroupId: 'restricted-edit', edits: [{ fromByte: raw.fromByte, toByte: raw.fromByte, insertedText: '改' }] });
+    await runtime.session.undo();
+    expect(await runtime.readMarkdown() === text).toBe(true);
+  });
+
+  it('部分索引首屏直接预览，同一 PM 开放编辑，等待期间不出现源码', async () => {
+    let start!: () => void, finish!: () => void;
+    const first = new Promise<void>(resolve => { start = resolve; });
+    const tail = new Promise<void>(resolve => { finish = resolve; });
+    const build: typeof buildMarkdownIndex = (port, snapshot, options) => buildMarkdownIndex(port, snapshot, {
+      ...options, scan: async (port, snapshot, task) => {
+        await first;
+        const scanner = new MarkdownStructureScanner(snapshot.revision);
+        const part = await port.readSnapshot(snapshot, 0, 1024);
+        await task.onBatch(scanner.push(part.text));
+        await tail;
+        task.signal.throwIfAborted();
+        const rest = await port.readSnapshot(snapshot, part.toByte, snapshot.byteLength);
+        await task.onBatch(scanner.push(rest.text, true));
+      },
+    });
+    const port = createMemoryMarkdownPort();
+    const runtime = new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '# 标题\n\n正文\n\n'.repeat(500) }), build);
+    const target = document.body.appendChild(document.createElement('div'));
+    const states: MarkdownPresentation[] = [];
+    let preview: Element | null = null;
+    let previewReadonly = false;
+    const failures: unknown[] = [];
+    const host = new MarkdownViewportHost(runtime, target, 'semantic', {}, {
+      onActive() {}, onFailure: error => failures.push(error), writeClipboard: async () => {},
+      onPresentation: state => {
+        states.push(state);
+        if (state.phase === 'preview') {
+          preview = target.querySelector('.ProseMirror');
+          previewReadonly = preview?.getAttribute('contenteditable') === 'false';
+          host.updateOptions({ readonly: false });
+          expect(preview?.getAttribute('contenteditable')).toBe('false');
+        }
+      },
+    });
+    let raw = false;
+    const observer = new MutationObserver(() => { raw ||= !!target.querySelector('.cm-editor'); });
+    observer.observe(target, { childList: true, subtree: true });
+    try {
+      await vi.waitFor(() => expect(target.querySelector('[role="status"]')).not.toBeNull());
+      expect(host.presentation.phase).toBe('preparing');
+      expect(runtime.structurePriority).toBe(MarkdownTaskPriority.VisibleText);
+      expect(host.presentation.timings.preview).toBeUndefined();
+      start();
+      await vi.waitFor(() => expect(host.writable).toBe(true));
+      expect(runtime.state.progress.state).toBe('partial');
+      expect(previewReadonly).toBe(true);
+      expect(target.querySelector('.ProseMirror')).toBe(preview);
+      expect(runtime.structurePriority).toBe(MarkdownTaskPriority.Index);
+      expect(runtime.state.status).toMatchObject({ revision: 0, dirty: false, canUndo: false });
+      expect(host.presentation.coverage).toBe('semantic');
+      expect(states.some(state => state.phase === 'preview')).toBe(true);
+      expect(raw).toBe(false);
+      expect(failures).toEqual([]);
+    } finally { start(); finish(); observer.disconnect(); await host.dispose(); await runtime.close(true); }
+  });
+
+  it('预览中的写入门禁保护全局输入，源码宿主独立可编辑，隐藏撤销提权', async () => {
+    let release!: () => void;
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    const port = createMemoryMarkdownPort();
+    const runtime = new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '正文' }), async (...args) => {
+      await wait; return localBuild(...args);
+    });
+    const target = document.body.appendChild(document.createElement('div'));
+    const sourceTarget = document.body.appendChild(document.createElement('div'));
+    const callbacks = { onActive() {}, onFailure(error: unknown) { throw error; }, writeClipboard: async () => {} };
+    const host = new MarkdownViewportHost(runtime, target, 'semantic', {}, callbacks);
+    const source = new MarkdownViewportHost(runtime, sourceTarget, 'source', {}, callbacks);
+    try {
+      await vi.waitFor(() => expect(source.writable).toBe(true));
+      expect(host.writable).toBe(false);
+      host.selectAll();
+      const input = target.querySelector('textarea')!;
+      expect(input.readOnly).toBe(true);
+      input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: '误输入' }));
+      expect(runtime.state.status.revision).toBe(0);
+      await host.setHidden(true);
+      expect(runtime.structurePriority).toBe(MarkdownTaskPriority.Index);
+      expect(source.writable).toBe(true);
+    } finally { release(); await host.dispose(); await source.dispose(); await runtime.close(true); }
+  });
+
   it('编辑替换块组后恢复输入焦点，主动移到其他控件时不抢回', async () => {
     const { host, target, runtime } = await setup('# 标题\n\n正文');
     const nativeFocus = HTMLElement.prototype.focus;

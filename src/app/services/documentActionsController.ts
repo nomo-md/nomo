@@ -258,8 +258,6 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     const activeTabId = options.getActiveTabId();
     const browserFileTarget = getOrCreateReusableTab(options.getTabs(),
       options.canReuseTab?.(activeTabId) === false ? '' : activeTabId);
-    options.setTabs(browserFileTarget.tabs);
-    options.setActiveTabId(browserFileTarget.activeTabId);
     const targetTab = browserFileTarget.targetTab;
 
     await options.replaceTabRuntime?.(targetTab.id);
@@ -277,7 +275,9 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     targetTab.diskReadonly = false;
     targetTab.externalFileChange = createEmptyExternalFileChange();
 
-    options.setTabs([...options.getTabs()]);
+    // 替换完成后同步发布标签与运行时；不能让宿主在 await 期间绑定旧 editor。
+    options.setTabs(browserFileTarget.tabs);
+    options.setActiveTabId(browserFileTarget.activeTabId);
     options.loadTabState(targetTab);
 
     options.setStatusMessage(t.markdownFileOpened());
@@ -445,8 +445,6 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       existingTab,
       saved,
     );
-    options.setTabs(nativeDocumentTarget.tabs);
-    options.setActiveTabId(nativeDocumentTarget.activeTabId);
     const targetTab = nativeDocumentTarget.targetTab;
 
     await options.replaceTabRuntime?.(targetTab.id);
@@ -466,8 +464,9 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     targetTab.diskReadonly = document.readonly;
     targetTab.externalFileChange = createEmptyExternalFileChange();
 
+    // 先结束旧会话，再一次发布新标签与 editor，避免语义宿主提前挂到 boot editor。
+    options.setTabs(nativeDocumentTarget.tabs);
     options.setActiveTabId(targetTab.id);
-    options.setTabs([...options.getTabs()]);
     options.loadTabState(targetTab);
 
     options.setStatusMessage(message);
