@@ -5,7 +5,7 @@ import { createMermaidDiagramRenderer } from './mermaidDiagramRenderer';
 const mermaidMock = vi.hoisted(() => ({
   registerIconPacks: vi.fn(),
   initialize: vi.fn(),
-  render: vi.fn(async (_id: string, code: string) => ({ svg: `<svg>${code}</svg>` })),
+  render: vi.fn(async (_id: string, code: string, _surface?: HTMLElement) => ({ svg: `<svg>${code}</svg>` })),
 }));
 
 vi.mock('mermaid', () => ({
@@ -51,8 +51,10 @@ describe('createMermaidDiagramRenderer', () => {
   });
   it('does not publish or cache a cancelled in-flight render and removes the temporary surface', async () => {
     const abort = new AbortController();
-    mermaidMock.render.mockImplementationOnce(async () => {
+    mermaidMock.render.mockImplementationOnce(async (_id, _code, surface) => {
+      expect(surface?.isConnected).toBe(true);
       abort.abort();
+      expect(surface?.isConnected).toBe(false);
       return { svg: '<svg>cancelled</svg>' };
     });
     const renderer = createMermaidDiagramRenderer();
@@ -64,5 +66,22 @@ describe('createMermaidDiagramRenderer', () => {
     expect(mermaidMock.render).toHaveBeenCalledTimes(count + 1);
     expect(document.body.childElementCount).toBe(before);
     expect((await renderer.renderMermaid(code, { theme: { theme: 'default' }, signal: abort.signal })).error).toBeTruthy();
+  });
+  it.each([1, 2])('rejects and removes cached output when cancelled at large SVG yield %i', async (checkpoint) => {
+    const abort = new AbortController();
+    let countPauses = 0;
+    const pause = vi.fn(async () => { if (++countPauses === checkpoint) abort.abort(); });
+    vi.stubGlobal('scheduler', { yield: pause });
+    try {
+      mermaidMock.render.mockImplementationOnce(async () => ({ svg: `<svg><text>${'x'.repeat(128 * 1024)}</text></svg>` }));
+      const renderer = createMermaidDiagramRenderer(), code = `flowchart LR\n largeA${checkpoint} --> largeB`;
+      const result = await renderer.renderMermaid(code, { theme: { theme: 'default' }, signal: abort.signal });
+      expect(result.error).toBeTruthy();
+      expect(pause).toHaveBeenCalledTimes(checkpoint);
+      const count = mermaidMock.render.mock.calls.length;
+      await renderer.renderMermaid(code, { theme: { theme: 'default' } });
+      expect(mermaidMock.render).toHaveBeenCalledTimes(count + 1);
+      expect(document.querySelector('body > div[style*="contain: layout style paint"]')).toBeNull();
+    } finally { vi.unstubAllGlobals(); }
   });
 });

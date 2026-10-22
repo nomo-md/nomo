@@ -1,0 +1,152 @@
+diff --git a/dist/chunks/mermaid.core/chunk-CSCIHK7Q.mjs b/dist/chunks/mermaid.core/chunk-CSCIHK7Q.mjs
+index e63b9d05eaf145de7abb1898586645cc3686df34..00f5766218ea7f18db016cf1df082447e02e0824 100644
+--- a/dist/chunks/mermaid.core/chunk-CSCIHK7Q.mjs
++++ b/dist/chunks/mermaid.core/chunk-CSCIHK7Q.mjs
+@@ -4725,6 +4725,37 @@ var siteConfig = assignWithDepth_default({}, defaultConfig);
+ var configFromInitialize;
+ var directives = [];
+ var currentConfig = assignWithDepth_default({}, defaultConfig);
++// Nomo: cache the copy plan, never a mutable getConfig() result. The original
++// depth-two/array-union semantics are prepared once per configuration change.
++// Retain one plan (at most 256 KiB estimated); larger configs use upstream copies.
++// It contains config values only, no view or document state.
++var copyCurrentConfig;
++var createConfigCopy = (source, depth = 2, budget = { bytes: 0 }) => {
++  const template = assignWithDepth_default({}, source, { depth });
++  const children = [];
++  budget.bytes += 128;
++  for (const key of Object.keys(template)) {
++    const value = template[key];
++    budget.bytes += 64 + key.length * 2 + (typeof value === "string" ? value.length * 2 : 8);
++    if (budget.bytes > 256 * 1024) return;
++    if (depth > 0 && value !== null && typeof value === "object") {
++      if (Array.isArray(value)) {
++        budget.bytes += value.reduce((bytes, item) => bytes + 16 + (typeof item === "string" ? item.length * 2 : 0), 64);
++        if (budget.bytes > 256 * 1024) return;
++        children.push([key, () => value.slice()]);
++      } else {
++        const copy = createConfigCopy(value, depth - 1, budget);
++        if (!copy) return;
++        children.push([key, copy]);
++      }
++    }
++  }
++  return () => {
++    const result = { ...template };
++    for (const [key, copy] of children) result[key] = copy();
++    return result;
++  };
++};
+ var updateCurrentConfig = /* @__PURE__ */ __name((siteCfg, _directives) => {
+   let cfg = assignWithDepth_default({}, siteCfg);
+   let sumOfDirectives = {};
+@@ -4744,6 +4775,7 @@ var updateCurrentConfig = /* @__PURE__ */ __name((siteCfg, _directives) => {
+     }
+   }
+   currentConfig = cfg;
++  copyCurrentConfig = void 0;
+   checkConfig(currentConfig);
+   return currentConfig;
+ }, "updateCurrentConfig");
+@@ -4770,10 +4802,12 @@ var getSiteConfig = /* @__PURE__ */ __name(() => {
+ var setConfig = /* @__PURE__ */ __name((conf) => {
+   checkConfig(conf);
+   assignWithDepth_default(currentConfig, conf);
++  copyCurrentConfig = void 0;
+   return getConfig();
+ }, "setConfig");
+ var getConfig = /* @__PURE__ */ __name(() => {
+-  return assignWithDepth_default({}, currentConfig);
++  copyCurrentConfig ??= createConfigCopy(currentConfig) ?? (() => assignWithDepth_default({}, currentConfig));
++  return copyCurrentConfig();
+ }, "getConfig");
+ var sanitize = /* @__PURE__ */ __name((options) => {
+   if (!options) {
+diff --git a/dist/chunks/mermaid.core/dagre-BM42HDAG.mjs b/dist/chunks/mermaid.core/dagre-BM42HDAG.mjs
+index 029b39a39b6e2a6eb811cb4ea4ec8847991f2a64..b4df1d688f15cc3e6c86e78ba6a9181871049a6e 100644
+--- a/dist/chunks/mermaid.core/dagre-BM42HDAG.mjs
++++ b/dist/chunks/mermaid.core/dagre-BM42HDAG.mjs
+@@ -1,3 +1,4 @@
++import { createRenderTasks } from "./nomo-render-tasks.mjs";
+ import {
+   clear as clear2,
+   insertEdge,
+@@ -399,8 +400,8 @@ var recursiveRender = /* @__PURE__ */ __name(async (_elem, graph, diagramType, i
+   const edgePaths = elem.insert("g").attr("class", "edgePaths");
+   const edgeLabels = elem.insert("g").attr("class", "edgeLabels");
+   const nodes = elem.insert("g").attr("class", "nodes");
+-  await Promise.all(
+-    graph.nodes().map(async function(v) {
++  const renderTasks = createRenderTasks(elem.node());
++  await renderTasks(graph.nodes(), async function(v) {
+       const node = graph.node(v);
+       if (parentCluster !== void 0) {
+         const data = JSON.parse(JSON.stringify(parentCluster.clusterData));
+@@ -468,10 +469,10 @@ var recursiveRender = /* @__PURE__ */ __name(async (_elem, graph, diagramType, i
+           await insertNode(nodes, graph.node(v), { config: siteConfig, dir });
+         }
+       }
+-    })
++    }
+   );
+   const processEdges = /* @__PURE__ */ __name(async () => {
+-    const edgePromises = graph.edges().map(async function(e) {
++    await renderTasks(graph.edges(), async function(e) {
+       const edge = graph.edge(e.v, e.w, e.name);
+       log.info("Edge " + e.v + " -> " + e.w + ": " + JSON.stringify(e));
+       log.info("Edge " + e.v + " -> " + e.w + ": ", e, " ", JSON.stringify(graph.edge(e)));
+@@ -487,7 +488,7 @@ var recursiveRender = /* @__PURE__ */ __name(async (_elem, graph, diagramType, i
+       );
+       await insertEdgeLabel(edgeLabels, edge);
+     });
+-    await Promise.all(edgePromises);
++
+   }, "processEdges");
+   await processEdges();
+   log.info("Graph before layout:", JSON.stringify(graphlibJson2.write(graph)));
+@@ -498,8 +499,7 @@ var recursiveRender = /* @__PURE__ */ __name(async (_elem, graph, diagramType, i
+   log.info("Graph after layout:", JSON.stringify(graphlibJson2.write(graph)));
+   let diff = 0;
+   let { subGraphTitleTotalMargin } = getSubGraphTitleMargins(siteConfig);
+-  await Promise.all(
+-    sortNodesByHierarchy(graph).map(async function(v) {
++  await renderTasks(sortNodesByHierarchy(graph), async function(v) {
+       const node = graph.node(v);
+       log.info(
+         "Position XBX => " + v + ": (" + node.x,
+@@ -565,9 +565,9 @@ var recursiveRender = /* @__PURE__ */ __name(async (_elem, graph, diagramType, i
+           positionNode(node);
+         }
+       }
+-    })
++    }
+   );
+-  graph.edges().forEach(function(e) {
++  await renderTasks(graph.edges(), function(e) {
+     const edge = graph.edge(e);
+     log.info("Edge " + e.v + " -> " + e.w + ": " + JSON.stringify(edge), edge);
+     edge.points.forEach((point) => point.y += subGraphTitleTotalMargin / 2);
+diff --git a/dist/chunks/mermaid.core/nomo-render-tasks.mjs b/dist/chunks/mermaid.core/nomo-render-tasks.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..327b5adbe2bb3cba94404a6b1b123aab5a58287b
+--- /dev/null
++++ b/dist/chunks/mermaid.core/nomo-render-tasks.mjs
+@@ -0,0 +1,18 @@
++// Nomo: bound each DOM rendering batch and yield to input between expensive
++// batches. State belongs to one recursive render and is released with it.
++export function createRenderTasks(root) {
++  const connected = root?.isConnected;
++  let deadline = performance.now() + 8;
++  return async (items, task) => {
++    for (let offset = 0; offset < items.length; offset += 32) {
++      if (connected && !root.isConnected) throw new DOMException("Render cancelled", "AbortError");
++      await Promise.all(items.slice(offset, offset + 32).map(task));
++      if (performance.now() >= deadline) {
++        if (globalThis.scheduler?.yield) await globalThis.scheduler.yield();
++        else await new Promise(resolve => setTimeout(resolve, 0));
++        deadline = performance.now() + 8;
++      }
++    }
++    if (connected && !root.isConnected) throw new DOMException("Render cancelled", "AbortError");
++  };
++}

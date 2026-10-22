@@ -35,12 +35,21 @@ export function createMermaidDiagramRenderer(): DiagramRenderer {
           const surface = document.createElement('div');
           surface.style.cssText = `position:fixed;left:0;top:0;width:${document.documentElement.clientWidth}px;height:0;overflow:hidden;contain:layout style paint;visibility:hidden;pointer-events:none`;
           document.body.append(surface);
+          // 大图分批让出主线程后，关闭或切换标签可及时使下一批失效。
+          const cancel = () => surface.remove();
+          options.signal?.addEventListener('abort', cancel, { once: true });
           try {
             const result = await mermaid.render(id, code, surface);
             options.signal?.throwIfAborted();
+            await yieldForLargeSvg(result.svg, options.signal);
             if (fonts === fontGeneration) svgCache.put(key, result.svg);
+            await yieldForLargeSvg(result.svg, options.signal);
             return { svg: result.svg };
-          } finally { surface.remove(); }
+          } finally {
+            options.signal?.removeEventListener('abort', cancel);
+            if (options.signal?.aborted) svgCache.delete(key);
+            surface.remove();
+          }
         }, options.signal);
       } catch (error) {
         return {
@@ -56,6 +65,15 @@ export function createMermaidDiagramRenderer(): DiagramRenderer {
       }
     },
   };
+}
+
+/** 将大图的库渲染、缓存整理和视图提交分开，避免串成同一个长任务。 */
+async function yieldForLargeSvg(svg: string, signal?: AbortSignal): Promise<void> {
+  if (svg.length < 128 * 1024) return;
+  const scheduler = (globalThis as { scheduler?: { yield(): Promise<void> } }).scheduler;
+  if (scheduler?.yield) await scheduler.yield();
+  else await new Promise<void>(resolve => setTimeout(resolve, 0));
+  signal?.throwIfAborted();
 }
 
 async function loadMermaid(theme: MermaidThemeDefinition): Promise<MermaidApi> {

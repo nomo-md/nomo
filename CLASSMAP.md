@@ -191,7 +191,7 @@
 | 渲染器注册表 | `src/lib/editor-core/renderers.ts` | `src/lib/services/render.ts` | 全局渲染器注册/获取 |
 | 代码高亮 | `src/lib/services/shikiCodeTokenizer.ts` | `src/lib/editor-core/nodeViews/CodeBlockNodeView.ts` | Shiki 代码 token 化 |
 | 公式渲染 | `src/lib/services/katexMathRenderer.ts` | `src/lib/editor-core/nodeViews/MathBlockNodeView.ts`, `MathInlineNodeView.ts` | KaTeX 公式渲染 |
-| 图表渲染 | `src/lib/services/mermaidDiagramRenderer.ts` | `src/lib/services/mermaidSvgCache.ts`, `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts` | 串行渲染、临时测量容器、16 项/8 MiB SVG 缓存及复用时的 ID/引用隔离 |
+| 图表渲染 | `src/lib/services/mermaidDiagramRenderer.ts` | `src/lib/services/mermaidSvgCache.ts`, `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts`, `patches/mermaid@11.15.0.patch` | 串行渲染、可取消测量容器、16 项/8 MiB SVG 缓存及 ID/引用隔离；锁定的 Mermaid 补丁复用配置复制计划并分批执行 Dagre DOM 渲染 |
 | 增强渲染调度与可见性 | `src/lib/services/renderTaskQueue.ts`, `src/lib/editor-core/nodeViews/renderVisibility.ts` | 代码块与 Mermaid NodeView、图表渲染器、`plugins/typography.ts`、`markdown-document/viewportHost.ts` | 有界并发、排队取消、视口及后台暂停、宿主导航目标首屏资格与截止预算、结果提交阅读锚点；导出主动补齐 |
 | 图表查看与缩放 | `src/lib/services/mermaidDiagramView.ts` | `src/lib/editor-core/nodeViews/MermaidBlockNodeView.ts`, `src/quicklook/preview.ts`, `src/app/services/exportService.ts` | 可读适配、全图/原始尺寸、全屏交互、导出尺寸还原 |
 | 图片加载器 | `src/app/services/desktopImageLoader.ts` | `src/lib/editor-core/nodeViews/ImageNodeView.ts` | 本地/asset/远程图片解析 |

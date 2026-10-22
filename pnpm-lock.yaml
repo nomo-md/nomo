@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  mermaid@11.15.0: b204d57b0b4e98041b76c344691db3723aec3e36e679b067183ae4f6dfc0848f
+
 importers:
 
   .:
@@ -61,7 +64,7 @@ importers:
         version: 0.41.1
       mermaid:
         specifier: ^11.15.0
-        version: 11.15.0
+        version: 11.15.0(patch_hash=b204d57b0b4e98041b76c344691db3723aec3e36e679b067183ae4f6dfc0848f)
       prosemirror-commands:
         specifier: ^1.7.1
         version: 1.7.1
@@ -4348,7 +4351,7 @@ snapshots:
 
   mdurl@2.0.0: {}
 
-  mermaid@11.15.0:
+  mermaid@11.15.0(patch_hash=b204d57b0b4e98041b76c344691db3723aec3e36e679b067183ae4f6dfc0848f):
     dependencies:
       '@braintree/sanitize-url': 7.1.2
       '@iconify/utils': 3.1.3

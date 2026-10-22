@@ -7,6 +7,10 @@ export class MermaidSvgCache {
   get size() { return this.entries.size; }
   get estimatedBytes() { return this.bytes; }
   clear() { this.entries.clear(); this.bytes = 0; }
+  delete(key: string) {
+    const entry = this.entries.get(key);
+    if (entry) { this.bytes -= entry.bytes; this.entries.delete(key); }
+  }
   get(key: string, id: string) {
     const entry = this.entries.get(key);
     if (!entry) return undefined;
