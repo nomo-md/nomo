@@ -11,6 +11,7 @@ import type { DocumentIndexProgress, SourceEdit } from './protocol';
 import { utf8Length } from './utf8Text';
 import { createHeadingIdAllocator, normalizeHeadingTitle } from '../toc/tocService';
 import type { OutlineItem } from '../outline/outlineService';
+import { emptyEnhancements, addEnhancements, enhancementTotal } from './enhancements';
 
 export interface MarkdownOutlineItem extends OutlineItem {
   byte: number;
@@ -155,7 +156,7 @@ export class MarkdownStructureIndex {
   private indexedBytes = 0;
   private complete = false;
   private layoutUnits = 0;
-  private enhancementObjects = 0;
+  private enhancements = emptyEnhancements();
   private incompleteMetrics = 0;
   private headings: MarkdownOutlineItem[] = [];
   private allocateHeadingId = createHeadingIdAllocator();
@@ -190,7 +191,8 @@ export class MarkdownStructureIndex {
       indexedBytes: this.indexedBytes,
       totalBytes: this.totalBytes,
       layoutUnits: this.layoutUnits,
-      enhancementObjects: this.enhancementObjects,
+      enhancementObjects: enhancementTotal(this.enhancements),
+      enhancements: { ...this.enhancements },
       metricsComplete: this.complete && this.incompleteMetrics === 0,
     };
   }
@@ -201,7 +203,7 @@ export class MarkdownStructureIndex {
       const last = this.entries.at(-1);
       if (last?.id === block.id) {
         this.layoutUnits -= last.layoutUnits;
-        this.enhancementObjects -= last.enhancementObjects;
+        addEnhancements(this.enhancements, last.enhancements, -1);
         this.incompleteMetrics -= Number(!last.metricsComplete);
         this.entries[this.entries.length - 1] = block;
         // 巨型原文块可延长，但不重复分配标题 ID。真正替换了标题才重建派生目录。
@@ -212,7 +214,7 @@ export class MarkdownStructureIndex {
         if (!rebuildHeadings) this.appendHeadings(block);
       }
       this.layoutUnits += block.layoutUnits;
-      this.enhancementObjects += block.enhancementObjects;
+      addEnhancements(this.enhancements, block.enhancements);
       this.incompleteMetrics += Number(!block.metricsComplete);
     }
     if (rebuildHeadings) {

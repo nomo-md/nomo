@@ -3,6 +3,7 @@ import { MarkdownDocumentSession } from './session';
 import { DocumentConflictError } from './protocol';
 import { Utf8Text, utf8Length } from './utf8Text';
 import { MarkdownMountPolicy } from './mountPolicy';
+import { emptyEnhancements } from './enhancements';
 
 describe('Markdown document integrity', () => {
   it('keeps an immutable complete snapshot while later edits continue', () => {
@@ -141,13 +142,14 @@ describe('mount policy', () => {
     totalBytes: 100,
     layoutUnits: 10,
     enhancementObjects: 0,
+    enhancements: emptyEnhancements(),
   };
   it('keeps unknown structure windowed and classifies small complex documents', () => {
     const policy = new MarkdownMountPolicy();
     expect(policy.update({ ...complete, state: 'partial' }, 0, false)).toBe('windowed');
     expect(policy.windowLimited).toBe(false);
     expect(policy.update(complete, 0, false)).toBe('progressive-full');
-    expect(policy.update({ ...complete, layoutUnits: 3_017 }, 1, false)).toBe('windowed');
+    expect(policy.update({ ...complete, layoutUnits: 6_017 }, 1, false)).toBe('windowed');
     expect(policy.windowLimited).toBe(true);
     expect(policy.update(complete, 100, false)).toBe('windowed');
     expect(policy.update(complete, 2_099, false)).toBe('windowed');
@@ -157,17 +159,16 @@ describe('mount policy', () => {
   });
   it('requires all lower thresholds and an uninterrupted idle interval', () => {
     const policy = new MarkdownMountPolicy();
-    policy.update({ ...complete, enhancementObjects: 129 }, 0, false);
-    expect(policy.update({ ...complete, enhancementObjects: 110 }, 10_000, false)).toBe('windowed');
+    policy.update({ ...complete, layoutUnits: 6_001 }, 0, false);
+    expect(policy.update({ ...complete, layoutUnits: 5_000 }, 10_000, false)).toBe('windowed');
     policy.update(complete, 11_000, false);
     policy.update(complete, 12_000, true);
     expect(policy.update(complete, 13_000, false)).toBe('windowed');
     expect(policy.update(complete, 15_000, false)).toBe('progressive-full');
   });
   it.each([
-    ['totalBytes', 500_000, 400_000],
-    ['layoutUnits', 2_000, 1_600],
-    ['enhancementObjects', 128, 100],
+    ['totalBytes', 1_048_576, 838_860],
+    ['layoutUnits', 6_000, 4_800],
   ] as const)('uses strict upper and inclusive lower %s boundaries', (metric, upper, lower) => {
     const policy = new MarkdownMountPolicy();
     expect(policy.update({ ...complete, [metric]: upper }, 0, false)).toBe('progressive-full');
@@ -180,5 +181,13 @@ describe('mount policy', () => {
   it('does not infer complete complexity from a ready index with unknown giant-block metrics', () => {
     const policy = new MarkdownMountPolicy();
     expect(policy.update({ ...complete, metricsComplete: false }, 0, false)).toBe('windowed');
+  });
+  it('轻量增强数量不否决准入，资源压力独立限制且不污染规模滞回', () => {
+    const policy = new MarkdownMountPolicy();
+    const rich = { ...complete, enhancementObjects: 5000, enhancements: { ...emptyEnhancements(), inlineCode: 5000 } };
+    expect(policy.update(rich, 0, false)).toBe('progressive-full');
+    expect(policy.update(rich, 1, false, true)).toBe('windowed');
+    expect(policy.restriction).toBe('resource-pressure');
+    expect(policy.update(rich, 3000, false, false)).toBe('progressive-full');
   });
 });

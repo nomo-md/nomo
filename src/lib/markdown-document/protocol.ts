@@ -1,3 +1,5 @@
+import type { MarkdownEnhancements } from './enhancements';
+
 /** 所有正文范围都是工作正文的 UTF-8 字节范围；禁止传入 PM/CM 的 UTF-16 位置。 */
 export interface SourceRange {
   fromByte: number;
@@ -43,6 +45,7 @@ export interface DocumentIndexProgress {
   totalBytes: number;
   layoutUnits: number;
   enhancementObjects: number;
+  enhancements: MarkdownEnhancements;
   metricsComplete?: boolean;
 }
 export class DocumentConflictError extends Error {

@@ -27,10 +27,30 @@ function scannerSpy(reads: number[]): typeof scanMarkdownSnapshot {
 }
 
 describe('结构索引增量收敛', () => {
+  it('替换增强类型时减去旧分类，前缀和收敛后缀只计数一次', async () => {
+    const prefix = '# 前缀\n\n' + '`prefix`\n\n'.repeat(180);
+    const middle = '`old`\n\n```ts\nold()\n```\n\n';
+    const suffix = '普通后缀\n\n'.repeat(1000) + '![tail](a.png)';
+    const port = createMemoryMarkdownPort(), status = await port.openDocument({ text: prefix + middle + suffix });
+    const initial = await port.captureSnapshot(status.documentId);
+    const options = { signal: new AbortController().signal, onProgress() {}, scan: scannerSpy([]) };
+    const before = await buildMarkdownIndex(port, initial, options);
+    const bytes = (text: string) => new TextEncoder().encode(text).length;
+    const edits = [{ fromByte: bytes(prefix), toByte: bytes(prefix + middle),
+      insertedText: '$x$\n\n```mermaid\ngraph TD; A-->B\n```\n\n$$\ny\n$$\n\n' }];
+    await port.applyTransaction(status.documentId, { baseRevision: 0, operationId: 'replace-types', historyGroupId: 'g', edits });
+    const current = await port.captureSnapshot(status.documentId);
+    const after = await buildMarkdownIndex(port, current, { ...options, previous: { index: before, snapshot: initial }, edits });
+    const full = await buildMarkdownIndex(port, current, options);
+    expect(after.progress.enhancements).toEqual(full.progress.enhancements);
+    expect(after.progress.enhancements).toEqual({ inlineCode: 180, codeBlocks: 0, diagrams: 1, inlineMath: 1, blockMath: 1, images: 1, htmlDetails: 0 });
+    expect(after.progress.enhancementObjects).toBe(184);
+    await port.releaseSnapshot(initial); await port.releaseSnapshot(current); await port.close(status.documentId, true);
+  });
   it('连续输入只重扫变化附近，保留全文覆盖与文末引用', async () => {
     const port = createMemoryMarkdownPort();
     const status = await port.openDocument({
-      text: '# 标题\n\n' + '正文内容\n\n'.repeat(5000) + '[label]: /tail\n',
+      text: '# 标题 `a`\n\n' + '正文内容 `b`\n\n'.repeat(5000) + '![尾部](a.png)\n\n[label]: /tail\n',
     });
     const refs: SnapshotReference[] = [];
     const initial = await port.captureSnapshot(status.documentId);
@@ -69,6 +89,9 @@ describe('结构索引增量收敛', () => {
     expect(after.blocks.slice(1).map(block => block.id)).toEqual(before.blocks.slice(1).map(block => block.id));
     expect(after.blocks[1].contentVersion).toBe(before.blocks[1].contentVersion);
     const complete = await buildMarkdownIndex(port, current, options);
+    expect(after.progress.enhancements).toEqual(complete.progress.enhancements);
+    expect(after.progress.enhancements.inlineCode).toBe(5001);
+    expect(after.progress.enhancements.images).toBe(1);
     expect(after.outline.map(({ blockId: _id, ...item }) => item)).toEqual(
       complete.outline.map(({ blockId: _id, ...item }) => item),
     );

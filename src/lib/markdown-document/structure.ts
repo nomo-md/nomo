@@ -3,6 +3,7 @@ import { createMarkdownTokenizer } from '../editor-core/markdownTokenizer';
 import { readDetailsSource } from '../editor-core/details/detailsSyntax';
 import { extractFrontMatterBlock } from '../markdown/frontMatter';
 import { utf8Length } from './utf8Text';
+import { emptyEnhancements, enhancementTotal, type MarkdownEnhancements } from './enhancements';
 
 export interface MarkdownStructureBlock {
   id: string;
@@ -17,6 +18,7 @@ export interface MarkdownStructureBlock {
   mode: 'semantic' | 'raw';
   layoutUnits: number;
   enhancementObjects: number;
+  enhancements: MarkdownEnhancements;
   /** 巨型原文区域尚无完整语义计数时，不能据此退回全文挂载。 */
   metricsComplete: boolean;
   headings: Array<{ level: number; text: string; byte: number; line: number }>;
@@ -50,7 +52,7 @@ function blockStarts(tokens: readonly Token[]) {
 }
 function tokenCounts(tokens: readonly Token[]) {
   let layoutUnits = 0;
-  let enhancementObjects = 0;
+  const enhancements = emptyEnhancements();
   const headings: Array<{ level: number; text: string; line: number }> = [];
   const references = new Set<string>();
   for (let index = 0; index < tokens.length; index++) {
@@ -67,17 +69,10 @@ function tokenCounts(tokens: readonly Token[]) {
       ].includes(token.type)
     )
       layoutUnits++;
-    if (
-      [
-        'fence',
-        'code_block',
-        'math_display',
-        'html_block',
-        'details_html_body',
-        'details_summary_html',
-      ].includes(token.type)
-    )
-      enhancementObjects++;
+    if (token.type === 'fence' && token.info.trim().split(/\s+/)[0]?.toLowerCase() === 'mermaid') enhancements.diagrams++;
+    else if (token.type === 'fence' || token.type === 'code_block') enhancements.codeBlocks++;
+    else if (token.type === 'math_display') enhancements.blockMath++;
+    else if (['html_block', 'details_html_body', 'details_summary_html'].includes(token.type)) enhancements.htmlDetails++;
     if (token.type === 'heading_open')
       headings.push({
         level: Number(token.tag.slice(1)),
@@ -85,14 +80,17 @@ function tokenCounts(tokens: readonly Token[]) {
         line: token.map?.[0] ?? 0,
       });
     if (token.type === 'inline') {
-      for (const child of token.children ?? [])
-        if (['image', 'math_inline', 'code_inline'].includes(child.type)) enhancementObjects++;
+      for (const child of token.children ?? []) {
+        if (child.type === 'image') enhancements.images++;
+        else if (child.type === 'math_inline') enhancements.inlineMath++;
+        else if (child.type === 'code_inline') enhancements.inlineCode++;
+      }
       // 依赖候选允许多报；只有实际 tokenizer 解析结果能决定链接语义。
       for (const match of token.content.matchAll(/\[([^\]\n]+)\](?:\[([^\]\n]*)\])?/g))
         references.add((match[2] || match[1]).trim().replace(/\s+/g, ' ').toUpperCase());
     }
   }
-  return { layoutUnits, enhancementObjects, headings, references: [...references] };
+  return { layoutUnits, enhancements, enhancementObjects: enhancementTotal(enhancements), headings, references: [...references] };
 }
 
 type RawState = {
@@ -263,6 +261,7 @@ export class MarkdownStructureScanner {
       mode: semantic ? 'semantic' : 'raw',
       layoutUnits: counts.layoutUnits,
       enhancementObjects: counts.enhancementObjects,
+      enhancements: counts.enhancements,
       metricsComplete:
         semantic &&
         !tokens.some((token) => ['html_block', 'details_html_body'].includes(token.type)),

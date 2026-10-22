@@ -9,6 +9,7 @@ import { MarkdownTaskPriority } from './scheduler';
 import { ProseMirrorEditorCore } from '../editor-core/ProseMirrorEditorCore';
 import { estimateMarkdownBlockHeight } from './viewport';
 import { MarkdownSemanticWindow } from './semanticWindow';
+import { markdownResidentBudget } from './residentBudget';
 
 const localBuild: typeof buildMarkdownIndex = (port, snapshot, options) =>
   buildMarkdownIndex(port, snapshot, {
@@ -33,6 +34,9 @@ const localBuild: typeof buildMarkdownIndex = (port, snapshot, options) =>
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  expect(markdownResidentBudget(document).diagnostics).toMatchObject({ hosts: 0, documents: 0, entries: 0,
+    actual: { views: 0, sourceBytes: 0, domNodes: 0, imageBytes: 0 },
+    reserved: { views: 0, sourceBytes: 0, domNodes: 0, imageBytes: 0 } });
   document.body.replaceChildren();
 });
 async function setup(text: string, mode: 'semantic' | 'source' = 'semantic', onOpenSource?: (range: { fromByte: number; toByte: number; byte: number }) => void) {
@@ -92,6 +96,36 @@ function outlineGeometry(target: HTMLElement, positions: number[]) {
 }
 
 describe('完整会话的真实窗口宿主', () => {
+  it('异步增强触发共享压力，隐藏及销毁释放登记，保护中的全文编辑和撤销仍完整', async () => {
+    const text = '# 开头\n\n' + '完整正文\n\n'.repeat(300) + '末段';
+    const first = await setup(text), second = await setup('另一个宿主', 'source');
+    const budget = markdownResidentBudget(document);
+    expect(budget.diagnostics.hosts).toBe(2);
+    const root = first.target.querySelector('.markdown-session-window')!;
+    const image = document.createElement('img'); image.src = '/large.png';
+    Object.defineProperties(image, { complete: { value: true }, naturalWidth: { value: 8192 }, naturalHeight: { value: 8192 } });
+    root.append(image);
+    await vi.waitFor(() => expect(first.runtime.state.mountRestriction).toBe('resource-pressure'));
+    expect(second.runtime.state.mountMode).toBe('windowed');
+    expect(budget.diagnostics.actual.imageBytes).toBe(8192 * 8192 * 4);
+    expect(budget.diagnostics.protectedExcess.imageBytes).toBeGreaterThan(0);
+    await first.host.reveal(first.runtime.state.status.byteLength, true);
+    first.host.activeCore!.execute({ type: 'insertText', text: '！' });
+    await first.runtime.session.flushEdits();
+    expect(await first.runtime.readMarkdown()).toBe(text + '！');
+    await first.runtime.session.undo();
+    expect(await first.runtime.readMarkdown()).toBe(text);
+    await second.host.setHidden(true);
+    expect(budget.diagnostics.hosts).toBe(1);
+    await second.host.setHidden(false);
+    await vi.waitFor(() => expect(budget.diagnostics.hosts).toBe(2));
+    await second.host.dispose(); await first.host.dispose();
+    expect(budget.diagnostics).toMatchObject({ hosts: 0, entries: 0, documents: 0,
+      actual: { views: 0, sourceBytes: 0, domNodes: 0, imageBytes: 0 },
+      reserved: { views: 0, sourceBytes: 0, domNodes: 0, imageBytes: 0 } });
+    expect([...first.failures, ...second.failures]).toEqual([]);
+  });
+
   it('标题调度直接使用已确认字节位置，不反复计算原文光标映射', async () => {
     const { host, runtime, target } = await setup('# 一\n\n| 列 | 内容 |\n| --- | --- |\n| a | b |\n\n# 二\n\n尾声');
     outlineGeometry(target, [0, 900]);
@@ -421,7 +455,7 @@ describe('完整会话的真实窗口宿主', () => {
   });
 
   it('直跳目标读取失败保留原位置和正文，明确记录失败且不跳估算位置', async () => {
-    const { runtime, host, port, target } = await setup('# 起点\n\n' + '正文\n\n'.repeat(2500) + '# 终点\n\n尾声');
+    const { runtime, host, port, target } = await setup('# 起点\n\n' + '正文\n\n'.repeat(6500) + '# 终点\n\n尾声');
     const pane = target.parentElement!;
     Object.defineProperty(pane, 'clientHeight', { value: 800 });
     Object.defineProperty(pane, 'scrollHeight', { value: 100000 });
@@ -437,7 +471,7 @@ describe('完整会话的真实窗口宿主', () => {
   });
 
   it('直跳首屏邻接受限结构时保留原位置并结束等待，不把提示判为正文', async () => {
-    const text = '# 起点\n\n正文\n\n' + '巨'.repeat(20000) + '\n\n# 终点\n\n' + '后续正文\n\n'.repeat(2500);
+    const text = '# 起点\n\n正文\n\n' + '巨'.repeat(20000) + '\n\n# 终点\n\n' + '后续正文\n\n'.repeat(6500);
     const { host, target, runtime, failures } = await setup(text);
     const { pane } = outlineGeometry(target, [0, 900]);
     for (const view of target.querySelectorAll<HTMLElement>('.markdown-session-window')) {
@@ -903,7 +937,7 @@ describe('完整会话的真实窗口宿主', () => {
   });
 
   it('跨窗口导航保留全局去重标题 ID，返回后仍可再次定位', async () => {
-    const text = '# 重复标题\n\n' + '段落内容\n\n'.repeat(3500) + '# 重复标题\n\n结尾';
+    const text = '# 重复标题\n\n' + '段落内容\n\n'.repeat(6500) + '# 重复标题\n\n结尾';
     const { runtime, host, target, failures } = await setup(text);
     const headings = runtime.state.index!.outline;
     expect(headings).toHaveLength(2);
@@ -959,9 +993,14 @@ describe('完整会话的真实窗口宿主', () => {
     expect(failures).toEqual([]);
   });
 
-  it('全选的中文组字提交替换完整正文，组字结束前不提交中间文本', async () => {
+  it('共享压力下全选的中文组字提交替换完整正文，组字结束前不提交中间文本', async () => {
     const text = '原始正文\n\n'.repeat(3500);
     const { runtime, host, target, failures } = await setup(text, 'source');
+    const budget = markdownResidentBudget(document), other = {};
+    budget.register(other, 'composition-pressure', () => {});
+    cleanups.push(async () => budget.unregister(other));
+    budget.reserve(other, { views: 33, sourceBytes: 0, domNodes: 0, imageBytes: 0 }, true);
+    await vi.waitFor(() => expect(runtime.state.mountRestriction).toBe('resource-pressure'));
     host.selectAll();
     expect(host.captureSelection()).toEqual({
       anchorByte: 0,

@@ -9,6 +9,7 @@ import { markdownWorkScheduler, MarkdownTaskPriority } from './scheduler';
 import type { MarkdownStructureIndex } from './structureIndex';
 import { MarkdownGlobalSelection } from './selection';
 import { AutomaticMarkdownToc } from './automaticToc';
+import { emptyEnhancements } from './enhancements';
 import {
   searchMarkdownSnapshot,
   replaceMarkdownSnapshotMatches,
@@ -21,6 +22,7 @@ export interface MarkdownLoadingState {
   progress: DocumentIndexProgress;
   mountMode: MarkdownMountMode;
   windowLimited: boolean;
+  mountRestriction: MarkdownMountPolicy['restriction'];
   failure: unknown | null;
   timings: {
     captured: number;
@@ -63,6 +65,7 @@ export class ProgressiveMarkdownDocument {
   private closed = false;
   private failure: unknown | null = null;
   private policy = new MarkdownMountPolicy();
+  private pressureOwners = new Set<object>();
   private mode: MarkdownMountMode = 'windowed';
   private readonly listeners = new Set<(state: MarkdownLoadingState) => void>();
   private unsubscribe: () => void;
@@ -149,6 +152,7 @@ export class ProgressiveMarkdownDocument {
             totalBytes: status.byteLength,
             layoutUnits: 0,
             enhancementObjects: 0,
+            enhancements: emptyEnhancements(),
             metricsComplete: false,
           };
     return {
@@ -157,6 +161,7 @@ export class ProgressiveMarkdownDocument {
       progress,
       mountMode: this.mode,
       windowLimited: this.policy.windowLimited,
+      mountRestriction: this.policy.restriction,
       failure: this.failure,
       timings: { ...this.timings },
     };
@@ -173,11 +178,12 @@ export class ProgressiveMarkdownDocument {
       this.state.progress,
       performance.now(),
       performance.now() - this.latestInteraction < 2000,
+      this.pressureOwners.size > 0,
     );
     const state = this.state;
     const signature = JSON.stringify([state.status.revision, state.status.dirty, state.status.canUndo, state.status.canRedo,
       state.status.persistenceWarning, this.session.state.viewGeneration, this.session.state.pendingTransactions,
-      state.progress.state, state.progress.indexedBytes, state.progress.layoutUnits, state.mountMode, state.windowLimited, state.timings]);
+      state.progress.state, state.progress.indexedBytes, state.progress.layoutUnits, state.progress.enhancements, state.mountMode, state.windowLimited, state.mountRestriction, state.timings]);
     // 滚动只更新时间和挂载策略；元数据没有变化时不让应用反复派生大纲、持久化标签。
     if (signature === this.publishedSignature && this.publishedFailure === state.failure) return;
     this.publishedSignature = signature; this.publishedFailure = state.failure;
@@ -188,6 +194,11 @@ export class ProgressiveMarkdownDocument {
       this.timings[stage] = performance.now() - this.started;
       this.publish();
     }
+  }
+  setMountPressure(owner: object, pressured: boolean) {
+    if (this.pressureOwners.has(owner) === pressured) return;
+    if (pressured) this.pressureOwners.add(owner); else this.pressureOwners.delete(owner);
+    this.publish();
   }
   interacting() {
     this.latestInteraction = performance.now();
@@ -461,7 +472,7 @@ export class ProgressiveMarkdownDocument {
     await this.building;
     await this.toc.dispose();
     if (this.completed) { await this.port.releaseSnapshot(this.completed.snapshot); this.completed = null; }
-    this.unsubscribe(); this.unsubscribeChanges(); this.selection.dispose(); this.listeners.clear();
+    this.unsubscribe(); this.unsubscribeChanges(); this.selection.dispose(); this.listeners.clear(); this.pressureOwners.clear();
     await this.port.detach?.(this.session.documentId);
   }
   /** 卸载使用 setHidden；只有完成关闭/丢弃流程才释放会话和磁盘历史。 */
@@ -498,5 +509,6 @@ export class ProgressiveMarkdownDocument {
     this.unsubscribeChanges();
     this.selection.dispose();
     this.listeners.clear();
+    this.pressureOwners.clear();
   }
 }

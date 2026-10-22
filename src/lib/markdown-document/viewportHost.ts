@@ -8,6 +8,8 @@ import {
 } from './viewport';
 import { MarkdownStableGroups, MarkdownScrollDemand, MARKDOWN_VIEWPORT_POLICY, type MarkdownBlockGroup } from './mountWindow';
 import { MarkdownLayoutCache } from './layoutCache';
+import { markdownResidentBudget, UNKNOWN_IMAGE_BYTES, type MarkdownResidentBudget, type ResidentToken } from './residentBudget';
+import { MarkdownResidentTracker } from './residentTracker';
 import { MarkdownLayoutBatch, markdownWorkScheduler, MarkdownTaskPriority } from './scheduler';
 import { TABLE_LAYOUT_READY_EVENT } from '../table-layout/dom';
 import { subscribeTypographyInteraction } from '../typography/interaction';
@@ -142,6 +144,9 @@ export class MarkdownViewportHost {
   private contentTop = 0;
   private lastIndexedBlock: MarkdownStructureIndex['blocks'][number] | undefined;
   private readonly scroll: HTMLElement;
+  private readonly budget: MarkdownResidentBudget;
+  private readonly resources: MarkdownResidentTracker;
+  private budgetRegistered = false;
   constructor(
     readonly document: ProgressiveMarkdownDocument,
     readonly target: HTMLElement,
@@ -160,6 +165,8 @@ export class MarkdownViewportHost {
       onOpenSource?(range: { fromByte: number; toByte: number; byte: number }): void;
     },
   ) {
+    this.budget = markdownResidentBudget(target.ownerDocument);
+    this.resources = new MarkdownResidentTracker(this.budget);
     this.scroll = target.closest<HTMLElement>('.semantic-pane, .source-pane') ?? target;
     this.presentationStarted = document.elapsed;
     this.presentationRevision = document.state.status.revision;
@@ -192,6 +199,8 @@ export class MarkdownViewportHost {
     globalThis.document.addEventListener('pointerdown', this.onOutsidePointer, true);
     globalThis.document.addEventListener('focusin', this.onDocumentFocus, true);
     target.addEventListener('input', this.onInput, true);
+    target.addEventListener('compositionstart', this.onBudgetComposition, true);
+    target.addEventListener('compositionend', this.onBudgetComposition, true);
     target.addEventListener('focusin', this.onFocus, true);
     target.addEventListener(TABLE_LAYOUT_READY_EVENT, this.onTableLayout);
     target.addEventListener('load', this.onAsset, true);
@@ -214,6 +223,7 @@ export class MarkdownViewportHost {
       commitPendingEdits() {},
     });
     this.unsubscribe = document.subscribe(() => {
+      this.budget.updateDocument(this, document.state.progress);
       if (this.outlineNavigation && this.outlineNavigation.revision !== document.state.status.revision)
         this.cancelOutlineNavigation();
       for (const view of this.mounted) {
@@ -222,7 +232,26 @@ export class MarkdownViewportHost {
       }
       this.schedule();
     });
+    this.connectBudget();
     this.requestPreparation();
+  }
+  private connectBudget() {
+    if (this.budgetRegistered) return;
+    this.budgetRegistered = true;
+    this.budget.register(this, this.document.session.documentId, () => {
+      if (!this.budgetRegistered || this.hidden || this.disposed) return;
+      this.document.setMountPressure(this, this.budget.pressured(this));
+      this.schedule();
+    });
+    this.budget.updateDocument(this, this.document.state.progress);
+    this.document.setMountPressure(this, this.budget.pressured(this));
+  }
+  private disconnectBudget() {
+    if (!this.budgetRegistered) return;
+    this.resources.dispose();
+    this.budget.unregister(this);
+    this.budgetRegistered = false;
+    this.document.setMountPressure(this, false);
   }
   get activeCore() {
     return this.active?.semantic?.core;
@@ -394,7 +423,11 @@ export class MarkdownViewportHost {
     return true;
   }
   private onNavigationIntent = () => {
+    this.budget.interacting(this);
     if (this.cancelOutlineNavigation()) this.callbacks.onNavigationIntent?.();
+  };
+  private onBudgetComposition = (event: CompositionEvent) => {
+    this.budget.holdInteraction(this, 'composition', event.type === 'compositionstart');
   };
   private get localScrollTop() {
     return Math.max(0, (this.scroll.scrollTop - this.contentTop) / this.scale);
@@ -444,6 +477,7 @@ export class MarkdownViewportHost {
       if (!this.outlineNavigation || this.outlineNavigation.animationDone) this.schedule();
       return;
     }
+    this.budget.interacting(this);
     const target = this.outlineNavigation;
     if (target?.kind === 'direct' && !target.aligned) {
       // 实际输入已由前置意图事件取消；准备导致的浏览器几何调整仍保持原阅读锚点。
@@ -565,6 +599,8 @@ export class MarkdownViewportHost {
   };
   get diagnostics() {
     return { ...this.stats, mounted: this.mounted.length, cacheEntries: this.layoutCache.size,
+      resources: this.budget.diagnostics, resourcePressure: this.budget.pressured(this),
+      enhancements: this.document.state.progress.enhancements, mountRestriction: this.document.state.mountRestriction,
       residentWindowBytes: this.mounted.reduce((sum, view) => sum + this.windowBytes(view), 0),
       cacheBytes: this.layoutCache.estimatedBytes, cacheHits: this.layoutCache.hits,
       cacheMisses: this.layoutCache.misses, preparationMs: this.demand.preparationMs,
@@ -710,6 +746,7 @@ export class MarkdownViewportHost {
     this.pointerView = this.mounted.find((view) => view.element.contains(event.target as Node));
     this.pointerAnchor =
       this.byteAtCoords(this.pointerView, event) ?? this.selection(this.pointerView)?.headByte;
+    this.budget.holdInteraction(this, 'pointer', this.pointerAnchor !== undefined);
     if (this.pointerView) this.active = this.pointerView;
   };
   private byteAtCoords(view: Mounted | undefined, event: PointerEvent) {
@@ -733,6 +770,7 @@ export class MarkdownViewportHost {
   };
   private onPointerUp = () => {
     if (this.pointerAnchor === undefined) return;
+    this.budget.holdInteraction(this, 'pointer', false);
     const selected = this.selection();
     if (selected && !this.globalSelection) this.document.selection.set(selected);
     this.pointerAnchor = undefined;
@@ -1041,6 +1079,7 @@ export class MarkdownViewportHost {
     });
     const generation = this.generation;
     const created: Mounted[] = [];
+    const reservations = new Set<ResidentToken>();
     try {
       await this.document.session.awaitTransactions();
       if (this.disposed || this.hidden || generation !== this.generation) return;
@@ -1143,7 +1182,7 @@ export class MarkdownViewportHost {
         const top = requestedTop ?? this.localScrollTop;
         const demand = this.demand.range(height, performance.now());
         if (navigating) demand.before = demand.after = 0;
-        const pressure = this.mounted.length > MARKDOWN_VIEWPORT_POLICY.softViews ||
+        const pressure = this.budget.pressured(this) || this.mounted.length > MARKDOWN_VIEWPORT_POLICY.softViews ||
           this.mounted.reduce((sum, view) => sum + this.windowBytes(view), 0) > MARKDOWN_VIEWPORT_POLICY.softWindowBytes;
         if (pressure) { if (!navigating) demand.before = demand.after = height * 3; demand.retainBefore = demand.retainAfter = height * 3; }
         const from = this.heights.indexAt(Math.max(0, top - demand.before));
@@ -1247,6 +1286,7 @@ export class MarkdownViewportHost {
         ? this.document.selection.selection
         : (this.selection() ?? this.document.selection.selection);
       for (const plan of plans) {
+        const required = containsTarget(plan) > 0 || distance(plan) <= ((this.scroll.clientHeight || 800) / this.scale) * 3;
         const key = `${plan.groupId ?? `${plan.fromByte}:${plan.toByte}`}:${plan.restricted ? 'restricted' : plan.semantic}`;
         let view = this.mounted.find(
           (view) =>
@@ -1257,16 +1297,20 @@ export class MarkdownViewportHost {
               !(view.source?.bridge.isStale || view.semantic?.bridge.isStale))),
         );
         if (!view) {
-          // 软预算优先释放远处保留带；可见区、基础缓冲和交互保护不被预算挤掉。
-          if (!(this.outlineNavigation && plan.fromByte <= this.outlineNavigation.byte && plan.toByte > this.outlineNavigation.byte) &&
-            distance(plan) > ((this.scroll.clientHeight || 800) / this.scale) * 3 &&
-            (next.length >= MARKDOWN_VIEWPORT_POLICY.softViews ||
-             next.reduce((sum, view) => sum + this.windowBytes(view), 0) + (plan.restricted ? 0 : plan.toByte - plan.fromByte) > MARKDOWN_VIEWPORT_POLICY.softWindowBytes)) continue;
+          // 额外扩展统一预占共享预算；拒绝会锁存压力并交给既有窗口回收分支。
           // 屏内也遵守同一批次预算，先发布已准备的完整组，不等整屏准备完毕。
           if (createdCount && performance.now() - batchStart >= MARKDOWN_VIEWPORT_POLICY.batchMs) {
             this.again = true;
             continue;
           }
+          const images = plan.semantic && index ? index.blocks.slice(plan.from, plan.to)
+            .reduce((sum, block) => sum + block.enhancements.images, 0) : 0;
+          const reservation = this.budget.reserve(this, {
+            views: plan.restricted ? 0 : 1, sourceBytes: plan.restricted ? 0 : plan.toByte - plan.fromByte,
+            domNodes: 0, imageBytes: images * UNKNOWN_IMAGE_BYTES,
+          }, required);
+          if (reservation.kind !== 'admitted') continue;
+          reservations.add(reservation.token);
           const started = performance.now();
           let interrupt!: () => void;
           const cancelled = new Promise<undefined>(resolve => { interrupt = () => resolve(undefined); });
@@ -1356,6 +1400,8 @@ export class MarkdownViewportHost {
             });
           }
           const elapsed = performance.now() - started;
+          this.resources.track(element, reservation.token, plan.restricted ? 0 : plan.toByte - plan.fromByte, plan.restricted ? 0 : 1);
+          reservations.delete(reservation.token);
           this.demand.prepared(elapsed);
           this.stats.maxPreparationMs = Math.max(this.stats.maxPreparationMs, elapsed);
           if (elapsed > MARKDOWN_VIEWPORT_POLICY.batchMs) this.stats.overBudget++;
@@ -1374,6 +1420,7 @@ export class MarkdownViewportHost {
         }
         view.from = plan.from;
         view.to = plan.to;
+        this.resources.update(view.element, this.windowBytes(view), required || this.pinned(view));
         if (view.restricted) {
           Object.assign(view.window, { fromByte: plan.fromByte, toByte: plan.toByte, revision: state.status.revision });
           view.signature = plan.signature;
@@ -1515,6 +1562,7 @@ export class MarkdownViewportHost {
       }
       throw error;
     } finally {
+      for (const token of reservations) this.budget.release(token);
       for (const view of created) if (!this.mounted.includes(view)) this.destroyView(view);
       this.busy = false;
       finish();
@@ -1533,6 +1581,7 @@ export class MarkdownViewportHost {
     return element;
   }
   private destroyView(view: Mounted) {
+    this.resources.release(view.element);
     // 布局结果已由测量批次发布；回收只释放视图，避免 DOM 写入之间再同步读布局。
     this.observer?.unobserve(view.element);
     this.dirty.delete(view);
@@ -1565,7 +1614,7 @@ export class MarkdownViewportHost {
   /** 只复用已测量的完整首屏；不改变目标加载判定，也不略过邻接正文准备。 */
   private reuseOutlineViewport() {
     const target = this.outlineNavigation, state = this.document.state;
-    if (!target || target.kind !== 'animated' || !target.sample.targetLoaded || this.busy ||
+    if (this.budget.pressured(this) || !target || target.kind !== 'animated' || !target.sample.targetLoaded || this.busy ||
       this.dirty.size || this.viewFailure || state.failure || this.document.session.state.pendingTransactions ||
       this.index !== state.index || this.index?.revision !== target.revision ||
       this.heights.length !== this.index.blocks.length || this.lastIndexedBlock !== this.index.blocks.at(-1)) {
@@ -1913,8 +1962,8 @@ export class MarkdownViewportHost {
     this.navigation++;
     this.layoutBatch.cancel(this);
     markdownWorkScheduler.cancel(this);
-    if (hidden) await this.unmountViews();
-    else this.schedule();
+    if (hidden) { await this.unmountViews(); this.disconnectBudget(); }
+    else { this.connectBudget(); this.schedule(); }
   }
   private async unmountViews() {
     await this.document.session.flushEdits();
@@ -1936,6 +1985,7 @@ export class MarkdownViewportHost {
     this.invalidateStable();
     this.generation++;
     await this.unmountViews();
+    this.disconnectBudget();
     this.disposed = true;
     this.generation++;
     this.unsubscribe();
@@ -1974,6 +2024,8 @@ export class MarkdownViewportHost {
     globalThis.document.removeEventListener('pointerdown', this.onOutsidePointer, true);
     globalThis.document.removeEventListener('focusin', this.onDocumentFocus, true);
     this.target.removeEventListener('input', this.onInput, true);
+    this.target.removeEventListener('compositionstart', this.onBudgetComposition, true);
+    this.target.removeEventListener('compositionend', this.onBudgetComposition, true);
     this.target.removeEventListener('focusin', this.onFocus, true);
     this.target.removeEventListener(TABLE_LAYOUT_READY_EVENT, this.onTableLayout);
     this.target.removeEventListener('load', this.onAsset, true);

@@ -2,12 +2,10 @@ import type { DocumentIndexProgress } from './protocol';
 
 export type MarkdownMountMode = 'windowed' | 'progressive-full';
 export const DEFAULT_MARKDOWN_MOUNT_LIMITS = Object.freeze({
-  bytes: 500_000,
-  layoutUnits: 2_000,
-  enhancementObjects: 128,
-  returnBytes: 400_000,
-  returnLayoutUnits: 1_600,
-  returnEnhancementObjects: 100,
+  bytes: 1_048_576,
+  layoutUnits: 6_000,
+  returnBytes: 838_860,
+  returnLayoutUnits: 4_800,
   idleMilliseconds: 2_000,
 });
 
@@ -16,20 +14,24 @@ export class MarkdownMountPolicy {
   private mode: MarkdownMountMode = 'windowed';
   private limited = false;
   private belowSince: number | null = null;
-  get windowLimited() { return this.mode === 'windowed' && this.limited; }
+  private pressure = false;
+  private incomplete = false;
+  get windowLimited() { return this.mode === 'windowed' && (this.limited || this.pressure); }
+  get restriction() { return this.pressure ? 'resource-pressure' : this.limited ? 'document-size' : this.mode === 'windowed' ? this.incomplete ? 'structure-incomplete' : 'index-pending' : null; }
   constructor(private readonly limits = DEFAULT_MARKDOWN_MOUNT_LIMITS) {}
-  update(progress: DocumentIndexProgress, now: number, interacting: boolean): MarkdownMountMode {
+  update(progress: DocumentIndexProgress, now: number, interacting: boolean, pressure = false): MarkdownMountMode {
+    this.pressure = pressure;
+    this.incomplete = progress.state === 'ready' && progress.metricsComplete === false;
     const high =
       progress.totalBytes > this.limits.bytes ||
-      progress.layoutUnits > this.limits.layoutUnits ||
-      progress.enhancementObjects > this.limits.enhancementObjects;
+      progress.layoutUnits > this.limits.layoutUnits;
     if (high) {
       this.limited = true;
       this.mode = 'windowed';
       this.belowSince = null;
       return this.mode;
     }
-    if (progress.state !== 'ready' || progress.metricsComplete === false) {
+    if (pressure || progress.state !== 'ready' || progress.metricsComplete === false) {
       this.belowSince = null;
       this.mode = 'windowed';
       return this.mode;
@@ -40,8 +42,7 @@ export class MarkdownMountPolicy {
     }
     const low =
       progress.totalBytes <= this.limits.returnBytes &&
-      progress.layoutUnits <= this.limits.returnLayoutUnits &&
-      progress.enhancementObjects <= this.limits.returnEnhancementObjects;
+      progress.layoutUnits <= this.limits.returnLayoutUnits;
     if (!low || interacting) {
       this.belowSince = null;
       return this.mode;

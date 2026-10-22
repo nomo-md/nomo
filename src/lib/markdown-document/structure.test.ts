@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { parseMarkdown, serializeMarkdown } from '../editor-core/markdown';
 import { MarkdownStructureScanner, type MarkdownStructureBlock } from './structure';
 import { Utf8Text } from './utf8Text';
+import { addEnhancements, emptyEnhancements } from './enhancements';
 
 function scan(source: string, chunkSize: number, limit?: number) {
   const scanner = new MarkdownStructureScanner(1, { maxSemanticBytes: limit });
@@ -30,6 +31,24 @@ function scan(source: string, chunkSize: number, limit?: number) {
 }
 
 describe('结构边界渐进扫描', () => {
+  it('增强按类型计数，Mermaid 不重复记为普通代码块', () => {
+    const source = '`path` $x$ ![img](a.png)\n\n```ts\na()\n```\n\n```MeRmAiD\ngraph TD; A-->B\n```\n\n$$\ny\n$$\n';
+    const { blocks } = scan(source, 17);
+    const counts = emptyEnhancements();
+    for (const block of blocks) addEnhancements(counts, block.enhancements);
+    expect(counts).toEqual({ inlineCode: 1, inlineMath: 1, images: 1, codeBlocks: 1, diagrams: 1, blockMath: 1, htmlDetails: 0 });
+    expect(blocks.reduce((sum, block) => sum + block.enhancementObjects, 0)).toBe(6);
+  });
+  it('Details 与 HTML 使用现有解析分类，未知巨型结构保持指标不完整', () => {
+    const source = '<details>\n<summary>标题</summary>\n\n正文 `a`\n\n</details>\n\n<div>HTML</div>\n';
+    const { blocks } = scan(source, 13);
+    const counts = emptyEnhancements();
+    for (const block of blocks) addEnhancements(counts, block.enhancements);
+    expect(counts.htmlDetails).toBe(2);
+    expect(counts.inlineCode).toBe(1);
+    expect(blocks.some(block => !block.metricsComplete)).toBe(true);
+    expect(scan('```\n' + 'x'.repeat(1000) + '\n```', 32, 128).blocks[0].metricsComplete).toBe(false);
+  });
   const fixtures = [
     '开头\n#并非标题\n\n后文\n',
     '- 第一项\n\n  缩进续行\n  - 嵌套\n\n- 第二项\n\n# 结尾\n',

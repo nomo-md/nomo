@@ -153,6 +153,7 @@
 | 前端会话与视图事务 | `src/lib/markdown-document/controller.ts` | `port.ts`, `session.ts`, `utf8Text.ts`, `windowBridge.ts` | 修改待确认输入、重试、保存期间输入、关闭门禁、浏览器内存适配器或视图失效与重定位 |
 | 有界语义和原文窗口 | `src/lib/markdown-document/semanticWindow.ts`, `sourceWindow.ts` | `sourceProjection.ts`, `positions.ts`, `textChanges.ts`, `src/lib/editor-core/ProseMirrorEditorCore.ts` | 修改同实例语义预览、初始就绪与统一写入门禁、PM/CM 共用历史、源文精确补丁、混合换行、UTF-8/UTF-16 映射或局部编辑保留 |
 | 渐进索引与运行时 | `src/lib/markdown-document/runtime.ts` | `structure.ts`, `structure.worker.ts`, `structureIndex.ts`, `incrementalIndex.ts`, `indexInvalidation.ts` | 修改纯文本结构检查点、可撤销可见结构需求、全局引用、标题 ID 去重、增量收敛、版本门禁、后台取消或加载阶段计时 |
+| 全文准入与共享驻留预算 | `src/lib/markdown-document/mountPolicy.ts`, `residentBudget.ts` | `residentTracker.ts`, `enhancements.ts`, `structure.ts`, `structureIndex.ts`, `runtime.ts`, `viewportHost.ts` | 修改 1 MiB / 6000 排版单元准入、增强分类统计、同窗语义/源码宿主的可撤销预占与 DOM/图片增量计量、压力锁存和恢复；窗口挂载与回收仍由现有宿主执行 |
 | 真实窗口与布局策略 | `src/lib/markdown-document/viewportHost.ts` | `mountWindow.ts`, `layoutCache.ts`, `mountPolicy.ts`, `viewport.ts`, `scheduler.ts`, `editor-document.css` | 修改首屏呈现与覆盖计时、受限结构提示与导航、稳定块组、3–6 屏自适应准备、回收滞回、原位 DOM 更新、交互保护、全局选区、边界导航、大纲挂载后的精确定位与几何高亮、阅读锚点或有界高度/表格布局缓存 |
 | 语义窗口标题锚点 | `src/lib/editor-core/plugins/headingAnchors.ts` | `src/lib/editor-core/ProseMirrorEditorCore.ts`, `src/lib/markdown-document/viewportHost.ts` | 修改全局标题 ID 的 PM decoration、跨窗口重名标题定位或大纲点击后的显式滚动；宿主不得直接修改标题 DOM 属性 |
 | 全文选区与任务 | `src/lib/markdown-document/selection.ts`, `tasks.ts` | `runtime.ts`, `controller.ts`, `port.ts` | 修改跨窗口选区、完整快照复制、剪切冲突保护、全文搜索替换及取消 |
