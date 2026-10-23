@@ -280,11 +280,12 @@ export class MarkdownSessionController {
     await this.prepareClose(discard);
     await this.closePrepared(discard);
   }
-  async closePrepared(discard: boolean) {
+  async closePrepared(discard: boolean, closeStorage?: () => Promise<void>) {
     this.assertOpen();
     if (!this.closing) throw new Error('文档尚未准备关闭。');
     try {
-      await this.port.close(this.documentId, discard);
+      if (closeStorage) await closeStorage();
+      else await this.port.close(this.documentId, discard);
     } catch (error) {
       this.cancelClose();
       throw error;

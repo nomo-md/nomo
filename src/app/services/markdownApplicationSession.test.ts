@@ -57,6 +57,55 @@ async function setup(text: string, onRequestSource?: (isCurrent: () => boolean) 
 }
 
 describe('应用 Markdown 会话入口', () => {
+  it('准备关闭后源码组件只归还宿主，下一帧的回收入口才释放窗口', async () => {
+    const { application } = await setup('# 源码关闭\n\n尾部');
+    const semantic = document.body.appendChild(document.createElement('div'));
+    const source = document.body.appendChild(document.createElement('div'));
+    application.editor.mount(semantic);
+    application.setViewMode('split');
+    const returnHost = application.mountSource(source);
+    await vi.waitFor(() => expect(source.querySelector('.cm-editor')).not.toBeNull());
+    application.stopCloseEnhancements();
+    expect(application.writable).toBe(true);
+    await application.prepareViewClose();
+    returnHost();
+    expect(source.querySelector('.cm-editor')).not.toBeNull();
+    await application.releaseCloseViews();
+    expect(source.childElementCount).toBe(0);
+  });
+  it('关闭准备后可分批释放视图，正在捕获的完整快照仍保留会话和尾部', async () => {
+    const text = '# 混合\n\n正文\n\nNOMO_END';
+    const { application, doc } = await setup(text);
+    const target = document.body.appendChild(document.createElement('div'));
+    application.editor.mount(target);
+    await vi.waitFor(() => expect(application.writable).toBe(true));
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const read = doc.port.readSnapshot.bind(doc.port);
+    const delayed = vi.spyOn(doc.port, 'readSnapshot').mockImplementation(async (...args) => { await gate; return read(...args); });
+    const capture = application.capture();
+    await vi.waitFor(() => expect(delayed).toHaveBeenCalled());
+    await application.prepareViewClose();
+    await application.releaseCloseViews();
+    expect(target.childElementCount).toBe(0);
+    expect(doc.session.state.closing).toBe(false);
+    release(); expect((await capture).markdown).toBe(text);
+  });
+
+  it('组合存储关闭失败时两篇会话均保留，重试后共同释放', async () => {
+    const first = await setup('# A\n\n未保存 A'), second = await setup('# B\n\n未保存 B');
+    const close = vi.spyOn(first.doc.port as Required<typeof first.doc.port>, 'closeMany').mockRejectedValueOnce(new Error('storage busy'));
+    await expect(MarkdownApplicationSession.closeTogether([
+      { application: first.application, discard: true }, { application: second.application, discard: true },
+    ])).rejects.toThrow('storage busy');
+    expect(await first.application.readMarkdown()).toContain('未保存 A');
+    expect(await second.application.readMarkdown()).toContain('未保存 B');
+    await MarkdownApplicationSession.closeTogether([
+      { application: first.application, discard: true }, { application: second.application, discard: true },
+    ]);
+    expect(close).toHaveBeenCalledTimes(2);
+  });
+
   it.each([[0, 0], [7, 7], [7, 19], [19, 7]])('切走再挂载保留光标和正反向选区 %j，恢复不产生编辑历史', async (offsetAnchor, offsetHead) => {
     const text = '# 标题\n\n前😀中间文字 **加粗** 后面\n\n最后一段';
     const { application, doc, failures } = await setup(text);

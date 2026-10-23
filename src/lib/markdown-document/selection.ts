@@ -106,13 +106,12 @@ export class MarkdownGlobalSelection {
   }
   private async withSelectedSnapshot<T>(run: (selected: SelectedSnapshot) => Promise<T>) {
     this.assertOpen();
-    await this.session.flushEdits();
-    const selected: Omit<SelectedSnapshot, 'snapshot'> = {
-      selection: this.selection,
-      generation: this.session.state.viewGeneration,
-      selectionVersion: this.version,
-    };
     return this.session.withSnapshot(async snapshot => {
+      const selected: Omit<SelectedSnapshot, 'snapshot'> = {
+        selection: this.selection,
+        generation: this.session.state.viewGeneration,
+        selectionVersion: this.version,
+      };
       if (
         selected.generation !== this.session.state.viewGeneration ||
         snapshot.revision !== this.session.state.committed.revision

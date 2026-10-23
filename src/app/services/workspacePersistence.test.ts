@@ -10,6 +10,8 @@ import {
   createPersistedWorkspaceState,
   createRuntimeTabFromPersisted,
   migrateWorkspaceSetting,
+  pendingCloseWorkspaceSetting,
+  restorePendingCloseItems,
   partitionPersistedWorkspaceTabsForRestore,
   persistWorkspaceDrafts,
   type WorkspaceDraftPersistenceCache,
@@ -34,6 +36,37 @@ beforeEach(() => {
 });
 
 describe('workspacePersistence', () => {
+  it('失败后组合回到原外层位置，不移动等待期间新开的标签', () => {
+    const tabs = ['a', 'b', 'c', 'new'].map(id => createTab({ id }));
+    const item = (tabId: string) => ({ kind: 'single' as const, id: `item-${tabId}`, tabId });
+    const comparison = { kind: 'comparison' as const, id: 'pair', leftTabId: 'b', rightTabId: 'c', focusedTabId: 'c', mode: 'semantic' as const, leftPercent: 40 };
+    const restored = restorePendingCloseItems(tabs, [item('a'), item('new')], { items: [comparison], itemPositions: [1], tabs: [], positions: [] });
+    expect(restored.map(item => item.id)).toEqual(['item-a', 'pair', 'item-new']);
+    expect(restored[1]).toEqual(comparison);
+  });
+  it('恢复当前窗口的关闭检查点，旧启动快照和其它窗口不覆盖它', () => {
+    const setting = (key: string, value: unknown) => ({ key, valueJson: JSON.stringify(value), updatedAt: 1 });
+    const interrupted = setting('workspaceTabs:main', { version: 5, pendingCloses: [{ id: 'interrupted' }] });
+    const settings = [setting('startupWorkspace', { version: 4, tabs: [] }), interrupted,
+      setting('workspaceTabs:window-other', { version: 5, pendingCloses: [{ id: 'other' }] })];
+    expect(pendingCloseWorkspaceSetting(settings, 'main')).toBe(interrupted);
+    expect(pendingCloseWorkspaceSetting(settings, 'window-missing')).toBeUndefined();
+    expect(pendingCloseWorkspaceSetting([setting('workspaceTabs:main', { version: 5, pendingCloses: [] })], 'main')).toBeUndefined();
+  });
+  it('v5 将隐藏关闭记录与可见文档分开持久化，不复制正文，迁移保留恢复身份', async () => {
+    const tab = createTab({ id: 'closing', markdown: 'private body', dirty: true });
+    tab.documentId = 'md-closing-1';
+    const closed = await createPersistedWorkspaceState({ tabs: [tab], activeTabId: tab.id, currentFolderPath: '', desktopEnabled: true, draftWritePolicy: 'skip' });
+    const state = await createPersistedWorkspaceState({ tabs: [], activeTabId: '', currentFolderPath: '', desktopEnabled: true,
+      pendingCloses: [{ id: 'close-1', phase: 'pending', tabs: closed.tabs as PersistedMarkdownWorkspaceTab[], positions: [2], items: [], decisions: { closing: 'save' }, revisions: { closing: tab.version } }],
+    });
+    expect(state.tabs).toEqual([]);
+    expect(state.pendingCloses?.[0].tabs[0].documentId).toBe('md-closing-1');
+    expect(JSON.stringify(state)).not.toContain('private body');
+    const restored = await migrateWorkspaceSetting({ valueJson: JSON.stringify(state) });
+    expect(restored?.migrated).toBe(false);
+    expect(restored?.state.pendingCloses?.[0]).toMatchObject({ phase: 'pending', positions: [2], decisions: { closing: 'save' } });
+  });
   it('persists workspace tabs without markdown bodies', async () => {
     const tab = createTab({
       nativePath: 'D:\\docs\\a.md',
@@ -52,7 +85,7 @@ describe('workspacePersistence', () => {
     expect(JSON.stringify(state)).not.toContain('changed');
     expect(JSON.stringify(state)).not.toContain('saved');
     expect(state).toMatchObject({
-      version: 3,
+      version: 5,
       activeTabId: tab.id,
       currentFolderPath: 'D:\\docs',
       tabs: [{ nativePath: 'D:\\docs\\a.md', draftId: null, dirty: false }],
@@ -366,7 +399,7 @@ describe('workspacePersistence', () => {
     });
 
     expect(result?.migrated).toBe(true);
-    expect(result?.state.version).toBe(3);
+    expect(result?.state.version).toBe(5);
     expect(result?.state.tabs[0]).toMatchObject({
       id: 'v2-tab',
       documentKind: 'markdown',
@@ -541,7 +574,7 @@ describe('workspacePersistence', () => {
       }),
     });
 
-    expect(result?.migrated).toBe(false);
+    expect(result?.migrated).toBe(true);
     expect(result?.state.tabs[0]).toMatchObject({
       documentKind: 'text',
       recoveryConflictPath: null,

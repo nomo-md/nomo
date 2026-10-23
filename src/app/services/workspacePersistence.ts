@@ -13,6 +13,7 @@ import {
   type PersistedMarkdownWorkspaceTab,
   type PersistedSegmentedWorkspaceTab,
   type PersistedWorkspaceState,
+  type PersistedPendingClose,
   type PersistedWorkspaceTab,
   type SegmentedSessionOpenData,
   type SegmentedTextTabState,
@@ -33,6 +34,7 @@ import {
 } from '../../lib/services/storage';
 
 interface PersistedWorkspaceTabV2 {
+  closeFailure?: string;
   documentId?: string;
   globalSelection?: GlobalSelection | null;
   globalScrollAnchor?: GlobalScrollAnchor | null;
@@ -71,6 +73,26 @@ type LegacyWorkspaceState = {
 export interface WorkspaceMigrationResult {
   state: PersistedWorkspaceState;
   migrated: boolean;
+}
+
+/** 未完成关闭属于当前窗口；不能被上次正常退出留下的启动快照遮蔽。 */
+export function pendingCloseWorkspaceSetting(settings: readonly SettingRecord[], windowLabel: string) {
+  const setting = settings.find(setting => setting.key === `workspaceTabs:${windowLabel}`);
+  if (!setting) return undefined;
+  try {
+    const value = JSON.parse(setting.valueJson);
+    return Array.isArray(value?.pendingCloses) && value.pendingCloses.length ? setting : undefined;
+  } catch { return undefined; }
+}
+
+/** 恢复外层标签的位置和组合关系，同时保留用户在等待期间打开的其它标签。 */
+export function restorePendingCloseItems(tabs: readonly Tab[] | readonly PersistedWorkspaceTab[], current: readonly WorkspaceItem[], record: Pick<PersistedPendingClose, 'items' | 'itemPositions' | 'tabs' | 'positions'>) {
+  const restoring = new Set(record.items.map(item => item.id));
+  const items = current.filter(item => !restoring.has(item.id));
+  const positioned = record.items.map((item, index) => ({ item, position: record.itemPositions?.[index] ?? record.positions[record.tabs.findIndex(tab => tab.id === getWorkspaceItemTabIds(item)[0])] ?? items.length }));
+  for (const { item, position } of positioned.sort((a, b) => a.position - b.position))
+    items.splice(Math.max(0, Math.min(position, items.length)), 0, item);
+  return normalizeWorkspaceItems(tabs, items);
 }
 
 export type WorkspaceDraftWritePolicy = 'write-needed' | 'missing-only' | 'skip';
@@ -134,7 +156,7 @@ function isPersistedWorkspaceState(value: unknown): value is PersistedWorkspaceS
   }
   const state = value as Partial<PersistedWorkspaceState>;
   return (
-    (state.version === 3 || state.version === 4) &&
+    (state.version === 3 || state.version === 4 || state.version === 5) &&
     Array.isArray(state.tabs) &&
     state.tabs.every(isPersistedWorkspaceTab) &&
     typeof state.activeTabId === 'string'
@@ -150,6 +172,7 @@ export async function createPersistedWorkspaceState(input: {
   desktopEnabled: boolean;
   preservedDraftIds?: ReadonlySet<string>;
   draftWritePolicy?: WorkspaceDraftWritePolicy;
+  pendingCloses?: PersistedPendingClose[];
 }): Promise<PersistedWorkspaceState> {
   const persistedTabs: PersistedWorkspaceTab[] = [];
   const draftWritePolicy = input.draftWritePolicy ?? 'write-needed';
@@ -189,12 +212,13 @@ export async function createPersistedWorkspaceState(input: {
   }
 
   return normalizePersistedWorkspaceState({
-    version: 4,
+    version: 5,
     tabs: persistedTabs,
     activeTabId: input.activeTabId,
     items: input.items ? [...input.items] : undefined,
     activeItemId: input.activeItemId,
     currentFolderPath: input.currentFolderPath || undefined,
+    pendingCloses: input.pendingCloses,
   });
 }
 
@@ -276,7 +300,7 @@ export async function migrateWorkspaceSetting(
       parsed.activeItemId !== state.activeItemId || parsed.activeTabId !== state.activeTabId;
     return {
       state,
-      migrated: parsed.version !== 4 || correctedKind || correctedItems,
+      migrated: parsed.version !== 5 || correctedKind || correctedItems,
     };
   }
 
@@ -361,6 +385,7 @@ export function createRuntimeTabFromPersisted(
       id: tab.id,
       documentKind: 'markdown',
       documentId: tab.documentId,
+      closeFailure: tab.closeFailure,
       globalSelection: tab.globalSelection,
       globalScrollAnchor: tab.globalScrollAnchor,
       fileName: tab.fileName,
@@ -441,14 +466,33 @@ function normalizePersistedWorkspaceState(state: PersistedWorkspaceState): Persi
   const activeItem = items.find((item) => item.id === state.activeItemId) ??
     findWorkspaceItemForTab(items, state.activeTabId) ?? items[0];
   return {
-    version: 4,
+    version: 5,
     tabs,
     items,
     activeItemId: activeItem?.id ?? '',
     activeTabId: activeItem ? getWorkspaceItemFocusedTabId(activeItem) : '',
     currentFolderPath:
       typeof state.currentFolderPath === 'string' ? state.currentFolderPath : undefined,
+    pendingCloses: normalizePendingCloses(state.pendingCloses, tabs),
   };
+}
+
+function normalizePendingCloses(input: unknown, visible: PersistedWorkspaceTab[]): PersistedPendingClose[] {
+  if (!Array.isArray(input)) return [];
+  const assigned = new Set(visible.map(tab => tab.id));
+  return input.flatMap((record: PersistedPendingClose) => {
+    if (!record || typeof record.id !== 'string' || !Array.isArray(record.tabs)) return [];
+    const tabs = record.tabs.filter(tab => isPersistedWorkspaceTab(tab) && tab.documentKind === 'markdown' && !assigned.has(tab.id)).map(normalizePersistedMarkdownWorkspaceTab);
+    if (!tabs.length) return [];
+    for (const tab of tabs) assigned.add(tab.id);
+    return [{ id: record.id, phase: record.phase === 'readyToRelease' ? 'readyToRelease' : 'pending', tabs,
+      positions: tabs.map((tab) => { const index = record.tabs.findIndex(candidate => candidate.id === tab.id); const position = record.positions?.[index]; return Number.isSafeInteger(position) && position >= 0 ? position : visible.length; }),
+      items: normalizeWorkspaceItems(tabs, Array.isArray(record.items) ? record.items : []),
+      itemPositions: Array.isArray(record.itemPositions) ? record.itemPositions.map(position => Number.isSafeInteger(position) && position >= 0 ? position : visible.length) : undefined,
+      decisions: Object.fromEntries(tabs.map(tab => [tab.id, record.decisions?.[tab.id] === 'discard' ? 'discard' : record.decisions?.[tab.id] === 'clean' ? 'clean' : 'save'])),
+      revisions: Object.fromEntries(tabs.map(tab => [tab.id, Number.isSafeInteger(record.revisions?.[tab.id]) ? record.revisions[tab.id] : tab.version])),
+    } as PersistedPendingClose];
+  });
 }
 
 function migratePersistedWorkspaceStateV2(
@@ -494,6 +538,7 @@ function normalizePersistedMarkdownWorkspaceTab(
   return {
     ...common,
     documentKind: 'markdown',
+    closeFailure: typeof tab.closeFailure === 'string' ? tab.closeFailure : undefined,
     documentId: typeof tab.documentId === 'string' && /^md-[a-z0-9-]+$/i.test(tab.documentId) ? tab.documentId : undefined,
     globalSelection: normalizeGlobalSelection(tab.globalSelection),
     globalScrollAnchor: normalizeGlobalScrollAnchor(tab.globalScrollAnchor),

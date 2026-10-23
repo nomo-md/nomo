@@ -859,6 +859,12 @@
     registeredSourceHandle = null;
     registeredSourceContent = null;
     registeredSourceDocumentId = '';
+    // sourcePane 由容器派生，而非直接 bind:this；销毁后不会再运行派生更新。
+    // 必须主动归还导出绑定，否则父组件及布局 WeakMap 会保留整棵旧正文。
+    sourceEditor = undefined;
+    sourcePane = undefined!;
+    semanticPane = undefined!;
+    editorHost = undefined!;
     outlineDragPreview?.remove();
     clearOutlineExpandTimer();
     if (outlineAutoScrollFrame) cancelAnimationFrame(outlineAutoScrollFrame);

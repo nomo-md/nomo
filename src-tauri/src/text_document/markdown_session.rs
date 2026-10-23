@@ -148,6 +148,18 @@ impl Drop for SessionCleanup {
                     "MarkdownDocument",
                     &format!("清理已关闭会话失败：{error}"),
                 );
+                // 存储已提交成功；短暂的文件占用只重试清理，不能变成保存失败。
+                let root = self.root.clone();
+                std::thread::spawn(move || {
+                    for delay in [100, 500, 2000] {
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                        match fs::remove_dir_all(&root) {
+                            Ok(()) => return,
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                            Err(error) => crate::app_logger::warn("MarkdownDocument", &format!("重试清理已关闭会话失败：{error}")),
+                        }
+                    }
+                });
             }
         }
     }
@@ -1062,6 +1074,34 @@ impl MarkdownDocumentSessionManager {
         }
         Ok(())
     }
+    /// 组合成员全部通过归属、快照和保存校验后才共同释放，避免部分关闭。
+    pub(crate) fn close_many(&self, owner: &str, mut documents: Vec<(String, bool)>) -> TextDocumentResult<()> {
+        documents.sort_by(|left, right| left.0.cmp(&right.0));
+        if documents.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(error("invalid-close-group", "组合关闭包含重复文档"));
+        }
+        let _paths = lock(&self.path_operations)?;
+        let handles = documents.iter().map(|(id, _)| self.session(id)).collect::<TextDocumentResult<Vec<_>>>()?;
+        let gates = handles.iter().map(|handle| Ok(lock(handle)?.save_gate.clone())).collect::<TextDocumentResult<Vec<_>>>()?;
+        let _saving = gates.iter().map(|gate| lock(gate)).collect::<TextDocumentResult<Vec<_>>>()?;
+        let mut sessions = handles.iter().map(|handle| lock(handle)).collect::<TextDocumentResult<Vec<_>>>()?;
+        {
+            let snapshots = lock(&self.snapshots)?;
+            for ((id, discard), session) in documents.iter().zip(sessions.iter()) {
+                session.owner(owner)?;
+                if snapshots.values().any(|snapshot| &snapshot.document_id == id) {
+                    return Err(error("document-busy", "组合文档仍有正在使用的完整快照"));
+                }
+                if session.dirty && !discard { return Err(error("unsaved-document", "组合文档尚有未保存内容")); }
+            }
+        }
+        for session in &mut sessions { session.closed = true; session.cleanup.remove = true; }
+        let mut registry = lock(&self.sessions)?;
+        for (id, _) in documents { registry.remove(&id); }
+        drop(registry); drop(sessions);
+        Ok(())
+    }
+
     pub(crate) fn close(
         &self,
         owner: &str,
@@ -1095,6 +1135,22 @@ impl MarkdownDocumentSessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn close_group_keeps_every_member_when_a_snapshot_is_busy() {
+        let (root, manager) = fixture();
+        let first = manager.open("main", None, Some("first".into())).unwrap();
+        let second = manager.open("main", None, Some("second".into())).unwrap();
+        let snapshot = manager.capture("main", &second.document_id).unwrap();
+        let group = vec![(first.document_id.clone(), true), (second.document_id.clone(), true)];
+        assert!(manager.close_many("main", group.clone()).is_err());
+        assert!(manager.status("main", &first.document_id).is_ok());
+        assert!(manager.status("main", &second.document_id).is_ok());
+        manager.release("main", &snapshot.snapshot_id).unwrap();
+        manager.close_many("main", group).unwrap();
+        assert!(manager.status("main", &first.document_id).is_err());
+        assert!(manager.status("main", &second.document_id).is_err());
+        drop(manager); fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn fresh_open_reads_the_new_baseline_and_survives_closing_the_old_session() {
         let (root, manager) = fixture();

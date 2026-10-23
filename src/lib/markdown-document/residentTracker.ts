@@ -11,8 +11,10 @@ export class MarkdownResidentTracker {
   private observer?: MutationObserver;
   private records: MutationRecord[] = [];
   private dirty = new Set<Tracked>();
+  private quiesced = false;
   constructor(private readonly budget: MarkdownResidentBudget) {}
   track(root: HTMLElement, token: ResidentToken, sourceBytes: number, views: number) {
+    this.quiesced = false;
     const tracked: Tracked = { root, token, cost: { sourceBytes, views, domNodes: 0, imageBytes: 0 }, nodes: new Set(), images: new Map() };
     this.roots.set(root, tracked);
     this.walk(root, node => this.move(node, tracked));
@@ -38,7 +40,7 @@ export class MarkdownResidentTracker {
   release(root: HTMLElement) {
     const tracked = this.roots.get(root);
     if (!tracked) return;
-    this.flush();
+    if (!this.quiesced) this.flush();
     this.roots.delete(root); this.dirty.delete(tracked);
     for (const node of tracked.nodes) this.membership.delete(node);
     tracked.nodes.clear(); tracked.images.clear();
@@ -47,7 +49,11 @@ export class MarkdownResidentTracker {
     this.budget.release(tracked.token);
     // MutationObserver 没有 unobserve；重绑剩余根，不遍历其后代。
     this.observer?.disconnect();
-    for (const remaining of this.roots.keys()) this.observe(remaining);
+    if (!this.quiesced) for (const remaining of this.roots.keys()) this.observe(remaining);
+  }
+  quiesce() {
+    this.quiesced = true; this.observer?.disconnect(); this.records = []; this.dirty.clear();
+    markdownWorkScheduler.cancel(this);
   }
   dispose() {
     for (const root of [...this.roots.keys()]) this.release(root);

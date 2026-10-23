@@ -65,9 +65,18 @@ pub(crate) enum MarkdownRequest {
         document_id: String,
         discard: bool,
     },
+    CloseMany {
+        documents: Vec<CloseDocument>,
+    },
     Detach {
         document_id: String,
     },
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CloseDocument {
+    pub document_id: String,
+    pub discard: bool,
 }
 fn value(result: impl Serialize) -> TextDocumentResult<Value> {
     serde_json::to_value(result)
@@ -132,6 +141,7 @@ pub(crate) async fn markdown_document_command(
             document_id,
             discard,
         } => value(manager.close(&owner, &document_id, discard)?),
+        MarkdownRequest::CloseMany { documents } => value(manager.close_many(&owner, documents.into_iter().map(|document| (document.document_id, document.discard)).collect())?),
     })
     .await
     .map_err(|e| TextDocumentError::new("background-join-failed", e.to_string()))?

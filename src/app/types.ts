@@ -19,6 +19,7 @@ export interface CommonTabState {
 }
 
 export interface MarkdownTabState extends CommonTabState {
+  closeFailure?: string;
   /** 完整正文与磁盘恢复日志的身份；markdown 字段仅供旧工作区导入。 */
   documentId?: string;
   byteLength?: number;
@@ -163,6 +164,7 @@ export interface PersistedCommonWorkspaceTab {
 }
 
 export interface PersistedMarkdownWorkspaceTab extends PersistedCommonWorkspaceTab {
+  closeFailure?: string;
   documentId?: string;
   globalSelection?: GlobalSelection | null;
   globalScrollAnchor?: GlobalScrollAnchor | null;
@@ -183,12 +185,24 @@ export interface PersistedSegmentedWorkspaceTab extends PersistedCommonWorkspace
 
 export type PersistedWorkspaceTab = PersistedMarkdownWorkspaceTab | PersistedSegmentedWorkspaceTab;
 
+export interface PersistedPendingClose {
+  id: string;
+  phase: 'pending' | 'readyToRelease';
+  tabs: PersistedMarkdownWorkspaceTab[];
+  positions: number[];
+  items: WorkspaceItem[];
+  itemPositions?: number[];
+  decisions: Record<string, 'save' | 'discard' | 'clean'>;
+  revisions: Record<string, number>;
+}
+
 export interface PersistedWorkspaceState {
-  /** v3 只用于兼容既有输入；持久化写入统一生成 v4。 */
-  version: 3 | 4;
+  /** 旧版本只用于读取；写入统一生成 v5。 */
+  version: 3 | 4 | 5;
   tabs: PersistedWorkspaceTab[];
   activeTabId: string;
   items?: WorkspaceItem[];
   activeItemId?: string;
   currentFolderPath?: string;
+  pendingCloses?: PersistedPendingClose[];
 }

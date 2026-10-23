@@ -46,6 +46,7 @@ export interface MarkdownDocumentPort {
     overwriteExternal?: boolean,
   ): Promise<MarkdownSessionStatus>;
   close(documentId: string, discard: boolean): Promise<void>;
+  closeMany?(documents: Array<{ documentId: string; discard: boolean }>): Promise<void>;
   detach?(documentId: string): Promise<void>;
 }
 
@@ -80,6 +81,7 @@ export function createNativeMarkdownPort(): MarkdownDocumentPort {
     saveSnapshot: (snapshot, path, overwriteExternal = false) =>
       native({ type: 'saveSnapshot', snapshotId: snapshot.snapshotId, path, overwriteExternal }),
     close: (documentId, discard) => native({ type: 'close', documentId, discard }),
+    closeMany: documents => native({ type: 'closeMany', documents }),
     detach: (documentId) => native({ type: 'detach', documentId }),
   };
 }
@@ -165,6 +167,13 @@ export function createMemoryMarkdownPort(): MarkdownDocumentPort {
       current.close();
       sessions.delete(id);
       originals.delete(id);
+    },
+    async closeMany(documents) {
+      for (const { documentId, discard } of documents) {
+        if (session(documentId).status().dirty && !discard) throw new Error('组合文档尚有未保存内容。');
+        if ([...snapshots.values()].some(snapshot => snapshot.documentId === documentId)) throw new Error('组合文档仍有正在使用的快照。');
+      }
+      for (const { documentId } of documents) { session(documentId).close(); sessions.delete(documentId); originals.delete(documentId); }
     },
   };
 }

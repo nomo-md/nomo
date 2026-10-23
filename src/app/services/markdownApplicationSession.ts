@@ -44,6 +44,7 @@ export class MarkdownApplicationSession {
   private sourceReadingPosition?: ReturnType<MarkdownViewportHost['captureReadingPosition']>;
   private listeners = new Set<(event: EditorChangeEvent) => void>();
   private disposed = false;
+  private preparedForClose = false;
   private detaching?: Promise<void>;
   private generation = 0;
   private unsubscribe?: () => void;
@@ -220,6 +221,13 @@ export class MarkdownApplicationSession {
         Math.min(doc.state.status.byteLength, 32 * 1024),
       );
       this.frontMatter = extractFrontMatterBlock(prefix.text);
+      if (!tab.nativePath && doc.state.status.path) {
+        const path = doc.state.status.path;
+        const recoveredPath = path.startsWith('\\\\?\\UNC\\') ? '\\\\' + path.slice(8)
+          : path.startsWith('\\\\?\\') ? path.slice(4) : path;
+        tab.nativePath = recoveredPath; tab.filePath = recoveredPath;
+        tab.fileName = recoveredPath.split(/[\\/]/).pop() ?? tab.fileName;
+      }
       tab.documentId = doc.session.documentId;
       // 旧恢复资料只在会话导入确认后退出热路径；持久化元数据保留旧 draftId 供迁移失败恢复。
       tab.markdown = '';
@@ -396,10 +404,11 @@ export class MarkdownApplicationSession {
       this.clearOpening(target);
       this.sourceTarget = undefined;
       this.source = undefined;
+      if (this.preparedForClose) return;
       const host = this.sourceHost;
       this.sourceReadingPosition = host?.captureReadingPosition() ?? this.sourceReadingPosition;
       this.sourceHost = undefined;
-      this.teardown = this.teardown.then(() => host?.dispose());
+      this.teardown = this.teardown.then(() => host?.dispose({ prepared: this.preparedForClose }));
       void this.teardown.catch(this.onFailure);
     };
   }
@@ -445,14 +454,16 @@ export class MarkdownApplicationSession {
     this.sourceRequest++; this.pendingSourceByte = undefined;
     this.clearOpening(this.semanticTarget);
     this.clearPendingFocus();
-    this.captureSelection();
-    this.tab.globalScrollAnchor =
-      (this.source ? this.sourceHost : this.semanticHost)?.position ?? this.tab.globalScrollAnchor;
+    if (!this.preparedForClose) {
+      this.captureSelection();
+      this.tab.globalScrollAnchor =
+        (this.source ? this.sourceHost : this.semanticHost)?.position ?? this.tab.globalScrollAnchor;
+    }
     this.semanticTarget = undefined;
     const host = this.semanticHost;
-    this.semanticReadingPosition = host?.captureReadingPosition() ?? this.semanticReadingPosition;
+    if (!this.preparedForClose) this.semanticReadingPosition = host?.captureReadingPosition() ?? this.semanticReadingPosition;
     this.semanticHost = undefined;
-    this.teardown = this.teardown.then(() => host?.dispose());
+    this.teardown = this.teardown.then(() => host?.dispose({ prepared: this.preparedForClose }));
     await this.teardown;
     this.document?.setHidden(!this.sourceTarget);
     this.active = undefined;
@@ -840,7 +851,35 @@ export class MarkdownApplicationSession {
     await doc.suspendTasks();
   }
   resume() {
+    this.preparedForClose = false;
+    if (this.semanticTarget) this.semanticTarget.inert = false;
+    if (this.sourceTarget) this.sourceTarget.inert = false;
     void this.mountViews().catch(this.onFailure);
+  }
+  async prepareViewClose() {
+    const doc = await this.ready;
+    // 先结束组字，再屏蔽新的 DOM 输入；原生会话仍允许已登记操作完成。
+    await doc.session.flushEdits();
+    if (this.semanticTarget) this.semanticTarget.inert = true;
+    if (this.sourceTarget) this.sourceTarget.inert = true;
+    this.captureSelection();
+    this.tab.globalScrollAnchor = this.currentHost?.position ?? this.tab.globalScrollAnchor;
+    this.semanticReadingPosition = this.semanticHost?.captureReadingPosition() ?? this.semanticReadingPosition;
+    this.sourceReadingPosition = this.sourceHost?.captureReadingPosition() ?? this.sourceReadingPosition;
+    this.preparedForClose = true;
+    this.semanticHost?.suspendForClose(); this.sourceHost?.suspendForClose();
+    doc.cancelBackgroundWork();
+  }
+  stopCloseEnhancements() {
+    this.semanticHost?.suspendEnhancements(); this.sourceHost?.suspendEnhancements();
+  }
+  async releaseCloseViews() {
+    const hosts = [this.semanticHost, this.sourceHost];
+    await this.unmount();
+    const source = this.sourceHost;
+    this.sourceHost = undefined; this.sourceTarget = undefined;
+    await source?.dispose({ prepared: true });
+    return hosts.flatMap(host => host ? [host.diagnostics] : []);
   }
   /** 移交只释放本窗口引用；不能关闭已经交给目标窗口的同一原生会话。 */
   detach(): Promise<void> {
@@ -864,7 +903,25 @@ export class MarkdownApplicationSession {
     this.fallback.destroy();
     await doc?.detach();
   }
-  async close(discard: boolean) {
+  static async closeTogether(targets: Array<{ application: MarkdownApplicationSession; discard: boolean }>) {
+    if (targets.length === 1) return targets[0].application.close(targets[0].discard);
+    const documents = await Promise.all(targets.map(target => target.application.ready));
+    const port = documents[0].port;
+    if (!port.closeMany) throw new Error('存储端不支持组合文档的原子关闭。');
+    let arrived = 0;
+    let resolve!: () => void, reject!: (error: unknown) => void;
+    const storage = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+    void storage.catch(() => undefined);
+    const closeStorage = () => {
+      if (++arrived === targets.length) void port.closeMany!(documents.map((doc, index) => ({ documentId: doc.session.documentId, discard: targets[index].discard }))).then(resolve, reject);
+      return storage;
+    };
+    // 任一准备失败必须唤醒已抵达存储屏障的成员，所有成员都先恢复再向上报告。
+    const results = await Promise.allSettled(targets.map(target => target.application.close(target.discard, closeStorage).catch(error => { reject(error); throw error; })));
+    const failure = results.find(result => result.status === 'rejected');
+    if (failure?.status === 'rejected') throw failure.reason;
+  }
+  async close(discard: boolean, closeStorage?: () => Promise<void>) {
     this.clearPendingFocus();
     for (const target of this.openings.keys()) this.clearOpening(target);
     this.sourceRequest++; this.pendingSourceByte = undefined; this.presentations.clear();
@@ -885,7 +942,7 @@ export class MarkdownApplicationSession {
       await this.sourceHost?.dispose();
       this.sourceHost = undefined;
       await doc.session.awaitSnapshotTasks();
-      await doc.close(discard);
+      await doc.close(discard, closeStorage);
     } catch (error) {
       // 关闭失败仍归当前标签所有，恢复挂载，不能留下空白且无法编辑的正文区域。
       if (semanticTarget?.isConnected && !this.semanticTarget) this.semanticTarget = semanticTarget;

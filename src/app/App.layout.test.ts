@@ -1341,13 +1341,12 @@ describe('App outline layout', () => {
   });
 
   it('only skips close confirmation for clean preview tabs', () => {
-    expect(appSource).toContain('const tabToClose = tabs.find((t) => t.id === tabId);');
-    expect(appSource).toContain(
-      'const dirtyTabToClose = getDirtyTabs([tabToClose]).find((tab) => tab.id === tabId);',
-    );
-    expect(appSource).toContain('if (dirtyTabToClose && !tabToClose.dirty)');
-    expect(appSource).toContain('if (tabId === previewTabId && !dirtyTabToClose)');
-    expect(documentActionsSource).toContain('t.confirmCloseModifiedFile()');
+    const start = appSource.indexOf('function closeMarkdownTabs(');
+    const close = appSource.slice(start, appSource.indexOf('async function createNewFile()', start));
+    expect(close).toContain("if (!tab.dirty) { decisions[tab.id] = 'clean'; continue; }");
+    expect(close).toContain('documentCloseCoordinator.operations.coversRevision(tab.id, revisions[tab.id])');
+    expect(close).toContain('confirmAction(t.confirmCloseModifiedFile()');
+    expect(appSource).toContain('await closeMarkdownTabs([tabId], discardWithoutConfirmation)');
   });
 
   it('bundles and opens the first-run sample document through the normal document flow', () => {
@@ -1494,7 +1493,7 @@ describe('App outline layout', () => {
 
   it('keeps a segmented tab open and surfaces flush, save and close failures', () => {
     const closeStart = appSource.indexOf('async function closeSegmentedTab(');
-    const closeEnd = appSource.indexOf('// 包装 closeTab', closeStart);
+    const closeEnd = appSource.indexOf('async function closeTab(', closeStart);
     const closeSource = appSource.slice(closeStart, closeEnd);
 
     expect(closeSource).toContain(

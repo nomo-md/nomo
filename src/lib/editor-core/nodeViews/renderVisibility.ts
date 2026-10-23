@@ -13,7 +13,13 @@ export interface NavigationRenderContext {
 }
 const navigationContexts = new WeakMap<HTMLElement, NavigationRenderContext>();
 const navigationAnchors = new WeakSet<HTMLElement>();
+const suspendedHosts = new WeakSet<HTMLElement>();
 const NAVIGATION_RENDER_EVENT = 'nomo:navigation-render';
+export function setRenderSuspended(host: HTMLElement, suspended: boolean) {
+  if (suspendedHosts.has(host) === suspended) return;
+  if (suspended) suspendedHosts.add(host); else suspendedHosts.delete(host);
+  host.dispatchEvent(new Event(NAVIGATION_RENDER_EVENT, { bubbles: true }));
+}
 
 /** 仅宿主的临时视图调度；不进入文档状态、序列化或用户偏好。 */
 export function setNavigationRenderContext(host: HTMLElement, context: NavigationRenderContext | undefined, keepAnchor = false) {
@@ -75,7 +81,8 @@ export function observeRenderVisibility(element: HTMLElement, onChange: (visible
     if (allowed === false && context?.ready && context.deadline !== undefined && needsPreparation() &&
       context.deadline - performance.now() <= (kind === 'diagram' ? 48 : 16) &&
       [...context.targets].some(target => target.contains(element))) context.deferred(kind, element);
-    onChange((allowed ?? nearViewport) && !element.ownerDocument.hidden);
+    const host = element.closest<HTMLElement>('.markdown-session-host');
+    onChange((allowed ?? nearViewport) && !element.ownerDocument.hidden && !(host && suspendedHosts.has(host)));
   };
   const stopNavigation = observeNavigationRender(element, notify);
   const observer = typeof IntersectionObserver === 'function'

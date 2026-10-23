@@ -227,7 +227,7 @@ fn item_members(item: &Value) -> Result<Vec<&str>, String> {
 }
 
 fn workspace_tabs(workspace: &Value) -> Result<&Vec<Value>, String> {
-    if workspace.get("version").and_then(Value::as_u64) != Some(4) {
+    if !matches!(workspace.get("version").and_then(Value::as_u64), Some(4 | 5)) {
         return Err("移交需要 v4 工作区".into());
     }
     workspace

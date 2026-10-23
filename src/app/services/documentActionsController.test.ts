@@ -3,6 +3,7 @@ import type { NativeDocument } from '../../lib/desktop/tauriStorage';
 import type { MarkdownTabState, Tab } from '../types';
 import { createEmptyExternalFileChange } from '../types';
 import { createDocumentActionsController } from './documentActionsController';
+import { DocumentOperationRegistry } from './documentCloseCoordinator';
 import { confirmAction } from './confirmAction';
 import { saveNativeMarkdownFile, getExternalFileChange } from './documentFiles';
 import { createMarkdownTab, createSegmentedTextTab, isMarkdownTab } from './tabs';
@@ -350,6 +351,36 @@ describe('documentActionsController', () => {
     expect(getState().tabs).toHaveLength(1);
     expect(getState().tabs[0].id).toBe(tab.id);
     expect(getState().statusMessage).toBe('disk full');
+  });
+
+  it('中断关闭恢复的文档暂停自动保存，允许用户明确保存', async () => {
+    vi.useFakeTimers();
+    try {
+      const tab = createTab(); tab.closeFailure = 'interrupted close';
+      const { options } = createOptions([tab]);
+      options.getAutoSaveEnabled = () => true;
+      const controller = createDocumentActionsController(options as any);
+      controller.debouncedAutoSave(tab.id);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(saveNativeMarkdownFile).not.toHaveBeenCalled();
+      await controller.saveMarkdownFile(false, tab.id);
+      expect(saveNativeMarkdownFile).toHaveBeenCalledOnce();
+      controller.cancelPendingAutoSaves();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('关闭收口触发元数据更新时不重新安排自动保存', async () => {
+    vi.useFakeTimers();
+    try {
+      const tab = createTab(), operations = new DocumentOperationRegistry();
+      operations.block([tab.id], true);
+      const { options } = createOptions([tab]);
+      const controller = createDocumentActionsController({ ...options, operations } as any);
+      controller.debouncedAutoSave(tab.id);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(saveNativeMarkdownFile).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it('自动保存只写回当前路径，不根据 H1 隐式重命名文件', async () => {

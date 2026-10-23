@@ -1131,3 +1131,18 @@
   padding: 4px;
   text-align: center;
 }
+.document-close-recovery {
+  position: fixed;
+  bottom: 36px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  max-width: min(720px, calc(100vw - 32px));
+  padding: 10px 16px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  color: var(--md-editor-fg);
+  background: var(--md-editor-surface);
+  cursor: pointer;
+  text-align: left;
+}

@@ -15,6 +15,7 @@ interface ImageInsertionOptions {
   getNativePath(): string | null;
   getSourceEditor(): MarkdownSourceEditorHandle | undefined;
   getReadonly?(): boolean;
+  canStartInsertion?(): boolean;
   isDocumentOpen?(): boolean;
   isDocumentFocused?(): boolean;
   getSourceRuntimeState?(): MarkdownSourceRuntimeState | undefined;
@@ -35,6 +36,7 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
   const pendingInsertions = new Set<Promise<void>>();
 
   function insertImageFiles(files: File[], target?: ImageInsertionTarget): Promise<void> {
+    if (options.canStartInsertion?.() === false) return Promise.resolve();
     const insertion = performImageInsertion(files, target);
     pendingInsertions.add(insertion);
     void insertion.then(

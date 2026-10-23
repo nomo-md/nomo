@@ -37,6 +37,7 @@ import {
   isMarkdownTab,
 } from './tabs';
 import { t } from '../i18n';
+import { DocumentOperationRegistry, type DocumentOperation } from './documentCloseCoordinator';
 
 // 从 Markdown 中提取第一个 H1 标题，生成建议文件名（清理非法字符）
 function suggestFileNameFromH1(markdown: string, fallbackName: string): string {
@@ -69,6 +70,9 @@ function saveMarkdownWithSourceEncoding(
 }
 
 interface DocumentActionsOptions {
+  operations?: DocumentOperationRegistry;
+  getTab?(tabId: string): Tab | undefined;
+  reopenClosingPath?(path: string): Promise<boolean>;
   recoveryKey: string;
   getLargeDocumentLimit(): number;
   getAutoSaveDelayMs(): number;
@@ -121,11 +125,15 @@ interface DocumentActionsOptions {
 }
 
 export function createDocumentActionsController(options: DocumentActionsOptions) {
+  const operations = options.operations ?? new DocumentOperationRegistry();
+  const getTab = (id: string) => options.getTab?.(id) ?? options.getTabs().find(tab => tab.id === id);
   const pendingSaveOperations = new Set<Promise<unknown>>();
   const pendingReloads = new Map<string, Promise<void>>();
+  const trackedReloads = new Map<string, Promise<void>>();
+  const closeSavePaths = new Map<string, string>();
 
-  function trackPendingSave<T>(operation: () => Promise<T>): Promise<T> {
-    const promise = operation();
+  function trackPendingSave<T>(operation: (task: DocumentOperation) => Promise<T>, tabId = options.getActiveTabId(), allowClosing = false, kind: 'save' | 'edit' = 'save'): Promise<T> {
+    const promise = operations.run(tabId, kind, operation, allowClosing);
     pendingSaveOperations.add(promise);
     void promise.then(
       () => pendingSaveOperations.delete(promise),
@@ -285,13 +293,13 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     input.value = '';
   }
 
-  async function saveMarkdownFile(saveAs = false, targetTabId = options.getActiveTabId()): Promise<boolean> {
-    const activeTab = options.getTabs().find((tab) => tab.id === targetTabId);
+  async function saveMarkdownFile(saveAs = false, targetTabId = options.getActiveTabId(), task?: DocumentOperation): Promise<boolean> {
+    const activeTab = getTab(targetTabId);
     if (!isMarkdownTab(activeTab)) {
       // TXT/JSON 由分段会话保存，绝不能回退到 EditorCore 的 Markdown 全量保存链路。
       return false;
     }
-    if (getMarkdownApplicationSession(getDocumentEditor(targetTabId))) return saveSessionDocument(activeTab, saveAs);
+    if (getMarkdownApplicationSession(getDocumentEditor(targetTabId))) return saveSessionDocument(activeTab, saveAs, false, false, task);
     if (activeTab.largeDocumentMode && !saveAs) {
       options.setStatusMessage(t.largeDocumentReadonlySaveBlocked());
       return false;
@@ -358,10 +366,11 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     return true;
   }
 
-  async function saveSessionDocument(tab: MarkdownTabState, saveAs = false, overwriteExternal = false, automatic = false): Promise<boolean> {
+  async function saveSessionDocument(tab: MarkdownTabState, saveAs = false, overwriteExternal = false, automatic = false, task?: DocumentOperation): Promise<boolean> {
     const application = getMarkdownApplicationSession(getDocumentEditor(tab.id));
     if (!application) return false;
     if (!saveAs && !overwriteExternal && tab.externalFileChange.type !== 'none') {
+      if (task) task.saveResult = { status: 'failed', error: t.externalChangeChooseAction() };
       options.setStatusMessage(t.externalChangeChooseAction()); return false;
     }
     try {
@@ -370,13 +379,15 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
         if (automatic) return false;
         await doc.retry();
       }
-      let path = !saveAs && !tab.diskReadonly ? tab.nativePath : null;
+      let path = task?.targetPath ?? (!saveAs && !tab.diskReadonly ? tab.nativePath : null);
       if (options.getDesktopEnabled() && !path) {
         const { save } = await import('@tauri-apps/plugin-dialog');
         path = await save({ defaultPath: tab.nativePath ?? tab.fileName, filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }] });
-        if (!path) return false;
+        if (!path) { if (task) task.saveResult = { status: 'cancelled' }; return false; }
       }
+      if (task && path) task.targetPath = path;
       await doc.session.withSnapshot(async snapshot => {
+        task?.snapshot(snapshot.revision);
         if (!options.getDesktopEnabled()) {
           const text = await readCompleteSnapshot(doc.port, snapshot);
           exportMarkdownInBrowser(text, suggestFileNameFromH1(text, tab.fileName));
@@ -399,8 +410,13 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       updateFocusedDocumentState(tab); options.setTabs([...options.getTabs()]); options.onTabRuntimeSaved?.(tab.id);
       options.setStatusMessage(doc.session.state.committed.persistenceWarning
         ? `${t.saved()}：${doc.session.state.committed.persistenceWarning}` : t.saved());
+      if (task) task.saveResult = { status: 'saved', revision: task.revision, path: path ?? undefined };
       return true;
-    } catch (error) { options.setStatusMessage(`${t.saveFileFailed()}: ${error instanceof Error ? error.message : String(error)}`); return false; }
+    } catch (error) {
+      const message = `${t.saveFileFailed()}: ${error instanceof Error ? error.message : String(error)}`;
+      if (task) task.saveResult = { status: 'failed', revision: task.revision, error: message };
+      options.setStatusMessage(message); return false;
+    }
   }
 
   async function openRecentFile(path: string) {
@@ -419,6 +435,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
   }
 
   async function applyNativeDocument(document: NativeDocument, message: string, saved = false) {
+    if (!saved && await options.reopenClosingPath?.(document.path)) return;
     const isLargeDocument =
       document.markdown.length > options.getLargeDocumentLimit() ||
       document.sizeBytes > options.getLargeDocumentLimit();
@@ -644,22 +661,20 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     if (generation === recentRefreshGeneration) options.setRecentFiles(entries);
   }
 
-  function reloadExternalFile(): Promise<void> {
-    const tabId = options.getActiveTabId();
+  function reloadExternalFile(tabId = options.getActiveTabId()): Promise<void> {
     const pending = pendingReloads.get(tabId);
     if (pending) return pending;
-    const operation = reloadExternalFileNow();
+    const operation = reloadExternalFileNow(tabId);
     pendingReloads.set(tabId, operation);
     void operation.then(() => pendingReloads.delete(tabId), () => pendingReloads.delete(tabId));
     return operation;
   }
 
-  async function reloadExternalFileNow() {
-    const activeTab = options.getTabs().find((tab) => tab.id === options.getActiveTabId());
+  async function reloadExternalFileNow(tabId: string) {
+    const activeTab = getTab(tabId);
     if (!isMarkdownTab(activeTab)) {
       return;
     }
-    const tabId = activeTab.id;
     const path = activeTab.nativePath;
     if (!options.getDesktopEnabled() || !path || activeTab.externalFileChange.type === 'none') {
       return;
@@ -737,8 +752,8 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     }
   }
 
-  async function overwriteExternalFile() {
-    const activeTab = options.getTabs().find((tab) => tab.id === options.getActiveTabId());
+  async function overwriteExternalFile(task?: DocumentOperation) {
+    const activeTab = getTab(task?.tabId ?? options.getActiveTabId());
     if (!isMarkdownTab(activeTab)) {
       return;
     }
@@ -757,7 +772,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       return;
     }
     if (getMarkdownApplicationSession(getDocumentEditor(tabId))) {
-      await saveSessionDocument(activeTab, false, true); return;
+      return saveSessionDocument(activeTab, false, true, false, task);
     }
 
     const core = await prepareDocumentSave(tabId);
@@ -784,10 +799,13 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
   let saveTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
   function debouncedAutoSave(tabId: string) {
+    if (operations.isBlocked(tabId)) return;
     if (!options.getAutoSaveEnabled()) return;
 
     const targetTab = options.getTabs().find((tab) => tab.id === tabId);
     if (!isMarkdownTab(targetTab) || !targetTab.nativePath) return;
+    // 中断或失败后先由用户确认，不能在恢复标签时再次自动覆盖磁盘。
+    if (targetTab.closeFailure) return;
     if (targetTab.diskReadonly) {
       cancelPendingAutoSave(tabId);
       if (options.getActiveTabId() === tabId) {
@@ -813,7 +831,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
         debouncedAutoSave(tabId);
         return;
       }
-      await trackPendingSave(() => autoSaveLatestTab(tabId));
+      await trackPendingSave(task => autoSaveLatestTab(tabId, false, undefined, task), tabId);
     }, options.getAutoSaveDelayMs());
   }
 
@@ -821,6 +839,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     tabId: string,
     force: boolean = false,
     diskBaseline?: { markdown: string; modifiedAt: number },
+    task?: DocumentOperation,
   ) {
     if (!options.getAutoSaveEnabled() || !options.getDesktopEnabled()) {
       if (force && diskBaseline) {
@@ -829,10 +848,10 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       return;
     }
 
-    const sessionTab = options.getTabs().find(tab => tab.id === tabId);
+    const sessionTab = getTab(tabId);
     if (isMarkdownTab(sessionTab) && getMarkdownApplicationSession(getDocumentEditor(tabId))) {
       if (sessionTab.dirty && sessionTab.nativePath && !sessionTab.diskReadonly && sessionTab.externalFileChange.type === 'none')
-        await saveSessionDocument(sessionTab, false, false, true);
+        return saveSessionDocument(sessionTab, false, false, true, task);
       return;
     }
     await prepareDocumentSave(tabId);
@@ -980,13 +999,37 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     openFileDialog,
     openMarkdownFile,
     saveMarkdownFile: (saveAs = false, targetTabId = options.getActiveTabId()) =>
-      trackPendingSave(() => saveMarkdownFile(saveAs, targetTabId)),
+      trackPendingSave(task => saveMarkdownFile(saveAs, targetTabId, task), targetTabId),
+    saveForClose: (tabId: string) => {
+      const path = closeSavePaths.get(tabId); closeSavePaths.delete(tabId);
+      return trackPendingSave(task => { task.targetPath = path; return saveMarkdownFile(false, tabId, task); }, tabId, true);
+    },
+    cancelCloseSavePreparation: (tabId: string) => closeSavePaths.delete(tabId),
+    async chooseCloseSavePath(tabId: string): Promise<boolean> {
+      const tab = getTab(tabId);
+      if (!isMarkdownTab(tab)) return false;
+      if (tab.nativePath && !tab.diskReadonly) return true;
+      if (!options.getDesktopEnabled()) return true;
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      const path = await save({ defaultPath: tab.nativePath ?? tab.fileName, filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }] });
+      if (!path) return false;
+      // 独立目标只供本次保存；成功后才改变文件归属。
+      closeSavePaths.set(tabId, path);
+      return true;
+    },
     openRecentFile,
     applyNativeDocument,
     createNewFile,
     closeTab,
     refreshRecentFiles,
-    reloadExternalFile: () => trackPendingSave(reloadExternalFile),
+    reloadExternalFile: () => {
+      const id = options.getActiveTabId(), existing = trackedReloads.get(id);
+      if (existing) return existing;
+      const task = trackPendingSave(() => reloadExternalFile(id), id, false, 'edit');
+      trackedReloads.set(id, task);
+      void task.then(() => trackedReloads.delete(id), () => trackedReloads.delete(id));
+      return task;
+    },
     overwriteExternalFile: () => trackPendingSave(overwriteExternalFile),
     awaitPendingSaves,
     checkExternalFileChange,

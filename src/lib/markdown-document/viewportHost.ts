@@ -11,12 +11,13 @@ import { markdownResidentBudget, UNKNOWN_IMAGE_BYTES, type MarkdownResidentBudge
 import { MarkdownResidentTracker } from './residentTracker';
 import { MarkdownLayoutBatch, markdownWorkScheduler, MarkdownTaskPriority } from './scheduler';
 import { TABLE_LAYOUT_READY_EVENT } from '../table-layout/dom';
+import { reclaimMarkdownViews } from './reclamation';
 import { getTypographyInteraction, subscribeTypographyInteraction } from '../typography/interaction';
 import { DocumentConflictError, type DocumentSelection, type DocumentWindow } from './protocol';
 import { utf8ToUtf16, utf8Length } from './utf8Text';
 import type { MarkdownStructureIndex } from './structureIndex';
 import { getOutlineViewportOffset } from '../outline/outlineViewport';
-import { setNavigationRenderContext, type NavigationRenderContext, type NavigationEnhancement } from '../editor-core/nodeViews/renderVisibility';
+import { setNavigationRenderContext, setRenderSuspended, type NavigationRenderContext, type NavigationEnhancement } from '../editor-core/nodeViews/renderVisibility';
 
 interface Mounted {
   key: string;
@@ -81,6 +82,7 @@ export class MarkdownViewportHost {
   private frame = 0;
   private generation = 0;
   private disposed = false;
+  private disposal?: Promise<void>;
   private hidden = false;
   private busy = false;
   private again = false;
@@ -140,7 +142,7 @@ export class MarkdownViewportHost {
   private readonly stats = { ranges: 0, created: 0, destroyed: 0, moved: 0,
     measurements: 0, heightChanges: 0, tablePublications: 0, tableRestores: 0,
     anchorCorrections: 0, overBudget: 0, peakMounted: 0, batches: 0, maxPreparationMs: 0,
-    preparationHints: 0, maxJumpWaitMs: 0 };
+    preparationHints: 0, maxJumpWaitMs: 0, maxViewReleaseMs: 0, overBudgetReleases: 0 };
   private installedLayout = '';
   private scale = 1;
   private contentTop = 0;
@@ -1609,16 +1611,22 @@ export class MarkdownViewportHost {
     element.style.height = `${Math.max(0, height)}px`;
     return element;
   }
-  private destroyView(view: Mounted) {
+  private destroyView(view: Mounted, prepared = false) {
+    const started = prepared ? performance.now() : 0;
     if (this.selectionOwner === view) this.selectionOwner = undefined;
     this.resources.release(view.element);
     // 布局结果已由测量批次发布；回收只释放视图，避免 DOM 写入之间再同步读布局。
     this.observer?.unobserve(view.element);
     this.dirty.delete(view);
-    view.semantic?.dispose();
+    view.semantic?.dispose(prepared);
     view.source?.dispose();
     view.element.remove();
     this.stats.destroyed++;
+    if (prepared) {
+      const elapsed = performance.now() - started;
+      this.stats.maxViewReleaseMs = Math.max(this.stats.maxViewReleaseMs, elapsed);
+      if (elapsed > 4) this.stats.overBudgetReleases++;
+    }
   }
   /** 模式改变宽度前保留现有块锚点，后续仍由批量测量恢复屏幕偏移。 */
   preserveReadingPosition() {
@@ -1995,7 +2003,16 @@ export class MarkdownViewportHost {
     for (const view of this.mounted) view.semantic?.core.updateTheme(theme);
     this.invalidateGeometry();
   }
+  suspendForClose() {
+    setRenderSuspended(this.target, true);
+    this.cancelOutlineNavigation(); this.interruptRead?.();
+    this.hidden = true; this.generation++;
+    this.layoutBatch.cancel(this); markdownWorkScheduler.cancel(this);
+    cancelAnimationFrame(this.frame); this.frame = 0;
+  }
+  suspendEnhancements() { setRenderSuspended(this.target, true); }
   async setHidden(hidden: boolean) {
+    setRenderSuspended(this.target, hidden);
     if (this.hidden === hidden) return;
     this.cancelOutlineNavigation();
     this.interruptRead?.();
@@ -2013,28 +2030,30 @@ export class MarkdownViewportHost {
     if (hidden) { await this.unmountViews(); this.disconnectBudget(); }
     else { this.connectBudget(); this.schedule(); }
   }
-  private async unmountViews() {
-    await this.document.session.flushEdits();
+  private async unmountViews(prepared = false) {
+    if (!prepared) await this.document.session.flushEdits();
     await this.renderDone;
     this.removeInput();
-    for (const view of this.mounted) this.destroyView(view);
+    const views = this.mounted;
     this.mounted = [];
     this.active = undefined;
     this.callbacks.onActive(undefined, undefined);
     this.target.replaceChildren();
     this.spacers.clear();
+    if (prepared) await reclaimMarkdownViews(views.map(view => () => this.destroyView(view, true)));
+    else for (const view of views) this.destroyView(view);
   }
-  async dispose() {
-    if (this.disposed) return;
+  dispose(options?: { prepared?: boolean }): Promise<void> {
+    return this.disposal ??= this.disposeResources(!!options?.prepared);
+  }
+  private async disposeResources(prepared: boolean) {
+    setRenderSuspended(this.target, true);
     this.cancelOutlineNavigation();
     this.interruptRead?.();
     this.hidden = true;
+    if (prepared) this.resources.quiesce();
     this.document.requestVisibleStructure(this, null);
     this.invalidateStable();
-    this.generation++;
-    await this.unmountViews();
-    this.disconnectBudget();
-    this.disposed = true;
     this.generation++;
     this.unsubscribe();
     this.typographySubscription.destroy();
@@ -2077,5 +2096,9 @@ export class MarkdownViewportHost {
     this.target.removeEventListener(TABLE_LAYOUT_READY_EVENT, this.onTableLayout);
     this.target.removeEventListener('load', this.onAsset, true);
     this.target.ownerDocument.fonts?.removeEventListener('loadingdone', this.onFont);
+    await this.unmountViews(prepared);
+    this.disconnectBudget();
+    this.disposed = true;
+    this.generation++;
   }
 }

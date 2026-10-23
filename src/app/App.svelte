@@ -119,6 +119,10 @@
   } from './services/workspaceItems';
   import type { MarkdownDocumentRuntime, MarkdownWorkspaceRuntimeBinding } from './services/markdownDocumentRuntime';
   import { MarkdownApplicationSession, getMarkdownApplicationSession } from './services/markdownApplicationSession';
+  import { DocumentCloseCoordinator } from './services/documentCloseCoordinator';
+  import { createNativeMarkdownPort } from '../lib/markdown-document/port';
+  import { afterMarkdownClosePaint } from '../lib/markdown-document/reclamation';
+  import type { PersistedPendingClose, PersistedMarkdownWorkspaceTab } from './types';
   import { markdownResidentBudget } from '../lib/markdown-document/residentBudget';
   import { resolveMarkdownWindowingLimits } from '../lib/markdown-document/windowingLimits';
   import { createWorkspaceTransferController } from './services/workspaceTransferController';
@@ -147,6 +151,8 @@
     createPersistedWorkspaceState,
     createRuntimeTabFromPersisted,
     migrateWorkspaceSetting,
+    pendingCloseWorkspaceSetting,
+    restorePendingCloseItems,
     partitionPersistedWorkspaceTabsForRestore,
     persistWorkspaceDrafts,
     type WorkspaceDraftPersistenceCache,
@@ -659,6 +665,11 @@
   let activeItemId = '';
   let activeComparison: ComparisonWorkspaceItem | null = null;
   const documentRuntimes = new Map<string, MarkdownDocumentRuntime>();
+  const documentCloseCoordinator = new DocumentCloseCoordinator();
+  const closingDocuments = new Map<string, { tab: MarkdownTabState; runtime: MarkdownDocumentRuntime }>();
+  const pendingCloseRecords = new Map<string, PersistedPendingClose>();
+  const closingUiIds = new Set<string>();
+  let restoredCloseFailure: { tabId: string; message: string } | null = null;
   const pendingMarkdownRuntimeDisposals = new Set<Promise<void>>();
   const mountedDocumentRuntimes = new WeakSet<MarkdownDocumentRuntime>();
   let comparisonRuntimes: MarkdownDocumentRuntime[] = [];
@@ -824,7 +835,7 @@
   function getCurrentWindowOpenTargetsSnapshot(currentTabs: Tab[] = tabs) {
     const filePaths = Array.from(
       new Set(
-        currentTabs.map((tab) => tab.nativePath).filter((path): path is string => Boolean(path)),
+        [...currentTabs, ...[...closingDocuments.values()].map(member => member.tab)].map((tab) => tab.nativePath).filter((path): path is string => Boolean(path)),
       ),
     ).sort();
     return {
@@ -904,13 +915,13 @@
   }
 
   let workspacePersistenceQueue: Promise<void> = Promise.resolve();
-  function persistWorkspaceStateNow(options?: { ensureDraftIds?: boolean }) {
+  function persistWorkspaceStateNow(options?: { ensureDraftIds?: boolean; preparedClose?: boolean }) {
     const pending = workspacePersistenceQueue.then(() => persistWorkspaceStateImmediately(options));
     workspacePersistenceQueue = pending.catch(() => undefined);
     return pending;
   }
 
-  async function persistWorkspaceStateImmediately(options?: { ensureDraftIds?: boolean }) {
+  async function persistWorkspaceStateImmediately(options?: { ensureDraftIds?: boolean; preparedClose?: boolean }) {
     if (!desktopEnabled || !windowLabel) return;
     if (workspaceInteractionDisabled && !workspaceTransferFlushing) return;
     const writeStamp = await takeWorkspaceWriteStamp();
@@ -920,12 +931,13 @@
       persistWorkspaceState();
       return;
     }
-    syncActiveTabMarkdownFromEditor();
+    if (!options?.preparedClose) syncActiveTabMarkdownFromEditor();
     if (options?.ensureDraftIds !== false) {
       await persistWorkspaceDraftsNow('missing-only');
     }
+    const pendingIds = new Set([...pendingCloseRecords.values()].flatMap(record => record.tabs.map(tab => tab.id)));
     const state = await createPersistedWorkspaceState({
-      tabs,
+      tabs: tabs.filter(tab => !pendingIds.has(tab.id)),
       activeTabId,
       items: workspaceItems,
       activeItemId,
@@ -933,6 +945,7 @@
       desktopEnabled,
       preservedDraftIds: getPendingStartupConflictDraftIds(),
       draftWritePolicy: 'skip',
+      pendingCloses: [...pendingCloseRecords.values()],
     });
     Object.assign(state, writeStamp, { writerWindowLabel: windowLabel });
     const workspaceEntries: Record<string, unknown> = {
@@ -1057,6 +1070,31 @@
   }
 
   async function restorePersistedWorkspaceState(state: PersistedWorkspaceState) {
+    if (state.pendingCloses?.length) {
+      const recovered = [...state.tabs];
+      let items = [...(state.items ?? [])];
+      for (const record of state.pendingCloses) {
+        for (const [index, tab] of record.tabs.entries()) {
+          if (record.phase === 'readyToRelease') {
+            try {
+              const port = createNativeMarkdownPort();
+              if (tab.documentId) { await port.openDocument({ recoveryId: tab.documentId }); await port.close(tab.documentId, record.decisions[tab.id] === 'discard'); }
+              continue;
+            } catch (error) {
+              if (['recovery-missing', 'document-closed'].includes((error as { code?: string }).code ?? '')) continue;
+              showVisibleError(error, t.saveFileFailed());
+            }
+          }
+          const closeFailure = '上次保存关闭未完成，文档已恢复，请确认后保存。';
+          if (!recovered.some(candidate => candidate.id === tab.id)) recovered.splice(Math.min(record.positions[index] ?? recovered.length, recovered.length), 0, { ...tab, closeFailure });
+          restoredCloseFailure = { tabId: tab.id, message: `${tab.fileName}：${closeFailure}` };
+        }
+        items = restorePendingCloseItems(recovered, items, record);
+      }
+      state = { ...state, tabs: recovered, items: normalizeWorkspaceItems(recovered, items), pendingCloses: [] };
+    }
+    const failedClose = state.tabs.find((tab): tab is PersistedMarkdownWorkspaceTab => tab.documentKind === 'markdown' && !!tab.closeFailure);
+    restoredCloseFailure = failedClose ? { tabId: failedClose.id, message: `${failedClose.fileName}：${failedClose.closeFailure}` } : null;
     restoringWorkspaceItems = state.items ?? null;
     if (typeof state.currentFolderPath === 'string' && state.currentFolderPath.length > 0) {
       currentFolderPath = state.currentFolderPath;
@@ -1838,6 +1876,7 @@
 
   // 加载指定 Tab 的状态并更新编辑器
   function loadTabState(tab: Tab) {
+    if (isMarkdownTab(tab) && tab.closeFailure) restoredCloseFailure = { tabId: tab.id, message: `${tab.fileName}：${tab.closeFailure}` };
     if (pendingNewDocumentFocusId !== tab.id) pendingNewDocumentFocusId = '';
     reconcileWorkspaceItems(tabs, tab.id);
     clearSplitSemanticRefreshTimer();
@@ -2196,23 +2235,14 @@
   // 步骤：关闭全部标签页前统一确认未保存内容，确认后不自动创建空白标签。
   async function closeAllTabsWithConfirmation(options?: { skipPersist?: boolean }) {
     if (workspaceInteractionDisabled) return false;
-    flushVisibleDocumentRuntimes();
     invalidatePendingPreviewOpen();
-    const dirtyTabs = getDirtyTabs(tabs);
-    let discardChanges = false;
-    if (dirtyTabs.length > 0) {
-      const names = dirtyTabs.map((t) => t.fileName).join('、');
-      const ok = await confirmAction(t.unsavedChangesCloseTabs({ names }));
-      if (ok === false) return false;
-      discardChanges = true;
-    }
-
-    invalidatePendingPreviewOpen();
-    // 先让在途恢复 open 收口并清理，再取最终 tabs 快照关闭会话。
     await cancelDeferredWorkspaceRestore();
-    await closeAllSegmentedSessions(discardChanges);
-    clearAllTabsWithoutCreatingBlank(options);
-    return true;
+    for (const item of [...workspaceItems]) if (!await closeWorkspaceItem(item.id)) return false;
+    for (const tab of [...tabs]) { await closeTab(tab.id); if (tabs.some(candidate => candidate.id === tab.id)) return false; }
+    // 此入口用于替换整个文件夹工作区；失败恢复的文档不能被随后覆盖。
+    await documentCloseCoordinator.awaitSettled();
+    if (tabs.length) return false;
+    clearAllTabsWithoutCreatingBlank(options); return true;
   }
 
   async function flushAllSegmentedSessions() {
@@ -2501,6 +2531,12 @@
     await closeWorkspaceItem(findWorkspaceItemForTab(workspaceItems, activeTab.id)?.id ?? activeTab.id);
   }
 
+  async function awaitProtectedDocumentWork() {
+    await documentCloseCoordinator.awaitSettled();
+    await documentCloseCoordinator.operations.awaitAll();
+    await documentActions.awaitPendingSaves();
+  }
+
   async function closeCurrentWindow() {
     if (workspaceInteractionDisabled) return;
     flushVisibleDocumentRuntimes();
@@ -2514,6 +2550,7 @@
     // 步骤：关闭窗口前检查未保存的脏标签，弹出确认对话框（三按钮模式，与关闭标签页 UI 一致）
     let discardDirtySegmented = false;
     if (closeBehavior === 'close-window') {
+      await awaitProtectedDocumentWork();
       const dirtyTabs = getDirtyTabs(tabs);
       if (dirtyTabs.length > 0) {
         const names = dirtyTabs.map((t) => t.fileName).join('、');
@@ -2853,6 +2890,7 @@
         await invoke('acknowledge_workspace_exit', { requestId, approved: false });
         return;
       }
+      await awaitProtectedDocumentWork();
       const dirtyTabs = getDirtyTabs(tabs);
       if (dirtyTabs.length > 0) {
         await invoke('activate_document_window');
@@ -3619,10 +3657,12 @@
   async function copySelection() {
     const application = getMarkdownApplicationSession(editor);
     if (application) {
+      const tabId = activeTabId;
+      return trackEditorOperation(async () => {
       application.captureSelection();
       try { const doc = await application.ready; await writeEditorClipboard({ text: await doc.selection.copy(), html: '' }, desktopEnabled); }
       catch { statusMessage = t.copyFailed(); }
-      return;
+      }, tabId, 'copy');
     }
     const payload = editor.getClipboardPayload();
     if (!payload) return;
@@ -3815,8 +3855,8 @@
     return true;
   }
 
-  function trackEditorOperation<T>(operation: () => Promise<T>): Promise<T> {
-    const pending = operation();
+  function trackEditorOperation<T>(operation: () => Promise<T>, tabId = activeTabId, kind: 'edit' | 'copy' = 'edit'): Promise<T> {
+    const pending = documentCloseCoordinator.operations.run(tabId, kind, operation);
     pendingEditorOperations.add(pending);
     void pending.then(() => pendingEditorOperations.delete(pending), () => pendingEditorOperations.delete(pending));
     return pending;
@@ -3932,6 +3972,7 @@
     if (activeItemId !== nextActiveId) activeItemId = nextActiveId;
     for (const [id, runtime] of documentRuntimes) {
       if (!currentTabs.some((tab) => tab.id === id)) {
+        if (closingDocuments.has(id)) continue;
         if (sessionAnalysisKey.startsWith(`${id}:`)) cancelSessionAnalysis();
         if (editor === runtime.editor) {
           detachMountedEditorHostEvents();
@@ -3950,7 +3991,7 @@
   function getDocumentRuntime(tab: MarkdownTabState): MarkdownDocumentRuntime {
     const existing = documentRuntimes.get(tab.id);
     if (existing) return existing;
-    const currentDocument = () => tabs.find((candidate) => candidate.id === tab.id) as MarkdownTabState | undefined;
+    const currentDocument = () => tabs.find((candidate) => candidate.id === tab.id) as MarkdownTabState | undefined ?? closingDocuments.get(tab.id)?.tab;
     const owner = findWorkspaceItemForTab(workspaceItems, tab.id);
     const initialMode = owner?.kind === 'comparison' ? owner.mode : preferredEditorMode;
     let observedOutlineCount = -1;
@@ -3972,7 +4013,7 @@
       if (current?.session === application && !current.disposed) showVisibleError(error, t.saveFileFailed());
     }, () => {
       const current = documentRuntimes.get(tab.id);
-      if (!current || current.disposed || current.session !== application) return;
+      if (!current || current.disposed || current.session !== application || closingDocuments.has(tab.id)) return;
       const indexed = application.document?.state.index;
       const outlineChanged = !!indexed && (observedOutlineRevision !== indexed.revision || observedOutlineCount !== indexed.outline.length || observedOutline !== indexed.outline);
       if (indexed && outlineChanged) {
@@ -4026,6 +4067,7 @@
       getSourceLineHeight: () => runtime.sourceEditor?.getLineHeight() ?? 24,
     });
     runtime.images = createImageInsertionHandlers({
+      canStartInsertion: () => !closingUiIds.has(tab.id),
       getEditor: () => core, getMode: () => runtime.mode === 'source' ? 'source' : 'semantic',
       getFileName: () => currentDocument()?.fileName ?? tab.fileName, getNativePath: () => currentDocument()?.nativePath ?? null,
       getSourceEditor: () => runtime.sourceEditor, getImageContext: () => getImageContext(tab.id),
@@ -4088,7 +4130,7 @@
   }
 
   function flushDocumentRuntime(tabId: string) {
-    const tab = tabs.find((candidate) => candidate.id === tabId);
+    const tab = tabs.find((candidate) => candidate.id === tabId) ?? closingDocuments.get(tabId)?.tab;
     const runtime = documentRuntimes.get(tabId);
     if (!isMarkdownTab(tab) || !runtime || runtime.disposed) return;
     runtime.editor.commitPendingEdits();
@@ -4201,6 +4243,10 @@
     if (runtime.sourceEditor === binding.sourceEditor) runtime.sourceEditor = undefined;
     if (runtime.sourcePane === binding.sourcePane) runtime.sourcePane = undefined;
     if (runtime.semanticPane === binding.semanticPane) runtime.semanticPane = undefined;
+    if (documentCloseCoordinator.isClosing(binding.documentId)) {
+      if (mountedEditorHost === binding.host) detachMountedEditorHostEvents();
+      return;
+    }
     flushDocumentRuntime(binding.documentId);
     runtime.editor.unmount();
     if (mountedEditorHost === binding.host) detachMountedEditorHostEvents();
@@ -4329,6 +4375,7 @@
     workspaceInteractionDisabled = true;
     workspaceTransferFlushing = true;
     try {
+      await documentCloseCoordinator.awaitSettled();
       sessionAnalysisAbort?.abort(); sessionSearchAbort?.abort(); sessionAnalysisKey = '';
       if (sessionAnalysisTimer) { clearTimeout(sessionAnalysisTimer); sessionAnalysisTimer = undefined; }
       await workspaceRestorePreparation;
@@ -4391,6 +4438,8 @@
     },
     showError: (error) => showVisibleError(error, t.saveFileFailed()),
     beforeCloseEmptySource: async (state) => {
+      await awaitProtectedDocumentWork();
+      if (tabs.length) throw new Error('保存失败后文档已恢复，保留来源窗口。');
       transferredOpenTargetWindowLabel = state.targetWindowLabel;
       await forwardDeferredOpenTargets();
     },
@@ -4590,7 +4639,7 @@
   }
   function scheduleSessionAnalysis(tabId: string, application: MarkdownApplicationSession) {
     const state = application.document?.state;
-    if (activeTabId !== tabId || state?.progress.state !== 'ready') return;
+    if (activeTabId !== tabId || closingUiIds.has(tabId) || state?.progress.state !== 'ready') return;
     const key = `${tabId}:${state.status.revision}:${markdownLintEnabled}:${markdownLintRuleSet}`;
     if (key === sessionAnalysisKey) return;
     sessionAnalysisKey = key;
@@ -5042,6 +5091,7 @@
   async function openPreviewFileInCurrentWindow(path: string) {
     if (!desktopEnabled) return;
     const requestGeneration = invalidatePendingPreviewOpen();
+    if (await reopenClosingPath(path)) return;
     if (!(await ensureExplorerPathExists(path, t.fileMissing()))) {
       return;
     }
@@ -5093,6 +5143,7 @@
 
     const { document, error } = await readMarkdownMetadata(path, t.previewOpenFailed());
     if (requestGeneration !== previewOpenGeneration) return;
+    if (await reopenClosingPath(path)) return;
     if (error) {
       statusMessage = error;
       if (isMissingPathError(error)) {
@@ -5234,17 +5285,11 @@
     const keepTab = tabs.find((t) => t.id === keepTabId);
     if (!keepTab) return;
 
-    const dirtyTabs = getDirtyTabs(tabs.filter((t) => t.id !== keepTabId));
-    if (dirtyTabs.length > 0) {
-      const names = dirtyTabs.map((t) => t.fileName).join('、');
-      const ok = await confirmAction(t.unsavedChangesCloseTabs({ names }));
-      if (ok === false) return;
+    for (const tab of [...tabs]) {
+      if (tab.id === keepTabId) continue;
+      await closeTab(tab.id);
+      if (tabs.some(candidate => candidate.id === tab.id)) return;
     }
-
-    invalidatePendingPreviewOpen();
-    const tabsToClose = tabs.filter((tab) => tab.id !== keepTabId);
-    await closeSegmentedSessions(tabsToClose, true);
-    tabs = [keepTab];
     activeTabId = keepTabId;
     // 无论保留的是否是预览标签，都固定它（只剩一个标签不需要预览机制）
     previewTabId = null;
@@ -5267,17 +5312,8 @@
     if (tabIndex < 0) return;
 
     const rightTabs = tabs.slice(tabIndex + 1);
-    const dirtyRightTabs = getDirtyTabs(rightTabs);
-    if (dirtyRightTabs.length > 0) {
-      const names = dirtyRightTabs.map((t) => t.fileName).join('、');
-      const ok = await confirmAction(t.unsavedChangesCloseTabs({ names }));
-      if (ok === false) return;
-    }
-
-    invalidatePendingPreviewOpen();
-    await closeSegmentedSessions(rightTabs, true);
-    const remaining = tabs.slice(0, tabIndex + 1);
-    tabs = remaining;
+    for (const tab of rightTabs) { await closeTab(tab.id); if (tabs.some(candidate => candidate.id === tab.id)) return; }
+    const remaining = tabs;
     if (previewTabId && !remaining.find((t) => t.id === previewTabId)) {
       previewTabId = null;
     }
@@ -5299,6 +5335,9 @@
 
   const pendingExplorerRenames = new Set<string>();
   const documentActions = createDocumentActionsController({
+    operations: documentCloseCoordinator.operations,
+    getTab: id => tabs.find(tab => tab.id === id) ?? closingDocuments.get(id)?.tab,
+    reopenClosingPath,
     isPathChanging: (path) =>
       path != null && Array.from(pendingExplorerRenames).some(
         (sourcePath) => pathEqualsOrDescendsFrom(path, sourcePath),
@@ -5362,7 +5401,7 @@
     getFileInput: () => fileInput,
     getEditor: () => editor,
     beforeMarkdownCommit: flushActiveEditorView,
-    getEditorForTab: (id) => { const tab = tabs.find(tab => tab.id === id); return isMarkdownTab(tab) ? getDocumentRuntime(tab).editor : undefined; },
+    getEditorForTab: (id) => { const tab = tabs.find(tab => tab.id === id) ?? closingDocuments.get(id)?.tab; return isMarkdownTab(tab) ? getDocumentRuntime(tab).editor : undefined; },
     replaceTabRuntime: async (id) => {
       const runtime = documentRuntimes.get(id);
       if (!runtime) return;
@@ -5374,6 +5413,8 @@
     getNextTabIdAfterClose: getAdjacentWorkspaceTabId,
     flushTabRuntime: flushDocumentRuntime,
     onTabRuntimeSaved: (id) => {
+      const restored = tabs.find(tab => tab.id === id);
+      if (isMarkdownTab(restored) && !restored.dirty) { delete restored.closeFailure; if (restoredCloseFailure?.tabId === id) restoredCloseFailure = null; }
       const tab = tabs.find((candidate) => candidate.id === id);
       if (activeTabId === id && isMarkdownTab(tab)) {
         savedMarkdown = tab.savedMarkdown; dirty = tab.dirty; nativePath = tab.nativePath;
@@ -5473,6 +5514,7 @@
     getSourceLineHeight,
   });
   const imageInsertion = createImageInsertionHandlers({
+    canStartInsertion: () => !closingUiIds.has(activeTabId),
     getEditor: () => editor,
     getMode: () => getActiveEditorMode(),
     getFileName: () => fileName,
@@ -5494,7 +5536,7 @@
     (documentRuntimes.get(activeTabId)?.interaction ?? editorInteraction).updateMarkdown(nextMarkdown);
     scheduleSplitSemanticRefresh();
   }
-  function runMarkdownCommand(command: EditorCommand) { (documentRuntimes.get(activeTabId)?.interaction ?? editorInteraction).runCommand(command); }
+  function runMarkdownCommand(command: EditorCommand) { if (closingUiIds.has(activeTabId)) return; (documentRuntimes.get(activeTabId)?.interaction ?? editorInteraction).runCommand(command); }
   function runCommand(command: EditorCommand) {
     if (workspaceInteractionDisabled) return;
     const activeTab = tabs.find((tab) => tab.id === activeTabId);
@@ -5659,68 +5701,139 @@
   async function closeWorkspaceItem(itemId: string, event?: Event): Promise<boolean> {
     event?.stopPropagation();
     if (workspaceInteractionDisabled) return false;
-    const item = workspaceItems.find((candidate) => candidate.id === itemId) ?? findWorkspaceItemForTab(workspaceItems, itemId);
+    const item = workspaceItems.find(candidate => candidate.id === itemId) ?? findWorkspaceItemForTab(workspaceItems, itemId);
     if (!item) return false;
-    if (item.kind === 'single') {
-      await closeTab(item.tabId, event);
-      return !tabs.some((tab) => tab.id === item.tabId);
-    }
-    workspaceInteractionDisabled = true;
-    closingWorkspaceItemId = item.id;
-    try {
-      const ids = getWorkspaceItemTabIds(item);
-      const savedMembers = new Set<string>();
-      workspaceTransferFlushing = true;
-      await awaitPendingEditorOperations();
-      flushVisibleDocumentRuntimes();
-      await Promise.all(ids.map((id) => documentRuntimes.get(id)?.images.awaitPendingInsertions()));
-      await documentActions.awaitPendingSaves();
-      workspaceTransferFlushing = false;
-      for (const id of ids) flushDocumentRuntime(id);
-      for (const id of ids) {
-        const tab = tabs.find((candidate) => candidate.id === id);
-        if (!isMarkdownTab(tab)) return false;
-        if (!tab.dirty) continue;
-        const choice = await confirmAction(t.unsavedChangesCloseTabs({ names: tab.fileName }), {
-          okLabel: t.discardChanges(), cancelLabel: t.cancel(), saveLabel: t.save(),
-        });
-        if (choice === false) return false;
-        if (choice === 'save' && (!(await saveDocumentById(id)) || tabs.find((candidate) => candidate.id === id)?.dirty)) return false;
-        if (choice === 'save') savedMembers.add(id);
+    if (item.kind === 'single') { await closeTab(item.tabId, event); return !tabs.some(tab => tab.id === item.tabId); }
+    return closeMarkdownTabs(getWorkspaceItemTabIds(item));
+  }
+
+  async function reopenClosingPath(path: string) {
+    const closing = [...closingDocuments.values(), ...tabs.filter(isMarkdownTab).map(tab => ({ tab }))].find(({ tab }) => documentCloseCoordinator.isClosing(tab.id) && ((tab.nativePath !== null && sameNativePath(tab.nativePath, path)) || documentCloseCoordinator.operations.savingPaths(tab.id).some(target => sameNativePath(target, path))));
+    if (!closing) return false;
+    if (!await documentCloseCoordinator.reopen(closing.tab.id)) return false;
+    await switchTab(closing.tab.id);
+    return true;
+  }
+
+  function closeMarkdownTabs(ids: string[], discardWithoutConfirmation = false): Promise<boolean> {
+    const members = ids.flatMap(id => {
+      const tab = tabs.find(candidate => candidate.id === id);
+      return isMarkdownTab(tab) ? [{ tab, runtime: getDocumentRuntime(tab) }] : [];
+    });
+    if (members.length !== ids.length) return Promise.resolve(false);
+    const id = crypto.randomUUID();
+    const positions = members.map(member => tabs.indexOf(member.tab));
+    const originalItems = workspaceItems.filter(item => getWorkspaceItemTabIds(item).some(tabId => ids.includes(tabId))).map(item => ({ ...item }));
+    const itemPositions = originalItems.map(item => workspaceItems.findIndex(candidate => candidate.id === item.id));
+    const decisions: PersistedPendingClose['decisions'] = {};
+    const revisions: Record<string, number> = {};
+    const timings: Record<string, number> = {};
+    let views: Promise<void> = Promise.resolve();
+    const resume = () => {
+      for (const { tab, runtime } of members) {
+        documentActions.cancelCloseSavePreparation(tab.id);
+        closingUiIds.delete(tab.id);
+        if (tabs.some(candidate => candidate.id === tab.id)) runtime.session?.resume();
       }
-      for (const id of ids) flushDocumentRuntime(id);
-      if (workspaceItems.find((candidate) => candidate.id === item.id)?.kind !== 'comparison' || ids.some((id) => !tabs.some((tab) => tab.id === id)) || [...savedMembers].some((id) => tabs.find((tab) => tab.id === id)?.dirty)) return false;
-      // 两篇都完成确认后，才一次移除组合；取消或保存失败不会丢掉另一篇。
-      const index = workspaceItems.findIndex((candidate) => candidate.id === item.id);
-      const wasActive = activeItemId === item.id;
-      workspaceItems = workspaceItems.filter((candidate) => candidate.id !== item.id);
-      tabs = tabs.filter((tab) => !ids.includes(tab.id));
-      if (previewTabId && ids.includes(previewTabId)) previewTabId = null;
-      if (wasActive) {
-        const next = workspaceItems[Math.min(index, workspaceItems.length - 1)];
-        if (next) {
-          activeItemId = next.id;
-          activeTabId = getWorkspaceItemFocusedTabId(next);
-          loadTabState(tabs.find((tab) => tab.id === activeTabId)!);
-        } else {
-          editor = bootEditor;
-          clearAllTabsWithoutCreatingBlank();
+    };
+    const persist = async (phase: 'pending' | 'readyToRelease' | 'removed') => {
+      const previous = pendingCloseRecords.get(id);
+      if (phase === 'removed') pendingCloseRecords.delete(id);
+      else {
+        const state = await createPersistedWorkspaceState({ tabs: members.map(member => member.tab), activeTabId: '', items: originalItems,
+          currentFolderPath, desktopEnabled, draftWritePolicy: 'skip' });
+        pendingCloseRecords.set(id, { id, phase, tabs: state.tabs as PersistedMarkdownWorkspaceTab[], positions, items: originalItems, itemPositions, decisions: { ...decisions }, revisions: { ...revisions } });
+      }
+      try { await persistWorkspaceStateNow({ ensureDraftIds: false, preparedClose: true }); }
+      catch (error) { if (previous) pendingCloseRecords.set(id, previous); else pendingCloseRecords.delete(id); throw error; }
+    };
+    return documentCloseCoordinator.request(ids, {
+      async prepare() {
+        if (externalChangeDialogTargetTabId && ids.includes(externalChangeDialogTargetTabId)) closeExternalChangeDialog();
+        if (ids.some(tabId => sessionAnalysisKey.startsWith(`${tabId}:`))) cancelSessionAnalysis();
+        if (ids.includes(activeTabId)) sessionSearchAbort?.abort();
+        for (const { tab, runtime } of members) {
+          closingUiIds.add(tab.id); documentActions.cancelPendingAutoSave(tab.id);
+          runtime.session?.stopCloseEnhancements();
         }
-      }
-      reconcileWorkspaceItems(tabs, activeTabId);
-      void updateWindowTitle();
-      persistWorkspaceState();
-      return true;
-    } catch (error) {
-      showVisibleError(error, t.saveFileFailed());
-      return false;
-    } finally {
-      workspaceTransferFlushing = false;
-      closingWorkspaceItemId = null;
-      workspaceInteractionDisabled = false;
-      persistWorkspaceState();
-      void drainDeferredWorkspaceOperations();
-    }
+        await documentCloseCoordinator.operations.awaitSource(ids, ['edit']);
+        for (const member of members) member.runtime = getDocumentRuntime(member.tab);
+        await Promise.all(members.map(member => member.runtime.images.awaitPendingInsertions()));
+        await Promise.all(members.map(async ({ runtime }) => runtime.session?.prepareViewClose()));
+        for (const { tab } of members) revisions[tab.id] = tab.version;
+      },
+      async decide() {
+        // 等待已有保存完成捕获即可；磁盘写入不占用关闭的前台等待。
+        await documentCloseCoordinator.operations.awaitSaveCapture(ids);
+        for (const { tab } of members) {
+          if (discardWithoutConfirmation) { decisions[tab.id] = 'discard'; continue; }
+          if (!tab.dirty) { decisions[tab.id] = 'clean'; continue; }
+          if (documentCloseCoordinator.operations.coversRevision(tab.id, revisions[tab.id])) { decisions[tab.id] = 'save'; continue; }
+          const choice = await confirmAction(t.confirmCloseModifiedFile(), { title: tab.fileName,
+            okLabel: t.discardChanges(), cancelLabel: t.cancel(), saveLabel: t.save() });
+          if (choice === false) return false;
+          decisions[tab.id] = choice === 'save' ? 'save' : 'discard';
+          if (choice === 'save' && !await documentActions.chooseCloseSavePath(tab.id)) return false;
+        }
+        // 所有成员确认后统一接受最终保存，避免取消另一成员时提前产生新写入。
+        for (const { tab } of members) if (decisions[tab.id] === 'save' && !documentCloseCoordinator.operations.coversRevision(tab.id, revisions[tab.id]))
+          void documentActions.saveForClose(tab.id).catch(error => showVisibleError(error, t.saveFileFailed()));
+        return true;
+      },
+      persist,
+      detach() {
+        const wasActive = ids.includes(activeTabId);
+        const nextId = wasActive ? getAdjacentWorkspaceTabId(activeTabId) : undefined;
+        for (const member of members) closingDocuments.set(member.tab.id, member);
+        tabs = tabs.filter(tab => !ids.includes(tab.id));
+        workspaceItems = workspaceItems.filter(item => !getWorkspaceItemTabIds(item).some(tabId => ids.includes(tabId)));
+        if (previewTabId && ids.includes(previewTabId)) previewTabId = null;
+        if (wasActive) {
+          const next = tabs.find(tab => tab.id === nextId) ?? tabs[Math.min(Math.min(...positions), tabs.length - 1)];
+          if (next) { activeTabId = next.id; loadTabState(next); }
+          else { editor = bootEditor; clearAllTabsWithoutCreatingBlank({ skipPersist: true }); }
+        }
+        void updateWindowTitle();
+        requestAnimationFrame(() => setTimeout(() => { timings.firstPaint = performance.now(); logInfo('DocumentClose', '关闭前台完成', { id, tabIds: ids, timings }); }, 0));
+      },
+      releaseViews() {
+        // 让 Svelte 更新与相邻正文先绘制；宏任务回收不占用当前点击的微任务链。
+        views = afterMarkdownClosePaint().then(async () => {
+          const diagnostics = (await Promise.all(members.map(member => member.runtime.session?.releaseCloseViews()))).flatMap(value => value ?? []);
+          logInfo('DocumentClose', '关闭视图释放', { id, diagnostics });
+        });
+        return views;
+      },
+      validate() {
+        for (const { tab, runtime } of members) {
+          const state = runtime.session?.document?.session.state;
+          if (decisions[tab.id] !== 'discard' && (tab.dirty || state?.pendingTransactions || state?.committed.persistenceWarning))
+            throw new Error(`${tab.fileName} 尚有未保存内容，已恢复标签。`);
+        }
+      },
+      async release() {
+        await MarkdownApplicationSession.closeTogether(members.map(member => ({ application: member.runtime.session!, discard: decisions[member.tab.id] === 'discard' })));
+        for (const { tab, runtime } of members) {
+          runtime.disposed = true; runtime.unsubscribe();
+          documentRuntimes.delete(tab.id); closingDocuments.delete(tab.id); closingUiIds.delete(tab.id);
+          if (restoredCloseFailure?.tabId === tab.id) restoredCloseFailure = null;
+        }
+      },
+      async restore(error) {
+        await views;
+        for (const [index, { tab, runtime }] of members.entries()) {
+          if (!tabs.some(candidate => candidate.id === tab.id)) tabs.splice(Math.min(positions[index], tabs.length), 0, tab);
+          tab.closeFailure = error ? String(error) : undefined;
+          documentRuntimes.set(tab.id, runtime); closingDocuments.delete(tab.id);
+        }
+        tabs = [...tabs]; workspaceItems = restorePendingCloseItems(tabs, workspaceItems, { items: originalItems, itemPositions, tabs: [], positions });
+        if (error) { const message = `${members.map(member => member.tab.fileName).join('、')}：${String(error)}`; restoredCloseFailure = { tabId: members[0].tab.id, message }; statusMessage = message; }
+        if (!activeTabId) { activeTabId = members[0].tab.id; loadTabState(members[0].tab); }
+      },
+      resume,
+      report(error) { statusMessage = String(error); showVisibleError(error, t.saveFileFailed()); },
+      mark(stage) { timings[stage] = performance.now(); if (stage === 'released') logInfo('DocumentClose', '关闭后台完成', { id, tabIds: ids, timings }); },
+    });
   }
 
   async function createNewFile() {
@@ -5759,7 +5872,7 @@
     if (!(await requestMarkdownMiniReturn({ showExternalChange: false }))) return false;
     invalidatePendingPreviewOpen();
     const existingTab = tabs.find(
-      (tab) => tab.nativePath != null && sameNativePath(tab.nativePath, path),
+      (tab) => tab.nativePath != null && tab.nativePath !== null && sameNativePath(tab.nativePath, path),
     );
     if (existingTab) {
       await switchTab(existingTab.id);
@@ -5861,6 +5974,7 @@
   }
 
   async function saveMarkdownFile(saveAs = false): Promise<boolean> {
+    if (closingUiIds.has(activeTabId)) return false;
     const activeTab = tabs.find((tab) => tab.id === activeTabId);
     if (!isSegmentedTextTab(activeTab)) {
       return saveMarkdownDocument(saveAs);
@@ -6206,154 +6320,14 @@
     persistWorkspaceState();
   }
 
-  // 包装 closeTab：预览标签页直接关闭无需确认
   async function closeTab(tabId: string, event?: Event, discardWithoutConfirmation = false) {
-    if (workspaceInteractionDisabled) return;
-    await awaitPendingEditorOperations();
-    flushDocumentRuntime(tabId);
     event?.stopPropagation();
-    if (markdownMiniActive && activeTabId === tabId) {
-      if (!(await requestMarkdownMiniReturn({ showExternalChange: false }))) return;
-    }
-    invalidatePendingPreviewOpen();
-    if (externalChangeDialogTargetTabId === tabId) {
-      closeExternalChangeDialog();
-    }
-
-    // 关闭前保存阅读位置
-    if (activeTabId === tabId) {
-      saveActiveTabState();
-      void flushReadingPositions();
-    }
-
-    const tabToClose = tabs.find((t) => t.id === tabId);
-    if (!tabToClose) {
-      logCloseDiagnostics('closeTab: 未找到目标标签', {
-        tabId,
-        activeTabId,
-        tabCount: tabs.length,
-      });
-      return;
-    }
-
-    if (isSegmentedTextTab(tabToClose)) {
-      await closeSegmentedTab(tabToClose, discardWithoutConfirmation);
-      return;
-    }
-
-    logCloseDiagnostics('closeTab: 收到关闭请求', {
-      tabId,
-      activeTabId,
-      previewTabId,
-      targetDirty: tabToClose.dirty,
-      appDirty: dirty,
-      isActiveTarget: tabId === activeTabId,
-      targetRevision: tabToClose.version,
-      appVersion: version,
-      targetMarkdownLength: isMarkdownTab(tabToClose) ? tabToClose.markdown.length : null,
-      appMarkdownLength: markdown.length,
-      targetSavedMarkdownLength: isMarkdownTab(tabToClose) ? tabToClose.savedMarkdown.length : null,
-      appSavedMarkdownLength: savedMarkdown.length,
-    });
-
-    const dirtyTabToClose = getDirtyTabs([tabToClose]).find((tab) => tab.id === tabId);
-    logCloseDiagnostics('closeTab: 实时 dirty 判定完成', {
-      tabId,
-      hasDirtyTabToClose: Boolean(dirtyTabToClose),
-      targetDirtyAfterCheck: tabToClose.dirty,
-      appDirty: dirty,
-      dirtyTabRevision: isMarkdownTab(dirtyTabToClose)
-        ? dirtyTabToClose.version
-        : dirtyTabToClose?.revision,
-      dirtyMarkdownLength: isMarkdownTab(dirtyTabToClose) ? dirtyTabToClose.markdown.length : null,
-      dirtySavedMarkdownLength: isMarkdownTab(dirtyTabToClose)
-        ? dirtyTabToClose.savedMarkdown.length
-        : null,
-    });
-
-    if (dirtyTabToClose && !tabToClose.dirty) {
-      Object.assign(tabToClose, dirtyTabToClose);
-      tabs = [...tabs];
-      logCloseDiagnostics('closeTab: 已把活动标签 dirty 状态写回 tabs', {
-        tabId,
-        targetDirty: tabToClose.dirty,
-        targetRevision: tabToClose.version,
-      });
-    }
-
-    if (tabId === previewTabId && !dirtyTabToClose) {
-      logCloseDiagnostics('closeTab: 干净预览标签直接关闭', { tabId });
-      const wasActive = activeTabId === tabId;
-      const preferredNextTabId = getAdjacentWorkspaceTabId(tabId);
-      const index = tabs.findIndex((t) => t.id === tabId);
-      tabs = tabs.filter((t) => t.id !== tabId);
-      previewTabId = null;
-
-      if (wasActive) {
-        if (tabs.length > 0) {
-          const newActiveIndex = Math.min(index, tabs.length - 1);
-          const next = tabs.find((tab) => tab.id === preferredNextTabId) ?? tabs[newActiveIndex];
-          activeTabId = next.id;
-          loadTabState(next);
-        } else {
-          activeTabId = '';
-          markdown = '';
-          savedMarkdown = '';
-          fileName = '';
-          filePath = '';
-          nativePath = null;
-          dirty = false;
-          lastKnownModifiedAt = 0;
-          largeDocumentMode = false;
-          readonlyDocumentMode = false;
-          diskReadonly = false;
-          externalFileChange = createEmptyExternalFileChange();
-          outline = [];
-          isSwitchingTab = true;
-          try {
-            if (editor && !getMarkdownApplicationSession(editor)) {
-              editor.setMarkdown('', { reason: 'switch-tab', dirty: false, savedMarkdown: '' });
-            }
-          } finally {
-            isSwitchingTab = false;
-          }
-        }
-        updateWindowTitle();
-      }
-      persistWorkspaceState();
-      return;
-    }
-
-    logCloseDiagnostics('closeTab: 交给 documentActions.closeTab 处理确认', {
-      tabId,
-      targetDirty: tabToClose.dirty,
-    });
-    await _documentCloseTab(tabId, event, discardWithoutConfirmation);
-
-    // 关闭最后一个普通标签后清空编辑器状态
-    if (tabs.length === 0) {
-      markdown = '';
-      savedMarkdown = '';
-      fileName = '';
-      filePath = '';
-      nativePath = null;
-      dirty = false;
-      lastKnownModifiedAt = 0;
-      largeDocumentMode = false;
-      readonlyDocumentMode = false;
-      diskReadonly = false;
-      externalFileChange = createEmptyExternalFileChange();
-      outline = [];
-      isSwitchingTab = true;
-      try {
-        if (editor && !getMarkdownApplicationSession(editor)) {
-          editor.setMarkdown('', { reason: 'switch-tab', dirty: false, savedMarkdown: '' });
-        }
-      } finally {
-        isSwitchingTab = false;
-      }
-      updateWindowTitle();
-    }
+    if (workspaceInteractionDisabled) return;
+    const tab = tabs.find(candidate => candidate.id === tabId);
+    if (!tab) return;
+    if (markdownMiniActive && activeTabId === tabId && !await requestMarkdownMiniReturn({ showExternalChange: false })) return;
+    if (isSegmentedTextTab(tab)) { await closeSegmentedTab(tab, discardWithoutConfirmation); return; }
+    await closeMarkdownTabs([tabId], discardWithoutConfirmation);
   }
 
   function getDirtyTabs(candidateTabs: Tab[]) {
@@ -6961,7 +6935,7 @@
   ) {
     if (!desktopEnabled || !windowLabel) return;
     const workspaceTabsKey = windowLabel ? `workspaceTabs:${windowLabel}` : 'workspaceTabs';
-    const workspaceTabsSetting =
+    const workspaceTabsSetting = pendingCloseWorkspaceSetting(settings, windowLabel) ??
       (windowLabel === 'main' ? settings.find((s) => s.key === 'startupWorkspace') : undefined) ??
       settings.find((s) => s.key === workspaceTabsKey) ??
       settings.find((s) => s.key === 'workspaceTabs');
@@ -7037,7 +7011,7 @@
           }
         }
 
-        if (transferBootstrap || pendingExternalOpenPaths.length > 0) {
+        if (transferBootstrap || (pendingExternalOpenPaths.length > 0 && !pendingCloseWorkspaceSetting(settings, windowLabel))) {
           // 双击 md 文件启动：不恢复上次工作区，稍后单独加载文件所在目录并打开该文件
           restoredWorkspaceTabs = false;
         } else {
@@ -7663,50 +7637,57 @@
   async function handleWordExport() {
     if (wordExportBusy) return;
     const tab = tabs.find((candidate) => candidate.id === activeTabId);
-    if (!isMarkdownTab(tab)) return;
+    if (!isMarkdownTab(tab) || closingUiIds.has(tab.id)) return;
+    const exportName = tab.fileName;
     const runtime = getDocumentRuntime(tab);
     const abort = new AbortController();
     wordExportBusy = true;
     wordExportAbort = abort;
+    return documentCloseCoordinator.operations.run(tab.id, 'export', async operation => {
     try {
       const { captureWordSnapshot } = await import('./services/word/snapshot');
       const snapshot = await captureWordSnapshot(tab, runtime, {
-        signal: abort.signal, isAvailable: () => tabs.some((candidate) => candidate.id === tab.id), flush: flushDocumentRuntime,
+        signal: abort.signal, isAvailable: () => !runtime.disposed && documentRuntimes.get(tab.id) === runtime, flush: flushDocumentRuntime,
       });
       if (!snapshot) return;
+      operation.releaseSource();
       if (!snapshot.documentPath && !snapshot.markdown.trim()) { showToast(t.noOpenDocumentForExport(), 2000); return; }
       const { exportWord } = await import('./services/wordExportService');
       const result = await exportWord(snapshot, { signal: abort.signal, onGenerating: () => showToast(t.wordExportGenerating(), 120_000) });
       if (abort.signal.aborted) return;
       if (result.cancelled) return;
-      if (!result.success) { showToast(result.error ?? t.exportFailed(), 5000); return; }
+      if (!result.success) { showToast(`${exportName}：${result.error ?? t.exportFailed()}`, 5000); return; }
       const message = t.exportWordSuccess({ path: result.filePath! });
       const count = result.warnings?.length ?? 0;
       const detail = result.warnings?.slice(0, 3).join('；') ?? '';
       showToast(count ? `${message}；${t.wordExportWarnings({ count })} ${detail}` : message, count ? 10000 : 2500);
     } catch (error) {
-      if (!abort.signal.aborted) showToast(`${t.exportFailed()}: ${error instanceof Error ? error.message : String(error)}`, 5000);
+      if (!abort.signal.aborted) showToast(`${exportName}：${t.exportFailed()}: ${error instanceof Error ? error.message : String(error)}`, 5000);
     } finally {
       if (wordExportAbort === abort) { wordExportAbort = undefined; wordExportBusy = false; }
     }
+    });
   }
 
   async function handleExport(format: 'html' | 'pdf' | 'docx') {
     if (format === 'docx') { await handleWordExport(); return; }
     if (documentExportBusy) return;
     const tab = tabs.find((candidate) => candidate.id === activeTabId);
-    if (!isMarkdownTab(tab)) return;
+    if (!isMarkdownTab(tab) || closingUiIds.has(tab.id)) return;
+    const exportName = tab.fileName;
     const runtime = getDocumentRuntime(tab);
     const appearance = captureExportAppearance(runtime.host);
     const abort = new AbortController();
     documentExportBusy = true;
     documentExportAbort = abort;
+    return documentCloseCoordinator.operations.run(tab.id, 'export', async operation => {
     try {
       const snapshot = await captureExportSnapshot(tab, runtime, {
         appearance, signal: abort.signal,
-        isAvailable: () => tabs.some((candidate) => candidate.id === tab.id), flush: flushDocumentRuntime,
+        isAvailable: () => !runtime.disposed && documentRuntimes.get(tab.id) === runtime, flush: flushDocumentRuntime,
       });
       if (!snapshot) return;
+      operation.releaseSource();
       if (!snapshot.documentPath && !snapshot.markdown.trim()) { showToast(t.noOpenDocumentForExport(), 2000); return; }
       const { exportHtml, exportPdf } = await import('./services/exportService');
       const result = await (format === 'html' ? exportHtml : exportPdf)(snapshot, { signal: abort.signal });
@@ -7717,12 +7698,13 @@
           : t.exportPdfSuccess({ path: result.filePath! });
         const warningText = result.warnings?.filter(Boolean).join('；');
         showToast(warningText ? `${message}；${warningText}` : message, warningText ? 10000 : 2500);
-      } else showToast(result.error ?? t.exportFailed(), 5000);
+      } else showToast(`${exportName}：${result.error ?? t.exportFailed()}`, 5000);
     } catch (error) {
-      if (!abort.signal.aborted) showToast(`${t.exportFailed()}: ${error instanceof Error ? error.message : String(error)}`, 5000);
+      if (!abort.signal.aborted) showToast(`${exportName}：${t.exportFailed()}: ${error instanceof Error ? error.message : String(error)}`, 5000);
     } finally {
       if (documentExportAbort === abort) { documentExportAbort = undefined; documentExportBusy = false; }
     }
+    });
   }
 
   $: visibleOutlineIds = new Set(
@@ -8237,6 +8219,13 @@
 
 {#if tabDragGhost}
   <TabDragGhost {...tabDragGhost} />
+{/if}
+
+{#if restoredCloseFailure}
+  <div role="alert"><button class="document-close-recovery" title={restoredCloseFailure.message}
+    on:click={() => { if (restoredCloseFailure) void switchTab(restoredCloseFailure.tabId); }}>
+    {restoredCloseFailure.message}
+  </button></div>
 {/if}
 
 <AppShell

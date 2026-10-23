@@ -123,7 +123,8 @@
 | 标签标题拖影 | `src/app/components/TabDragGhost.svelte` | `src/app/App.svelte`, `src/app/components/DocumentTabs.svelte`, `src/app/components/ComparisonPane.svelte`, `src-tauri/src/window/tab_drag.rs` | 窗口内跟随原生鼠标逻辑坐标的普通 / 组合 / 成员标题预览及结束清理 |
 | 启动工作区与统一退出 | `src-tauri/src/window/workspace_lifecycle.rs` | `src/app/App.svelte`, `src-tauri/src/window/commands.rs`, `src-tauri/src/lib.rs` | 最后实际关闭窗口快照、跨窗口退出确认、保存失败与超时取消 |
 | 最近打开与空白页入口 | `src/app/components/RecentOpenPopover.svelte` | `src/app/components/EmptyWorkspace.svelte`, `src/app/components/AppTitleBar.svelte`, `src-tauri/src/config/commands.rs` | 最近记录浮层、原子删除、跨窗口同步与主动打开排序 |
-| 工作区持久化 | `src/app/services/workspacePersistence.ts` | `src/app/App.svelte`, `src/lib/desktop/tauriStorage.ts` | 工作区 v4 元数据、组合项、草稿引用、v3/v2/旧 workspaceTabs 迁移 |
+| 工作区持久化 | `src/app/services/workspacePersistence.ts` | `src/app/App.svelte`, `src/lib/desktop/tauriStorage.ts` | 工作区 v5 元数据、组合项、待关闭恢复记录、草稿引用及旧版本迁移 |
+| Markdown 标签关闭 | `src/app/services/documentCloseCoordinator.ts` | `App.svelte`, `documentActionsController.ts`, `markdownApplicationSession.ts`, `src/lib/markdown-document/reclamation.ts` | 文档级保护操作、先移除标签后后台保存、失败恢复、关闭记录持久化、分批视图回收与组合原子释放；原生 `markdown_commands.rs` 的 closeMany 共同校验后释放成员 |
 | 阅读位置持久化 | `src/app/services/readingPosition.ts` | `src/app/App.svelte`, `src/app/services/outlineNavigation.ts` | Markdown 文件按路径保存/恢复统一阅读语义锚点 |
 | 恢复草稿 | `src/app/services/recoveryDraft.ts` | `src/app/services/documentActionsController.ts` | 异常退出后草稿写入/恢复 |
 | Markdown 桥接 | `src/lib/markdown/MarkdownBridge.ts` | `src/lib/markdown/frontMatter.ts` | front matter 与正文分离/合并规则变更 |
@@ -402,7 +403,7 @@
 - 初始化渲染服务（Shiki、KaTeX、Mermaid、图片加载器）
 - 按文档 ID 创建、挂起和恢复 `EditorCore` 运行时，保留窗口内编辑历史和阅读位置
 - 新建空白标签在对应运行时挂载后聚焦正文一次，切换文档取消过期聚焦
-- 加载设置和 v4 工作区状态，协调旧版迁移、组合恢复、草稿恢复与启动冲突选择
+- 加载设置和 v5 工作区状态，协调旧版迁移、组合恢复、待关闭恢复、草稿恢复与启动冲突选择
 - 协调主题运行时初始化、系统明暗同步、快捷键切换和保存失败回滚
 - 协调打开、保存、自动保存、模式切换、外部文件打开、关闭确认
 - 统一路由菜单、最近记录、系统文件管理器和文件树打开请求，并串行协调空窗口复用与跨窗口去重
@@ -2313,7 +2314,7 @@
 **Kind:** service
 
 **Owns:**
-- `PersistedWorkspaceState v4` 的生成、组合元数据归一化及 v3/v2/旧 `workspaceTabs:*` 配置迁移
+- `PersistedWorkspaceState v5` 的生成、组合及待关闭元数据归一化、v4/v3/v2/旧 `workspaceTabs:*` 配置迁移
 - 工作区标签元数据持久化边界：禁止把 `markdown` / `savedMarkdown` 写回配置
 - 根据 dirty、未命名标签和 `draftId` 写入或清理工作区草稿正文文件
 - 将持久化标签元数据还原为运行时标签所需的基础结构；活动组合两篇立即加载，其他项延迟恢复

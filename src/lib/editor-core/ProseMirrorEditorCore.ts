@@ -516,12 +516,12 @@ export class ProseMirrorEditorCore implements EditorCore {
     return Promise.all([documentComposition, nodeComposition]).then(() => undefined);
   }
 
-  unmount(): void {
+  unmount(prepared = false): void {
     this.assertActive();
     if (this.initialEditableFrame !== null) cancelAnimationFrame(this.initialEditableFrame);
     this.initialEditableFrame = null;
     if (this.view) cancelMathInlineDraft(this.view);
-    this.commitPendingEdits();
+    if (!prepared) this.commitPendingEdits();
     this.clearPlainTextPasteRequest();
     if (!this.view) return;
     this.clearBlockAlignmentGaps();
@@ -533,12 +533,12 @@ export class ProseMirrorEditorCore implements EditorCore {
     this.syncSnapshot = null;
   }
 
-  destroy(): void {
+  destroy(options?: { prepared?: boolean }): void {
     if (this.projectionCompositionTimer !== null) clearTimeout(this.projectionCompositionTimer);
     this.projectionCompositionTimer = null;
     this.parsedDocument = null;
     if (this.destroyed) return;
-    this.unmount();
+    this.unmount(options?.prepared);
     this.clearMarkdownSyncTimer();
     this.clearPlainTextPasteRequest();
     this.listeners.clear();

@@ -470,6 +470,13 @@ export class ProgressiveMarkdownDocument {
     if (this.completed) { await this.port.releaseSnapshot(this.completed.snapshot); this.completed = null; }
     this.currentIndex = null;
   }
+  /** 关闭准备只取消可重建索引，保护保存/导出正在物化的目录和快照。 */
+  cancelBackgroundWork() {
+    this.setHidden(true);
+    this.abort?.abort(); this.generation++;
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    markdownWorkScheduler.cancel(this); this.queuedYield?.(); this.queuedYield = null;
+  }
   /** 跨窗归属已提交后只释放本 WebView 的任务与快照，不关闭原生文档。 */
   async detach() {
     if (this.closed) return;
@@ -487,7 +494,7 @@ export class ProgressiveMarkdownDocument {
     await this.port.detach?.(this.session.documentId);
   }
   /** 卸载使用 setHidden；只有完成关闭/丢弃流程才释放会话和磁盘历史。 */
-  async close(discard = false) {
+  async close(discard = false, closeStorage?: () => Promise<void>) {
     if (this.closed) return;
     if (!discard) await this.session.flushEdits();
     this.closed = true;
@@ -508,7 +515,7 @@ export class ProgressiveMarkdownDocument {
         await this.port.releaseSnapshot(this.completed.snapshot);
         this.completed = null;
       }
-      await this.session.closePrepared(discard);
+      await this.session.closePrepared(discard, closeStorage);
     } catch (error) {
       this.session.cancelClose();
       if (tocDisposed) this.toc = new AutomaticMarkdownToc(this.session, this.build);
