@@ -252,14 +252,19 @@ pub(crate) struct MarkdownDocumentSessionManager {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<Session>>>>>,
     snapshots: Arc<Mutex<HashMap<String, CapturedSnapshot>>>,
     path_operations: Arc<Mutex<()>>,
+    writing_stats: super::writing_stats::WritingStatsService,
 }
 impl MarkdownDocumentSessionManager {
     pub(crate) fn new(root: PathBuf) -> TextDocumentResult<Self> {
+        if let Err(error) = super::writing_stats::WritingStatsService::clean_stale(&root) {
+            crate::app_logger::warn("WritingStats", &format!("清理遗留统计文件失败：{}", error.message));
+        }
         Ok(Self {
             root,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             snapshots: Arc::new(Mutex::new(HashMap::new())),
             path_operations: Arc::new(Mutex::new(())),
+            writing_stats: Default::default(),
         })
     }
     fn session(&self, document_id: &str) -> TextDocumentResult<Arc<Mutex<Session>>> {
@@ -524,6 +529,28 @@ impl MarkdownDocumentSessionManager {
         session.owner(owner)?;
         Ok(session.status())
     }
+    pub(crate) async fn writing_stats(
+        &self, owner: String, query: super::writing_stats::StatsQuery,
+    ) -> TextDocumentResult<super::writing_stats::StatsResult> {
+        let handle = self.session(&query.document_id)?;
+        let (snapshot, root) = {
+            let session = lock(&handle)?;
+            session.owner(&owner)?;
+            if session.current.revision != query.revision {
+                return Err(TextDocumentError::revision_conflict(query.revision, session.current.revision));
+            }
+            (session.current.clone(), session.root.clone())
+        };
+        let document_id = query.document_id.clone();
+        let revision = query.revision;
+        let result = self.writing_stats.request(owner.clone(), query, snapshot, root, Box::new(handle)).await?;
+        let current = self.status(&owner, &document_id)?;
+        if current.revision != revision { return Err(TextDocumentError::revision_conflict(revision, current.revision)); }
+        Ok(result)
+    }
+    pub(crate) fn cancel_writing_stats(&self, owner: &str, request_id: Option<u64>) {
+        self.writing_stats.cancel(owner, request_id);
+    }
     pub(crate) fn read_window(
         &self,
         owner: &str,
@@ -676,6 +703,9 @@ impl MarkdownDocumentSessionManager {
             transaction.operation_id.clone(),
             (fingerprint, result.clone()),
         );
+        if result.revision != transaction.base_revision {
+            self.writing_stats.invalidate(&transaction.document_id, false);
+        }
         session.ack_order.push_back(transaction.operation_id);
         if session.ack_order.len() > 128 {
             if let Some(key) = session.ack_order.pop_front() {
@@ -775,7 +805,9 @@ impl MarkdownDocumentSessionManager {
             selection_before: session.manifest.selection.clone(),
             selection_after: selection,
         };
-        session.publish(record, tree, HistoryPointer::Existing(undo), next_redo)
+        let result = session.publish(record, tree, HistoryPointer::Existing(undo), next_redo)?;
+        self.writing_stats.invalidate(document_id, false);
+        Ok(result)
     }
     pub(crate) fn capture(
         &self,
@@ -983,6 +1015,7 @@ impl MarkdownDocumentSessionManager {
             return Err(error("document-busy", "请先完成文档的快照任务"));
         }
         session.owner = target.into();
+        self.writing_stats.invalidate(document_id, true);
         Ok(())
     }
     /// 多文档归属和工作区提交共享同一临界区；持久化失败时全部仍归源窗口。
@@ -1029,6 +1062,7 @@ impl MarkdownDocumentSessionManager {
         let result = commit()?;
         for session in &mut sessions {
             session.owner = target.into();
+            self.writing_stats.invalidate(&session.manifest.document_id, true);
         }
         Ok(result)
     }
@@ -1051,12 +1085,14 @@ impl MarkdownDocumentSessionManager {
                 return Err(error("document-busy", "文档仍有正在使用的完整快照"));
             }
             session.closed = true;
+            self.writing_stats.invalidate(document_id, true);
         }
         lock(&self.sessions)?.remove(document_id);
         Ok(())
     }
     /// WebView 已销毁，前端不再有机会释放快照。等保存结束后释放该窗口资源，保留磁盘恢复资料。
     pub(crate) fn detach_owner(&self, owner: &str) -> TextDocumentResult<()> {
+        self.writing_stats.cancel(owner, None);
         let _path_operation = lock(&self.path_operations)?;
         let handles: Vec<_> = lock(&self.sessions)?.values().cloned().collect();
         for handle in handles {
@@ -1069,6 +1105,7 @@ impl MarkdownDocumentSessionManager {
             }
             session.closed = true;
             let document_id = session.manifest.document_id.clone();
+            self.writing_stats.invalidate(&document_id, true);
             lock(&self.snapshots)?.retain(|_, snapshot| snapshot.document_id != document_id);
             lock(&self.sessions)?.remove(&document_id);
         }
@@ -1095,7 +1132,10 @@ impl MarkdownDocumentSessionManager {
                 if session.dirty && !discard { return Err(error("unsaved-document", "组合文档尚有未保存内容")); }
             }
         }
-        for session in &mut sessions { session.closed = true; session.cleanup.remove = true; }
+        for session in &mut sessions {
+            session.closed = true; session.cleanup.remove = true;
+            self.writing_stats.invalidate(&session.manifest.document_id, true);
+        }
         let mut registry = lock(&self.sessions)?;
         for (id, _) in documents { registry.remove(&id); }
         drop(registry); drop(sessions);
@@ -1125,6 +1165,7 @@ impl MarkdownDocumentSessionManager {
             }
             session.closed = true;
             session.cleanup.remove = true;
+            self.writing_stats.invalidate(document_id, true);
         }
         lock(&self.sessions)?.remove(document_id);
         drop(session);

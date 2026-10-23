@@ -3,6 +3,7 @@ import { MarkdownDocumentSession, type MarkdownSnapshot } from './session';
 import type { DocumentStatus, DocumentTransaction, DocumentWindow } from './protocol';
 import { DocumentConflictError } from './protocol';
 import type { MarkdownEncoding } from '../services/storage';
+import type { NativeStatsRequest, NativeStatsResponse } from '../outline/writingStatsProtocol';
 
 export interface MarkdownSessionStatus extends DocumentStatus {
   encoding?: MarkdownEncoding;
@@ -16,6 +17,8 @@ export interface SnapshotReference {
   byteLength: number;
 }
 export interface MarkdownDocumentPort {
+  writingStats?(request: NativeStatsRequest): Promise<NativeStatsResponse>;
+  cancelWritingStats?(requestId?: number): Promise<void>;
   openDocument(
     input: { path: string; fresh?: boolean } | { text: string } | { recoveryId: string },
   ): Promise<MarkdownSessionStatus>;
@@ -61,6 +64,8 @@ function native<T>(request: Record<string, unknown>): Promise<T> {
 }
 export function createNativeMarkdownPort(): MarkdownDocumentPort {
   return {
+    writingStats: (request) => native({ type: 'writingStats', ...request }),
+    cancelWritingStats: (requestId) => native({ type: 'cancelWritingStats', requestId }),
     openDocument: (input) =>
       'recoveryId' in input
         ? native({ type: 'recover', documentId: input.recoveryId })

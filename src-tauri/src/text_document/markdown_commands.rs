@@ -13,6 +13,13 @@ use tauri::{State, WebviewWindow};
     rename_all_fields = "camelCase"
 )]
 pub(crate) enum MarkdownRequest {
+    WritingStats {
+        #[serde(flatten)]
+        query: super::writing_stats::StatsQuery,
+    },
+    CancelWritingStats {
+        request_id: Option<u64>,
+    },
     Open {
         path: Option<String>,
         text: Option<String>,
@@ -92,7 +99,16 @@ pub(crate) async fn markdown_document_command(
 ) -> TextDocumentResult<Value> {
     let owner = window.label().to_owned();
     let manager = manager.inner().clone();
+    let request = match request {
+        MarkdownRequest::WritingStats { query } => return value(manager.writing_stats(owner, query).await?),
+        MarkdownRequest::CancelWritingStats { request_id } => {
+            manager.cancel_writing_stats(&owner, request_id);
+            return value(());
+        }
+        request => request,
+    };
     tauri::async_runtime::spawn_blocking(move || match request {
+        MarkdownRequest::WritingStats { .. } | MarkdownRequest::CancelWritingStats { .. } => unreachable!(),
         MarkdownRequest::Open { path, text, fresh } => {
             value(if fresh {
                 manager.open_with_policy(&owner, path.map(Into::into), text, true)?

@@ -175,8 +175,8 @@
 | Responsibility | Primary code | Related code | Change when |
 |---|---|---|---|
 | 大纲服务 | `src/lib/outline/outlineService.ts` | `src/lib/outline/writingStats.ts`, `src/lib/editor-core/InlineSourceCodec.ts` | 标题语义内容与 slug、八类行内符号排除、大纲与同步统计兼容入口 |
-| 正文统计与范围索引 | `src/lib/outline/writingStats.ts` | `sourceTokenPositions.ts`, `writingStatsEngine.ts`, `writingStatsProtocol.ts` | 中英计数、可见字数、源码/语义选区上下文和索引查询 |
-| 后台统计调度 | `src/app/services/writingStatsController.ts` | `src/lib/outline/writingStats.worker.ts`, `src/app/App.svelte` | 120 ms 防抖、单 Worker、快照缓存、失效门禁及统计状态 |
+| 正文统计与范围索引 | `src-tauri/src/text_document/writing_stats/` | `markdown_session.rs`, `markdown_commands.rs`, `src/lib/outline/writingStatsProtocol.ts` | 桌面端 revision 快照的 64 KiB 流式扫描、磁盘区间索引、Unicode 与 UTF-8 选区统计、增量块复用；浏览器兼容路径为 `writingStats.ts` / `sourceTokenPositions.ts` |
+| 后台统计调度 | `src/app/services/writingStatsController.ts`, `nativeWritingStatsController.ts` | `src/app/App.svelte`, `src-tauri/src/text_document/writing_stats/service.rs` | 全文 500 ms / 选区 120 ms 防抖、被动等待组字草稿、身份门禁与取消；桌面端单 Rust 扫描任务，浏览器端单 Worker |
 | 章节结构重排 | `src/lib/outline/outlineReorder.ts` | `src/lib/editor-core/editorCommands.ts` | 计算章节子树、落点、层级变化、Markdown 重排与标题索引映射 |
 | 大纲交互控制器 | `src/app/services/outlineInteractionController.ts` | `src/app/services/outlineNavigation.ts`, `src/lib/outline/outlineReorder.ts` | 点击定位、章节拖拽编排、源码模式可撤销替换 |
 | 大纲滚动定位 | `src/app/services/outlineNavigation.ts`, `src/lib/markdown-document/viewportHost.ts` | `src/lib/outline/outlineViewport.ts`, `src/app/services/markdownApplicationSession.ts`, `src/lib/markdown-document/mountPolicy.ts`, `src/app/services/editorInteractionController.ts` | 会话大纲在语义/源码/双栏按编辑区高度 20%（64–180px）定位与高亮；仅受限窗口模式的未加载目标准备就绪后直跳，其他情况保留固定动画；双栏逐栏判定、原位置保护与过期导航取消；兼容视图的 PM/DOM 标题匹配 |
@@ -2818,7 +2818,7 @@
 - 状态栏 UI：行数/词数/字数/字符统计展示、缩放百分比控制
 
 **Does not own:**
-- 不拥有统计数据计算（正文与范围索引在 writingStats.ts，后台调度在 writingStatsController.ts）
+- 不拥有统计数据计算（桌面正文与范围索引在 Rust writing_stats，浏览器兼容实现在 writingStats.ts，调度在 writingStatsController.ts）
 
 **Called by:** `src/app/components/AppShell.svelte`
 
@@ -4180,7 +4180,7 @@
 
 **Kind:** pure statistics / index
 
-**Owns:** 共享 tokenizer 的源码正文位置映射、ProseMirror 正文投影、中英文词边界和 Unicode 可见字符边界、累计范围查询。
+**Owns:** 浏览器预览与测试对照的共享 tokenizer 正文位置映射（含表格转义来源区间）、ProseMirror 正文投影、中英文词边界和 Unicode 可见字符边界、累计范围查询。
 
 **Does not own:** DOM、选区修改、文件 IO 或 Worker 生命周期。
 
@@ -4196,11 +4196,11 @@
 
 **Kind:** controller
 
-**Owns:** 单个统计 Worker、120 ms 最新选区防抖、内容修订快照、跨模式索引复用、请求合并、文档/模式/选区失效门禁、取消与错误状态。
+**Owns:** 桌面/浏览器统计路由、选区防抖和失效门禁。`nativeWritingStatsController.ts` 仅传文档/revision/请求/选区身份，等待 IME 与草稿自然提交；浏览器路径保留单 Worker 和快照缓存。
 
-**Called by:** `src/app/App.svelte`；重计算入口为 `src/lib/outline/writingStats.worker.ts`。
+**Called by:** `src/app/App.svelte`；桌面重计算经 `MarkdownDocumentPort` 进入 `writing_stats/service.rs`，浏览器经 `writingStats.worker.ts`。Markdown 检查单独按开关 capture。
 
-**Related tests:** `src/app/services/writingStatsController.test.ts`
+**Related tests:** `src/app/services/writingStatsController.test.ts`, `nativeWritingStatsController.test.ts`, `src-tauri/src/text_document/writing_stats/tests.rs`
 
 **Confidence:** high
 

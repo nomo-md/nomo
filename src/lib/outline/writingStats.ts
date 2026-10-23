@@ -317,7 +317,9 @@ export function buildSourceWritingStats(markdown: string): WritingStatsIndex {
       token.meta?.statsContentColumn !== undefined && token.map
         ? bodyLines[token.map[0]] + token.meta.statsContentColumn
         : cursor;
-    const positions = locateInline(
+    const tableSpans = token.meta?.statsTableSpans as import('./sourceTokenPositions').TextSourceSpan[] | undefined;
+    const tableLine = tableSpans ? bodyLines[token.meta.statsTableLine] : 0;
+    const positions = tableSpans ? tableSpans.map(span => tableLine + span.from) : locateInline(
       token.meta?.statsContent ?? token.content,
       markdown,
       inlineStart,
@@ -368,7 +370,10 @@ export function buildSourceWritingStats(markdown: string): WritingStatsIndex {
         );
         const ends = Array.from(
           { length: text.length },
-          (_, i) => (positions[span.from + (sameLength ? i : rawLength - 1)] ?? starts[i]) + 1,
+          (_, i) => {
+            const index = span.from + (sameLength ? i : rawLength - 1);
+            return tableSpans?.[index] ? tableLine + tableSpans[index].to : (positions[index] ?? starts[i]) + 1;
+          },
         );
         append(run, text, starts, ends);
       }

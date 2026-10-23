@@ -203,6 +203,23 @@ export class MarkdownSessionController {
     this.assertOpen();
     await this.flushQueue();
   }
+  /** Statistics may wait for composition/transactions, but never commit a view draft. */
+  async awaitStatisticsReady(signal: AbortSignal): Promise<boolean> {
+    this.assertOpen();
+    for (const view of this.mounted) {
+      if (signal.aborted || view.hasUnconfirmedDraft?.()) return false;
+      const ready = await new Promise<boolean>((resolve, reject) => {
+        const cancelled = () => { signal.removeEventListener('abort', cancelled); resolve(false); };
+        signal.addEventListener('abort', cancelled, { once: true });
+        view.awaitCompositionEnd().then(() => {
+          signal.removeEventListener('abort', cancelled); resolve(!signal.aborted);
+        }, error => { signal.removeEventListener('abort', cancelled); reject(error); });
+      });
+      if (!ready || view.hasUnconfirmedDraft?.()) return false;
+    }
+    await this.awaitTransactions();
+    return !signal.aborted && !this.closing;
+  }
   async flushEdits(intent: 'explicit' | 'automatic' = 'explicit') {
     this.assertOpen();
     for (const view of [...this.mounted]) {

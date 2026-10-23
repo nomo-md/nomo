@@ -10,6 +10,15 @@ import { createWritingStatsEngine } from './writingStatsEngine';
 import { readFileSync } from 'node:fs';
 
 describe('writing statistics', () => {
+  it('maps escaped pipes in repeated table cells to their original source intervals', () => {
+    const source = '| A | A |\r\n| --- | --- |\r\n| a\\|b | `a\\|b` |\r\n';
+    const index = buildSourceWritingStats(source);
+    expect(queryWritingStats(index)).toMatchObject({ words: 6, visibleChars: 8 });
+    for (const match of source.matchAll(/a\\\|b/g)) {
+      expect(queryWritingStats(index, match.index!, match.index! + 4)).toMatchObject({ words: 2, visibleChars: 3 });
+      expect(queryWritingStats(index, match.index! + 1, match.index! + 3).visibleChars).toBe(1);
+    }
+  });
   it.each([
     ['中文 hello', 3],
     ["don't well-known foo_bar 3.14 2026", 5],

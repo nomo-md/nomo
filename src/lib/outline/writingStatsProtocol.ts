@@ -29,3 +29,23 @@ export interface WritingStatsState {
   full: DocumentStats | null;
   selected: DocumentStats | null;
 }
+
+/** Desktop requests contain identities and global UTF-8 ranges only. */
+export interface NativeStatsRequest {
+  documentId: string;
+  revision: number;
+  requestId: number;
+  selectionVersion: number;
+  selection: { from: number; to: number } | null;
+}
+export interface NativeStatsResponse extends NativeStatsRequest {
+  full: DocumentStats;
+  selected: DocumentStats | null;
+  metrics: {
+    elapsedMs: number;
+    snapshotBytesRead: number;
+    workspaceBoundBytes: number;
+    indexBytes: number;
+    cacheHit: boolean;
+  };
+}

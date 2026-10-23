@@ -5,6 +5,7 @@ import type {
   StatsResponse,
   WritingStatsState,
 } from '../../lib/outline/writingStatsProtocol';
+import { createNativeWritingStatsController, type NativeStatsDocument } from './nativeWritingStatsController';
 
 interface StatsWorker {
   onmessage: ((event: MessageEvent<StatsResponse>) => void) | null;
@@ -28,6 +29,8 @@ export function createWritingStatsController(
       type: 'module',
     }),
 ) {
+  let usingNative = false;
+  const native = createNativeWritingStatsController(state => { if (usingNative) onState(state); });
   let worker: StatsWorker | null = null;
   let input: DocumentInput | null = null;
   let context: StatsContext = {
@@ -76,7 +79,7 @@ export function createWritingStatsController(
           if (!destroyed && worker === currentWorker) fail();
         };
         worker.onmessage = ({ data }) => {
-          if (destroyed || data.requestId !== inFlight) return;
+          if (destroyed || usingNative || data.requestId !== inFlight) return;
           inFlight = null;
           const sameDocument =
             data.context.documentId === context.documentId &&
@@ -143,8 +146,17 @@ export function createWritingStatsController(
     }, 120);
   }
   return {
+    setNativeDocument(next: NativeStatsDocument) {
+      if (destroyed) return;
+      usingNative = true;
+      cancelTimer(); queued = false; inFlight = null; input = null;
+      worker?.terminate(); worker = null;
+      sourceSnapshotRevision = semanticSnapshotRevision = -1;
+      native.setDocument(next);
+    },
     setDocument(next: DocumentInput) {
       if (destroyed) return;
+      if (usingNative) { native.invalidate(); usingNative = false; }
       if (
         input?.documentId === next.documentId &&
         input.markdown === next.markdown &&
@@ -181,6 +193,7 @@ export function createWritingStatsController(
       schedule();
     },
     setSelection(selection: StatsRange | null) {
+      if (usingNative) { native.setSelection(selection); return; }
       if (destroyed || suspended || !input || state.status === 'error') return;
       range = selection && selection.from !== selection.to ? selection : null;
       context = { ...context, selectionRevision: context.selectionRevision + 1 };
@@ -193,6 +206,7 @@ export function createWritingStatsController(
       } else schedule();
     },
     invalidate() {
+      native.invalidate();
       cancelTimer();
       queued = false;
       input = null;
@@ -202,6 +216,7 @@ export function createWritingStatsController(
       publish();
     },
     suspend() {
+      if (usingNative) { native.suspend(); return; }
       cancelTimer();
       queued = false;
       range = null;
@@ -215,6 +230,7 @@ export function createWritingStatsController(
       publish();
     },
     destroy() {
+      native.destroy();
       destroyed = true;
       cancelTimer();
       queued = false;

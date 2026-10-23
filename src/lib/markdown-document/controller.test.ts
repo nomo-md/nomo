@@ -3,6 +3,24 @@ import { MarkdownSessionController } from './controller';
 import { createMemoryMarkdownPort, readCompleteSnapshot } from './port';
 
 describe('Markdown 会话协调', () => {
+  it('统计等待组字而不确认草稿，取消等待不提交输入', async () => {
+    const port = createMemoryMarkdownPort();
+    const controller = new MarkdownSessionController(port, await port.openDocument({ text: '正文' }));
+    let committed = 0;
+    let endComposition!: () => void;
+    const detach = controller.attachEdits({
+      awaitCompositionEnd: () => new Promise<void>(resolve => { endComposition = resolve; }),
+      commitPendingEdits: () => { committed++; },
+    });
+    const abort = new AbortController();
+    const waiting = controller.awaitStatisticsReady(abort.signal);
+    abort.abort(); expect(await waiting).toBe(false);
+    endComposition(); expect(committed).toBe(0); detach();
+    const removeDraft = controller.attachEdits({ awaitCompositionEnd: async () => {},
+      hasUnconfirmedDraft: () => true, commitPendingEdits: () => { committed++; } });
+    expect(await controller.awaitStatisticsReady(new AbortController().signal)).toBe(false);
+    expect(committed).toBe(0); removeDraft(); await controller.close(true);
+  });
   it('语义/源码视图连续提交同一队列，挂载回收不切断历史', async () => {
     const port = createMemoryMarkdownPort();
     const controller = new MarkdownSessionController(

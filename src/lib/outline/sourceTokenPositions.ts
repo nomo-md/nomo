@@ -1,5 +1,6 @@
 import type MarkdownIt from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
+import tableRule from 'markdown-it/lib/rules_block/table.mjs';
 
 export interface TextSourceSpan {
   text: string;
@@ -9,6 +10,42 @@ export interface TextSourceSpan {
 
 /** 只在统计 tokenizer 上记录原始位置；语法判定仍完全交给共享规则。 */
 export function recordInlinePositions(markdown: MarkdownIt): void {
+  // table 解码 \| 的时间早于 inline。直接记录单元格消费的源码范围，
+  // 不能再用已经解码的 token.content 搜索原文（重复单元格也会错位）。
+  markdown.block.ruler.at('table', (state, start, end, silent) => {
+    const first = state.tokens.length;
+    if (!tableRule(state, start, end, silent)) return false;
+    if (silent) return true;
+    let cells: TextSourceSpan[][] = [];
+    let cell = 0;
+    let line = start;
+    for (const token of state.tokens.slice(first)) {
+      if (token.type === 'tr_open' && token.map) {
+        line = token.map[0];
+        const from = state.bMarks[line] + state.tShift[line];
+        const raw = state.src.slice(from, state.eMarks[line]);
+        const left = raw.length - raw.trimStart().length;
+        const text = raw.trim();
+        cells = [[]];
+        for (let i = 0; i < text.length; i++) {
+          const column = from - state.bMarks[line] + left + i;
+          if (text[i] === '|' && text[i - 1] !== '\\') { cells.push([]); continue; }
+          if (text[i] === '\\' && text[i + 1] === '|') continue;
+          cells.at(-1)!.push({ text: text[i], from: column - (text[i] === '|' ? 1 : 0), to: column + 1 });
+        }
+        if (!cells[0]?.length) cells.shift();
+        if (!cells.at(-1)?.length) cells.pop();
+        for (const spans of cells) {
+          while (spans.length && /^\s$/.test(spans[0].text)) spans.shift();
+          while (spans.length && /^\s$/.test(spans.at(-1)!.text)) spans.pop();
+        }
+        cell = 0;
+      } else if (token.type === 'inline') {
+        token.meta = { ...token.meta, statsTableLine: line, statsTableSpans: cells[cell++] ?? [] };
+      }
+    }
+    return true;
+  }, { alt: ['paragraph', 'reference'] });
   markdown.inline.ruler2.disable('fragments_join');
   markdown.core.ruler.disable('text_join');
   markdown.core.ruler.after('inline', 'stats_original_inline', (state) => {

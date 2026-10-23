@@ -1960,6 +1960,8 @@
       activeOutlineId = runtime.activeOutlineId ?? (outlineProjection.activeId || outline[0]?.id || '');
       collapsedOutlineIds = outlineProjection.collapsedIds;
       syncSourceTextareaHeight();
+      // 已挂载的组合标签成员切换焦点时不会再次发布会话元数据。
+      if (runtime.session) scheduleSessionAnalysis(tab.id, runtime.session);
       if (!runtime.session && owner?.kind !== 'comparison' && !mountedDocumentRuntimes.has(runtime)) scheduleReadingPositionRestore(tab, nextReadingMode, storedPosition, restoreGeneration);
     } finally {
       isSwitchingTab = false;
@@ -4668,13 +4670,15 @@
     sessionAnalysisAbort?.abort(); sessionAnalysisAbort = undefined;
     if (sessionAnalysisTimer) clearTimeout(sessionAnalysisTimer);
     sessionAnalysisTimer = undefined; sessionAnalysisKey = '';
+    writingStatsController.suspend();
   }
   function scheduleSessionAnalysis(tabId: string, application: MarkdownApplicationSession) {
     const state = application.document?.state;
-    if (activeTabId !== tabId || closingUiIds.has(tabId) || state?.progress.state !== 'ready') return;
+    if (document.hidden || activeTabId !== tabId || closingUiIds.has(tabId) || state?.progress.state !== 'ready') return;
     const key = `${tabId}:${state.status.revision}:${markdownLintEnabled}:${markdownLintRuleSet}`;
     if (key === sessionAnalysisKey) return;
     sessionAnalysisKey = key;
+    writingStatsController.suspend();
     sessionAnalysisAbort?.abort();
     if (sessionAnalysisTimer) clearTimeout(sessionAnalysisTimer);
     const abort = new AbortController(); sessionAnalysisAbort = abort;
@@ -4689,18 +4693,38 @@
       sessionAnalysisTimer = undefined;
       if (!isCurrent()) return;
       if (application.editor.hasPendingMathInlineDraft?.()) { sessionAnalysisKey = ''; return; }
+      const nativeDocument = application.document;
+      if (nativeDocument?.port.writingStats) {
+        const selection = application.captureSelection();
+        writingStatsController.setNativeDocument({ documentId: nativeDocument.session.documentId,
+          revision: state.status.revision, port: nativeDocument.port,
+          selection: selection ? { from: selection.anchorByte, to: selection.headByte, sourceCoordinates: 'utf8' } : null,
+          ready: async signal => await nativeDocument.session.awaitStatisticsReady(signal) && isCurrent(),
+        });
+        // Markdown 检查是独立的显式开关。统计不再借用它的全文 capture。
+        if (!markdownLintEnabled) return;
+      }
       void application.capture(abort.signal, 'automatic').then(snapshot => {
         if (!isCurrent() || application.document?.state.status.revision !== snapshot.revision) return;
-        writingStatsController.setDocument({ documentId: tabId, markdown: snapshot.markdown, mode: 'source', revision: snapshot.revision, semanticSnapshot: () => null });
-        const selected = application.captureSelection();
-        if (selected) writingStatsController.setSelection({ from: selected.anchorByte, to: selected.headByte, sourceCoordinates: 'utf8' });
+        if (!nativeDocument?.port.writingStats) {
+          writingStatsController.setDocument({ documentId: tabId, markdown: snapshot.markdown, mode: 'source', revision: snapshot.revision, semanticSnapshot: () => null });
+          const selected = application.captureSelection();
+          if (selected) writingStatsController.setSelection({ from: selected.anchorByte, to: selected.headByte, sourceCoordinates: 'utf8' });
+        }
         if (markdownLintEnabled) markdownLintController.schedule({ tabId, version: snapshot.revision, markdown: snapshot.markdown,
           ruleSet: markdownLintRuleSet, largeDocumentMode: false }, 0);
       }).catch(error => { if (isCurrent()) showVisibleError(error, t.saveFileFailed()); });
     }, 500);
   }
+  function handleStatisticsVisibility() {
+    if (document.hidden) cancelSessionAnalysis();
+    else {
+      const application = getMarkdownApplicationSession(editor);
+      if (application && activeTabId) scheduleSessionAnalysis(activeTabId, application);
+    }
+  }
   $: if (sessionAnalysisKey && !sessionAnalysisKey.startsWith(`${activeTabId}:`)) cancelSessionAnalysis();
-  $: if (activeTabId && isMarkdownTab(tabs.find((tab) => tab.id === activeTabId)) && !getMarkdownApplicationSession(editor)) {
+  $: if (!desktopEnabled && activeTabId && isMarkdownTab(tabs.find((tab) => tab.id === activeTabId)) && !getMarkdownApplicationSession(editor)) {
     const activeMode = mode === 'split' ? splitActivePane : mode;
     writingStatsController.setDocument({
       documentId: activeTabId, markdown, mode: activeMode, revision: statsContentRevision,
@@ -6979,6 +7003,7 @@
   }
 
   onMount(async () => {
+    document.addEventListener('visibilitychange', handleStatisticsVisibility);
     appearanceRuntimeActive = true;
     appBootState = 'restoring-workspace';
     try {
@@ -7150,6 +7175,7 @@
   });
 
   onDestroy(() => {
+    document.removeEventListener('visibilitychange', handleStatisticsVisibility);
     wordExportAbort?.abort();
     documentExportAbort?.abort();
     markdownMiniTransitionController?.dispose();
@@ -7208,8 +7234,15 @@
 
   function syncFromEditor(event: EditorChangeEvent) {
     if (emojiPickerTarget?.mode === 'semantic' && event.contentRevision !== undefined && event.contentRevision !== emojiPickerTarget.contentRevision) emojiPickerTarget = null;
-    if (event.reason === 'content-pending') writingStatsController.suspend();
-    else statsContentRevision = event.contentRevision ?? statsContentRevision;
+    const application = getMarkdownApplicationSession(editor);
+    if (event.reason === 'content-pending') {
+      if (application) cancelSessionAnalysis();
+      else writingStatsController.suspend();
+    } else {
+      statsContentRevision = event.contentRevision ?? statsContentRevision;
+      // 格式节点进入/退出编辑可能不改变 Rust revision，仍需恢复被草稿挂起的统计。
+      if (application) scheduleSessionAnalysis(activeTabId, application);
+    }
     if (isSwitchingTab) return;
 
     const activeTab = tabs.find((tab) => tab.id === activeTabId);

@@ -11,6 +11,7 @@ mod line_index;
 pub(crate) mod markdown_codec;
 pub(crate) mod markdown_commands;
 mod markdown_history;
+mod writing_stats;
 pub(crate) mod markdown_session;
 mod piece_tree;
 mod session;
