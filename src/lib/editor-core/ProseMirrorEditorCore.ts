@@ -191,7 +191,6 @@ export class ProseMirrorEditorCore implements EditorCore {
   private target: HTMLElement | null;
   private view: EditorView | null = null;
   private suspendedState: EditorState | null = null;
-  private detailsSession = new DetailsSession();
   private markdown: string;
   private originalMarkdown: string;
   private semanticViewDirty = false;
@@ -317,9 +316,18 @@ export class ProseMirrorEditorCore implements EditorCore {
       headByte: this.sourceSelectionBefore.headByte + delta,
     };
   }
+
+  forkDetailsSession(markdown: string): DetailsSession {
+    this.assertActive();
+    this.flushPendingMarkdownSync();
+    return this.detailsSession.fork(this.markdown, markdown);
+  }
   private sourceSelectionBefore?: DocumentSelection;
 
-  constructor(private readonly options: EditorCoreOptions) {
+  constructor(
+    private readonly options: EditorCoreOptions,
+    private detailsSession = new DetailsSession(),
+  ) {
     const initialTheme = options.theme ?? {
       name: 'light',
       colorThemeId: 'nomo-default',

@@ -99,6 +99,48 @@ function outlineGeometry(target: HTMLElement, positions: number[]) {
 }
 
 describe('完整会话的真实窗口宿主', () => {
+  it('勾选任务项导致语义窗口重建后保留 Details 临时展开状态', async () => {
+    const text = '<details>\n<summary>任务</summary>\n\n- [ ] 待办\n\n</details>';
+    const { runtime, host, target, failures } = await setup(text);
+    await vi.waitFor(() => expect(host.writable).toBe(true));
+    const originalWindow = target.querySelector('.markdown-session-window');
+    const originalBlock = runtime.state.index!.blocks[0];
+    (host as any).heights.update(0, 640);
+    const toggle = target.querySelector<HTMLButtonElement>('.details-toggle')!;
+    toggle.click();
+    await vi.waitFor(() =>
+      expect(target.querySelector('.details-block')?.getAttribute('data-details-open')).toBe('true'));
+    target.querySelector<HTMLInputElement>('.task-checkbox-widget input')!
+      .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    await runtime.session.flushEdits();
+    await vi.waitFor(() => expect(runtime.state.index?.revision).toBe(runtime.state.status.revision));
+    await vi.waitFor(() => expect(target.querySelector('.markdown-session-window')).not.toBe(originalWindow));
+    const nextBlock = runtime.state.index!.blocks[0];
+    expect([nextBlock.fromByte, nextBlock.toByte]).toEqual([originalBlock.fromByte, originalBlock.toByte]);
+    expect((host as any).heights.height(0)).toBe(640);
+    expect(await runtime.readMarkdown()).toContain('- [x] 待办');
+    expect(target.querySelector('.details-block')?.getAttribute('data-details-open')).toBe('true');
+    expect(failures).toEqual([]);
+  });
+
+  it('修改外部任务项后保留 Details 临时折叠状态', async () => {
+    const text = '<details open>\n<summary>任务</summary>\n\n正文\n\n</details>\n\n- [ ] 外部待办';
+    const { runtime, host, target, failures } = await setup(text);
+    await vi.waitFor(() => expect(host.writable).toBe(true));
+    const originalWindow = target.querySelector('.markdown-session-window');
+    target.querySelector<HTMLButtonElement>('.details-toggle')!.click();
+    await vi.waitFor(() =>
+      expect(target.querySelector('.details-block')?.getAttribute('data-details-open')).toBe('false'));
+    target.querySelector<HTMLInputElement>('.task-checkbox-widget input')!
+      .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    await runtime.session.flushEdits();
+    await vi.waitFor(() => expect(runtime.state.index?.revision).toBe(runtime.state.status.revision));
+    await vi.waitFor(() => expect(target.querySelector('.markdown-session-window')).not.toBe(originalWindow));
+    expect(await runtime.readMarkdown()).toContain('- [x] 外部待办');
+    expect(target.querySelector('.details-block')?.getAttribute('data-details-open')).toBe('false');
+    expect(failures).toEqual([]);
+  });
+
   it('重挂载阅读锚点跨多次迟到布局保持原屏幕位置，用户滚动后停止恢复', async () => {
     const { host, target } = await setup('# 标题\n\n正文\n\n尾声');
     const pane = target.parentElement!, core = host.activeCore!;

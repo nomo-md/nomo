@@ -650,6 +650,9 @@ export class MarkdownViewportHost {
     if (this.mode === 'semantic' && block.mode === 'raw') return `restricted:${block.id}:${this.layoutContext}`;
     return `${block.id}:${block.contentVersion ?? block.version}:${block.sourceHash}:${JSON.stringify(block.references.map(key => this.index?.references[key]))}:${this.layoutContext}`;
   }
+  private blockGeometryKey(block: MarkdownStructureIndex['blocks'][number]) {
+    return `${block.fromByte}:${block.toByte}:${block.kind}:${block.mode}`;
+  }
   private captureAnchor(forDirect = false): ReadingAnchor | undefined {
     if (!forDirect && this.outlineNavigation && !this.outlineNavigation.aligned) return undefined;
     if ((!forDirect && this.preferredByte !== undefined && !this.outlineNavigation) || !this.index) return undefined;
@@ -743,6 +746,17 @@ export class MarkdownViewportHost {
   private hasOriginalSource(view: Mounted) {
     if (view.restricted) return true;
     return (view.semantic?.bridge.text ?? view.source?.bridge.text) === view.window.text;
+  }
+  private forkDetailsSession(window: DocumentWindow) {
+    let source: Mounted | undefined;
+    let overlap = 0;
+    for (const candidate of this.mounted) {
+      if (!candidate.semantic) continue;
+      const shared = Math.min(candidate.window.toByte, window.toByte) -
+        Math.max(candidate.window.fromByte, window.fromByte);
+      if (shared > overlap) { source = candidate; overlap = shared; }
+    }
+    return source?.semantic?.core.forkDetailsSession(window.text);
   }
   private mountedGroups(ids: Set<string | undefined>, pinned: number[]) {
     const result: MarkdownBlockGroup[] = [];
@@ -1114,6 +1128,14 @@ export class MarkdownViewportHost {
       const geometryChanged = context !== this.layoutContext;
       const previousAnchor = geometryChanged ? (this.readingAnchor ?? this.captureAnchor()) :
         index !== this.index ? this.captureAnchor() : undefined;
+      const carriedHeights = new Map<string, number>();
+      if (index !== this.index && this.index) {
+        for (const view of this.mounted) {
+          if (view.from === undefined || view.to === undefined) continue;
+          for (let i = view.from; i < view.to; i++)
+            carriedHeights.set(this.blockGeometryKey(this.index.blocks[i]), this.heights.height(i));
+        }
+      }
       this.layoutContext = context;
       const previousLength = this.heights.length;
       const appendOnly = index === this.index && (index?.blocks.length ?? 0) >= previousLength;
@@ -1122,7 +1144,10 @@ export class MarkdownViewportHost {
         this.index = index;
         this.heights = new MarkdownHeightIndex();
       }
-      const heightFor = (block: MarkdownStructureIndex['blocks'][number]) => this.layoutCache.get(this.blockLayoutKey(block))?.height ??
+      // 等长局部编辑会换结构身份，但旧实测高度仍比结构估算可靠；真实 DOM 接入后会再次测量。
+      const heightFor = (block: MarkdownStructureIndex['blocks'][number]) =>
+        this.layoutCache.get(this.blockLayoutKey(block))?.height ??
+        carriedHeights.get(this.blockGeometryKey(block)) ??
         (this.mode === 'semantic' && block.mode === 'raw' ? 104 : estimateMarkdownBlockHeight(block));
       if (previousLength && this.heights.length === previousLength && index?.blocks[previousLength - 1] !== this.lastIndexedBlock)
         this.heights.update(previousLength - 1, heightFor(index!.blocks[previousLength - 1]));
@@ -1387,6 +1412,7 @@ export class MarkdownViewportHost {
             };
             element.append(message, button);
           } else if (plan.semantic) {
+            const detailsSession = this.forkDetailsSession(window);
             view.semantic = new MarkdownSemanticWindow(this.document.session, window, {
               ...this.options,
               target: element,
@@ -1405,7 +1431,7 @@ export class MarkdownViewportHost {
                 this.schedule();
                 if (view === this.active && this.focusAfterRemount && !this.pointerView && view!.semantic?.editable) this.focus();
               },
-            });
+            }, detailsSession);
           } else {
             view.source = new MarkdownSourceWindow(this.document.session, window, {
               target: element,

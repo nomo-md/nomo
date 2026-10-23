@@ -18,6 +18,14 @@ export class DetailsSession {
   private sourceEntries: Map<number, SourceEntry> | null = null;
   private pendingSource = false;
 
+  fork(previous: string, source: string): DetailsSession {
+    const next = new DetailsSession();
+    next.entries = new Map([...this.entries].map(([pos, entry]) => [pos, { ...entry }]));
+    if (source !== previous) next.beforeSourceChange(previous, source);
+    next.prepare(source);
+    return next;
+  }
+
   invalidateSource(): void { if (!this.pendingSource) this.sourceEntries = null; }
 
   beforeSourceChange(previous: string, source: string): void {

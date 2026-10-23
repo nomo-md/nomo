@@ -1,4 +1,5 @@
 import { ProseMirrorEditorCore } from '../editor-core/ProseMirrorEditorCore';
+import type { DetailsSession } from '../editor-core/details/detailsState';
 import type { EditorCoreOptions, EditorRuntimeOptions } from '../editor-core/types';
 import type { MarkdownSessionController } from './controller';
 import type { DocumentWindow } from './protocol';
@@ -31,6 +32,7 @@ export class MarkdownSemanticWindow {
       onFailure(error: unknown): void;
       onPresentationChange?(): void;
     },
+    detailsSession?: DetailsSession,
   ) {
     this.ready = window.text.length === 0;
     if (this.ready) this.resolveReady();
@@ -78,7 +80,7 @@ export class MarkdownSemanticWindow {
           this.composing = kind === 'composition-start';
         },
       },
-    });
+    }, detailsSession);
     this.detachEdits = session.attachEdits({
       awaitCompositionEnd: () => this.core.awaitCompositionEnd(),
       commitPendingEdits: () => this.core.commitPendingEdits(),
