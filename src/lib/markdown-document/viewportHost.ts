@@ -1,5 +1,6 @@
 import type { EditorCoreOptions, EditorRuntimeOptions } from '../editor-core/types';
 import type { ProgressiveMarkdownDocument } from './runtime';
+import type { MarkdownIndexChange } from './incrementalIndex';
 import { MarkdownSemanticWindow } from './semanticWindow';
 import { MarkdownSourceWindow } from './sourceWindow';
 import {
@@ -140,7 +141,7 @@ export class MarkdownViewportHost {
   private layoutBatch: MarkdownLayoutBatch;
   private typographySubscription: { destroy(): void };
   private readonly stats = { ranges: 0, created: 0, destroyed: 0, moved: 0,
-    measurements: 0, heightChanges: 0, tablePublications: 0, tableRestores: 0,
+    measurements: 0, heightChanges: 0, tablePublications: 0, tableRestores: 0, indexOnlyUpdates: 0,
     anchorCorrections: 0, overBudget: 0, peakMounted: 0, batches: 0, maxPreparationMs: 0,
     preparationHints: 0, maxJumpWaitMs: 0, maxViewReleaseMs: 0, overBudgetReleases: 0 };
   private installedLayout = '';
@@ -227,13 +228,14 @@ export class MarkdownViewportHost {
           : Promise.resolve(),
       commitPendingEdits() {},
     });
-    this.unsubscribe = document.subscribe(() => {
+    this.unsubscribe = document.subscribe((state, change) => {
       this.budget.updateDocument(this, document.state.progress);
       if (this.outlineNavigation && this.outlineNavigation.revision !== document.state.status.revision)
         this.cancelOutlineNavigation();
+      if (change && this.updateOffscreenIndex(change)) return;
       for (const view of this.mounted) {
-        view.semantic?.setFailure(!!document.state.failure || !!this.viewFailure);
-        view.source?.setReadonly(!!this.options.readonly || !!document.state.failure || !!this.viewFailure);
+        view.semantic?.setFailure(!!state.failure || !!this.viewFailure);
+        view.source?.setReadonly(!!this.options.readonly || !!state.failure || !!this.viewFailure);
       }
       this.schedule();
     });
@@ -648,7 +650,60 @@ export class MarkdownViewportHost {
   };
   private blockLayoutKey(block: MarkdownStructureIndex['blocks'][number]) {
     if (this.mode === 'semantic' && block.mode === 'raw') return `restricted:${block.id}:${this.layoutContext}`;
-    return `${block.id}:${block.contentVersion ?? block.version}:${block.sourceHash}:${JSON.stringify(block.references.map(key => this.index?.references[key]))}:${this.layoutContext}`;
+    const references = block.references.length ? JSON.stringify(block.references.map(key => this.index?.references[key])) : '[]';
+    return `${block.id}:${block.contentVersion ?? block.version}:${block.sourceHash}:${references}:${this.layoutContext}`;
+  }
+  private updateStructureIndex(index: MarkdownStructureIndex | null, geometryChanged = false) {
+    const previousLength = this.heights.length;
+    const appendOnly = index === this.index && (index?.blocks.length ?? 0) >= previousLength;
+    const structureChanged = index !== this.index || (index?.blocks.length ?? 0) !== previousLength || index?.blocks.at(-1) !== this.lastIndexedBlock;
+    if (index !== this.index || (index?.blocks.length ?? 0) < previousLength || geometryChanged) {
+      this.index = index;
+      this.heights = new MarkdownHeightIndex();
+    }
+    const heightFor = (block: MarkdownStructureIndex['blocks'][number]) => this.layoutCache.get(this.blockLayoutKey(block))?.height ??
+      (this.mode === 'semantic' && block.mode === 'raw' ? 104 : estimateMarkdownBlockHeight(block));
+    if (previousLength && this.heights.length === previousLength && index?.blocks[previousLength - 1] !== this.lastIndexedBlock)
+      this.heights.update(previousLength - 1, heightFor(index!.blocks[previousLength - 1]));
+    if (!this.heights.length && index?.blocks.length)
+      this.heights.rebuild(index.blocks.length, i => heightFor(index.blocks[i]));
+    else for (let i = this.heights.length; i < (index?.blocks.length ?? 0); i++) this.heights.append(heightFor(index!.blocks[i]));
+    this.lastIndexedBlock = index?.blocks.at(-1);
+    if (structureChanged) {
+      const previousGroups = this.groups.length;
+      this.groups = this.grouping.update(index?.blocks ?? []);
+      if (appendOnly) {
+        for (let i = Math.max(0, previousGroups - 1); i < this.groups.length; i++) this.groupById.set(this.groups[i].id, this.groups[i]);
+        for (let i = Math.max(0, previousLength - 1); i < (index?.blocks.length ?? 0); i++) this.blockPositions.set(index!.blocks[i].id, i);
+      } else {
+        this.groupById.clear();
+        for (const group of this.groups) this.groupById.set(group.id, group);
+        this.blockPositions.clear();
+        if (index) for (let i = 0; i < index.blocks.length; i++) this.blockPositions.set(index.blocks[i].id, i);
+      }
+    }
+  }
+  private updateOffscreenIndex(change: MarkdownIndexChange) {
+    const state = this.document.state;
+    const last = this.mounted.at(-1);
+    // 只跳过已覆盖最大预加载范围后的纯追加；导航、测量、权限与完整索引一律走原挂载流程。
+    if (change.complete || change.referencesChanged || this.hidden || this.disposed || this.busy || this.frame || this.again ||
+      this.dirty.size || this.outlineNavigation || this.preferredByte !== undefined || this.scrollByte !== undefined ||
+      !this.layoutContext || !this.installedLayout || state.failure || this.viewFailure || this.document.session.state.pendingTransactions ||
+      state.mountMode !== 'windowed' || !state.windowLimited || this.budget.pressured(this) ||
+      !state.index || state.index !== this.index || state.index.revision !== state.status.revision ||
+      !last?.to || change.fromByte < last.window.toByte || state.index.blocks.length < this.heights.length) return false;
+    const bottom = this.localScrollTop + (this.scroll.clientHeight || 800) / this.scale * (MARKDOWN_VIEWPORT_POLICY.forwardScreens + 1);
+    if (this.heights.top(last.to) < bottom) return false;
+    this.updateStructureIndex(state.index);
+    const tail = this.spacers.get('tail');
+    const total = Math.max(this.heights.totalHeight, state.status.byteLength / 100 * 24);
+    const height = Math.max(0, total - this.heights.top(last.to));
+    if (!tail || height <= 0) return false;
+    // 保持完整滚动高度；屏外追加不触碰现有窗口、选区、编辑权限或增强任务。
+    if (tail.style.height !== `${height}px`) tail.style.height = `${height}px`;
+    this.stats.indexOnlyUpdates++;
+    return true;
   }
   private captureAnchor(forDirect = false): ReadingAnchor | undefined {
     if (!forDirect && this.outlineNavigation && !this.outlineNavigation.aligned) return undefined;
@@ -1115,30 +1170,7 @@ export class MarkdownViewportHost {
       const previousAnchor = geometryChanged ? (this.readingAnchor ?? this.captureAnchor()) :
         index !== this.index ? this.captureAnchor() : undefined;
       this.layoutContext = context;
-      const previousLength = this.heights.length;
-      const appendOnly = index === this.index && (index?.blocks.length ?? 0) >= previousLength;
-      const structureChanged = index !== this.index || (index?.blocks.length ?? 0) !== previousLength || index?.blocks.at(-1) !== this.lastIndexedBlock;
-      if (index !== this.index || (index?.blocks.length ?? 0) < previousLength || geometryChanged) {
-        this.index = index;
-        this.heights = new MarkdownHeightIndex();
-      }
-      const heightFor = (block: MarkdownStructureIndex['blocks'][number]) => this.layoutCache.get(this.blockLayoutKey(block))?.height ??
-        (this.mode === 'semantic' && block.mode === 'raw' ? 104 : estimateMarkdownBlockHeight(block));
-      if (previousLength && this.heights.length === previousLength && index?.blocks[previousLength - 1] !== this.lastIndexedBlock)
-        this.heights.update(previousLength - 1, heightFor(index!.blocks[previousLength - 1]));
-      for (let i = this.heights.length; i < (index?.blocks.length ?? 0); i++) this.heights.append(heightFor(index!.blocks[i]));
-      this.lastIndexedBlock = index?.blocks.at(-1);
-      if (structureChanged) {
-        const previousGroups = this.groups.length;
-        this.groups = this.grouping.update(index?.blocks ?? []);
-        if (appendOnly) {
-          for (let i = Math.max(0, previousGroups - 1); i < this.groups.length; i++) this.groupById.set(this.groups[i].id, this.groups[i]);
-          for (let i = Math.max(0, previousLength - 1); i < (index?.blocks.length ?? 0); i++) this.blockPositions.set(index!.blocks[i].id, i);
-        } else {
-          this.groupById = new Map(this.groups.map(group => [group.id, group]));
-          this.blockPositions = new Map(index?.blocks.map((block, i) => [block.id, i]) ?? []);
-        }
-      }
+      this.updateStructureIndex(index, geometryChanged);
       if (geometryChanged) for (const view of this.mounted) this.markDirty(view);
       this.restoreAnchor(previousAnchor);
       this.alignOutlineHeading();

@@ -17,6 +17,16 @@ function scenario(overrides: Partial<DocumentCloseHooks> = {}) {
 }
 
 describe('后台关闭的所有权与操作保护', () => {
+  it('按文档等待编辑操作不受其他标签阻塞，关联文档完成前仍须等待', async () => {
+    const operations = new DocumentOperationRegistry(), unrelated = deferred(), related = deferred();
+    const other = operations.run('other', 'edit', () => unrelated.promise);
+    const member = operations.run('member', 'edit', () => related.promise);
+    let ready = false;
+    const waiting = operations.awaitSource(['active', 'member'], ['edit', 'copy']).then(() => { ready = true; });
+    await Promise.resolve(); expect(ready).toBe(false);
+    related.resolve(); await member; await waiting; expect(ready).toBe(true);
+    unrelated.resolve(); await other;
+  });
   it('输入收口等待期间就拒绝新操作，准备取消后不恢复第二次', async () => {
     const coordinator = new DocumentCloseCoordinator(), gate = deferred(), { hooks } = scenario({ prepare: () => gate.promise, decide: async () => false });
     const closing = coordinator.request(['a'], hooks);

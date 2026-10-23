@@ -99,6 +99,58 @@ function outlineGeometry(target: HTMLElement, positions: number[]) {
 }
 
 describe('完整会话的真实窗口宿主', () => {
+  it('屏外追加保留可见窗口及滚动高度，文末引用和完整索引仍立即更新', async () => {
+    let append!: () => void, finish!: () => void;
+    const second = new Promise<void>(resolve => { append = resolve; });
+    const tail = new Promise<void>(resolve => { finish = resolve; });
+    const build: typeof buildMarkdownIndex = (port, snapshot, options) => buildMarkdownIndex(port, snapshot, {
+      ...options, scan: async (port, snapshot, task) => {
+        const scanner = new MarkdownStructureScanner(snapshot.revision);
+        const first = await port.readSnapshot(snapshot, 0, 2048);
+        await task.onBatch(scanner.push(first.text));
+        await second;
+        task.signal.throwIfAborted();
+        const next = await port.readSnapshot(snapshot, first.toByte, 4096);
+        await task.onBatch(scanner.push(next.text));
+        await tail;
+        task.signal.throwIfAborted();
+        const rest = await port.readSnapshot(snapshot, next.toByte, snapshot.byteLength);
+        await task.onBatch(scanner.push(rest.text, true));
+      },
+    });
+    const port = createMemoryMarkdownPort();
+    const runtime = new ProgressiveMarkdownDocument(port, await port.openDocument({
+      text: '[reference][late]\n\n' + 'paragraph\n\n'.repeat(1200) + '[late]: /resolved\n',
+    }), build);
+    runtime.updateMountLimits({ ...resolveMarkdownWindowingLimits(100).mount, bytes: 1000, returnBytes: 800 });
+    const pane = document.body.appendChild(document.createElement('div'));
+    pane.className = 'semantic-pane';
+    Object.defineProperty(pane, 'clientHeight', { value: 100 });
+    const target = pane.appendChild(document.createElement('div'));
+    const failures: unknown[] = [];
+    const host = new MarkdownViewportHost(runtime, target, 'semantic', {}, {
+      onActive() {}, onFailure: error => failures.push(error), writeClipboard: async () => {},
+    });
+    try {
+      await vi.waitFor(() => expect(host.writable).toBe(true));
+      await new Promise(resolve => setTimeout(resolve, 350));
+      const window = target.querySelector('.ProseMirror');
+      const created = host.diagnostics.created;
+      const before = runtime.state.progress.indexedBytes;
+      append();
+      await vi.waitFor(() => expect(runtime.state.progress.indexedBytes).toBeGreaterThan(before));
+      expect(target.querySelector('.ProseMirror')).toBe(window);
+      expect(host.diagnostics.created).toBe(created);
+      expect(host.diagnostics.indexOnlyUpdates).toBeGreaterThan(0);
+      expect(host.writable).toBe(true);
+      expect(target.querySelector('.markdown-session-spacer')).not.toBeNull();
+      finish();
+      await vi.waitFor(() => expect(target.querySelector('a')?.getAttribute('href')).toBe('/resolved'));
+      expect(runtime.state.progress.state).toBe('ready');
+      expect(runtime.state.windowLimited).toBe(true);
+      expect(failures).toEqual([]);
+    } finally { append(); finish(); await host.dispose(); await runtime.close(true); }
+  });
   it('重挂载阅读锚点跨多次迟到布局保持原屏幕位置，用户滚动后停止恢复', async () => {
     const { host, target } = await setup('# 标题\n\n正文\n\n尾声');
     const pane = target.parentElement!, core = host.activeCore!;

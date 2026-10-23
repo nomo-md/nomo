@@ -21,6 +21,7 @@ export class MathInlineNodeView {
   private suppressNextSelectAutoEdit = false;
   private originalTex = '';
   private renderId = 0;
+  private renderer: ReturnType<typeof getMathRenderer> = null;
   private previewRenderId = 0;
   private pendingPointerRatio: number | null = null;
   private activeEditExitFn: (() => void) | null = null;
@@ -93,7 +94,7 @@ export class MathInlineNodeView {
     if (this.editing && texChanged) {
       // 外部更新已改变正文，结束旧缓冲并释放其组字等待。
       this.cleanupEdit();
-    } else if (!this.editing) {
+    } else if (!this.editing && (texChanged || this.renderer !== getMathRenderer())) {
       this.renderKaTeX();
     }
     return true;
@@ -151,6 +152,7 @@ export class MathInlineNodeView {
     if (!tex) return;
 
     const mathRenderer = getMathRenderer();
+    this.renderer = mathRenderer;
     if (!mathRenderer) return;
 
     try {

@@ -1,5 +1,5 @@
 import { MarkdownSessionController } from './controller';
-import { buildMarkdownIndex, type MarkdownIndexedSnapshot } from './incrementalIndex';
+import { buildMarkdownIndex, type MarkdownIndexedSnapshot, type MarkdownIndexChange } from './incrementalIndex';
 import { invalidateMarkdownIndex, type MarkdownIndexInvalidation } from './indexInvalidation';
 import { MarkdownMountPolicy, type MarkdownMountMode } from './mountPolicy';
 import { DEFAULT_MARKDOWN_MOUNT_LIMITS, type MarkdownMountLimits } from './windowingLimits';
@@ -70,7 +70,7 @@ export class ProgressiveMarkdownDocument {
   private policy = new MarkdownMountPolicy();
   private pressureOwners = new Set<object>();
   private mode: MarkdownMountMode = 'windowed';
-  private readonly listeners = new Set<(state: MarkdownLoadingState) => void>();
+  private readonly listeners = new Set<(state: MarkdownLoadingState, change?: MarkdownIndexChange) => void>();
   private unsubscribe: () => void;
   private unsubscribeChanges: () => void;
   private readonly started: number;
@@ -170,7 +170,7 @@ export class ProgressiveMarkdownDocument {
     };
   }
   get elapsed() { return performance.now() - this.started; }
-  subscribe(listener: (state: MarkdownLoadingState) => void) {
+  subscribe(listener: (state: MarkdownLoadingState, change?: MarkdownIndexChange) => void) {
     this.listeners.add(listener);
     listener(this.state);
     return () => this.listeners.delete(listener);
@@ -179,7 +179,7 @@ export class ProgressiveMarkdownDocument {
     if (this.closed || !this.policy.updateLimits(limits)) return;
     if (!this.hidden) this.publish(true);
   }
-  private publish(force = false) {
+  private publish(force = false, change?: MarkdownIndexChange) {
     if (this.closed) return;
     this.mode = this.policy.update(
       this.state.progress,
@@ -203,7 +203,7 @@ export class ProgressiveMarkdownDocument {
     // 滚动只更新时间和挂载策略；元数据没有变化时不让应用反复派生大纲、持久化标签。
     if (!force && signature === this.publishedSignature && this.publishedFailure === state.failure) return;
     this.publishedSignature = signature; this.publishedFailure = state.failure;
-    for (const listener of this.listeners) listener(state);
+    for (const listener of this.listeners) listener(state, change);
   }
   noteVisible(stage: 'readable' | 'editable' | 'stable') {
     if (this.timings[stage] === undefined) {
@@ -303,7 +303,7 @@ export class ProgressiveMarkdownDocument {
               this.queuedYield = resolve;
               this.enqueueIndexYield();
             }),
-          onProgress: (index) => {
+          onProgress: (index, change) => {
             if (
               this.closed ||
               generation !== this.generation ||
@@ -311,7 +311,7 @@ export class ProgressiveMarkdownDocument {
             )
               return;
             this.currentIndex = index;
-            this.publish();
+            this.publish(false, change);
           },
         });
         abort.signal.throwIfAborted();

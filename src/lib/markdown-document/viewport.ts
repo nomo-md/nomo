@@ -22,6 +22,22 @@ export class MarkdownHeightIndex {
   height(index: number) {
     return this.heights[index] ?? 0;
   }
+  /** 首次挂载/几何失效时线性构建，后续追加和局部测量仍使用原来的增量更新。 */
+  rebuild(length: number, heightAt: (index: number) => number) {
+    const heights = new Array<number>(length);
+    const tree = new Array<number>(length + 1).fill(0);
+    for (let index = 1; index <= length; index++) {
+      const height = heightAt(index - 1);
+      if (!Number.isFinite(height) || height < 1) throw new RangeError('排版高度必须是有限正数。');
+      heights[index - 1] = height;
+      tree[index] += height;
+      const parent = index + (index & -index);
+      if (parent <= length) tree[parent] += tree[index];
+    }
+    // 校验失败时保留原索引，避免发布半成品。
+    this.heights = heights;
+    this.tree = tree;
+  }
   append(height: number) {
     if (!Number.isFinite(height) || height < 1) throw new RangeError('排版高度必须是有限正数。');
     const index = this.length + 1;

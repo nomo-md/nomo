@@ -2,8 +2,21 @@
 export function createRenderTaskQueue(concurrency: number) {
   let active = 0;
   const queue: Array<() => void> = [];
+  let deadline = 0;
+  let resume: ReturnType<typeof setTimeout> | undefined;
   function drain() {
+    if (resume !== undefined) return;
+    // 库调用不可抢占；只在任务之间让出主线程，避免连续微任务把多次增强渲染连成一个长任务。
+    if (queue.length && active < concurrency && performance.now() >= deadline) {
+      resume = setTimeout(() => {
+        resume = undefined;
+        deadline = performance.now() + 4;
+        drain();
+      }, 0);
+      return;
+    }
     while (active < concurrency && queue.length) queue.shift()!();
+    if (!active && !queue.length) deadline = 0;
   }
   return function run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     return new Promise((resolve, reject) => {
@@ -12,6 +25,7 @@ export function createRenderTaskQueue(concurrency: number) {
         if (started) return;
         const index = queue.indexOf(start);
         if (index >= 0) queue.splice(index, 1);
+        if (!queue.length && resume !== undefined) { clearTimeout(resume); resume = undefined; }
         signal?.removeEventListener('abort', abort);
         reject(new DOMException('Render cancelled', 'AbortError'));
       };
@@ -29,6 +43,7 @@ export function createRenderTaskQueue(concurrency: number) {
       };
       if (signal?.aborted) { abort(); return; }
       signal?.addEventListener('abort', abort, { once: true });
+      if (!active && !queue.length && resume === undefined) deadline = performance.now() + 4;
       queue.push(start);
       drain();
     });

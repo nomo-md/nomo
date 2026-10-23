@@ -57,6 +57,23 @@ async function setup(text: string, onRequestSource?: (isCurrent: () => boolean) 
 }
 
 describe('应用 Markdown 会话入口', () => {
+  it('初始元数据订阅只读取一次前缀，编辑后的新修订仍刷新 front matter', async () => {
+    const port = createMemoryMarkdownPort(), read = vi.spyOn(port, 'readWindow');
+    vi.spyOn(ProgressiveMarkdownDocument, 'open').mockImplementation(async (_, input) =>
+      new ProgressiveMarkdownDocument(port, await port.openDocument(input), localBuild));
+    const text = '---\ntitle: first\n---\n\n# Body';
+    const tab = createMarkdownTab({ markdown: text, savedMarkdown: text });
+    const application = new MarkdownApplicationSession(tab, false, { markdown: '' }, () => {}, () => {});
+    applications.push(application);
+    const doc = await application.ready;
+    await vi.waitFor(() => expect(doc.state.progress.state).toBe('ready'));
+    expect(read).toHaveBeenCalledOnce();
+    await doc.session.applyEdits({ viewGeneration: doc.session.state.viewGeneration,
+      historyGroupId: 'front-matter', edits: [{ fromByte: 11, toByte: 16, insertedText: 'second' }] });
+    await vi.waitFor(() => expect(JSON.stringify(application.frontMatter)).toContain('second'));
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(read.mock.calls[1][1]).toBe(1);
+  });
   it('准备关闭后源码组件只归还宿主，下一帧的回收入口才释放窗口', async () => {
     const { application } = await setup('# 源码关闭\n\n尾部');
     const semantic = document.body.appendChild(document.createElement('div'));
@@ -65,6 +82,8 @@ describe('应用 Markdown 会话入口', () => {
     application.setViewMode('split');
     const returnHost = application.mountSource(source);
     await vi.waitFor(() => expect(source.querySelector('.cm-editor')).not.toBeNull());
+    // 源码 DOM 可以先于语义预览开放；关闭验证从真实可编辑状态开始。
+    await vi.waitFor(() => expect(application.writable).toBe(true));
     application.stopCloseEnhancements();
     expect(application.writable).toBe(true);
     await application.prepareViewClose();

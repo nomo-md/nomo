@@ -54,6 +54,8 @@ export class MarkdownApplicationSession {
   private semanticTarget?: HTMLElement;
   private viewMode: 'semantic' | 'source' | 'split';
   private teardown: Promise<void> = Promise.resolve();
+  private mounting?: Promise<void>;
+  private mountRequested = false;
   private scrollOrigin: 'semantic' | 'source' | undefined;
   private scrollUntil = 0;
   private frontMatterRevision = -1;
@@ -72,7 +74,7 @@ export class MarkdownApplicationSession {
     private desktop: boolean,
     options: EditorCoreOptions,
     private onFailure: (error: unknown) => void,
-    private onMetadata: () => void,
+    private onMetadata: (reason?: 'index-progress') => void,
     private onSelection?: (selection: DocumentSelection) => void,
     private onRequestSource?: (isCurrent: () => boolean) => Promise<boolean>,
   ) {
@@ -221,6 +223,8 @@ export class MarkdownApplicationSession {
         Math.min(doc.state.status.byteLength, 32 * 1024),
       );
       this.frontMatter = extractFrontMatterBlock(prefix.text);
+      // subscribe 会立即发布当前状态；同一修订的前缀已读取，不再发起第二次 IPC。
+      this.frontMatterRevision = prefix.revision;
       if (!tab.nativePath && doc.state.status.path) {
         const path = doc.state.status.path;
         const recoveredPath = path.startsWith('\\\\?\\UNC\\') ? '\\\\' + path.slice(8)
@@ -236,8 +240,11 @@ export class MarkdownApplicationSession {
       savedText = '';
       tab.largeDocumentMode = false;
       tab.readonlyDocumentMode = false;
-      this.unsubscribe = doc.subscribe((state) => {
+      this.unsubscribe = doc.subscribe((state, indexChange) => {
         const pending = doc.session.state.pendingTransactions > 0;
+        const progressOnly = !!indexChange && tab.dirty === (state.status.dirty || pending) &&
+          tab.version === state.status.revision && tab.byteLength === state.status.byteLength &&
+          tab.encoding === (state.status.encoding ?? tab.encoding);
         tab.dirty = state.status.dirty || pending;
         tab.version = state.status.revision;
         tab.byteLength = state.status.byteLength;
@@ -263,7 +270,9 @@ export class MarkdownApplicationSession {
                 !(error instanceof DocumentConflictError)) this.onFailure(error);
             });
         }
-        this.onMetadata();
+        this.onMetadata(progressOnly ? 'index-progress' : undefined);
+        // 索引仍完整通知大纲与加载状态；正文没变时不重复触发自动保存和编辑元数据事件。
+        if (progressOnly) return;
         const event = {
           ...this.fallback.getSnapshot(),
           markdown: '',
@@ -310,9 +319,25 @@ export class MarkdownApplicationSession {
     this.onFailure(error);
   }
   private async mountViews() {
+    this.mountRequested = true;
+    if (this.mounting) return this.mounting;
+    const run = async () => {
+      try {
+        do {
+          this.mountRequested = false;
+          await this.mountCurrentViews();
+        } while (this.mountRequested && !this.disposed && !this.preparedForClose);
+      } finally { this.mounting = undefined; }
+    };
+    this.mounting = run();
+    return this.mounting;
+  }
+  private async mountCurrentViews() {
     const doc = await this.ready;
     await this.teardown;
-    if (this.disposed) return;
+    if (this.disposed || this.preparedForClose) return;
+    // 等待期间到达的挂载请求已包含在当前目标/模式中；后续异步阶段有新请求再补一次。
+    this.mountRequested = false;
     const callbacks = (mode: 'semantic' | 'source') => ({
       onActive: (core: EditorCore | undefined, source: MarkdownSourceWindow | undefined) => {
         if (!core && !source && this.activeHostMode !== mode) return;

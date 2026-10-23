@@ -14,6 +14,7 @@ import {
   restorePendingCloseItems,
   partitionPersistedWorkspaceTabsForRestore,
   persistWorkspaceDrafts,
+  WorkspacePersistenceQueue,
   type WorkspaceDraftPersistenceCache,
 } from './workspacePersistence';
 
@@ -36,6 +37,30 @@ beforeEach(() => {
 });
 
 describe('workspacePersistence', () => {
+  it('只合并相邻未执行元数据，关闭屏障前后的请求保持顺序', async () => {
+    const queue = new WorkspacePersistenceQueue(), writes: string[] = [];
+    let finish!: () => void;
+    const running = queue.enqueue(() => new Promise<void>(resolve => { finish = resolve; }));
+    await Promise.resolve();
+    const old = queue.enqueue(async () => { writes.push('old'); }, true);
+    const latest = queue.enqueue(async () => { writes.push('latest'); }, true);
+    expect(latest).toBe(old);
+    const close = queue.enqueue(async () => { writes.push('close'); });
+    const after = queue.enqueue(async () => { writes.push('after'); }, true);
+    expect(after).not.toBe(latest);
+    finish(); await Promise.all([running, old, latest, close, after]);
+    expect(writes).toEqual(['latest', 'close', 'after']);
+  });
+  it('已开始的写入不合并，错误返回调用方但不阻断之后的写入', async () => {
+    const queue = new WorkspacePersistenceQueue(); let fail!: (error: Error) => void;
+    const first = queue.enqueue(() => new Promise<void>((_, reject) => { fail = reject; }), true);
+    await Promise.resolve();
+    const next = vi.fn(async () => {}), second = queue.enqueue(next, true);
+    expect(second).not.toBe(first);
+    const rejected = expect(first).rejects.toThrow('disk failure');
+    fail(Error('disk failure')); await rejected; await second; await queue.settled;
+    expect(next).toHaveBeenCalledOnce();
+  });
   it('失败后组合回到原外层位置，不移动等待期间新开的标签', () => {
     const tabs = ['a', 'b', 'c', 'new'].map(id => createTab({ id }));
     const item = (tabId: string) => ({ kind: 'single' as const, id: `item-${tabId}`, tabId });

@@ -155,6 +155,7 @@
     restorePendingCloseItems,
     partitionPersistedWorkspaceTabsForRestore,
     persistWorkspaceDrafts,
+    WorkspacePersistenceQueue,
     type WorkspaceDraftPersistenceCache,
   } from './services/workspacePersistence';
   import {
@@ -914,11 +915,12 @@
     await persistWorkspaceStateNow({ ensureDraftIds: false });
   }
 
-  let workspacePersistenceQueue: Promise<void> = Promise.resolve();
+  const workspacePersistenceQueue = new WorkspacePersistenceQueue();
   function persistWorkspaceStateNow(options?: { ensureDraftIds?: boolean; preparedClose?: boolean }) {
-    const pending = workspacePersistenceQueue.then(() => persistWorkspaceStateImmediately(options));
-    workspacePersistenceQueue = pending.catch(() => undefined);
-    return pending;
+    const metadataOnly = !options && !workspaceInteractionDisabled && !workspaceTransferFlushing &&
+      !workspaceRestorePreparation && !deferredWorkspaceRestore && !pendingCloseRecords.size &&
+      tabs.length > 0 && tabs.every(tab => isMarkdownTab(tab) && !!tab.documentId);
+    return workspacePersistenceQueue.enqueue(() => persistWorkspaceStateImmediately(options), metadataOnly);
   }
 
   async function persistWorkspaceStateImmediately(options?: { ensureDraftIds?: boolean; preparedClose?: boolean }) {
@@ -1980,7 +1982,17 @@
     closeExternalChangeDialog();
     tabSwitchInProgress = true;
     try {
-      await awaitPendingEditorOperations();
+      const from = tabs.find(tab => tab.id === activeTabId);
+      const to = tabs.find(tab => tab.id === tabId);
+      // 仅 Markdown 间切换使用文档范围；退出、跨窗和其他文件类型沿用全局等待。
+      const transitionIds = isMarkdownTab(from) && isMarkdownTab(to)
+        ? [...new Set([activeTabId, tabId].flatMap(id => {
+            const item = findWorkspaceItemForTab(workspaceItems, id);
+            return item ? getWorkspaceItemTabIds(item) : [id];
+          }))]
+        : undefined;
+      await awaitPendingEditorOperations(transitionIds);
+      if (transitionIds && !transitionIds.includes(activeTabId)) return;
       const currentTab = tabs.find((tab) => tab.id === activeTabId);
       // 切换前必须把当前 CodeMirror 增量和恢复日志都落到 Rust，不能让隐藏组件持有未提交正文。
       await flushSegmentedDocumentBeforeTransition(
@@ -1988,8 +2000,10 @@
         segmentedWorkspace,
         segmentedDocumentPort,
       );
+      // 异步等待期间仍可能有新输入；保留最后一次同步收束，只跳过紧邻步骤的重复提交。
+      const preparedActiveId = transitionIds && isMarkdownTab(currentTab) && getMarkdownApplicationSession(editor) ? activeTabId : undefined;
       saveActiveTabState();
-      flushVisibleDocumentRuntimes();
+      flushVisibleDocumentRuntimes(preparedActiveId);
       if (isMarkdownTab(currentTab)) {
         void flushReadingPositions();
       }
@@ -1997,7 +2011,7 @@
       if (targetTab) {
         const nextOwner = findWorkspaceItemForTab(workspaceItems, tabId);
         if (nextOwner?.id !== activeItemId) {
-          suspendVisibleDocumentRuntimes();
+          suspendVisibleDocumentRuntimes(!!transitionIds);
         }
         activeTabId = tabId;
         persistWorkspaceState();
@@ -3862,9 +3876,12 @@
     void pending.then(() => pendingEditorOperations.delete(pending), () => pendingEditorOperations.delete(pending));
     return pending;
   }
-  async function awaitPendingEditorOperations() {
-    while (pendingEditorOperations.size) await Promise.allSettled([...pendingEditorOperations]);
-    await Promise.all([...documentRuntimes.values()].filter(runtime => !runtime.disposed).map(runtime => runtime.session?.flush()));
+  async function awaitPendingEditorOperations(ids?: readonly string[]) {
+    if (ids) await documentCloseCoordinator.operations.awaitSource(ids, ['edit', 'copy']);
+    else while (pendingEditorOperations.size) await Promise.allSettled([...pendingEditorOperations]);
+    const runtimes = [...documentRuntimes.values()].filter(runtime => !runtime.disposed && (!ids || ids.includes(runtime.tabId)));
+    if (ids) await Promise.all(runtimes.map(runtime => runtime.images.awaitPendingInsertions()));
+    await Promise.all(runtimes.map(runtime => runtime.session?.flush()));
   }
 
   function handleWorkspaceContextMenu(event: MouseEvent) {
@@ -4013,7 +4030,7 @@
     }, (error) => {
       const current = documentRuntimes.get(tab.id);
       if (current?.session === application && !current.disposed) showVisibleError(error, t.saveFileFailed());
-    }, () => {
+    }, (reason) => {
       const current = documentRuntimes.get(tab.id);
       if (!current || current.disposed || current.session !== application || closingDocuments.has(tab.id)) return;
       const loading = application.document?.state;
@@ -4038,8 +4055,10 @@
         if (changed && searchPanelOpen) scheduleSearchRefresh({ preserveActive: true, selectActive: false });
       }
       scheduleSessionAnalysis(tab.id, application);
-      tabs = [...tabs];
-      persistWorkspaceState();
+      if (reason !== 'index-progress') {
+        tabs = [...tabs];
+        persistWorkspaceState();
+      }
     }, selection => {
       if (activeTabId !== tab.id || isSwitchingTab) return;
       writingStatsController.setSelection({ from: selection.anchorByte, to: selection.headByte, sourceCoordinates: 'utf8' });
@@ -4156,13 +4175,14 @@
     if (runtime.mode !== 'semantic') runtime.sourceScrollTop = runtime.sourcePane?.scrollTop ?? runtime.sourceScrollTop;
   }
 
-  function flushVisibleDocumentRuntimes() {
+  function flushVisibleDocumentRuntimes(preparedTabId?: string) {
     rememberFocusedRuntime();
-    for (const id of activeComparison ? getWorkspaceItemTabIds(activeComparison) : [activeTabId]) flushDocumentRuntime(id);
+    for (const id of activeComparison ? getWorkspaceItemTabIds(activeComparison) : [activeTabId])
+      if (id !== preparedTabId) flushDocumentRuntime(id);
   }
 
-  function suspendVisibleDocumentRuntimes() {
-    flushVisibleDocumentRuntimes();
+  function suspendVisibleDocumentRuntimes(editsPrepared = false) {
+    if (!editsPrepared) flushVisibleDocumentRuntimes();
     const owner = findWorkspaceItemForTab(workspaceItems, activeTabId);
     for (const id of owner ? getWorkspaceItemTabIds(owner) : [activeTabId]) {
       const runtime = documentRuntimes.get(id);
@@ -4401,7 +4421,7 @@
       await Promise.all([...documentRuntimes.values()].map(runtime => runtime.session?.prepareTransfer()));
       flushVisibleDocumentRuntimes();
       await flushPersistWorkspaceState();
-      await workspacePersistenceQueue;
+      await workspacePersistenceQueue.settled;
       await _workspaceDraftWritePromise;
       await syncCurrentWindowOpenTargetsNow();
     } finally { workspaceTransferFlushing = false; }

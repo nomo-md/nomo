@@ -249,6 +249,10 @@ export class ProseMirrorEditorCore implements EditorCore {
     // 原文字节边界可映射到文档/块边界，光标需要落到最近的可编辑文本位置。
     const safeAnchor = Selection.near(state.doc.resolve(anchor), anchor === state.doc.content.size ? -1 : 1).anchor;
     const safeHead = Selection.near(state.doc.resolve(head), head === state.doc.content.size ? -1 : 1).head;
+    // 新窗口通常已在同一初始光标；不发空事务，避免接入 DOM 后再次更新插件和浏览器选区。
+    // 显式待输入格式仍须由 setSelection 清除，不能把它当成完全相同的状态。
+    if (state.selection instanceof TextSelection && state.selection.anchor === safeAnchor &&
+      state.selection.head === safeHead && state.storedMarks === null) return true;
     this.restoreSelectionSnapshot({ anchor: safeAnchor, head: safeHead }); return true;
   }
 
@@ -943,9 +947,9 @@ export class ProseMirrorEditorCore implements EditorCore {
   restoreSelectionSnapshot(selection: { anchor: number; head: number }): void {
     this.assertActive();
     const state = this.view?.state ?? this.suspendedState ?? this.createState(this.markdown);
-    const nextState = this.restoreSelection(state, selection);
-    if (this.view) this.view.dispatch(state.tr.setSelection(nextState.selection));
-    else this.suspendedState = nextState;
+    const transaction = state.tr.setSelection(this.createRestoredSelection(state, selection));
+    if (this.view) this.view.dispatch(transaction);
+    else this.suspendedState = state.apply(transaction);
   }
 
   placeCaretAtCoordinates({ left, top }: { left: number; top: number }): boolean {
@@ -1687,6 +1691,8 @@ export class ProseMirrorEditorCore implements EditorCore {
 
   updateOptions(options: Partial<EditorRuntimeOptions>): void {
     this.assertActive();
+    const optionsChanged = (Object.keys(options) as Array<keyof EditorRuntimeOptions>)
+      .some(key => options[key] !== this.runtime[key]);
     if (this.view) dismissQuickInsert(this.view);
     if (options.mode && options.mode !== this.runtime.mode && options.readonly !== true) {
       if (this.view) commitActiveEdit(this.view, true);
@@ -1699,9 +1705,10 @@ export class ProseMirrorEditorCore implements EditorCore {
     if (this.semanticViewDirty && this.runtime.mode === 'semantic' && options.mode === 'semantic') {
       this.replaceViewState(this.markdown, undefined, true);
     }
-    this.view?.setProps({
-      editable: () => this.isEditable(),
-    });
+    // NodeView 与插件不需要为重复的权限通知重新更新；编辑收束和事件仍按原顺序执行。
+    if (this.view && (optionsChanged || this.view.editable !== this.isEditable())) {
+      this.view.setProps({ editable: () => this.isEditable() });
+    }
     // A forced hide during composition must not leave a stale draft to revive later.
     if (this.view && (this.runtime.readonly || this.runtime.mode !== 'semantic')) {
       cancelMathInlineDraft(this.view);
@@ -2220,14 +2227,17 @@ export class ProseMirrorEditorCore implements EditorCore {
     state: EditorState,
     selection: { anchor: number; head: number },
   ): EditorState {
+    return state.apply(state.tr.setSelection(this.createRestoredSelection(state, selection)));
+  }
+
+  private createRestoredSelection(state: EditorState, selection: { anchor: number; head: number }): Selection {
     const anchor = clampDocPosition(state.doc, selection.anchor);
     const head = clampDocPosition(state.doc, selection.head);
 
     try {
-      return state.apply(state.tr.setSelection(TextSelection.create(state.doc, anchor, head)));
+      return TextSelection.create(state.doc, anchor, head);
     } catch {
-      const fallback = TextSelection.near(state.doc.resolve(head));
-      return state.apply(state.tr.setSelection(fallback));
+      return TextSelection.near(state.doc.resolve(head));
     }
   }
 

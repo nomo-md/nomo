@@ -33,6 +33,28 @@ import {
   type MarkdownEncoding,
 } from '../../lib/services/storage';
 
+/** 保留写入顺序与错误；仅调用方确认等价的未执行元数据写入可以合并。 */
+export class WorkspacePersistenceQueue {
+  private pending: Promise<void> = Promise.resolve();
+  private replaceable?: { write: () => Promise<void>; promise: Promise<void> };
+  get settled() { return this.pending; }
+  enqueue(write: () => Promise<void>, coalesce = false): Promise<void> {
+    if (coalesce && this.replaceable) {
+      this.replaceable.write = write;
+      return this.replaceable.promise;
+    }
+    const job = { write, promise: Promise.resolve() };
+    job.promise = this.pending.then(() => {
+      if (this.replaceable === job) this.replaceable = undefined;
+      return job.write();
+    });
+    // 关闭、草稿和归属变更都是屏障；后续请求不能越过它合并。
+    this.replaceable = coalesce ? job : undefined;
+    this.pending = job.promise.catch(() => undefined);
+    return job.promise;
+  }
+}
+
 interface PersistedWorkspaceTabV2 {
   closeFailure?: string;
   documentId?: string;

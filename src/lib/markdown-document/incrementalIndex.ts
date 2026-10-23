@@ -9,6 +9,14 @@ export interface MarkdownIndexedSnapshot {
   snapshot: SnapshotReference;
 }
 
+/** 本次发布影响的源文范围；仅用于跳过无关派生工作，不改变索引发布或挂载时机。 */
+export interface MarkdownIndexChange {
+  fromByte: number;
+  toByte: number;
+  referencesChanged: boolean;
+  complete: boolean;
+}
+
 /**
  * 从变更前的安全块重新扫描；只有修改之后某个完整语义块的内容、边界重新一致，
  * 才复用其后的结构。引用字典重新合并，渲染层根据实际变更的定义失效依赖块。
@@ -21,7 +29,7 @@ export async function buildMarkdownIndex(
     previous?: MarkdownIndexedSnapshot;
     edits?: readonly SourceEdit[];
     invalidation?: MarkdownIndexInvalidation;
-    onProgress(index: MarkdownStructureIndex): void;
+    onProgress(index: MarkdownStructureIndex, change?: MarkdownIndexChange): void;
     shouldYield?: () => Promise<void>;
     scan?: typeof scanMarkdownSnapshot;
   },
@@ -51,6 +59,7 @@ export async function buildMarkdownIndex(
       references: index.references,
     },
     onBatch: async (batch: MarkdownStructureBatch) => {
+      const fromByte = batch.blocks[0]?.fromByte ?? index.progress.indexedBytes;
       let through = batch.blocks.length;
       let converged: { oldEnd: number; lineDelta: number } | null = null;
       if (canReuse && previous) {
@@ -104,7 +113,13 @@ export async function buildMarkdownIndex(
           converged.lineDelta,
         );
       } else index.publish(batch);
-      options.onProgress(index);
+      options.onProgress(index, {
+        fromByte,
+        toByte: index.progress.indexedBytes,
+        // 收敛后缀也可能带回引用定义；保守标记，不能漏更新已有可见引用。
+        referencesChanged: !!converged || published.some(block => Object.keys(block.definitions ?? {}).length > 0),
+        complete: index.progress.state === 'ready',
+      });
       return converged ? false : undefined;
     },
   });

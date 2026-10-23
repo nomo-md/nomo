@@ -23,6 +23,7 @@ export class MathBlockNodeView {
   private view: EditorView;
   private getPos: () => number;
   private renderId = 0;
+  private renderer: ReturnType<typeof getMathRenderer> = null;
   private previewRenderId = 0;
 
   // 编辑态相关
@@ -78,7 +79,7 @@ export class MathBlockNodeView {
     if (this.editing && texChanged) {
       // 撤销或外部事务更新内容后结束旧缓冲，不能再把旧输入写回文档。
       this.cleanupEdit();
-    } else if (!this.editing) {
+    } else if (!this.editing && (texChanged || this.renderer !== getMathRenderer())) {
       this.renderKaTeX();
     }
     return true;
@@ -139,6 +140,7 @@ export class MathBlockNodeView {
     if (!tex) return;
 
     const mathRenderer = getMathRenderer();
+    this.renderer = mathRenderer;
     if (!mathRenderer) return;
 
     try {

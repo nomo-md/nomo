@@ -8,6 +8,30 @@ import { MarkdownSemanticWindow } from './semanticWindow';
 import { utf8Length } from './utf8Text';
 
 describe('真实 ProseMirror 窗口接入会话', () => {
+  it('相同源文选区不更新视图，实际选区及待输入格式变化仍完整恢复', async () => {
+    const text = '# Header\n\nBody';
+    const port = createMemoryMarkdownPort();
+    const session = new MarkdownSessionController(port, await port.openDocument({ text }));
+    const target = document.createElement('div');
+    const window = new MarkdownSemanticWindow(session, await port.readWindow(session.documentId, 0, 0, utf8Length(text)),
+      { target, onStale() {}, onHistory() {}, onFailure(error) { throw error; } });
+    try {
+      window.prepareAttachment(); document.body.append(target); window.activate();
+      const view = (window.core as unknown as { view: EditorView }).view;
+      const dispatch = vi.spyOn(view, 'dispatch');
+      expect(window.core.restoreSourceSelection({ anchorByte: 0, headByte: 0 })).toBe(true);
+      expect(dispatch).not.toHaveBeenCalled();
+      view.dispatch(view.state.tr.addStoredMark(view.state.schema.marks.strong.create()));
+      dispatch.mockClear();
+      window.core.restoreSourceSelection({ anchorByte: 0, headByte: 0 });
+      expect(dispatch).toHaveBeenCalledOnce(); expect(view.state.storedMarks).toBeNull();
+      dispatch.mockClear();
+      window.core.restoreSourceSelection({ anchorByte: 2, headByte: 8 });
+      expect(view.state.doc.textBetween(view.state.selection.from, view.state.selection.to)).toBe('Header');
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(session.state.committed).toMatchObject({ revision: 0, dirty: false, canUndo: false });
+    } finally { window.dispose(); target.remove(); await session.close(true); }
+  });
   it('窗口构建与结构测量共享解析，纯排版只刷新几何版本，编辑后重新建立来源', async () => {
     const text = '# 标题\n\n| 列 | 内容 |\n| --- | --- |\n| a | [引用][ref] |\n\n末段';
     const port = createMemoryMarkdownPort();
