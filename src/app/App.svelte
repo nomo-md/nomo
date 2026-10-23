@@ -135,7 +135,7 @@
     type TabDropPlacement, type TabDropZone,
   } from './services/tabTransfer';
   import { createImageInsertionHandlers } from './services/imageInsertion';
-  import { readEditorClipboard, writeEditorClipboard, writeFileClipboard } from './services/clipboard';
+  import { readEditorClipboard, releasePreparedImage, writeEditorClipboard, writeFileClipboard, type ClipboardReadResult } from './services/clipboard';
   import { createDesktopImageLoader } from './services/desktopImageLoader';
   import { OutlineProjection } from './services/outlineProjection';
   import { writeRecoveryDraft as writeRecoveryDraftToStorage } from './services/recoveryDraft';
@@ -3753,11 +3753,16 @@
     const runtime = documentRuntimes.get(sourceTabId);
     const revision = core.getSnapshot().version;
     return trackEditorOperation(async () => {
+      let content: ClipboardReadResult | undefined;
+      let imageTransferred = false;
       try {
-        const content = await readEditorClipboard(desktopEnabled, mode === 'plain' ? 'text' : 'rich');
+        content = await readEditorClipboard(desktopEnabled, mode === 'plain' ? 'text' : 'rich');
         if (!runtime || runtime.disposed || documentRuntimes.get(sourceTabId) !== runtime || core.getSnapshot().version !== revision) return;
         if (content.kind === 'image') {
           await runtime.images.insertImageFiles(content.files);
+        } else if (content.kind === 'native-image') {
+          imageTransferred = true;
+          await runtime.images.insertPreparedImage(content.image);
         } else {
           const input =
             content.kind === 'html'
@@ -3770,8 +3775,13 @@
           }
         }
         if (activeTabId === sourceTabId && !runtime.disposed) core.focus();
-      } catch {
-        statusMessage = t.pasteFailed();
+      } catch (error) {
+        showVisibleError(error, t.pasteFailed());
+      } finally {
+        if (content?.kind === 'native-image' && !imageTransferred) {
+          try { await releasePreparedImage(content.image); }
+          catch (error) { logError('ImageInsertion', '释放过期剪贴板图片失败', { error: String(error) }); }
+        }
       }
     });
   }
@@ -6075,10 +6085,15 @@
   }
 
   async function saveMarkdownFile(saveAs = false): Promise<boolean> {
-    if (closingUiIds.has(activeTabId)) return false;
-    const activeTab = tabs.find((tab) => tab.id === activeTabId);
+    const sourceTabId = activeTabId;
+    if (closingUiIds.has(sourceTabId)) return false;
+    const activeTab = tabs.find((tab) => tab.id === sourceTabId);
     if (!isSegmentedTextTab(activeTab)) {
-      return saveMarkdownDocument(saveAs);
+      // 手动保存等待已受理的图片；图片内部的首次保存走 saveDocumentById，避免自等待。
+      try { await awaitPendingEditorOperations([sourceTabId]); }
+      catch (error) { showVisibleError(error, t.saveFileFailed()); return false; }
+      if (!tabs.some(tab => tab.id === sourceTabId) || closingUiIds.has(sourceTabId)) return false;
+      return saveMarkdownDocument(saveAs, sourceTabId);
     }
 
     const previousNativePath = activeTab.nativePath;

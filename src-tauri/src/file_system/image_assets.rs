@@ -3,26 +3,55 @@ use crate::models::{
     ImageResolveInput, ImageResolvePayload, ImageUploadPayload, PicgoConnectionTestInput,
     PicgoCoreUploadInput, PicgoServerUploadInput,
 };
+pub(crate) mod prepared;
+mod transfer;
+mod upload;
+
+use prepared::PreparedImages;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
     process::Command,
+    sync::Mutex,
 };
+use tauri::{State, WebviewWindow};
+use transfer::{file_fingerprint, read_image_request, ImageSource};
+use upload::{run_picgo_command, UPLOAD_TIMEOUT};
+
+// 串行化目标文件的去重和命名，避免多个窗口同时导入时覆盖同名文件。
+static IMAGE_IMPORT_LOCK: Mutex<()> = Mutex::new(());
 
 #[tauri::command]
-pub(crate) fn import_image_asset(input: ImageAssetInput) -> Result<ImageAssetPayload, String> {
+pub(crate) async fn import_image_asset(
+    window: WebviewWindow,
+    state: State<'_, PreparedImages>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<ImageAssetPayload, String> {
+    let (input, source) = read_image_request(&request, window.label(), &state)?;
+    tauri::async_runtime::spawn_blocking(move || import_image_source(input, source))
+        .await
+        .map_err(|error| format!("图片导入任务失败：{error}"))?
+}
+
+fn import_image_source(
+    input: ImageAssetInput,
+    source: ImageSource,
+) -> Result<ImageAssetPayload, String> {
     let document_path = Path::new(&input.document_path);
     let document_dir = document_path
         .parent()
         .ok_or_else(|| "请先保存 Markdown 文件，再插入本地图片".to_string())?;
-    if input.bytes.is_empty() {
+    if source.len()? == 0 {
         return Err("图片内容为空，无法导入".to_string());
     }
 
+    let fingerprint = source.fingerprint()?;
+    let expected_len = source.len()?;
+    let _guard = IMAGE_IMPORT_LOCK
+        .lock()
+        .map_err(|error| error.to_string())?;
     let document_stem = document_stem(&input.document_file_name, document_path);
     let target = build_image_asset_target(
         document_dir,
@@ -36,7 +65,7 @@ pub(crate) fn import_image_asset(input: ImageAssetInput) -> Result<ImageAssetPay
     }
 
     if let Some(existing_file_name) =
-        find_existing_image_with_same_fingerprint(&target.directory, &input.bytes)
+        find_existing_image_with_same_fingerprint(&target.directory, expected_len, &fingerprint)
     {
         let absolute_path = target.directory.join(&existing_file_name);
         return Ok(ImageAssetPayload {
@@ -46,8 +75,19 @@ pub(crate) fn import_image_asset(input: ImageAssetInput) -> Result<ImageAssetPay
         });
     }
 
-    fs::write(&target.absolute_path, &input.bytes)
-        .map_err(|error| format!("写入图片资源失败：{error}"))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target.absolute_path)
+        .map_err(|error| format!("创建图片资源失败：{error}"))?;
+    let written = source.write_to(&mut file);
+    drop(file);
+    if let Err(error) = written {
+        if let Err(cleanup) = fs::remove_file(&target.absolute_path) {
+            crate::app_logger::warn("ImageInsertion", &format!("清理未完成图片失败：{cleanup}"));
+        }
+        return Err(error);
+    }
 
     Ok(ImageAssetPayload {
         markdown_src: target.markdown_src,
@@ -184,24 +224,25 @@ pub(crate) fn delete_image_asset(input: ImageDeleteInput) -> ImageDeletePayload 
 }
 
 #[tauri::command]
-pub(crate) fn upload_image_via_picgo_core(
-    input: PicgoCoreUploadInput,
+pub(crate) async fn upload_image_via_picgo_core(
+    window: WebviewWindow,
+    state: State<'_, PreparedImages>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<ImageUploadPayload, String> {
-    if input.bytes.is_empty() {
-        return Err("图片内容为空，无法上传".to_string());
-    }
-
-    let temp_path = write_temp_image_file(&input.file_name, &input.bytes)?;
+    let (input, source): (PicgoCoreUploadInput, _) =
+        read_image_request(&request, window.label(), &state)?;
     let command = input.command.trim();
     if command.is_empty() {
-        cleanup_temp_file(&temp_path);
         return Err("PicGo-Core 命令不能为空".to_string());
     }
-
+    let store = state.inner().clone();
+    let file_name = input.file_name.clone();
+    let temporary =
+        tauri::async_runtime::spawn_blocking(move || source.into_upload_file(&store, &file_name))
+            .await
+            .map_err(|error| error.to_string())??;
     let mut process = create_picgo_core_command(command);
-    process
-        .arg("upload")
-        .arg(temp_path.to_string_lossy().to_string());
+    process.arg("upload").arg(&temporary.path);
     if let Some(config_path) = input
         .config_path
         .as_deref()
@@ -211,11 +252,7 @@ pub(crate) fn upload_image_via_picgo_core(
         process.arg("--config").arg(config_path);
     }
 
-    let output = process
-        .output()
-        .map_err(|error| format!("调用 PicGo-Core 失败：{error}"));
-    cleanup_temp_file(&temp_path);
-    let output = output?;
+    let output = run_picgo_command(process, UPLOAD_TIMEOUT).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -234,26 +271,29 @@ pub(crate) fn upload_image_via_picgo_core(
 }
 
 #[tauri::command]
-pub(crate) fn upload_image_via_picgo_server(
-    input: PicgoServerUploadInput,
+pub(crate) async fn upload_image_via_picgo_server(
+    window: WebviewWindow,
+    state: State<'_, PreparedImages>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<ImageUploadPayload, String> {
-    if input.bytes.is_empty() {
-        return Err("图片内容为空，无法上传".to_string());
-    }
-
+    let (input, source): (PicgoServerUploadInput, _) =
+        read_image_request(&request, window.label(), &state)?;
     let server_url = input.server_url.trim();
     if server_url.is_empty() {
         return Err("PicGo Server 地址不能为空".to_string());
     }
 
-    let temp_path = write_temp_image_file(&input.file_name, &input.bytes)?;
+    let store = state.inner().clone();
+    let file_name = input.file_name.clone();
+    let temporary =
+        tauri::async_runtime::spawn_blocking(move || source.into_upload_file(&store, &file_name))
+            .await
+            .map_err(|error| error.to_string())??;
     let body = serde_json::json!({
-        "list": [temp_path.to_string_lossy().to_string()]
+        "list": [temporary.path.to_string_lossy().to_string()]
     })
     .to_string();
-    let response = post_json_to_picgo_server(server_url, &body);
-    cleanup_temp_file(&temp_path);
-    let response = response?;
+    let response = post_json_to_picgo_server(server_url, &body).await?;
 
     parse_picgo_server_url(&response)
         .map(|url| ImageUploadPayload { url })
@@ -490,13 +530,15 @@ fn unique_file_name(directory: &Path, safe_file_name: &str) -> String {
     candidate
 }
 
-fn find_existing_image_with_same_fingerprint(directory: &Path, bytes: &[u8]) -> Option<String> {
+fn find_existing_image_with_same_fingerprint(
+    directory: &Path,
+    expected_len: u64,
+    fingerprint: &[u8; 32],
+) -> Option<String> {
     if !directory.is_dir() {
         return None;
     }
 
-    let fingerprint = bytes_fingerprint(bytes);
-    let expected_len = bytes.len() as u64;
     let entries = fs::read_dir(directory).ok()?;
 
     for entry in entries.flatten() {
@@ -510,10 +552,10 @@ fn find_existing_image_with_same_fingerprint(directory: &Path, bytes: &[u8]) -> 
         if !metadata.is_file() || metadata.len() != expected_len {
             continue;
         }
-        let Some(existing_bytes) = fs::read(&path).ok() else {
+        let Some(existing_fingerprint) = file_fingerprint(&path).ok() else {
             continue;
         };
-        if bytes_fingerprint(&existing_bytes) == fingerprint {
+        if &existing_fingerprint == fingerprint {
             if let Some(file_name) = path.file_name().and_then(|value| value.to_str()) {
                 return Some(file_name.to_string());
             }
@@ -521,14 +563,6 @@ fn find_existing_image_with_same_fingerprint(directory: &Path, bytes: &[u8]) -> 
     }
 
     None
-}
-
-fn bytes_fingerprint(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()
 }
 
 fn ensure_path_stays_in_document_dir(document_dir: &Path, image_path: &Path) -> Result<(), String> {
@@ -599,28 +633,6 @@ fn hex_value(value: u8) -> Option<u8> {
     }
 }
 
-fn write_temp_image_file(file_name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
-    let safe_file_name = sanitize_image_file_name(file_name);
-    let mut target = std::env::temp_dir().join(format!(
-        "nomo-image-{}-{safe_file_name}",
-        crate::config::now_ts()
-    ));
-    let mut index = 1;
-    while target.exists() {
-        target = std::env::temp_dir().join(format!(
-            "nomo-image-{}-{index}-{safe_file_name}",
-            crate::config::now_ts()
-        ));
-        index += 1;
-    }
-    fs::write(&target, bytes).map_err(|error| format!("写入临时图片失败：{error}"))?;
-    Ok(target)
-}
-
-fn cleanup_temp_file(path: &Path) {
-    let _ = fs::remove_file(path);
-}
-
 fn extract_first_url(text: &str) -> Option<String> {
     text.split(|ch: char| {
         ch.is_whitespace() || matches!(ch, '"' | '\'' | '[' | ']' | ',' | '{' | '}')
@@ -632,32 +644,13 @@ fn extract_first_url(text: &str) -> Option<String> {
     })
 }
 
-fn post_json_to_picgo_server(server_url: &str, body: &str) -> Result<String, String> {
+async fn post_json_to_picgo_server(server_url: &str, body: &str) -> Result<String, String> {
     let endpoint = parse_http_endpoint(server_url)?;
-    let mut stream = TcpStream::connect((&endpoint.host[..], endpoint.port))
-        .map_err(|error| format!("连接 PicGo Server 失败：{error}"))?;
-    let request = format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        endpoint.path,
-        endpoint.host,
-        body.len(),
-        body
+    let url = format!(
+        "http://{}:{}{}",
+        endpoint.host, endpoint.port, endpoint.path
     );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|error| format!("请求 PicGo Server 失败：{error}"))?;
-
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|error| format!("读取 PicGo Server 响应失败：{error}"))?;
-
-    let status_line = response.lines().next().unwrap_or_default();
-    if !status_line.contains(" 200 ") {
-        return Err(format!("PicGo Server 返回异常状态：{status_line}"));
-    }
-
-    Ok(response.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+    upload::post_json(&url, body, UPLOAD_TIMEOUT).await
 }
 
 struct HttpEndpoint {
@@ -781,17 +774,19 @@ mod tests {
             document_file_name: "doc.md".to_string(),
             strategy: "copy-assets".to_string(),
             file_name: "image.png".to_string(),
-            bytes: vec![1, 2, 3, 4],
         };
 
-        let first = import_image_asset(input).expect("first import");
-        let second = import_image_asset(ImageAssetInput {
-            document_path: document_path.to_string_lossy().to_string(),
-            document_file_name: "doc.md".to_string(),
-            strategy: "copy-assets".to_string(),
-            file_name: "image.png".to_string(),
-            bytes: vec![1, 2, 3, 4],
-        })
+        let first =
+            import_image_source(input, ImageSource::Bytes(vec![1, 2, 3, 4])).expect("first import");
+        let second = import_image_source(
+            ImageAssetInput {
+                document_path: document_path.to_string_lossy().to_string(),
+                document_file_name: "doc.md".to_string(),
+                strategy: "copy-assets".to_string(),
+                file_name: "image.png".to_string(),
+            },
+            ImageSource::Bytes(vec![1, 2, 3, 4]),
+        )
         .expect("second import");
 
         assert_eq!(first.markdown_src, "./assets/image.png");
@@ -817,6 +812,33 @@ mod tests {
 
         assert!(result.removed);
         assert!(!image_path.exists());
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn native_file_and_binary_sources_share_deduplication_without_overwriting_names() {
+        use std::io::Write;
+        let dir = create_test_dir("native-source");
+        let store = PreparedImages::new(dir.join("temporary")).unwrap();
+        let (temporary, mut file) = store.create_file("image.gif").unwrap();
+        let original = b"GIF89a-original-encoded-bytes";
+        file.write_all(original).unwrap();
+        drop(file);
+        let input = || ImageAssetInput {
+            document_path: dir.join("doc.md").to_string_lossy().to_string(),
+            document_file_name: "doc.md".into(),
+            strategy: "copy-assets".into(),
+            file_name: "image.gif".into(),
+        };
+        let first = import_image_source(input(), ImageSource::Prepared(temporary)).unwrap();
+        assert_eq!(fs::read(&first.absolute_path).unwrap(), original);
+        let reused = import_image_source(input(), ImageSource::Bytes(original.to_vec())).unwrap();
+        assert!(reused.reused);
+        assert_eq!(reused.absolute_path, first.absolute_path);
+        let other =
+            import_image_source(input(), ImageSource::Bytes(b"different-image".to_vec())).unwrap();
+        assert_ne!(other.absolute_path, first.absolute_path);
+        assert_eq!(fs::read(&first.absolute_path).unwrap(), original);
         cleanup_test_dir(&dir);
     }
 

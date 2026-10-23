@@ -216,7 +216,6 @@ pub(crate) struct ImageAssetInput {
     pub(crate) document_file_name: String,
     pub(crate) strategy: String,
     pub(crate) file_name: String,
-    pub(crate) bytes: Vec<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -258,7 +257,6 @@ pub(crate) struct ImageDeletePayload {
 #[derive(Debug, Deserialize)]
 pub(crate) struct PicgoCoreUploadInput {
     pub(crate) file_name: String,
-    pub(crate) bytes: Vec<u8>,
     pub(crate) command: String,
     pub(crate) config_path: Option<String>,
 }
@@ -266,7 +264,6 @@ pub(crate) struct PicgoCoreUploadInput {
 #[derive(Debug, Deserialize)]
 pub(crate) struct PicgoServerUploadInput {
     pub(crate) file_name: String,
-    pub(crate) bytes: Vec<u8>,
     pub(crate) server_url: String,
 }
 

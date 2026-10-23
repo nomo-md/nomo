@@ -16,11 +16,19 @@ export interface ImageResolveResult {
   error?: string;
 }
 
-export interface ImageImportInput {
+export interface PreparedClipboardImage {
+  assetId: string;
   fileName: string;
-  bytes?: Uint8Array;
-  sourcePath?: string;
+  width: number;
+  height: number;
 }
+
+export type ImageImportInput = {
+  fileName: string;
+} & (
+  | { bytes: Uint8Array; nativeAssetId?: never }
+  | { nativeAssetId: string; bytes?: never }
+);
 
 export interface ImageImportResult {
   markdownSrc: string;

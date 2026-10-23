@@ -129,7 +129,7 @@
 | 恢复草稿 | `src/app/services/recoveryDraft.ts` | `src/app/services/documentActionsController.ts` | 异常退出后草稿写入/恢复 |
 | Markdown 桥接 | `src/lib/markdown/MarkdownBridge.ts` | `src/lib/markdown/frontMatter.ts` | front matter 与正文分离/合并规则变更 |
 | 图片插入协调 | `src/app/services/imageInsertion.ts` | `src/app/services/imageMarkdown.ts`, `src/lib/editor-core/renderers.ts` | 粘贴/拖放图片导入、策略选择、源码插入 |
-| 剪贴板协调 | `src/app/services/clipboard.ts` | `src/app/App.svelte`, `@tauri-apps/plugin-clipboard-manager`, `src-tauri/src/file_clipboard.rs` | 文本/安全 HTML/图片的 Web Clipboard 与 Tauri 读写、降级和 RGBA 转 PNG，以及原生文件复制 IPC |
+| 剪贴板协调 | `src/app/services/clipboard.ts` | `src/app/App.svelte`, `src-tauri/src/file_system/image_assets/prepared.rs`, `src-tauri/src/file_clipboard.rs` | Web Clipboard 优先、原生图片快照标识与释放、文本/HTML 读写及原生文件复制 IPC |
 | 原生文件剪贴板 | `src-tauri/src/file_clipboard.rs` | `src/app/services/clipboard.ts`, `src-tauri/src/lib.rs`, `arboard` | 校验已保存文件路径、写入系统文件列表并保持剪贴板实例存活 |
 | 图片 Markdown 路径 | `src/app/services/imageMarkdown.ts` | `src/app/services/imageInsertion.ts` | 图片文件过滤、路径/Markdown 语法生成 |
 | 文件存储与文档仓库接口 | `src/lib/services/storage.ts` | `src/lib/desktop/tauriStorage.ts` | FileStorage、DocumentRepository、Markdown 源编码契约变更 |
@@ -140,7 +140,7 @@
 | 资源管理器展示 | `src/app/services/explorerRows.ts` | — | 树形拍平为可渲染行 |
 | 资源管理器重命名规则 | `src/app/services/explorerRename.ts` | — | 行内重命名输入框选区范围 |
 | Rust 文件系统 | `src-tauri/src/file_system.rs` | `src-tauri/src/models.rs` | 后端文件读写、Markdown 编码转换/保持、短句柄目录快照与按需枚举 |
-| 图片资源后端 | `src-tauri/src/file_system/image_assets.rs` | — | 图片导入/解析/PicGo 上传/删除 |
+| 图片资源后端 | `src-tauri/src/file_system/image_assets.rs` | `image_assets/prepared.rs`, `image_assets/transfer.rs`, `image_assets/upload.rs` | 二进制/原生快照导入、窗口资源归属与释放、流式去重、PicGo 上传超时、图片解析/删除 |
 
 ### Markdown 统一会话迁移
 
@@ -2087,6 +2087,7 @@
 - PicGo-Core 上传
 - PicGo Server 上传和连接测试
 - 路径策略、文件名清洗、SHA-256 去重、临时文件处理
+- `prepared.rs` 在 Rust 读取剪贴板并编码 PNG，管理窗口所属磁盘快照及借用释放；`transfer.rs` 解析二进制 IPC/原生资源标识并流式计算指纹；`upload.rs` 处理有界输出和 120 秒上传超时
 
 **Does not own：**
 - 不拥有前端图片插入流程（在 imageInsertion.ts 中）
@@ -2609,6 +2610,7 @@
 - 源码模式 Markdown 图片语法插入
 - 图片属性文本生成（width/align）
 - 快捷插入图片的异步选区恢复；正文修订或编辑模式改变时取消替换
+- 受理时捕获文档书签，按文档串行读取和导入图片；关闭/导出等待整笔插入，所有终止路径释放原生快照
 
 **Does not own:**
 - 不拥有图片文件过滤（在 imageMarkdown.ts 中）
@@ -2628,7 +2630,7 @@
 - 修改图片后端处理
 - 修改图片 NodeView 展示
 
-**Related tests:** —
+**Related tests:** `src/app/services/imageInsertion.test.ts`
 
 **Confidence:** high
 
@@ -2640,9 +2642,9 @@
 
 **Owns:**
 - 语义编辑器剪贴板文本、安全 HTML 与图片读写协调
-- 优先使用激活上下文中的 Web Clipboard API，并在桌面端降级到 Tauri 官方剪贴板插件
+- 优先使用激活上下文中的 Web Clipboard API，桌面读图降级调用 Rust 快照命令，文本读写沿用官方插件
 - 为普通粘贴和纯文本粘贴提供富内容优先/文本优先读取策略
-- 将 Tauri RGBA 图片编码为 PNG `File`，交回既有图片导入流程
+- 原生降级返回 `PreparedClipboardImage` 标识，图片编码和磁盘暂存由 Rust 完成，提供显式释放入口
 
 **Does not own:**
 - 不拥有 ProseMirror 选区序列化和粘贴解析（在 `ProseMirrorEditorCore.ts` 中）
@@ -2653,9 +2655,9 @@
 **Depends on:** `@tauri-apps/plugin-clipboard-manager`, Web Clipboard API
 
 **Change this when:**
-- 修改桌面/浏览器剪贴板优先级、权限降级或图片编码桥接
+- 修改桌面/浏览器剪贴板优先级、权限降级或原生图片快照生命周期
 
-**Related tests:** —
+**Related tests:** `src/app/services/clipboard.test.ts`
 
 **Confidence:** high
 
@@ -3970,7 +3972,7 @@
 
 **Owns:**
 - 桌面图片加载器实现：resolve/import/remove
-- 通过 Tauri IPC 调用后端图片资源处理
+- 通过二进制正文＋编码元数据或原生资源标识调用导入/PicGo 上传，避免 JSON 数字数组
 
 **Does not own:**
 - 不拥有图片后端处理逻辑（在 Rust file_system/image_assets.rs 中）
@@ -3984,7 +3986,7 @@
 - 修改图片 resolve/import/remove 前端调用
 - 修改图片 context 构建逻辑
 
-**Related tests:** —
+**Related tests:** `src/app/services/desktopImageLoader.test.ts`
 
 **Confidence:** high
 

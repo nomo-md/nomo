@@ -33,8 +33,9 @@ web_atoms = "0.2"
 semver = "1"
 sys-locale = "0.3"
 md5 = "0.7"
+png = "0.18.1"
 lopdf = { version = "0.44", default-features = false }
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["sync", "time", "process", "io-util"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Storage_Packaging_Appx", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }

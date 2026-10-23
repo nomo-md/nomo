@@ -85,6 +85,9 @@ pub fn run() {
             }
             WindowEvent::Destroyed => {
                 let label = window.label();
+                if let Some(images) = window.try_state::<crate::file_system::image_assets::prepared::PreparedImages>() {
+                    images.release_owner(label);
+                }
                 crate::software_update::release_installed_release_notes(window.app_handle(), label);
                 crate::window::tab_drag::forget_window(label);
                 crate::window::tab_transfer::forget_window(window.app_handle(), label);
@@ -236,6 +239,8 @@ pub fn run() {
             let config = crate::config::ConfigManager::load_or_default(app.handle())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             app.manage(config);
+            let image_root = app.path().app_cache_dir().map_err(std::io::Error::other)?.join("prepared-images-v1");
+            app.manage(crate::file_system::image_assets::prepared::PreparedImages::new(image_root).map_err(std::io::Error::other)?);
             if let Err(error) = crate::software_update::initialize_installed_release_notes(app.handle())
             {
                 crate::app_logger::warn("Update", &format!("初始化更新日志版本记录失败：{error}"));
@@ -376,6 +381,8 @@ pub fn run() {
             crate::file_system::rename_file,
             crate::file_system::delete_file,
             crate::file_system::image_assets::import_image_asset,
+            crate::file_system::image_assets::prepared::prepare_clipboard_image,
+            crate::file_system::image_assets::prepared::release_prepared_image,
             crate::file_system::image_assets::resolve_image_asset,
             crate::file_system::image_assets::delete_image_asset,
             crate::file_system::image_assets::upload_image_via_picgo_core,
@@ -441,6 +448,9 @@ pub fn run() {
         .expect("error while building Nomo")
         .run(|_app, _event| {
             if matches!(&_event, tauri::RunEvent::Exit) {
+                if let Some(images) = _app.try_state::<crate::file_system::image_assets::prepared::PreparedImages>() {
+                    images.clear();
+                }
                 crate::window::workspace_lifecycle::committed_exit(_app);
             }
             #[cfg(target_os = "macos")]

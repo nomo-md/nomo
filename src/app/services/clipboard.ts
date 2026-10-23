@@ -1,8 +1,10 @@
 import type { EditorClipboardPayload } from '../../lib/editor-core';
+import type { PreparedClipboardImage } from '../../lib/services/render';
 
 export type ClipboardReadResult =
   | { kind: 'html'; html: string; text: string }
   | { kind: 'image'; files: File[] }
+  | { kind: 'native-image'; image: PreparedClipboardImage }
   | { kind: 'text'; text: string };
 
 export type ClipboardReadPreference = 'rich' | 'text';
@@ -53,20 +55,20 @@ export async function readEditorClipboard(
     return { kind: 'text', text };
   }
 
-  const { readImage, readText } = await import('@tauri-apps/plugin-clipboard-manager');
+  const { readText } = await import('@tauri-apps/plugin-clipboard-manager');
   if (preference === 'text') {
     return { kind: 'text', text: await readText().catch(() => '') };
   }
-  try {
-    const image = await readImage();
-    const size = await image.size();
-    const rgba = await image.rgba();
-    const file = await rgbaToPngFile(rgba, size.width, size.height);
-    return { kind: 'image', files: [file] };
-  } catch {
-    const text = await readText();
-    return { kind: 'text', text };
-  }
+  const { invoke } = await import('@tauri-apps/api/core');
+  // 原生读取失败返回 null；编码/落盘错误继续向调用方报告，不能伪装成文本粘贴。
+  const image = await invoke<PreparedClipboardImage | null>('prepare_clipboard_image');
+  if (image) return { kind: 'native-image', image };
+  return { kind: 'text', text: await readText() };
+}
+
+export async function releasePreparedImage(image: PreparedClipboardImage): Promise<void> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('release_prepared_image', { assetId: image.assetId });
 }
 
 async function tryReadWebClipboard(
@@ -80,9 +82,11 @@ async function tryReadWebClipboard(
     let text = '';
     for (const item of items) {
       const imageType = item.types.find((type) => type.startsWith('image/'));
-      if (imageType) {
+      if (imageType && preference !== 'text') {
         const blob = await item.getType(imageType);
-        imageFiles.push(new File([blob], `clipboard.${extensionForMime(imageType)}`, { type: imageType }));
+        imageFiles.push(
+          new File([blob], `clipboard.${extensionForMime(imageType)}`, { type: imageType }),
+        );
       }
       if (!html && item.types.includes('text/html')) {
         html = await (await item.getType('text/html')).text();
@@ -99,24 +103,6 @@ async function tryReadWebClipboard(
     // WebView 可能拒绝 clipboard.read；由桌面插件完成降级读取。
   }
   return null;
-}
-
-async function rgbaToPngFile(
-  rgba: Uint8Array,
-  width: number,
-  height: number,
-): Promise<File> {
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext('2d');
-  if (!context) throw new Error('Canvas 2D context is unavailable');
-  const pixels = Uint8ClampedArray.from(rgba);
-  context.putImageData(new ImageData(pixels, width, height), 0, 0);
-  const blob = await new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((value) => (value ? resolve(value) : reject(new Error('PNG encode failed'))), 'image/png');
-  });
-  return new File([blob], 'clipboard.png', { type: 'image/png' });
 }
 
 function extensionForMime(mime: string): string {

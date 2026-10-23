@@ -1035,7 +1035,13 @@
         class:blank-document={blankDocumentEditable}
       >
         {#if sessionEditor && mode !== 'semantic'}
-          <div use:mountSessionSource class="markdown-session-source"></div>
+          <div
+            use:mountSessionSource
+            class="markdown-session-source"
+            on:paste|capture={handleEditorPaste}
+            on:drop|capture={handleEditorDrop}
+            on:dragover|preventDefault
+          ></div>
         {:else if !sessionEditor && sourceInitialized}
         <MarkdownSourceEditor
           bind:sourceEditor

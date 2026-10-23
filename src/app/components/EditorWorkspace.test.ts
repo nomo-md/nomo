@@ -8,6 +8,7 @@ import type { MarkdownSourceEditorHandle } from './markdownSourceEditor';
 import type { EditorCore } from '../../lib/editor-core';
 import { resetOutlinePanelPosition } from '../services/outlinePanelPosition';
 import { executeDesktopCommand, type AppCommandHandlers } from '../services/appCommands';
+import * as markdownApplication from '../services/markdownApplicationSession';
 
 type Props = ComponentProps<typeof EditorWorkspace>;
 
@@ -19,6 +20,27 @@ afterEach(() => {
 });
 
 describe('EditorWorkspace outline drag', () => {
+  it('forwards image paste and drop from the session source host before CodeMirror handles them', async () => {
+    const sourceInput = document.createElement('div');
+    const paste = vi.fn((event: Event) => event.preventDefault());
+    const drop = vi.fn((event: Event) => event.preventDefault());
+    vi.spyOn(markdownApplication, 'getMarkdownApplicationSession').mockReturnValue({
+      document: { state: { status: { byteLength: 5 } } },
+      mountSource(target: HTMLElement) { target.append(sourceInput); return () => sourceInput.remove(); },
+    } as unknown as ReturnType<typeof markdownApplication.getMarkdownApplicationSession>);
+    await renderWorkspace({ props: createProps('hello', {
+      mode: 'source', handleEditorPaste: paste, handleEditorDrop: drop,
+    }) });
+    const nativeHandlers = vi.fn((event: Event) => expect(event.defaultPrevented).toBe(true));
+    sourceInput.addEventListener('paste', nativeHandlers);
+    sourceInput.addEventListener('drop', nativeHandlers);
+    await fireEvent(sourceInput, new Event('paste', { bubbles: true, cancelable: true }));
+    await fireEvent(sourceInput, new Event('drop', { bubbles: true, cancelable: true }));
+    expect(paste).toHaveBeenCalledOnce();
+    expect(drop).toHaveBeenCalledOnce();
+    expect(nativeHandlers).toHaveBeenCalledTimes(2);
+  });
+
   it('moves from the top region including its blank space, saves on release and restores across mounts', async () => {
     const moveOutlineSection = vi.fn(() => true);
     const rendered = await renderWorkspace({

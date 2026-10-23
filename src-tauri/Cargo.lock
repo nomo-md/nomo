@@ -2488,6 +2488,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-web-kit",
+ "png 0.18.1",
  "regex",
  "reqwest",
  "semver",
@@ -4589,6 +4590,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "windows-sys 0.61.2",
 ]

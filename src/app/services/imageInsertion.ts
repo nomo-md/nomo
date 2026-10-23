@@ -1,12 +1,21 @@
 import type { EditorCore, EditorMode, EditorSelectionSnapshot } from '../../lib/editor-core';
 import { getImageLoader } from '../../lib/editor-core/renderers';
-import type { ImageContext } from '../../lib/services/render';
+import type {
+  ImageContext,
+  ImageImportInput,
+  PreparedClipboardImage,
+} from '../../lib/services/render';
 import { Transaction } from '@codemirror/state';
-import { getSourceTextChanges, type MarkdownSourceEditorHandle, type MarkdownSourceRuntimeState } from '../components/markdownSourceEditor';
+import {
+  getSourceTextChanges,
+  type MarkdownSourceEditorHandle,
+  type MarkdownSourceRuntimeState,
+} from '../components/markdownSourceEditor';
 import { createPerfTimer, logError, logInfo } from '../../lib/services/logger';
 import { t } from '../i18n';
 import { createImageMarkdown, getImageFiles } from './imageMarkdown';
 import { getMarkdownApplicationSession } from './markdownApplicationSession';
+import { releasePreparedImage } from './clipboard';
 
 interface ImageInsertionOptions {
   getEditor(): EditorCore;
@@ -32,12 +41,48 @@ interface ImageInsertionTarget {
   contentRevision: number;
 }
 
+type ImageInsertionSource = { file: File } | { image: PreparedClipboardImage };
+
 export function createImageInsertionHandlers(options: ImageInsertionOptions) {
   const pendingInsertions = new Set<Promise<void>>();
+  let insertionQueue = Promise.resolve();
 
   function insertImageFiles(files: File[], target?: ImageInsertionTarget): Promise<void> {
-    if (options.canStartInsertion?.() === false) return Promise.resolve();
-    const insertion = performImageInsertion(files, target);
+    return insertSources(
+      files.map((file) => ({ file })),
+      target,
+    );
+  }
+
+  function insertPreparedImage(
+    image: PreparedClipboardImage,
+    target?: ImageInsertionTarget,
+  ): Promise<void> {
+    return insertSources([{ image }], target);
+  }
+
+  async function releaseSources(sources: ImageInsertionSource[]) {
+    for (const source of sources) {
+      if ('image' in source) {
+        try {
+          await releasePreparedImage(source.image);
+        } catch (error) {
+          logError('ImageInsertion', 'Failed to release prepared image', { error: String(error) });
+        }
+      }
+    }
+  }
+
+  function insertSources(
+    sources: ImageInsertionSource[],
+    target?: ImageInsertionTarget,
+  ): Promise<void> {
+    if (options.canStartInsertion?.() === false) return releaseSources(sources);
+    // 书签在受理时创建；仅把读字节、导入和提交排队，等待期间仍映射来源选区。
+    const insertion = performImageInsertion(sources, insertionQueue, target).finally(() =>
+      releaseSources(sources),
+    );
+    insertionQueue = insertion.catch(() => undefined);
     pendingInsertions.add(insertion);
     void insertion.then(
       () => pendingInsertions.delete(insertion),
@@ -46,7 +91,9 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
         logError('ImageInsertion', 'Failed to insert images', {
           error: error instanceof Error ? error.message : String(error),
         });
-        options.setStatusMessage(t.imagesInsertedWithFailures({ inserted: 0, failed: files.length }));
+        options.setStatusMessage(
+          t.imagesInsertedWithFailures({ inserted: 0, failed: sources.length }),
+        );
       },
     );
     return insertion;
@@ -57,7 +104,9 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
     let failure: PromiseRejectedResult | undefined;
     while (pendingInsertions.size > 0) {
       const results = await Promise.allSettled([...pendingInsertions]);
-      failure ??= results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      failure ??= results.find(
+        (result): result is PromiseRejectedResult => result.status === 'rejected',
+      );
     }
     if (failure) throw failure.reason;
   }
@@ -82,15 +131,24 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
     void insertImageFiles(files);
   }
 
-  async function performImageInsertion(files: File[], target?: ImageInsertionTarget) {
+  async function performImageInsertion(
+    sources: ImageInsertionSource[],
+    previous: Promise<void>,
+    target?: ImageInsertionTarget,
+  ) {
     const timer = createPerfTimer('ImageInsertion', '插入图片');
     const editor = options.getEditor();
-    const documentOpen = () => options.isDocumentOpen?.() !== false && options.getEditor() === editor;
+    const documentOpen = () =>
+      options.isDocumentOpen?.() !== false && options.getEditor() === editor;
     const cancelIfClosed = () => {
       const open = documentOpen();
-      const readonly = options.getReadonly?.() === true || !editor.canExecute({ type: 'insertImage', src: '' });
+      const readonly =
+        options.getReadonly?.() === true || !editor.canExecute({ type: 'insertImage', src: '' });
       if (open && !readonly) return false;
-      timer.end({ cancelled: true, reason: readonly ? 'source-document-readonly' : 'source-document-closed' });
+      timer.end({
+        cancelled: true,
+        reason: readonly ? 'source-document-readonly' : 'source-document-closed',
+      });
       return true;
     };
     const cancelIfTargetChanged = () => {
@@ -108,7 +166,7 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
     };
 
     if (cancelIfClosed() || cancelIfTargetChanged()) return;
-    logInfo('ImageInsertion', '开始插入图片', { count: files.length });
+    logInfo('ImageInsertion', '开始插入图片', { count: sources.length });
     const loader = getImageLoader();
     if (!loader) {
       timer.end({ failed: true, reason: 'loader-not-ready' });
@@ -118,83 +176,110 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
 
     const application = getMarkdownApplicationSession(editor);
     if (application) await application.ready;
+    if (cancelIfClosed() || cancelIfTargetChanged()) return;
     if (target) editor.restoreSelectionSnapshot(target.selection);
     const bookmark = application?.createInsertionBookmark();
+    const fallbackSnapshot = editor.getSnapshot();
+    const fallbackSourceSelection =
+      options.getSourceEditor()?.getSelection() ??
+      options.getSourceRuntimeState?.()?.state.selection.main;
     try {
-    const context = options.getImageContext();
-    const strategy = context.settings?.imageInsertStrategy ?? 'copy-assets';
-    if (strategy !== 'upload' && !options.getNativePath()) {
-      options.setStatusMessage(t.saveBeforeInsertLocalImage());
-      await options.saveMarkdownFile(true);
-      if (cancelIfClosed()) return;
-      if (!options.getNativePath()) {
-        timer.end({ cancelled: true, reason: 'document-not-saved' });
-        options.setStatusMessage(t.imageInsertCancelled());
-        return;
-      }
-    }
-
-    const imported: Array<{ src: string; alt: string }> = [];
-    let failed = 0;
-
-    for (const file of files) {
-      try {
-        const bytes = new Uint8Array(await file.arrayBuffer());
+      await previous;
+      if (cancelIfClosed() || cancelIfTargetChanged()) return;
+      const context = options.getImageContext();
+      const strategy = context.settings?.imageInsertStrategy ?? 'copy-assets';
+      if (strategy !== 'upload' && !options.getNativePath()) {
+        options.setStatusMessage(t.saveBeforeInsertLocalImage());
+        await options.saveMarkdownFile(true);
         if (cancelIfClosed()) return;
-        const result = await loader.import(
-          {
-            fileName: getInsertFileName(file, imported.length),
-            bytes,
-          },
-          options.getImageContext(),
-        );
-        if (cancelIfClosed()) return;
-        imported.push({ src: result.markdownSrc, alt: file.name || 'image' });
-      } catch (error) {
-        failed += 1;
-        logError('ImageInsertion', 'Failed to import image', {
-          fileName: file.name,
-          error: error instanceof Error ? error.message : String(error),
-        });
+        if (!options.getNativePath()) {
+          timer.end({ cancelled: true, reason: 'document-not-saved' });
+          options.setStatusMessage(t.imageInsertCancelled());
+          return;
+        }
       }
-    }
 
-    if (cancelIfClosed()) return;
-    if (imported.length > 0) {
-      // 文件选择和资源导入期间光标可能移动，只在来源正文未变化时替换触发符号。
-      if (cancelIfTargetChanged()) return;
-      if (target) editor.restoreSelectionSnapshot(target.selection);
-      if (bookmark) {
-        await bookmark.insert(`\n\n${buildImageSnippet(imported)}\n\n`);
-      } else if (options.getMode() === 'source') {
-        insertSourceMarkdown(imported, editor);
-      } else {
-        for (const item of imported) {
-          const imageSettings = context.settings;
-          const defaultAlign =
-            imageSettings?.defaultImageAlign && imageSettings.defaultImageAlign !== 'none'
-              ? imageSettings.defaultImageAlign
-              : null;
-          editor.execute({
-            type: 'insertImage',
-            src: item.src,
-            alt: item.alt,
-            width: imageSettings?.defaultImageWidth || null,
-            align: defaultAlign,
+      const imported: Array<{ src: string; alt: string }> = [];
+      let failed = 0;
+
+      for (const source of sources) {
+        const fileName =
+          'file' in source ? getInsertFileName(source.file, imported.length) : source.image.fileName;
+        try {
+          if (cancelIfClosed() || cancelIfTargetChanged()) return;
+          const input: ImageImportInput =
+            'file' in source
+              ? { fileName, bytes: new Uint8Array(await source.file.arrayBuffer()) }
+              : { fileName, nativeAssetId: source.image.assetId };
+          if (cancelIfClosed() || cancelIfTargetChanged()) return;
+          const result = await loader.import(input, options.getImageContext());
+          if (cancelIfClosed() || cancelIfTargetChanged()) return;
+          imported.push({
+            src: result.markdownSrc,
+            alt: 'file' in source ? source.file.name || 'image' : source.image.fileName,
+          });
+        } catch (error) {
+          failed += 1;
+          logError('ImageInsertion', 'Failed to import image', {
+            fileName,
+            error: error instanceof Error ? error.message : String(error),
           });
         }
-        if (options.isDocumentFocused?.() !== false) editor.focus();
       }
-    }
 
-    if (failed > 0) {
-      options.setStatusMessage(t.imagesInsertedWithFailures({ inserted: imported.length, failed }));
-    } else {
-      options.setStatusMessage(t.imagesInserted({ inserted: imported.length }));
+      if (cancelIfClosed()) return;
+      if (imported.length > 0) {
+        // 文件选择和资源导入期间光标可能移动，只在来源正文未变化时替换触发符号。
+        if (cancelIfTargetChanged()) return;
+        if (target) editor.restoreSelectionSnapshot(target.selection);
+        if (bookmark) {
+          await bookmark.insert(`\n\n${buildImageSnippet(imported)}\n\n`);
+        } else {
+          const snapshot = editor.getSnapshot();
+          if (
+            (snapshot.contentRevision ?? snapshot.version) !==
+            (fallbackSnapshot.contentRevision ?? fallbackSnapshot.version)
+          ) {
+            options.setStatusMessage(t.quickInsertSelectionChanged());
+            timer.end({ cancelled: true, reason: 'insertion-target-changed' });
+            return;
+          }
+          if (options.getMode() === 'source') {
+            insertSourceMarkdown(imported, editor, fallbackSourceSelection);
+          } else {
+            if (fallbackSnapshot.selection)
+              editor.restoreSelectionSnapshot(fallbackSnapshot.selection);
+            for (const item of imported) {
+              const imageSettings = context.settings;
+              const defaultAlign =
+                imageSettings?.defaultImageAlign && imageSettings.defaultImageAlign !== 'none'
+                  ? imageSettings.defaultImageAlign
+                  : null;
+              editor.execute({
+                type: 'insertImage',
+                src: item.src,
+                alt: item.alt,
+                width: imageSettings?.defaultImageWidth || null,
+                align: defaultAlign,
+              });
+            }
+            if (options.isDocumentFocused?.() !== false) editor.focus();
+          }
+        }
+      }
+
+      if (failed > 0) {
+        options.setStatusMessage(
+          t.imagesInsertedWithFailures({ inserted: imported.length, failed }),
+        );
+      } else {
+        options.setStatusMessage(t.imagesInserted({ inserted: imported.length }));
+      }
+      timer.end({ inserted: imported.length, failed });
+      logInfo('ImageInsertion', '图片插入完成', { inserted: imported.length, failed });
+    } finally {
+      bookmark?.dispose();
     }
-    timer.end({ inserted: imported.length, failed });
-    logInfo('ImageInsertion', '图片插入完成', { inserted: imported.length, failed });
-    } finally { bookmark?.dispose(); }
   }
 
   /** HTML 属性值转义：& " < > */
@@ -206,7 +291,11 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
       .replace(/>/g, '&gt;');
   }
 
-  function insertSourceMarkdown(items: Array<{ src: string; alt: string }>, editor: EditorCore) {
+  function insertSourceMarkdown(
+    items: Array<{ src: string; alt: string }>,
+    editor: EditorCore,
+    capturedSelection?: { from: number; to: number },
+  ) {
     const sourceEditor = options.getSourceEditor();
     const markdown = editor.flushMarkdown();
     const cachedRuntime = options.getSourceRuntimeState?.();
@@ -218,7 +307,8 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
           annotations: Transaction.addToHistory.of(false),
         }).state
       : undefined;
-    const selection = sourceEditor?.getSelection() ?? detachedState?.selection.main;
+    const selection =
+      capturedSelection ?? sourceEditor?.getSelection() ?? detachedState?.selection.main;
     const start = selection?.from ?? markdown.length;
     const end = selection?.to ?? start;
     const snippet = buildImageSnippet(items);
@@ -246,8 +336,13 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
       editor.setMarkdown(nextMarkdown, { reason: 'source-input', sourceInput: true });
     }
     requestAnimationFrame(() => {
-      if (!sourceEditor || options.isDocumentOpen?.() === false || options.isDocumentFocused?.() === false ||
-        options.getEditor() !== editor || options.getSourceEditor() !== sourceEditor) {
+      if (
+        !sourceEditor ||
+        options.isDocumentOpen?.() === false ||
+        options.isDocumentFocused?.() === false ||
+        options.getEditor() !== editor ||
+        options.getSourceEditor() !== sourceEditor
+      ) {
         return;
       }
       sourceEditor.focus();
@@ -259,11 +354,15 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
     const settings = options.getImageContext().settings;
     const width = settings?.defaultImageWidth || '';
     const align = settings?.defaultImageAlign ?? 'none';
-    return items.map(item => {
-      if (!width && align === 'none') return createImageMarkdown(item.alt, item.src);
-      const img = `<img src="${escapeHtmlAttr(item.src)}" alt="${escapeHtmlAttr(item.alt)}"${width ? ` width="${escapeHtmlAttr(width)}"` : ''}>`;
-      return align === 'left' || align === 'center' || align === 'right' ? `<p align="${align}">\n  ${img}\n</p>` : img;
-    }).join('\n');
+    return items
+      .map((item) => {
+        if (!width && align === 'none') return createImageMarkdown(item.alt, item.src);
+        const img = `<img src="${escapeHtmlAttr(item.src)}" alt="${escapeHtmlAttr(item.alt)}"${width ? ` width="${escapeHtmlAttr(width)}"` : ''}>`;
+        return align === 'left' || align === 'center' || align === 'right'
+          ? `<p align="${align}">\n  ${img}\n</p>`
+          : img;
+      })
+      .join('\n');
   }
 
   function getInsertFileName(file: File, index: number) {
@@ -277,6 +376,7 @@ export function createImageInsertionHandlers(options: ImageInsertionOptions) {
     handleEditorDrop,
     handleEditorPaste,
     insertImageFiles,
+    insertPreparedImage,
     awaitPendingInsertions,
   };
 }

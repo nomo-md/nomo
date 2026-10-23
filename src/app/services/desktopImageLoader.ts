@@ -74,7 +74,10 @@ export function createDesktopImageLoader(): ImageLoader {
 
       if (!isTauriRuntime()) {
         return {
-          markdownSrc: createFallbackMarkdownSrc(context.documentFileName ?? 'document.md', input.fileName),
+          markdownSrc: createFallbackMarkdownSrc(
+            context.documentFileName ?? 'document.md',
+            input.fileName,
+          ),
         };
       }
 
@@ -82,16 +85,11 @@ export function createDesktopImageLoader(): ImageLoader {
         throw new Error(t.desktopImageInsertRequiresSavedFile());
       }
 
-      const bytes = await readImportBytes(input);
-      const { invoke } = await import('@tauri-apps/api/core');
-      const result = await invoke<NativeImageAssetPayload>('import_image_asset', {
-        input: {
-          document_path: context.documentPath,
-          document_file_name: context.documentFileName ?? 'document.md',
-          strategy: settings.imageInsertStrategy,
-          file_name: input.fileName,
-          bytes: Array.from(bytes),
-        },
+      const result = await invokeImage<NativeImageAssetPayload>('import_image_asset', input, {
+        document_path: context.documentPath,
+        document_file_name: context.documentFileName ?? 'document.md',
+        strategy: settings.imageInsertStrategy,
+        file_name: input.fileName,
       });
 
       return {
@@ -140,8 +138,6 @@ async function uploadImage(
     ...DEFAULT_IMAGE_HANDLING_SETTINGS,
     ...context.settings,
   };
-  const bytes = await readImportBytes(input);
-  const { invoke } = await import('@tauri-apps/api/core');
   const command =
     settings.uploadProvider === 'picgo'
       ? 'upload_image_via_picgo_server'
@@ -150,28 +146,33 @@ async function uploadImage(
     settings.uploadProvider === 'picgo'
       ? {
           file_name: input.fileName,
-          bytes: Array.from(bytes),
           server_url: settings.picgoServerUrl,
         }
       : {
           file_name: input.fileName,
-          bytes: Array.from(bytes),
           command: settings.picgoCoreCommand,
           config_path: settings.picgoCoreConfigPath || null,
         };
 
-  const result = await invoke<NativeImageUploadPayload>(command, { input: inputPayload });
+  const result = await invokeImage<NativeImageUploadPayload>(command, input, inputPayload);
   return {
     markdownSrc: result.url,
   };
 }
 
-async function readImportBytes(input: ImageImportInput): Promise<Uint8Array> {
-  if (input.bytes) {
-    return input.bytes;
+async function invokeImage<T>(
+  command: string,
+  input: ImageImportInput,
+  metadata: Record<string, unknown>,
+): Promise<T> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  if (input.nativeAssetId) {
+    return invoke<T>(command, { input: metadata, nativeAssetId: input.nativeAssetId });
   }
-
-  throw new Error(t.imageContentEmpty());
+  if (!input.bytes?.byteLength) throw new Error(t.imageContentEmpty());
+  return invoke<T>(command, input.bytes, {
+    headers: { 'x-nomo-image-meta': encodeURIComponent(JSON.stringify(metadata)) },
+  });
 }
 
 function isRemoteImageSrc(src: string): boolean {
