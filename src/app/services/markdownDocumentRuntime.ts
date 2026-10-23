@@ -7,6 +7,7 @@ import type { createEditorInteractionController } from './editorInteractionContr
 import type { createImageInsertionHandlers } from './imageInsertion';
 import type { OutlineScrollAnchor } from './outlineNavigation';
 import type { createOutlineInteractionController } from './outlineInteractionController';
+import type { OutlineProjection } from './outlineProjection';
 
 /** 一次挂载所拥有的文档与 DOM；销毁回调用此快照，避免读取后来切换的全局焦点。 */
 export interface MarkdownWorkspaceRuntimeBinding {
@@ -31,7 +32,8 @@ export interface MarkdownDocumentRuntime {
   sourcePane?: HTMLElement;
   semanticPane?: HTMLElement;
   host?: HTMLDivElement;
-  outline: OutlineItem[];
+  outline: readonly OutlineItem[];
+  outlineProjection: OutlineProjection;
   semanticScrollTop: number;
   sourceScrollTop: number;
   pendingSourceScrollTop: number | null;

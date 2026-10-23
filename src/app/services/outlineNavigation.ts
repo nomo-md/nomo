@@ -90,7 +90,7 @@ function getSourceLineTopInPane(
 }
 
 export function getActiveOutlineIdFromSource(
-  outline: OutlineItem[],
+  outline: readonly OutlineItem[],
   scrollTop: number,
   lineHeight: number,
   sourceEditor?: MarkdownSourceEditorHandle,
@@ -107,7 +107,7 @@ export function getActiveOutlineIdFromSource(
 }
 
 export function getSourceScrollAnchor(
-  outline: OutlineItem[],
+  outline: readonly OutlineItem[],
   scrollTop: number,
   lineHeight: number,
   sourceEditor?: MarkdownSourceEditorHandle,
@@ -125,7 +125,7 @@ export function getSourceScrollAnchor(
 }
 
 export function getSourceScrollAnchorAtLine(
-  outline: OutlineItem[],
+  outline: readonly OutlineItem[],
   sourceLine: number,
   scrollTop: number,
   lineHeight: number,
@@ -190,7 +190,7 @@ export function getSourceScrollAnchorAtLine(
 }
 
 export function scrollSourceToAnchor(
-  outline: OutlineItem[],
+  outline: readonly OutlineItem[],
   sourcePane: HTMLElement | undefined,
   sourceEditor: MarkdownSourceEditorHandle | undefined,
   anchor: OutlineScrollAnchor | LegacyOutlineScrollAnchor | null,
@@ -231,7 +231,7 @@ export function scrollSourceToAnchor(
 }
 
 export function restoreSourceReadingPosition(
-  outline: OutlineItem[],
+  outline: readonly OutlineItem[],
   sourcePane: HTMLElement | undefined,
   sourceEditor: MarkdownSourceEditorHandle | undefined,
   anchor: OutlineScrollAnchor | LegacyOutlineScrollAnchor | null,
@@ -283,7 +283,7 @@ export function restoreSourceReadingPosition(
 }
 
 export function getActiveOutlineIdFromSemantic(
-  outline: OutlineItem[],
+  outline: readonly OutlineItem[],
   semanticPane: HTMLElement | undefined,
 ) {
   if (!outline.length || !semanticPane) {
@@ -307,7 +307,7 @@ export function getActiveOutlineIdFromSemantic(
 }
 
 export function getSemanticScrollAnchor(
-  outline: OutlineItem[],
+  outline: readonly OutlineItem[],
   semanticPane: HTMLElement | undefined,
   savedScrollTop?: number,
 ): OutlineScrollAnchor | null {
@@ -320,7 +320,7 @@ export function getSemanticScrollAnchor(
 }
 
 export function getSemanticScrollAnchorForBlock(
-  outline: OutlineItem[],
+  outline: readonly OutlineItem[],
   semanticPane: HTMLElement | undefined,
   blockElement: HTMLElement | null | undefined,
   savedScrollTop?: number,
@@ -337,7 +337,7 @@ export function getSemanticScrollAnchorForBlock(
 }
 
 function getSemanticScrollAnchorAtTop(
-  outline: OutlineItem[],
+  outline: readonly OutlineItem[],
   semanticPane: HTMLElement | undefined,
   anchorTop: number,
   savedScrollTop?: number,
@@ -405,7 +405,7 @@ function getSemanticScrollAnchorAtTop(
 }
 
 export function scrollSemanticToAnchor(
-  outline: OutlineItem[],
+  outline: readonly OutlineItem[],
   semanticPane: HTMLElement | undefined,
   anchor: OutlineScrollAnchor | LegacyOutlineScrollAnchor | null,
   options: ScrollToAnchorOptions = {},
@@ -450,7 +450,7 @@ export function scrollSemanticToAnchor(
 }
 
 export function restoreSemanticReadingPosition(
-  outline: OutlineItem[],
+  outline: readonly OutlineItem[],
   semanticPane: HTMLElement | undefined,
   anchor: OutlineScrollAnchor | LegacyOutlineScrollAnchor | null,
   options: ScrollToAnchorOptions = {},
@@ -569,7 +569,7 @@ function getSemanticHeadings(semanticPane: HTMLElement | undefined) {
 
 function getSemanticHeadingAnchors(
   semanticPane: HTMLElement | undefined,
-  outline: OutlineItem[],
+  outline: readonly OutlineItem[],
 ): SemanticHeadingAnchor[] {
   if (!semanticPane) {
     return [];

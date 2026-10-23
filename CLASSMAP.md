@@ -182,6 +182,7 @@
 | 大纲滚动定位 | `src/app/services/outlineNavigation.ts`, `src/lib/markdown-document/viewportHost.ts` | `src/lib/outline/outlineViewport.ts`, `src/app/services/markdownApplicationSession.ts`, `src/lib/markdown-document/mountPolicy.ts`, `src/app/services/editorInteractionController.ts` | 会话大纲在语义/源码/双栏按编辑区高度 20%（64–180px）定位与高亮；仅受限窗口模式的未加载目标准备就绪后直跳，其他情况保留固定动画；双栏逐栏判定、原位置保护与过期导航取消；兼容视图的 PM/DOM 标题匹配 |
 | Markdown 源码 CodeMirror | `src/app/components/MarkdownSourceEditor.svelte` | `src/app/components/markdownSourceEditor.ts`, `src/app/components/EditorWorkspace.svelte` | 修改源码输入、选区、历史、行坐标、滚动容器或块 spacer |
 | 大纲状态 | `src/app/services/outlineState.ts` | — | 大纲展开/折叠/可见性/激活项计算 |
+| 大纲分段投影与视口 | `src/app/services/outlineProjection.ts`, `src/app/services/outlineViewportController.ts` | `EditorWorkspace.svelte`, `markdownDocumentRuntime.ts` | 复用同修订结构标题；128 项/4ms 分批整理、约三屏行挂载、文档折叠和列表锚点恢复；视图卸载取消任务，文档关闭释放纯数据 |
 | 大纲浮窗定位 | `src/app/actions/outlinePanelDrag.ts`, `src/app/services/outlinePanelPosition.ts` | `EditorWorkspace.svelte`, `AppTitleBar.svelte`, `appCommands.ts` | 顶部区域拖动、编辑区边界约束、位置记忆与菜单重置；不参与章节重排或正文排版 |
 | TOC 服务 | `src/lib/toc/tocService.ts` | `src/lib/editor-core/nodeViews/TocBlockNodeView.ts`, `src/lib/outline/outlineService.ts` | 生成 TOC Markdown/目录项数据，标题字面符号转义与统一跳转 |
 

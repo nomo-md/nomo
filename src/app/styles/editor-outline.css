@@ -94,6 +94,30 @@
 
 .content-outline-list {
   display: block;
+  position: relative;
+  overflow-anchor: none;
+}
+
+.content-outline-row[data-outline-index] {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  margin-bottom: 0;
+}
+
+.outline-measure {
+  position: absolute;
+  display: grid;
+  align-items: center;
+  visibility: hidden;
+  pointer-events: none;
+  min-height: 24px;
+}
+
+.content-outline .outline-progress {
+  margin-top: 8px;
+  font-size: var(--md-editor-ui-font-size-sm);
 }
 
 .content-outline-row {

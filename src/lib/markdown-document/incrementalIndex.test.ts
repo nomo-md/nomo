@@ -161,7 +161,7 @@ describe('结构索引增量收敛', () => {
       },
     });
     expect(states).toContain('partial');
-    expect(index.outline.map(({ byte: _byte, blockId: _id, ...item }) => item)).toEqual(
+    expect(index.outline.map(({ byte: _byte, blockId: _id, blockHeadingIndex: _ordinal, ...item }) => item)).toEqual(
       extractOutline(source),
     );
     expect(new Set(index.outline.map((item) => item.id)).size).toBe(index.outline.length);

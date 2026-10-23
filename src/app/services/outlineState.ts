@@ -1,6 +1,6 @@
 import type { OutlineItem } from '../../lib/outline/outlineService';
 
-export function isOutlineItemExpandable(outline: OutlineItem[], index: number) {
+export function isOutlineItemExpandable(outline: readonly OutlineItem[], index: number) {
   const item = outline[index];
   const next = outline[index + 1];
   return Boolean(item && next && next.level > item.level);
@@ -11,7 +11,7 @@ export function isOutlineItemExpanded(collapsedOutlineIds: Set<string>, item: Ou
 }
 
 export function isOutlineItemVisible(
-  outline: OutlineItem[],
+  outline: readonly OutlineItem[],
   collapsedOutlineIds: Set<string>,
   index: number,
 ) {
@@ -44,7 +44,7 @@ export function toggleOutlineItemExpanded(collapsedOutlineIds: Set<string>, item
   return nextCollapsedIds;
 }
 
-export function pruneCollapsedOutlineIds(outline: OutlineItem[], collapsedOutlineIds: Set<string>) {
+export function pruneCollapsedOutlineIds(outline: readonly OutlineItem[], collapsedOutlineIds: Set<string>) {
   if (collapsedOutlineIds.size === 0) {
     return collapsedOutlineIds;
   }
@@ -53,7 +53,7 @@ export function pruneCollapsedOutlineIds(outline: OutlineItem[], collapsedOutlin
   return new Set(Array.from(collapsedOutlineIds).filter((id) => visibleIds.has(id)));
 }
 
-export function getOutlineItemAtLine(outline: OutlineItem[], line: number) {
+export function getOutlineItemAtLine(outline: readonly OutlineItem[], line: number) {
   let current = outline[0] ?? null;
   for (const item of outline) {
     if (item.line > line) {

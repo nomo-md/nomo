@@ -6,6 +6,7 @@ import {
   type OutlineSectionMoveRequest,
 } from '../../lib/outline/outlineReorder';
 import type { OutlineItem } from '../../lib/outline/outlineService';
+import type { OutlineProjection } from './outlineProjection';
 import { t } from '../i18n';
 import { getMarkdownApplicationSession } from './markdownApplicationSession';
 import { getOutlineViewportOffset } from '../../lib/outline/outlineViewport';
@@ -27,7 +28,8 @@ import {
 interface OutlineInteractionOptions {
   getMode(): EditorMode;
   getMarkdown(): string;
-  getOutline(): OutlineItem[];
+  getOutline(): readonly OutlineItem[];
+  getOutlineProjection?(): OutlineProjection | undefined;
   getCollapsedOutlineIds(): Set<string>;
   setCollapsedOutlineIds(value: Set<string>): void;
   getOutlineVisible(): boolean;
@@ -59,16 +61,29 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
   }
 
   function toggleOutlineItemExpanded(item: OutlineItem) {
+    const projection = options.getOutlineProjection?.();
+    if (projection) {
+      projection.toggle(item);
+      options.setCollapsedOutlineIds(projection.collapsedIds);
+      return;
+    }
     options.setCollapsedOutlineIds(
       getToggledOutlineItemIds(options.getCollapsedOutlineIds(), item),
     );
   }
 
   function expandAllOutline() {
+    options.getOutlineProjection?.()?.setDefaultLevel(7);
     options.setCollapsedOutlineIds(new Set());
   }
 
   function collapseAllOutline() {
+    const projection = options.getOutlineProjection?.();
+    if (projection) {
+      projection.setDefaultLevel(1);
+      options.setCollapsedOutlineIds(projection.collapsedIds);
+      return;
+    }
     const outline = options.getOutline();
     options.setCollapsedOutlineIds(
       new Set(
@@ -80,6 +95,7 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
   }
 
   function pruneCollapsedOutlineIds() {
+    if (options.getOutlineProjection?.()) return;
     options.setCollapsedOutlineIds(
       getPrunedCollapsedOutlineIds(options.getOutline(), options.getCollapsedOutlineIds()),
     );
@@ -142,8 +158,17 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
     }
     const application = getMarkdownApplicationSession(options.getEditor());
     if (application) {
+      const index = application.document?.state.index;
+      if (!index || index.progress.state !== 'ready' || index.revision !== application.document?.state.status.revision) {
+        options.setStatusMessage(t.outlineLoading());
+        return false;
+      }
+      const revision = index.revision;
+      const headings = index.outline;
       void application.transformMarkdown(text => {
-        const result = reorderOutlineSection(text, options.getOutline(), request);
+        if (application.document?.state.status.revision !== revision || options.isActive?.() === false)
+          throw new Error(t.outlineLoading());
+        const result = reorderOutlineSection(text, headings, request);
         if (!result.ok) throw new Error(getOutlineMoveFailureMessage(result.reason));
         return result.markdown;
       }).catch(error => options.setStatusMessage(String(error)));

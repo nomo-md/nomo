@@ -1,8 +1,9 @@
-import { cleanup, fireEvent, render } from '@testing-library/svelte/pure';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte/pure';
 import { tick, type ComponentProps } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { extractOutline } from '../../lib/outline/outlineService';
 import EditorWorkspace from './EditorWorkspace.svelte';
+import { OutlineProjection } from '../services/outlineProjection';
 import type { MarkdownSourceEditorHandle } from './markdownSourceEditor';
 import type { EditorCore } from '../../lib/editor-core';
 import { resetOutlinePanelPosition } from '../services/outlinePanelPosition';
@@ -20,7 +21,7 @@ afterEach(() => {
 describe('EditorWorkspace outline drag', () => {
   it('moves from the top region including its blank space, saves on release and restores across mounts', async () => {
     const moveOutlineSection = vi.fn(() => true);
-    const rendered = render(EditorWorkspace, {
+    const rendered = await renderWorkspace({
       props: createProps('# One\n# Two', { moveOutlineSection }),
     });
     const { panel, title } = mockPanelGeometry(rendered.container);
@@ -39,14 +40,14 @@ describe('EditorWorkspace outline drag', () => {
     expect(capture.release).toHaveBeenCalledOnce();
     const rows = [...panel.querySelectorAll<HTMLElement>('.content-outline-row')];
     rows[1].getBoundingClientRect = () => new DOMRect(500, 30, 220, 30);
-    mockPointerCapture(rows[0]);
+    mockPointerCapture(panel);
     await dragTo(rows[0], rows[1], 45);
     expect(moveOutlineSection).toHaveBeenCalledWith({ sourceIndex: 0, targetIndex: 1, placement: 'inside' });
     expect(panel.style.left).toBe('500px');
     expect(JSON.parse(window.localStorage.getItem('newmd.outline.position.v1')!)).toEqual({ left: 500, top: 108 });
     rendered.unmount();
 
-    const reopened = render(EditorWorkspace, { props: createProps('# Another document') });
+    const reopened = await renderWorkspace({ props: createProps('# Another document') });
     const geometry = mockPanelGeometry(reopened.container);
     await fireEvent(window, new Event('resize'));
     await new Promise((resolve) => window.requestAnimationFrame(resolve));
@@ -56,7 +57,7 @@ describe('EditorWorkspace outline drag', () => {
   });
 
   it('excludes the bulk button and cancels title movement without saving', async () => {
-    const rendered = render(EditorWorkspace, {
+    const rendered = await renderWorkspace({
       props: createProps('# Parent\n## Child', { isOutlineItemExpandable: (index) => index === 0 }),
     });
     const { panel, title } = mockPanelGeometry(rendered.container);
@@ -83,7 +84,7 @@ describe('EditorWorkspace outline drag', () => {
   it('constrains restored positions without overwriting them and resets from either menu', async () => {
     window.localStorage.setItem('newmd.outline.position.v1', JSON.stringify({ left: 9000, top: 9000 }));
     const openContextMenu = vi.fn();
-    const rendered = render(EditorWorkspace, { props: createProps('# One', { openContextMenu }) });
+    const rendered = await renderWorkspace({ props: createProps('# One', { openContextMenu }) });
     const { panel } = mockPanelGeometry(rendered.container);
     await fireEvent(window, new Event('resize'));
     await new Promise((resolve) => window.requestAnimationFrame(resolve));
@@ -109,7 +110,7 @@ describe('EditorWorkspace outline drag', () => {
   it('publishes a semantic workspace before creating source, then reuses source until unmount', async () => {
     const ready = vi.fn();
     const destroy = vi.fn();
-    const rendered = render(EditorWorkspace, { props: createProps('hello', {
+    const rendered = await renderWorkspace({ props: createProps('hello', {
       mode: 'semantic', sourceDocumentId: 'lazy', onRuntimeReady: ready, onRuntimeDestroy: destroy,
     }) });
     await tick();
@@ -137,13 +138,13 @@ describe('EditorWorkspace outline drag', () => {
     const jumpToOutlineItem = vi.fn();
     const moveOutlineSection = vi.fn(() => true);
     const markdown = '# One\none\n# Two\ntwo\n';
-    const { container } = render(EditorWorkspace, {
+    const { container } = await renderWorkspace({
       props: createProps(markdown, { jumpToOutlineItem, moveOutlineSection }),
     });
     const rows = [...container.querySelectorAll<HTMLElement>('.content-outline-row')];
     const panel = container.querySelector<HTMLElement>('.content-outline')!;
     const firstLink = rows[0].querySelector<HTMLButtonElement>('.outline-link')!;
-    const pointerCapture = mockPointerCapture(rows[0]);
+    const pointerCapture = mockPointerCapture(panel);
     expect(panel.classList.contains('outline-dragging')).toBe(false);
 
     await dispatchPointer(firstLink, 'pointerdown', { clientX: 0, clientY: 5 });
@@ -205,7 +206,7 @@ describe('EditorWorkspace outline drag', () => {
     const outline = extractOutline(markdown);
     const toggleOutlineItemExpanded = vi.fn();
     const moveOutlineSection = vi.fn(() => true);
-    const { container } = render(EditorWorkspace, {
+    const { container } = await renderWorkspace({
       props: createProps(markdown, {
         collapsedOutlineIds: new Set([outline[1].id]),
         isOutlineItemExpandable: (index) => index === 1,
@@ -217,7 +218,7 @@ describe('EditorWorkspace outline drag', () => {
     panel.getBoundingClientRect = () =>
       ({ top: 0, bottom: 300, left: 0, right: 220, width: 220, height: 300 } as DOMRect);
     const rows = [...container.querySelectorAll<HTMLElement>('.content-outline-row')];
-    const pointerCapture = mockPointerCapture(rows[0]);
+    const pointerCapture = mockPointerCapture(panel);
     rows[1].getBoundingClientRect = () =>
       ({ top: 30, bottom: 60, left: 0, right: 200, width: 200, height: 30 } as DOMRect);
     Object.defineProperty(document, 'elementFromPoint', {
@@ -246,7 +247,7 @@ describe('EditorWorkspace outline drag', () => {
     const outline = extractOutline(markdown);
     const toggleOutlineItemExpanded = vi.fn();
     const moveOutlineSection = vi.fn(() => true);
-    const { container } = render(EditorWorkspace, {
+    const { container } = await renderWorkspace({
       props: createProps(markdown, {
         isOutlineItemExpandable: (index) => index === 0,
         toggleOutlineItemExpanded,
@@ -255,7 +256,7 @@ describe('EditorWorkspace outline drag', () => {
     });
     const firstRow = container.querySelector<HTMLElement>('.content-outline-row')!;
     const toggle = firstRow.querySelector<HTMLButtonElement>('.outline-toggle')!;
-    const pointerCapture = mockPointerCapture(firstRow);
+    const pointerCapture = mockPointerCapture(container.querySelector<HTMLElement>('.content-outline')!);
 
     await dispatchPointer(toggle, 'pointerdown', { clientX: 0, clientY: 5 });
     await dispatchPointer(window, 'pointermove', { clientX: 8, clientY: 5 });
@@ -273,9 +274,10 @@ describe('EditorWorkspace paper clicks', () => {
   async function workspace(markdown = '第一段\n\n第二段', overrides: Partial<Props> = {}) {
     const place = vi.fn(() => true);
     const ready = vi.fn();
-    const rendered = render(EditorWorkspace, { props: createProps(markdown, {
+    const rendered = await renderWorkspace({ props: createProps(markdown, {
       mode: 'split', sourceDocumentId: 'paper', onRuntimeReady: ready,
-      editorCore: { subscribe: () => () => undefined, placeCaretAtCoordinates: place } as unknown as EditorCore,
+      editorCore: { subscribe: () => () => undefined, placeCaretAtCoordinates: place,
+        getScrollSyncSnapshot: () => ({ ready: false, revision: 0, renderRevision: 0, markdown, anchors: [] }) } as unknown as EditorCore,
       ...overrides,
     }) });
     await tick();
@@ -341,6 +343,21 @@ describe('EditorWorkspace paper clicks', () => {
   });
 });
 
+async function renderWorkspace(options: { props: Props }) {
+  const rendered = render(EditorWorkspace, options);
+  const panel = rendered.container.querySelector<HTMLElement>('.content-outline');
+  if (panel) {
+    Object.defineProperty(panel, 'clientHeight', { configurable: true, value: 320 });
+    if (vi.isFakeTimers()) {
+      for (let i = 0; i < 100 && panel.dataset.outlineReady !== 'true'; i++) await vi.advanceTimersByTimeAsync(16);
+      expect(panel.dataset.outlineReady).toBe('true');
+    }
+    else await waitFor(() => expect(panel.dataset.outlineReady).toBe('true'));
+    await tick();
+  }
+  return rendered;
+}
+
 function mockPanelGeometry(container: HTMLElement) {
   const grid = container.querySelector<HTMLElement>('.editor-grid')!;
   const panel = container.querySelector<HTMLElement>('.content-outline')!;
@@ -354,6 +371,10 @@ function mockPanelGeometry(container: HTMLElement) {
 
 function createProps(markdown: string, overrides: Partial<Props> = {}): Props {
   const outline = extractOutline(markdown);
+  const outlineProjection = new OutlineProjection('test', 7);
+  outlineProjection.update(outline, 0, 'ready');
+  for (const item of outline) if (overrides.collapsedOutlineIds?.has(item.id)) outlineProjection.toggle(item);
+  while (!outlineProjection.complete) outlineProjection.advance(outlineProjection.generation, () => 0);
   const noop = () => undefined;
   return {
     interfaceLocale: 'en-US',
@@ -369,7 +390,7 @@ function createProps(markdown: string, overrides: Partial<Props> = {}): Props {
     outline,
     activeOutlineId: '',
     collapsedOutlineIds: new Set(),
-    visibleOutlineIds: new Set(outline.map((item) => item.id)),
+    outlineProjection,
     sourceEditor: undefined as unknown as MarkdownSourceEditorHandle,
     sourcePane: undefined as unknown as HTMLElement,
     semanticPane: undefined as unknown as HTMLElement,

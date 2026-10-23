@@ -19,7 +19,7 @@ interface EditorInteractionOptions {
   getLargeDocumentMode(): boolean;
   getMode(): EditorMode;
   getSplitView?(): boolean;
-  getOutline(): OutlineItem[];
+  getOutline(): readonly OutlineItem[];
   getSemanticPane(): HTMLElement | undefined;
   getSourcePane(): HTMLElement | undefined;
   getSourceEditor(): MarkdownSourceEditorHandle | undefined;
@@ -403,7 +403,7 @@ export function createEditorInteractionController(options: EditorInteractionOpti
   }
 
   function getSemanticModeSwitchAnchor(
-    outline: OutlineItem[],
+    outline: readonly OutlineItem[],
     semanticPane: HTMLElement | undefined,
     savedScrollTop: number,
   ): OutlineScrollAnchor | null {
@@ -425,7 +425,7 @@ export function createEditorInteractionController(options: EditorInteractionOpti
   }
 
   function getSourceModeSwitchAnchor(
-    outline: OutlineItem[],
+    outline: readonly OutlineItem[],
     sourcePane: HTMLElement | undefined,
     savedScrollTop: number,
   ): OutlineScrollAnchor | null {

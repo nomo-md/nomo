@@ -136,7 +136,7 @@
   import { createImageInsertionHandlers } from './services/imageInsertion';
   import { readEditorClipboard, writeEditorClipboard, writeFileClipboard } from './services/clipboard';
   import { createDesktopImageLoader } from './services/desktopImageLoader';
-  import { isOutlineItemVisible as getOutlineItemVisible } from './services/outlineState';
+  import { OutlineProjection } from './services/outlineProjection';
   import { writeRecoveryDraft as writeRecoveryDraftToStorage } from './services/recoveryDraft';
   import {
     createBlankTab,
@@ -372,11 +372,11 @@
   let exitRequestId: number | null = null;
   let exitConfirmPending = false;
   let missingRecentPaths = new Set<string>();
-  let outline: OutlineItem[] = [];
+  let outline: readonly OutlineItem[] = [];
+  let outlineProjection: OutlineProjection | undefined;
   let outlineVisible = DEFAULT_APP_PREFERENCES.outlineVisible,
     activeOutlineId = outline[0]?.id ?? '';
   let collapsedOutlineIds = new Set<string>();
-  let visibleOutlineIds = new Set(outline.map((item) => item.id));
   let suppressOutlineScrollUntil = 0;
   let stats: DocumentStats = { chars: 0, words: 0, visibleChars: 0, lines: 1, headings: 0, readingMinutes: 1 };
   let statsStatus: 'pending' | 'ready' | 'error' = 'pending';
@@ -1954,8 +1954,9 @@
 
       const analysis = { outline: runtime.session ? runtime.outline : extractOutline(markdown) };
       outline = analysis.outline;
-      activeOutlineId = outline[0]?.id ?? '';
-      applyOutlineDefaultExpansion();
+      outlineProjection = runtime.outlineProjection;
+      activeOutlineId = runtime.activeOutlineId ?? (outlineProjection.activeId || outline[0]?.id || '');
+      collapsedOutlineIds = outlineProjection.collapsedIds;
       syncSourceTextareaHeight();
       if (!runtime.session && owner?.kind !== 'comparison' && !mountedDocumentRuntimes.has(runtime)) scheduleReadingPositionRestore(tab, nextReadingMode, storedPosition, restoreGeneration);
     } finally {
@@ -3951,6 +3952,7 @@
   function disposeMarkdownRuntime(runtime: MarkdownDocumentRuntime) {
     runtime.disposed = true;
     runtime.unsubscribe();
+    runtime.outlineProjection?.dispose();
     const disposal = runtime.session ? runtime.session.detach() : Promise.resolve(runtime.editor.destroy());
     pendingMarkdownRuntimeDisposals.add(disposal);
     void disposal.then(
@@ -4014,17 +4016,24 @@
     }, () => {
       const current = documentRuntimes.get(tab.id);
       if (!current || current.disposed || current.session !== application || closingDocuments.has(tab.id)) return;
-      const indexed = application.document?.state.index;
+      const loading = application.document?.state;
+      const indexed = loading?.index;
       const outlineChanged = !!indexed && (observedOutlineRevision !== indexed.revision || observedOutlineCount !== indexed.outline.length || observedOutline !== indexed.outline);
       if (indexed && outlineChanged) {
-        current.outline = [...indexed.outline];
+        current.outline = indexed.outline;
         observedOutline = indexed.outline;
         observedOutlineCount = indexed.outline.length; observedOutlineRevision = indexed.revision;
+      }
+      if (loading) {
+        current.outlineProjection.update(indexed?.outline ?? (current.outlineProjection.revision === loading.status.revision ? current.outlineProjection.headings : []), loading.status.revision,
+          loading.progress.state, loading.failure);
+        current.outline = current.outlineProjection.headings;
       }
       if (activeTabId === tab.id) {
         const changed = version !== tab.version;
         dirty = tab.dirty; version = tab.version;
-        if (outlineChanged) outline = current.outline;
+        if (outlineChanged || outline !== current.outline) outline = current.outline;
+        outlineProjection = current.outlineProjection;
         if (tab.documentId) { markdown = ''; savedMarkdown = ''; largeDocumentMode = false; readonlyDocumentMode = false; }
         if (changed && searchPanelOpen) scheduleSearchRefresh({ preserveActive: true, selectActive: false });
       }
@@ -4048,7 +4057,8 @@
     const core = application.editor;
     const runtime = {
       tabId: tab.id, editor: core, session: application, mode: initialMode,
-      outline: [], semanticScrollTop: 0, sourceScrollTop: 0,
+      outline: [], outlineProjection: new OutlineProjection(tab.id, outlineDefaultExpandLevel),
+      semanticScrollTop: 0, sourceScrollTop: 0,
       pendingSourceScrollTop: null, disposed: false, unsubscribe: () => undefined,
     } as unknown as MarkdownDocumentRuntime;
     documentRuntimes.set(tab.id, runtime);
@@ -4127,6 +4137,8 @@
     if (mode !== 'source') runtime.semanticScrollTop = semanticPane?.scrollTop ?? runtime.semanticScrollTop;
     if (mode !== 'semantic') runtime.sourceScrollTop = sourcePane?.scrollTop ?? runtime.sourceScrollTop;
     runtime.outline = outline;
+    runtime.activeOutlineId = activeOutlineId;
+    runtime.outlineProjection.activeId = activeOutlineId;
   }
 
   function flushDocumentRuntime(tabId: string) {
@@ -5459,6 +5471,7 @@
     getMode: () => getActiveEditorMode(),
     getMarkdown: () => markdown,
     getOutline: () => outline,
+    getOutlineProjection: () => documentRuntimes.get(activeTabId)?.outlineProjection,
     getCollapsedOutlineIds: () => collapsedOutlineIds,
     setCollapsedOutlineIds: (value) => {
       collapsedOutlineIds = value;
@@ -6577,6 +6590,7 @@
       writeBootSnapshot?: boolean;
     } = {},
   ) {
+    const outlineLevelChanged = outlineDefaultExpandLevel !== preferences.outlineDefaultExpandLevel;
     themeMode = preferences.themeMode;
     colorThemeId = preferences.colorThemeId;
     documentStyleId = preferences.documentStyleId;
@@ -6666,7 +6680,11 @@
       runtime.editor.updateOptions({ inlineCodeRenderingEnabled, copyMarkdownSyntaxEnabled, quickInsertEnabled, quickInsertTrigger, mode: getCoreModeForView(runtime.mode), readonly: tab.readonlyDocumentMode });
     }
     editor.updateOptions({ inlineCodeRenderingEnabled, copyMarkdownSyntaxEnabled, quickInsertEnabled, quickInsertTrigger });
-    applyOutlineDefaultExpansion();
+    if (outlineLevelChanged) {
+      for (const runtime of documentRuntimes.values()) runtime.outlineProjection.resetExpansion(outlineDefaultExpandLevel);
+      outlineProjection = documentRuntimes.get(activeTabId)?.outlineProjection;
+      collapsedOutlineIds = outlineProjection?.collapsedIds ?? new Set();
+    }
 
     const activeDocument = tabs.find((tab) => tab.id === activeTabId);
     if (isMarkdownTab(activeDocument)) {
@@ -6812,19 +6830,11 @@
   }
 
   function applyOutlineDefaultExpansion() {
-    if (outlineDefaultExpandLevel >= 6) {
-      collapsedOutlineIds = new Set();
-      return;
-    }
-
-    const nextCollapsedIds = new Set<string>();
-    outline.forEach((item, index) => {
-      const next = outline[index + 1];
-      if (item.level >= outlineDefaultExpandLevel && next && next.level > item.level) {
-        nextCollapsedIds.add(item.id);
-      }
-    });
-    collapsedOutlineIds = nextCollapsedIds;
+    const projection = documentRuntimes.get(activeTabId)?.outlineProjection;
+    if (!projection) return;
+    projection.resetExpansion(outlineDefaultExpandLevel);
+    collapsedOutlineIds = projection.collapsedIds;
+    outlineProjection = projection;
   }
 
   async function reloadAppPreferencesFromSettingsWindow() {
@@ -7707,12 +7717,6 @@
     });
   }
 
-  $: visibleOutlineIds = new Set(
-    outline
-      .filter((_item, index) => getOutlineItemVisible(outline, collapsedOutlineIds, index))
-      .map((item) => item.id),
-  );
-
   $: frontMatter = version >= 0 && documentRuntimes.get(activeTabId)?.session ? documentRuntimes.get(activeTabId)!.session!.frontMatter : extractFrontMatterBlock(markdown);
   $: if (!frontMatter) {
     frontMatterEditing = false;
@@ -8312,9 +8316,9 @@
   {frontMatterFocusTarget}
   {readonlyDocumentMode}
   {outline}
+  {outlineProjection}
   {activeOutlineId}
   {collapsedOutlineIds}
-  {visibleOutlineIds}
   stats={effectiveStats}
   {statsStatus}
   {writingStatsVisible}

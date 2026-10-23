@@ -60,6 +60,7 @@
     getMode: () => runtime.mode === 'source' ? 'source' : 'semantic',
     getMarkdown: () => runtime.editor.flushMarkdown(),
     getOutline: () => runtime.outline,
+    getOutlineProjection: () => runtime.outlineProjection,
     getCollapsedOutlineIds: () => collapsedOutlineIds,
     setCollapsedOutlineIds: (value) => { collapsedOutlineIds = value; runtime.collapsedOutlineIds = value; },
     getOutlineVisible: () => outlineVisible,
@@ -79,7 +80,6 @@
 
   $: frontMatter = runtime.session ? runtime.session.frontMatter : extractFrontMatterBlock(tab.markdown);
   $: readonlyMode = tab.readonlyDocumentMode;
-  $: visibleOutlineIds = new Set(runtime.outline.map((item) => item.id));
   $: updateCoreOptions(mode, readonlyMode);
   $: synchronizeBindings(host, sourceEditor, sourcePane, semanticPane, focused, mode);
   $: if (frontMatterEditRequest !== lastEditRequest) {
@@ -206,6 +206,7 @@
     return moveOutline(tab.id, request);
   }
   function resetOutlineCollapse() {
+    runtime.outlineProjection.resetExpansion();
     collapsedOutlineIds = new Set();
     runtime.collapsedOutlineIds = collapsedOutlineIds;
   }
@@ -240,7 +241,7 @@
     sourceRuntimeState={runtime.sourceState} onSourceRuntimeStateChange={rememberSourceState}
     largeDocumentMode={tab.largeDocumentMode} readonlyDocumentMode={readonlyMode}
     {frontMatter} {frontMatterEditing} frontMatterFocusRequest={frontMatterEditRequest} frontMatterFocusTarget="default"
-    outlineVisible={focused && outlineVisible} outline={runtime.outline} {activeOutlineId} {collapsedOutlineIds} {visibleOutlineIds}
+    outlineVisible={focused && outlineVisible} outline={runtime.outline} outlineProjection={runtime.outlineProjection} {activeOutlineId} {collapsedOutlineIds}
     bind:sourceEditor bind:sourcePane bind:semanticPane
     bind:editorHost={host} editorCore={runtime.editor}
     updateMarkdown={(value) => runtime.interaction.updateMarkdown(value)}

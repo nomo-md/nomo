@@ -1,4 +1,7 @@
 export const JA_JP_EXTRA_TRANSLATIONS = {
+  outlineLoading: 'アウトラインを読み込み中…',
+  outlineLoadFailed: 'アウトラインを読み込めませんでした。',
+  outlineRetry: '再試行',
   close: '閉じる',
   selectWholeParagraph: '段落を選択',
   selectWholeHeading: '見出しを選択',
@@ -256,7 +259,7 @@ export const JA_JP_EXTRA_TRANSLATIONS = {
     '現在の Markdown から導出された推定読書時間を統計ポップオーバーに表示します。',
   outlineDefaultExpandLevel: 'デフォルトのアウトライン展開レベル',
   outlineDefaultExpandLevelDescription:
-    'ドキュメントを開いたり切り替えたりするときに表示されるデフォルトの見出しレベル。',
+    '初めて開く文書の見出しレベル。タブ切り替え時は展開状態を保持します。',
   defaultInsertBehavior: 'デフォルトの挿入動作',
   externalFileChangeBehavior: 'ファイル変更時のデフォルト動作',
   externalFileChangeBehaviorDescription:

@@ -44,6 +44,9 @@ const generatedMessages = { ...messages.m } as unknown as MessageBag;
 
 const EXTRA_TRANSLATIONS: Partial<Record<EffectiveInterfaceLocale, TranslationTable>> = {
   'zh-CN': {
+    outlineLoading: '正在补充大纲…',
+    outlineLoadFailed: '大纲加载失败。',
+    outlineRetry: '重试',
     close: '关闭',
     selectWholeParagraph: '选中整段',
     selectWholeHeading: '选中标题',
@@ -273,7 +276,7 @@ const EXTRA_TRANSLATIONS: Partial<Record<EffectiveInterfaceLocale, TranslationTa
     readingTime: '阅读时间',
     readingTimeDescription: '在统计弹层中显示由当前 Markdown 派生的阅读时长。',
     outlineDefaultExpandLevel: '大纲默认展开层级',
-    outlineDefaultExpandLevelDescription: '打开或切换文档时默认展示到指定标题层级。',
+    outlineDefaultExpandLevelDescription: '首次打开文档时默认展示到指定标题层级，切换标签保留当前折叠状态。',
     defaultInsertBehavior: '默认插入行为',
     externalFileChangeBehavior: '文件变更默认行为',
     externalFileChangeBehaviorDescription:
@@ -747,6 +750,9 @@ const EXTRA_TRANSLATIONS: Partial<Record<EffectiveInterfaceLocale, TranslationTa
     largeDocumentStayReadonlySource: '大文件已进入只读源码模式，暂不切回语义编辑以避免卡顿',
   },
   'zh-TW': {
+    outlineLoading: '正在補充大綱…',
+    outlineLoadFailed: '大綱載入失敗。',
+    outlineRetry: '重試',
     close: '關閉',
     selectWholeParagraph: '選取整段',
     selectWholeHeading: '選取標題',
@@ -974,7 +980,7 @@ const EXTRA_TRANSLATIONS: Partial<Record<EffectiveInterfaceLocale, TranslationTa
     readingTime: '閱讀時間',
     readingTimeDescription: '在統計彈層中顯示由目前 Markdown 派生的閱讀時長。',
     outlineDefaultExpandLevel: '大綱預設展開層級',
-    outlineDefaultExpandLevelDescription: '開啟或切換文件時預設展示到指定標題層級。',
+    outlineDefaultExpandLevelDescription: '首次開啟文件時預設展示到指定標題層級，切換分頁保留目前摺疊狀態。',
     defaultInsertBehavior: '預設插入行為',
     externalFileChangeBehavior: '檔案變更預設行為',
     externalFileChangeBehaviorDescription:
@@ -1449,6 +1455,9 @@ const EXTRA_TRANSLATIONS: Partial<Record<EffectiveInterfaceLocale, TranslationTa
   },
   'ja-JP': JA_JP_EXTRA_TRANSLATIONS,
   'en-US': {
+    outlineLoading: 'Loading outline…',
+    outlineLoadFailed: 'Could not load the outline.',
+    outlineRetry: 'Retry',
     close: 'Close',
     selectWholeParagraph: 'Select paragraph',
     selectWholeHeading: 'Select heading',
@@ -1694,7 +1703,7 @@ const EXTRA_TRANSLATIONS: Partial<Record<EffectiveInterfaceLocale, TranslationTa
       'Show estimated reading time derived from the current Markdown in the stats popover.',
     outlineDefaultExpandLevel: 'Default outline expansion level',
     outlineDefaultExpandLevelDescription:
-      'Default heading level shown when opening or switching documents.',
+      'Default heading level for newly opened documents. Switching tabs preserves their expansion state.',
     defaultInsertBehavior: 'Default insertion behavior',
     externalFileChangeBehavior: 'Default file change behavior',
     externalFileChangeBehaviorDescription:

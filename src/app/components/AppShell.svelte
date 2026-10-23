@@ -134,10 +134,10 @@
   export let frontMatterFocusRequest: number;
   export let frontMatterFocusTarget: 'default' | 'title-value';
   export let readonlyDocumentMode: boolean;
-  export let outline: OutlineItem[];
+  export let outline: readonly OutlineItem[];
+  export let outlineProjection: import('../services/outlineProjection').OutlineProjection | undefined = undefined;
   export let activeOutlineId: string;
   export let collapsedOutlineIds: Set<string>;
-  export let visibleOutlineIds: Set<string>;
   export let stats: DocumentStats;
   export let statsStatus: 'pending' | 'ready' | 'error' = 'ready';
   export let writingStatsVisible: boolean;
@@ -635,9 +635,9 @@
               {readonlyDocumentMode}
               {outlineVisible}
               {outline}
+              {outlineProjection}
               {activeOutlineId}
               {collapsedOutlineIds}
-              {visibleOutlineIds}
               {updateMarkdown}
               {setSplitActivePane}
               {updateSplitLeftPercent}

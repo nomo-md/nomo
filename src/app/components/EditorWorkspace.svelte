@@ -15,7 +15,6 @@
     modePaneMotion,
     motionIn,
     outlinePanelTransition,
-    outlineRowTransition,
     transitionDuration,
   } from '../actions/motion';
   import FrontMatterCard from './FrontMatterCard.svelte';
@@ -24,6 +23,8 @@
   import { syncEditorPanes } from '../services/markdownScrollSyncWorkspace';
   import type { MarkdownWorkspaceRuntimeBinding } from '../services/markdownDocumentRuntime';
   import { getMarkdownApplicationSession } from '../services/markdownApplicationSession';
+  import { OutlineProjection } from '../services/outlineProjection';
+  import { OutlineViewportController, type OutlineViewportSnapshot } from '../services/outlineViewportController';
   import { t } from '../i18n';
   import type { EditorViewMode, SplitActivePane, SplitViewLayout } from '../types';
 
@@ -57,10 +58,10 @@
   export let frontMatterFocusTarget: 'default' | 'title-value';
   export let readonlyDocumentMode: boolean;
   export let outlineVisible: boolean;
-  export let outline: OutlineItem[];
+  export let outline: readonly OutlineItem[];
+  export let outlineProjection: OutlineProjection | undefined = undefined;
   export let activeOutlineId: string;
   export let collapsedOutlineIds: Set<string>;
-  export let visibleOutlineIds: Set<string>;
   export let sourceEditor: MarkdownSourceEditorHandle | undefined = undefined;
   export let sourcePane: HTMLElement;
   export let semanticPane: HTMLElement;
@@ -102,6 +103,7 @@
     startY: number;
     sourceIndex: number;
     row: HTMLElement;
+    generation: number;
   }
 
   let outlinePanel: HTMLElement;
@@ -118,13 +120,36 @@
   let outlineDropValid = false;
   let suppressOutlineClick = false;
   let outlineExpandTimer: ReturnType<typeof setTimeout> | null = null;
+  let outlineClickTimer: ReturnType<typeof setTimeout> | null = null;
   let outlineExpandTargetIndex = -1;
   let outlineAutoScrollFrame = 0;
   let outlinePointerX = 0;
   let outlinePointerY = 0;
-  let expandableOutlineIds = new Set<string>();
   let hasExpandableOutline = false;
   let hasCollapsedExpandableOutline = false;
+  const fallbackProjection = new OutlineProjection(sourceDocumentId);
+  let outlineViewport: OutlineViewportController | undefined;
+  let outlineView: OutlineViewportSnapshot = { rows: [], height: 0, pitch: 32, loading: true, focusedId: '', generation: -1 };
+  $: projection = outlineProjection ?? fallbackProjection;
+  $: if (!outlineProjection) fallbackProjection.update(outline, 0, 'ready');
+
+  function mountOutlineViewport(node: HTMLElement, _state: unknown) {
+    const controller = new OutlineViewportController(node, projection, snapshot => { outlineView = snapshot; });
+    outlineViewport = controller;
+    return {
+      update(_state: unknown) { controller.update(); },
+      destroy() { controller.destroy(); if (outlineViewport === controller) outlineViewport = undefined; },
+    };
+  }
+
+  function retryOutline() {
+    void getMarkdownApplicationSession(editorCore)?.document?.retry().catch(error => {
+      if (!runtimeLifetimeEnded) {
+        projection.update(projection.headings, projection.revision, 'failed', error);
+        outlineViewport?.update();
+      }
+    });
+  }
   let runtimeLifetimeEnded = false;
   // 当前挂载首次使用源码后复用视图；纯写作标签不创建第二套编辑器。
   let sourceInitialized = mode !== 'semantic';
@@ -226,16 +251,8 @@
     onSourceRuntimeStateChange(state);
   }
 
-  // 父标题的 ID 和索引不变时，增删子标题也必须刷新展开按钮。
-  $: expandableOutlineIds = new Set(
-    outline
-      .filter((_item, index) => isOutlineItemExpandable(index))
-      .map((item) => item.id),
-  );
-  $: hasExpandableOutline = expandableOutlineIds.size > 0;
-  $: hasCollapsedExpandableOutline = outline.some(
-    (item) => expandableOutlineIds.has(item.id) && collapsedOutlineIds.has(item.id),
-  );
+  $: hasExpandableOutline = outlineView.generation >= 0 && projection.expandableCount > 0;
+  $: hasCollapsedExpandableOutline = outlineView.generation >= 0 && projection.collapsedExpandableCount > 0;
   $: if (splitResizePointerId === null) {
     pendingSplitLeftPercent = splitLeftPercent;
   }
@@ -659,7 +676,9 @@
   function handleOutlineToggle(event: MouseEvent, item: OutlineItem) {
     event.preventDefault();
     event.stopPropagation();
+    outlineViewport?.capture();
     toggleOutlineItemExpanded(item);
+    outlineViewport?.update();
   }
 
   function handleOutlineLinkClick(event: MouseEvent, item: OutlineItem) {
@@ -674,6 +693,7 @@
   function handleOutlinePointerDown(event: PointerEvent, sourceIndex: number) {
     if (
       readonlyDocumentMode ||
+      !projection.ready ||
       event.button !== 0 ||
       !event.isPrimary ||
       event.pointerType === 'touch' ||
@@ -688,6 +708,7 @@
       startY: event.clientY,
       sourceIndex,
       row,
+      generation: projection.generation,
     };
     outlinePointerX = event.clientX;
     outlinePointerY = event.clientY;
@@ -696,6 +717,7 @@
   function handleOutlinePointerMove(event: PointerEvent) {
     const pending = pendingOutlineDrag;
     if (!pending || event.pointerId !== pending.pointerId) return;
+    if (pending.generation !== projection.generation || projection.phase !== 'ready') { cancelOutlineDrag(); return; }
     outlinePointerX = event.clientX;
     outlinePointerY = event.clientY;
     if (!outlineDragging) {
@@ -712,7 +734,7 @@
   function beginOutlineDrag(pending: PendingOutlineDrag, clientX: number, clientY: number) {
     outlineDragging = true;
     suppressOutlineClick = true;
-    pending.row.setPointerCapture?.(pending.pointerId);
+    outlinePanel.setPointerCapture?.(pending.pointerId);
     const preview = pending.row.cloneNode(true) as HTMLElement;
     const rect = pending.row.getBoundingClientRect();
     preview.classList.add('outline-drag-preview');
@@ -762,17 +784,20 @@
     if (
       targetIndex === outlineExpandTargetIndex ||
       !isOutlineItemExpandable(targetIndex) ||
-      !collapsedOutlineIds.has(outline[targetIndex]?.id)
+      !projection.isCollapsed(outline[targetIndex])
     ) {
-      if (!collapsedOutlineIds.has(outline[targetIndex]?.id)) clearOutlineExpandTimer();
+      if (outline[targetIndex] && !projection.isCollapsed(outline[targetIndex])) clearOutlineExpandTimer();
       return;
     }
     clearOutlineExpandTimer();
     outlineExpandTargetIndex = targetIndex;
     outlineExpandTimer = setTimeout(() => {
       const item = outline[targetIndex];
-      if (outlineDragging && item && collapsedOutlineIds.has(item.id)) {
+      if (outlineDragging && item && projection.isCollapsed(item)) {
+        outlineViewport?.capture();
         toggleOutlineItemExpanded(item);
+        if (pendingOutlineDrag) pendingOutlineDrag.generation = projection.generation;
+        outlineViewport?.update();
       }
       clearOutlineExpandTimer();
     }, 500);
@@ -810,7 +835,7 @@
   function handleOutlinePointerUp(event: PointerEvent) {
     const pending = pendingOutlineDrag;
     if (!pending || event.pointerId !== pending.pointerId) return;
-    if (outlineDragging && outlineDropTargetIndex >= 0 && outlineDropPlacement) {
+    if (outlineDragging && projection.ready && pending.generation === projection.generation && outlineDropTargetIndex >= 0 && outlineDropPlacement) {
       moveOutlineSection({
         sourceIndex: pending.sourceIndex,
         targetIndex: outlineDropTargetIndex,
@@ -828,8 +853,8 @@
 
   function finishOutlineDrag() {
     const pending = pendingOutlineDrag;
-    if (pending?.row.hasPointerCapture?.(pending.pointerId)) {
-      pending.row.releasePointerCapture(pending.pointerId);
+    if (pending && outlinePanel?.hasPointerCapture?.(pending.pointerId)) {
+      outlinePanel.releasePointerCapture(pending.pointerId);
     }
     pendingOutlineDrag = null;
     outlineDragging = false;
@@ -838,7 +863,9 @@
     clearOutlineDropTarget();
     if (outlineAutoScrollFrame) cancelAnimationFrame(outlineAutoScrollFrame);
     outlineAutoScrollFrame = 0;
-    setTimeout(() => {
+    if (outlineClickTimer) clearTimeout(outlineClickTimer);
+    outlineClickTimer = setTimeout(() => {
+      outlineClickTimer = null;
       suppressOutlineClick = false;
     }, 0);
   }
@@ -851,6 +878,8 @@
   }
 
   onDestroy(() => {
+    outlineViewport?.destroy();
+    fallbackProjection.dispose();
     unsubscribeSession?.();
     runtimeLifetimeEnded = true;
     // 子组件销毁回调已通过 onRuntimeStateChange 提交最后状态，旧 handle 不再可用。
@@ -867,6 +896,7 @@
     editorHost = undefined!;
     outlineDragPreview?.remove();
     clearOutlineExpandTimer();
+    if (outlineClickTimer) clearTimeout(outlineClickTimer);
     if (outlineAutoScrollFrame) cancelAnimationFrame(outlineAutoScrollFrame);
   });
 
@@ -888,21 +918,19 @@
   }
 
   function buildOutlineViewItems(): ContextMenuItem[] {
-    const expandableItems = outline.filter((_item, index) => isOutlineItemExpandable(index));
     const allExpandableItemsCollapsed =
-      expandableItems.length > 0 &&
-      expandableItems.every((item) => collapsedOutlineIds.has(item.id));
+      projection.expandableCount > 0 && projection.expandableCount === projection.collapsedExpandableCount;
     return [
       {
         label: t.expandAll(),
         icon: 'expand',
-        disabled: collapsedOutlineIds.size === 0,
+        disabled: projection.collapsedExpandableCount === 0,
         action: expandAllOutline,
       },
       {
         label: t.collapseAll(),
         icon: 'collapse',
-        disabled: expandableItems.length === 0 || allExpandableItemsCollapsed,
+        disabled: projection.expandableCount === 0 || allExpandableItemsCollapsed,
         action: collapseAllOutline,
       },
       outlineSeparator(),
@@ -934,8 +962,8 @@
     ];
     if (expandable) {
       items.push({
-        label: collapsedOutlineIds.has(item.id) ? t.expandHeading() : t.collapseHeading(),
-        icon: collapsedOutlineIds.has(item.id) ? 'expand' : 'collapse',
+        label: projection.isCollapsed(item) ? t.expandHeading() : t.collapseHeading(),
+        icon: projection.isCollapsed(item) ? 'expand' : 'collapse',
         action: () => toggleOutlineItemExpanded(item),
       });
     }
@@ -1108,16 +1136,22 @@
     </section>
 
     {#if outlineVisible}
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions (Arrow navigation is delegated from the heading buttons.) -->
       <aside
         bind:this={outlinePanel}
         class="content-outline"
         use:outlinePanelDrag
+        use:mountOutlineViewport={{ projection, outline, collapsedOutlineIds }}
         class:outline-dragging={outlineDragging}
         class:outline-readonly={readonlyDocumentMode}
         aria-label={t.documentOutline()}
         transition:outlinePanelTransition
         on:contextmenu={handleOutlineContextMenu}
+        on:keydown={(event) => outlineViewport?.keydown(event, toggleOutlineItemExpanded)}
+        data-outline-ready={outlineView.generation >= 0 && projection.ready}
+        data-outline-count={outlineView.generation >= 0 ? projection.processed : 0}
       >
+        <div class="outline-measure" data-outline-measure aria-hidden="true"><button class="outline-link" tabindex="-1"><span>目录 M</span></button></div>
         <div class="content-outline-header" title={t.dragOutlinePanel()}>
           <strong>{t.documentOutline()}</strong>
           {#if hasExpandableOutline}
@@ -1140,10 +1174,8 @@
             </button>
           {/if}
         </div>
-        {#if outline.length > 0}
-          <div class="content-outline-list">
-            {#each outline as item, index (item.id)}
-              {#if visibleOutlineIds.has(item.id)}
+          <div class="content-outline-list" style:height={`${outlineView.height}px`}>
+            {#each outlineView.rows as { item, index, position } (projection.identity(item))}
                 <div
                   class:active={activeOutlineId === item.id}
                   class:outline-drag-source={outlineDragging &&
@@ -1162,24 +1194,26 @@
                     outlineDropTargetIndex === index}
                   class="content-outline-row"
                   data-outline-index={index}
+                  data-outline-id={item.id}
+                  data-outline-position={position}
                   role="group"
-                  style={`padding-left: ${(item.level - 1) * 16}px`}
-                  transition:outlineRowTransition
+                  style={`padding-left: ${(item.level - 1) * 16}px; transform: translateY(${position * outlineView.pitch}px)`}
                   on:pointerdown={(event) => handleOutlinePointerDown(event, index)}
                   on:contextmenu={(event) => handleOutlineItemContextMenu(event, item, index)}
                 >
-                  {#if expandableOutlineIds.has(item.id)}
+                  {#if isOutlineItemExpandable(index)}
                     <button
                       type="button"
-                      class:collapsed={collapsedOutlineIds.has(item.id)}
+                      class:collapsed={projection.isCollapsed(item)}
                       class="outline-toggle"
-                      title={collapsedOutlineIds.has(item.id)
+                      title={projection.isCollapsed(item)
                         ? t.expandHeading()
                         : t.collapseHeading()}
-                      aria-label={collapsedOutlineIds.has(item.id)
+                      aria-label={projection.isCollapsed(item)
                         ? t.expandNamedHeading({ title: item.title })
                         : t.collapseNamedHeading({ title: item.title })}
-                      aria-expanded={!collapsedOutlineIds.has(item.id)}
+                      aria-expanded={!projection.isCollapsed(item)}
+                      tabindex="-1"
                       on:click={(event) => handleOutlineToggle(event, item)}
                     >
                       <ChevronDown size={13} />
@@ -1190,6 +1224,7 @@
                   <button
                     type="button"
                     class="outline-link"
+                    tabindex={outlineView.focusedId ? (outlineView.focusedId === item.id ? 0 : -1) : (position === 0 ? 0 : -1)}
                     title={item.title}
                     on:click={(event) => handleOutlineLinkClick(event, item)}
                   >
@@ -1203,10 +1238,13 @@
                     </span>
                   </button>
                 </div>
-              {/if}
             {/each}
           </div>
-        {:else}
+        {#if projection.failure}
+          <p class="outline-progress" role="status">{t.outlineLoadFailed()} <button type="button" on:click={retryOutline}>{t.outlineRetry()}</button></p>
+        {:else if outlineView.loading}
+          <p class="outline-progress" role="status">{t.outlineLoading()}</p>
+        {:else if outline.length === 0}
           <p>{t.documentHasNoHeadings()}</p>
         {/if}
       </aside>

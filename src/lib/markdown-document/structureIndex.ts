@@ -16,6 +16,7 @@ import { emptyEnhancements, addEnhancements, enhancementTotal } from './enhancem
 export interface MarkdownOutlineItem extends OutlineItem {
   byte: number;
   blockId: string;
+  blockHeadingIndex: number;
 }
 
 type Request = StructureWorkerRequest extends infer T
@@ -172,7 +173,7 @@ export class MarkdownStructureIndex {
     return this.headings;
   }
   private appendHeadings(block: MarkdownStructureBlock) {
-    for (const heading of block.headings) {
+    for (const [blockHeadingIndex, heading] of block.headings.entries()) {
       const title = normalizeHeadingTitle(heading.text) || heading.text.trim();
       this.headings.push({
         id: this.allocateHeadingId(title, this.headings.length + 1),
@@ -181,6 +182,7 @@ export class MarkdownStructureIndex {
         line: heading.line,
         byte: heading.byte,
         blockId: block.id,
+        blockHeadingIndex,
       });
     }
   }
