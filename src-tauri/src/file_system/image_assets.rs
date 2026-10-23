@@ -87,6 +87,8 @@ pub(crate) fn resolve_image_asset(input: ImageResolveInput) -> ImageResolvePaylo
         PathBuf::from(&local_src)
     };
 
+    // Tauri 的 asset 协议拒绝含 `..` 的路径；先解析为真实绝对路径，保留 Markdown 原始引用。
+    let absolute_path = absolute_path.canonicalize().unwrap_or(absolute_path);
     let exists = absolute_path.is_file();
     ImageResolvePayload {
         src,
