@@ -1,0 +1,20 @@
+[
+  { "source": "K k K", "query": "k", "count": 3 },
+  { "source": "S s ſ", "query": "s", "count": 3 },
+  { "source": "ß ẞ ss SS", "query": "ß", "count": 2 },
+  { "source": "I i İ ı", "query": "i", "count": 2 },
+  { "source": "Σ σ ς", "query": "σ", "count": 3 },
+  { "source": "中文 中文字 _中文 中文_ 😀中文😀", "query": "中文", "wholeWord": true, "count": 2 },
+  { "source": "a² a𝟙 a_ a😀 á", "query": "a", "wholeWord": true, "count": 2 },
+  { "source": "é é e", "query": "é", "count": 1 },
+  { "source": "a.*[b] aXXb a.*[b]", "query": "a.*[b]", "count": 2 },
+  { "source": "😀😀😀", "query": "😀😀", "count": 1 },
+  { "source": "aaaaa", "query": "aa", "count": 2 },
+  { "source": "cat Cat CAT", "query": "cat", "caseSensitive": true, "count": 1 },
+  { "source": "A\r\nB\nC\r\n", "query": "\n", "count": 3 },
+  { "source": "A\r\nB\nC\r\n", "query": "\r", "count": 2 },
+  { "source": "\r\n\r\n\r\n", "query": "\n\r", "count": 2 },
+  { "source": "首段\n\n尾段", "query": "段\n\n尾", "count": 1 },
+  { "source": "", "query": "a", "count": 0 },
+  { "source": "a", "query": "", "count": 0 }
+]

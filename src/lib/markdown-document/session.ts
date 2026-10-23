@@ -157,6 +157,17 @@ export class MarkdownDocumentSession {
     }
     return this.status();
   }
+  /** 浏览器适配器发布已经计算好的候选树，历史仍只有一个用户操作。 */
+  publishPrepared(base: MarkdownSnapshot, next: Utf8Text, group: string, selection?: DocumentSelection) {
+    this.assertOpen();
+    if (base.documentId !== this.documentId || base.revision !== this.revision) throw new DocumentConflictError();
+    if (!next.equals(this.text)) {
+      this.history.length = this.cursor;
+      this.history.push({ group, before: this.text, after: next, selectionBefore: this.selection, selectionAfter: selection });
+      this.cursor++; this.text = next; this.revision++; this.historyBarrier = true; this.selection = selection;
+    }
+    return this.status();
+  }
   redo(baseRevision = this.revision): DocumentStatus {
     this.assertOpen();
     if (baseRevision !== this.revision) throw new DocumentConflictError();

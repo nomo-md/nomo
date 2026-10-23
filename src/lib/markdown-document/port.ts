@@ -1,4 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { MARKDOWN_SEARCH_EVENT, type MarkdownSearchPort } from './searchProtocol';
+import { createMemorySearchPort } from './memorySearchPort';
 import { MarkdownDocumentSession, type MarkdownSnapshot } from './session';
 import type { DocumentStatus, DocumentTransaction, DocumentWindow } from './protocol';
 import { DocumentConflictError } from './protocol';
@@ -16,7 +19,7 @@ export interface SnapshotReference {
   revision: number;
   byteLength: number;
 }
-export interface MarkdownDocumentPort {
+export interface MarkdownDocumentPort extends MarkdownSearchPort {
   writingStats?(request: NativeStatsRequest): Promise<NativeStatsResponse>;
   cancelWritingStats?(requestId?: number): Promise<void>;
   openDocument(
@@ -64,6 +67,14 @@ function native<T>(request: Record<string, unknown>): Promise<T> {
 }
 export function createNativeMarkdownPort(): MarkdownDocumentPort {
   return {
+    listenSearch: listener => listen(MARKDOWN_SEARCH_EVENT, event => listener(event.payload as import('./searchProtocol').SearchProgress)),
+    startSearch: request => native({ type: 'startSearch', ...request }),
+    readSearchPage: (taskId, fromIndex, limit) => native({ type: 'readSearchPage', taskId, fromIndex, limit }),
+    searchTaskProgress: taskId => native({ type: 'searchTaskProgress', taskId }),
+    prepareReplaceAll: request => native({ type: 'prepareReplaceAll', ...request }),
+    commitReplaceAll: (documentId, taskId, operationId) => native({ type: 'commitReplaceAll', documentId, taskId, operationId }),
+    cancelTask: taskId => native({ type: 'cancelTask', taskId }),
+    releaseTask: taskId => native({ type: 'releaseTask', taskId }),
     writingStats: (request) => native({ type: 'writingStats', ...request }),
     cancelWritingStats: (requestId) => native({ type: 'cancelWritingStats', requestId }),
     openDocument: (input) =>
@@ -107,7 +118,9 @@ export function createMemoryMarkdownPort(): MarkdownDocumentPort {
     if (!result) throw new Error('文档快照已释放。');
     return result;
   };
+  const search = createMemorySearchPort(session);
   return {
+    ...search.port,
     async openDocument(input) {
       if ('recoveryId' in input) return session(input.recoveryId).status();
       if (!('text' in input)) throw new Error('浏览器文档入口需要文件正文。');
@@ -124,13 +137,14 @@ export function createMemoryMarkdownPort(): MarkdownDocumentPort {
       return session(id).readWindow(revision, fromByte, toByte);
     },
     async applyTransaction(id, transaction) {
-      return session(id).applyTransaction(transaction);
+      const status = session(id).applyTransaction(transaction);
+      search.invalidate(id); return status;
     },
     async undo(id, revision) {
-      return session(id).undo(revision);
+      search.invalidate(id); return session(id).undo(revision);
     },
     async redo(id, revision) {
-      return session(id).redo(revision);
+      search.invalidate(id); return session(id).redo(revision);
     },
     async captureSnapshot(id) {
       const result = session(id).captureSnapshot();
@@ -165,6 +179,7 @@ export function createMemoryMarkdownPort(): MarkdownDocumentPort {
       return session(reference.documentId).markSaved(snapshot(reference.snapshotId));
     },
     async close(id, discard) {
+      search.invalidate(id);
       const current = session(id);
       if (current.status().dirty && !discard) throw new Error('文档尚有未保存内容。');
       if ([...snapshots.values()].some((snapshot) => snapshot.documentId === id))
@@ -178,7 +193,7 @@ export function createMemoryMarkdownPort(): MarkdownDocumentPort {
         if (session(documentId).status().dirty && !discard) throw new Error('组合文档尚有未保存内容。');
         if ([...snapshots.values()].some(snapshot => snapshot.documentId === documentId)) throw new Error('组合文档仍有正在使用的快照。');
       }
-      for (const { documentId } of documents) { session(documentId).close(); sessions.delete(documentId); originals.delete(documentId); }
+      for (const { documentId } of documents) { search.invalidate(documentId); session(documentId).close(); sessions.delete(documentId); originals.delete(documentId); }
     },
   };
 }

@@ -610,6 +610,7 @@ export const JA_JP_EXTRA_TRANSLATIONS = {
   searchReplace: '検索と置換',
   searchInDocument: '現在の文書を検索',
   searchReady: '検索語を入力',
+  searchWorking: '処理中、{count} 件検出…',
   explorerSpeedSearchLabel: '展開済みのファイルやフォルダーを名前で検索',
   explorerSpeedSearchHint: '名前を入力して展開済みの項目へ移動。↑↓で選択、Enterで開く、Escで終了',
   noSearchResults: '結果なし',

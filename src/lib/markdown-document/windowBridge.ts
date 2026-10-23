@@ -68,7 +68,7 @@ export class MarkdownWindowBridge {
     },
     historyGroupId: string,
   ) {
-    if (this.stale || this.session.state.historyBusy || this.session.state.closing)
+    if (this.stale || this.session.state.historyBusy || this.session.state.nativeCommitBusy || this.session.state.closing)
       throw new DocumentConflictError();
     if (!change.edits.length) return;
     this.pending++;

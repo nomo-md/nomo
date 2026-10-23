@@ -12,11 +12,8 @@ import { MarkdownGlobalSelection } from './selection';
 import { AutomaticMarkdownToc } from './automaticToc';
 import { emptyEnhancements } from './enhancements';
 import { createMarkdownDocumentLayouts } from './layoutCache';
-import {
-  searchMarkdownSnapshot,
-  replaceMarkdownSnapshotMatches,
-  type MarkdownTaskProgress,
-} from './tasks';
+import { MarkdownSearchController } from './searchController';
+import type { SearchOptions } from './searchProtocol';
 
 export interface MarkdownLoadingState {
   status: MarkdownSessionStatus;
@@ -52,6 +49,7 @@ export interface MarkdownVisibleDemand {
 export class ProgressiveMarkdownDocument {
   readonly session: MarkdownSessionController;
   readonly selection: MarkdownGlobalSelection;
+  readonly searches: MarkdownSearchController;
   readonly layouts = createMarkdownDocumentLayouts();
   private toc: AutomaticMarkdownToc;
   private completed: MarkdownIndexedSnapshot | null = null;
@@ -91,6 +89,7 @@ export class ProgressiveMarkdownDocument {
     this.started = started;
     this.timings = { captured: performance.now() - this.started };
     this.session = new MarkdownSessionController(port, status);
+    this.searches = new MarkdownSearchController(this.session);
     this.toc = new AutomaticMarkdownToc(this.session, build);
     this.session.beforeSnapshot = signal => this.materializeToc(signal);
     this.selection = new MarkdownGlobalSelection(this.session);
@@ -199,6 +198,7 @@ export class ProgressiveMarkdownDocument {
     }
     const signature = JSON.stringify([state.status.revision, state.status.dirty, state.status.canUndo, state.status.canRedo,
       state.status.persistenceWarning, this.session.state.viewGeneration, this.session.state.pendingTransactions,
+      this.session.state.nativeCommitBusy, this.session.state.historyBusy, this.session.state.closing,
       state.progress.state, state.progress.indexedBytes, state.progress.layoutUnits, state.progress.enhancements, state.mountMode, state.windowLimited, state.mountRestriction, state.timings]);
     // 滚动只更新时间和挂载策略；元数据没有变化时不让应用反复派生大纲、持久化标签。
     if (!force && signature === this.publishedSignature && this.publishedFailure === state.failure) return;
@@ -224,6 +224,7 @@ export class ProgressiveMarkdownDocument {
   setHidden(hidden: boolean) {
     this.hidden = hidden;
     if (hidden) {
+      void this.searches.cancel().catch(error => { this.failure = error; this.publish(); });
       this.visibleDemands.clear();
       if (this.idleTimer) clearTimeout(this.idleTimer);
       this.idleTimer = null;
@@ -407,43 +408,12 @@ export class ProgressiveMarkdownDocument {
       } finally { await this.port.releaseSnapshot(snapshot); }
     }
   }
-  async search(
-    query: string,
-    options: {
-      caseSensitive?: boolean;
-      wholeWord?: boolean;
-      signal: AbortSignal;
-      onProgress?(progress: MarkdownTaskProgress): void;
-    },
-  ) {
-    return this.session.withSnapshot(async (snapshot) => ({
-      snapshotRevision: snapshot.revision,
-      matches: await searchMarkdownSnapshot(this.port, snapshot, query, options),
-    }), 'explicit', options.signal);
+  search(query: string, options: SearchOptions) {
+    return this.searches.search(query, options);
   }
-  async replaceAll(
-    query: string,
-    replacement: string,
-    options: {
-      caseSensitive?: boolean;
-      wholeWord?: boolean;
-      signal: AbortSignal;
-      onProgress?(progress: MarkdownTaskProgress): void;
-    },
-  ) {
-    return this.session.withSnapshot(async (snapshot) => {
-      const generation = this.session.state.viewGeneration;
-      const matches = await searchMarkdownSnapshot(this.port, snapshot, query, options);
-      options.signal.throwIfAborted();
-      await replaceMarkdownSnapshotMatches(
-        this.session,
-        snapshot,
-        matches,
-        replacement,
-        generation,
-      );
-      return matches.length;
-    }, 'explicit', options.signal);
+  async replaceAll(query: string, replacement: string, options: SearchOptions) {
+    const result = await this.searches.replaceAll(query, replacement, options, () => ({ selection: this.selection.selection }));
+    return result.count;
   }
   async retry() {
     try {
@@ -462,6 +432,7 @@ export class ProgressiveMarkdownDocument {
     this.publish();
   }
   async suspendTasks() {
+    await this.searches.cancel();
     this.setHidden(true); this.abort?.abort(); this.generation++;
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
     markdownWorkScheduler.cancel(this); this.queuedYield?.(); this.queuedYield = null;
@@ -480,6 +451,7 @@ export class ProgressiveMarkdownDocument {
   /** 跨窗归属已提交后只释放本 WebView 的任务与快照，不关闭原生文档。 */
   async detach() {
     if (this.closed) return;
+    await this.searches.dispose();
     this.closed = true; this.abort?.abort();
     this.visibleDemands.clear();
     if (this.timer) clearTimeout(this.timer);
@@ -496,6 +468,7 @@ export class ProgressiveMarkdownDocument {
   /** 卸载使用 setHidden；只有完成关闭/丢弃流程才释放会话和磁盘历史。 */
   async close(discard = false, closeStorage?: () => Promise<void>) {
     if (this.closed) return;
+    await this.searches.cancel();
     if (!discard) await this.session.flushEdits();
     this.closed = true;
     this.visibleDemands.clear();
@@ -525,6 +498,7 @@ export class ProgressiveMarkdownDocument {
     }
     this.unsubscribe();
     this.unsubscribeChanges();
+    await this.searches.dispose();
     this.selection.dispose();
     this.layouts.dispose();
     this.listeners.clear();

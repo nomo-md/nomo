@@ -59,6 +59,10 @@ pub(super) fn apply_tree_edits(
     edits: &[TreeEdit],
 ) -> TextDocumentResult<PieceTree> {
     for edit in edits {
+        if edit.pieces.len() <= 1 {
+            tree = tree.replace_range(edit.from, edit.to, edit.pieces.first().cloned())?;
+            continue;
+        }
         tree = tree.replace_range(edit.from, edit.to, None)?;
         for piece in edit.pieces.iter().rev() {
             tree = tree.replace_range(edit.from, edit.from, Some(piece.clone()))?;
@@ -107,17 +111,26 @@ impl DiskHistory {
     pub(super) fn append(&mut self, record: &HistoryRecord) -> TextDocumentResult<u64> {
         let bytes = serde_json::to_vec(record)
             .map_err(|e| TextDocumentError::new("history-serialize", e.to_string()))?;
+        let offset = self.write_record(&bytes)?;
+        self.file.sync_all()?;
+        self.cache(offset, record.clone(), bytes.len().saturating_mul(2).saturating_add(256));
+        Ok(offset)
+    }
+    /// 未发布批次不进入热缓存，也不逐条 fsync；调用方在发布 manifest 前统一持久化。
+    pub(super) fn append_staged(&mut self, record: &HistoryRecord) -> TextDocumentResult<u64> {
+        let bytes = serde_json::to_vec(record)
+            .map_err(|e| TextDocumentError::new("history-serialize", e.to_string()))?;
+        self.write_record(&bytes)
+    }
+    fn write_record(&mut self, bytes: &[u8]) -> TextDocumentResult<u64> {
         let offset = self.file.seek(SeekFrom::End(0))?;
         self.file.write_all(&(bytes.len() as u64).to_le_bytes())?;
         self.file.write_all(&bytes)?;
-        self.file.sync_all()?;
-        self.cache(
-            offset,
-            record.clone(),
-            bytes.len().saturating_mul(2).saturating_add(256),
-        );
         Ok(offset)
     }
+    pub(super) fn durability_handle(&self) -> TextDocumentResult<File> { Ok(self.file.try_clone()?) }
+    #[cfg(test)]
+    pub(super) fn evict_cache(&mut self) { self.capacity = 0; self.used = 0; self.hot.clear(); self.order.clear(); }
     pub(super) fn read(&mut self, offset: u64) -> TextDocumentResult<HistoryRecord> {
         if let Some((record, _)) = self.hot.get(&offset) {
             let record = record.clone();

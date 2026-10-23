@@ -107,7 +107,7 @@ export class MarkdownSemanticWindow {
     if (!this.core || this.disposed) return;
     const state = this.session.state;
     const blocked = this.applicationReadonly || this.failed || !!state.failure ||
-      state.historyBusy || state.closing || this.bridge.isStale;
+      state.historyBusy || state.nativeCommitBusy || state.closing || this.bridge.isStale;
     // 开放后允许原窗口连续乐观输入；不能因自己的待确认事务中断 IME。
     if (!this.opened && (this.attached || preparingAttachment) && this.ready && !blocked && !state.pendingTransactions)
       this.opened = true;

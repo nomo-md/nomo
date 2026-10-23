@@ -1,6 +1,7 @@
 import type { DocumentSelection, DocumentTransaction, SourceEdit } from './protocol';
 import { DocumentConflictError } from './protocol';
 import type { MarkdownDocumentPort, MarkdownSessionStatus, SnapshotReference } from './port';
+import type { ReplaceResult } from './searchProtocol';
 
 export interface MarkdownControllerState {
   committed: MarkdownSessionStatus;
@@ -9,6 +10,7 @@ export interface MarkdownControllerState {
   pendingTransactions: number;
   failure: unknown | null;
   historyBusy: boolean;
+  nativeCommitBusy: boolean;
   closing: boolean;
 }
 export interface MarkdownEditInput {
@@ -52,6 +54,9 @@ export class MarkdownSessionController {
   private failure: unknown | null = null;
   private closed = false;
   private historyBusy = false;
+  private nativeCommitBusy = false;
+  private nativeCommit: Promise<ReplaceResult> | null = null;
+  private nativeRecovery: (() => Promise<ReplaceResult>) | null = null;
   private closing = false;
   private mounted = new Set<MountedMarkdownEdits>();
   private listeners = new Set<(state: MarkdownControllerState) => void>();
@@ -75,6 +80,7 @@ export class MarkdownSessionController {
       pendingTransactions: this.pending.length,
       failure: this.failure,
       historyBusy: this.historyBusy,
+      nativeCommitBusy: this.nativeCommitBusy,
       closing: this.closing,
     };
   }
@@ -122,7 +128,7 @@ export class MarkdownSessionController {
 
   applyEdits(input: MarkdownEditInput): Promise<MarkdownSessionStatus> {
     this.assertOpen();
-    if (this.historyBusy || this.closing)
+    if (this.historyBusy || this.nativeCommitBusy || this.closing)
       return Promise.reject(new Error('正在切换文档状态，请稍后提交输入。'));
     if (input.viewGeneration !== this.generation)
       return Promise.reject(new DocumentConflictError());
@@ -186,6 +192,17 @@ export class MarkdownSessionController {
   async retryPendingEdits() {
     this.assertOpen();
     await this.running;
+    if (this.nativeRecovery) {
+      try {
+        const result = await this.nativeRecovery();
+        this.acceptNativeReplacement(result); this.nativeRecovery = null;
+      } catch (error) {
+        if ((error as { code?: string })?.code === 'replacement-not-committed') {
+          this.nativeRecovery = null; this.failure = null; this.emit();
+        }
+        throw error;
+      }
+    }
     this.failure = null;
     this.startDrain();
     await this.flushQueue();
@@ -222,6 +239,7 @@ export class MarkdownSessionController {
   }
   async flushEdits(intent: 'explicit' | 'automatic' = 'explicit') {
     this.assertOpen();
+    if (this.nativeCommit) await this.nativeCommit;
     for (const view of [...this.mounted]) {
       if (intent === 'automatic' && view.hasUnconfirmedDraft?.())
         throw new Error('自动保存正在等待尚未确认的编辑草稿。');
@@ -250,6 +268,53 @@ export class MarkdownSessionController {
       this.historyBusy = false;
       this.emit();
     }
+  }
+  private acceptNativeReplacement(result: ReplaceResult) {
+    if (result.status.documentId !== this.documentId || result.status.revision < this.committed.revision)
+      throw new DocumentConflictError('原生替换返回了过期确认。');
+    const changed = result.status.revision !== this.committed.revision;
+    this.committed = result.status;
+    if (changed) { this.generation++; this.changed(); }
+  }
+  /** 准备期间允许输入，最终发布前关闭所有写入口并排空间隙事务。 */
+  async commitNativeReplacement(base: { revision: number; generation: number }, signal: AbortSignal,
+    commit: () => Promise<ReplaceResult>, mapped?: (result: ReplaceResult) => void): Promise<ReplaceResult> {
+    await this.flushEdits(); signal.throwIfAborted();
+    if (this.closing || this.historyBusy || this.nativeCommitBusy) throw new DocumentConflictError();
+    this.nativeCommitBusy = true; this.emit();
+    const operation = (async () => {
+      await this.flushQueue(); signal.throwIfAborted();
+      if (this.generation !== base.generation || this.committed.revision !== base.revision || this.pending.length)
+        throw new DocumentConflictError('正文已有新输入，旧替换已取消。');
+      let result: ReplaceResult;
+      try { result = await commit(); }
+      catch (error) {
+        if (error instanceof DocumentConflictError || (error instanceof Error && typeof (error as { code?: unknown }).code === 'string')) throw error;
+        // 未知传输失败只能重查同一 operationId，不能重新准备/执行替换。
+        try { result = await commit(); }
+        catch (failure) {
+          this.nativeRecovery = async () => {
+            let recovered: ReplaceResult;
+            try { recovered = await commit(); }
+            catch (error) {
+              // 已释放候选且同版本仍在，确认该操作未发布；解除故障门禁，不在新请求中自动重做。
+              if ((error as { code?: string })?.code === 'search-expired' &&
+                (await this.port.status(this.documentId)).revision === base.revision)
+                throw Object.assign(new Error('上次替换未提交，正文已保留，请重新执行替换。'), { code: 'replacement-not-committed' });
+              throw error;
+            }
+            mapped?.(recovered); return recovered;
+          };
+          this.failure = failure; throw failure;
+        }
+      }
+      try { mapped?.(result); }
+      catch (error) { this.failure = error; }
+      this.acceptNativeReplacement(result); return result;
+    })();
+    this.nativeCommit = operation;
+    try { return await operation; }
+    finally { this.nativeCommit = null; this.nativeCommitBusy = false; this.emit(); }
   }
   async captureSnapshot(intent: 'explicit' | 'automatic' = 'explicit', signal?: AbortSignal): Promise<SnapshotReference> {
     await this.flushEdits(intent);
@@ -318,6 +383,7 @@ export class MarkdownSessionController {
   /** 先阻止新快照和输入，再排空已开始的任务；索引快照由文档运行时随后释放。 */
   async prepareClose(discard = false) {
     this.assertOpen();
+    if (this.nativeCommit) await this.nativeCommit;
     if (!discard) await this.flushEdits();
     if (this.closing) throw new Error('文档正在关闭。');
     this.closing = true;

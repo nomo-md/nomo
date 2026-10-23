@@ -31,9 +31,12 @@ export async function searchMarkdownSnapshot(
     signal: AbortSignal;
     onProgress?(progress: MarkdownTaskProgress): void;
     onMatches?(matches: readonly MarkdownSearchMatch[]): void;
+    retainMatches?: boolean;
+    onMatch?(match: MarkdownSearchMatch, index: number): boolean | void;
   },
 ): Promise<MarkdownSearchMatch[]> {
   const result: MarkdownSearchMatch[] = [];
+  let count = 0;
   if (!query) {
     options.onProgress?.({
       state: 'ready',
@@ -88,15 +91,18 @@ export async function searchMarkdownSnapshot(
       if (options.wholeWord && !isWholeWordRange(buffer, from, to)) continue;
       const prefix = buffer[from] === '\n' && buffer[from - 1] === '\r' ? '\r' : '';
       const suffix = buffer[to - 1] === '\r' && buffer[to] === '\n' ? '\n' : '';
-      matches.push({
+      const item = {
         fromByte: startByte + byteAt(from - prefix.length),
         toByte: startByte + byteAt(to + suffix.length),
         text: match[0],
         preservedPrefix: prefix,
         preservedSuffix: suffix,
-      });
+      };
+      if (options.retainMatches !== false || options.onMatches) matches.push(item);
+      if (options.onMatch?.(item, count) === false) return result;
+      count++;
     }
-    for (const match of matches) result.push(match);
+    if (options.retainMatches !== false) for (const match of matches) result.push(match);
     options.onMatches?.(matches);
     consumed = Math.max(consumed, safeEnd);
     nextSearchByte = startByte + byteAt(consumed);
@@ -108,7 +114,7 @@ export async function searchMarkdownSnapshot(
       state: complete ? 'ready' : 'partial',
       scannedBytes: from,
       totalBytes: snapshot.byteLength,
-      matches: result.length,
+      matches: count,
     });
     // 每个主线程批次仅搜索 64 KiB，输入和取消可在批次之间抢占。
     await new Promise<void>((resolve) => setTimeout(resolve, 0));

@@ -4,7 +4,7 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{State, WebviewWindow};
+use tauri::{Emitter, State, WebviewWindow};
 
 #[derive(Deserialize)]
 #[serde(
@@ -13,6 +13,13 @@ use tauri::{State, WebviewWindow};
     rename_all_fields = "camelCase"
 )]
 pub(crate) enum MarkdownRequest {
+    StartSearch { #[serde(flatten)] query: super::markdown_search::SearchQuery },
+    ReadSearchPage { task_id: String, from_index: u64, limit: usize },
+    SearchTaskProgress { task_id: String },
+    PrepareReplaceAll { #[serde(flatten)] query: super::markdown_search::ReplaceQuery },
+    CommitReplaceAll { document_id: String, task_id: String, operation_id: String },
+    CancelTask { task_id: String },
+    ReleaseTask { task_id: String },
     WritingStats {
         #[serde(flatten)]
         query: super::writing_stats::StatsQuery,
@@ -99,6 +106,11 @@ pub(crate) async fn markdown_document_command(
 ) -> TextDocumentResult<Value> {
     let owner = window.label().to_owned();
     let manager = manager.inner().clone();
+    let search_sink: super::markdown_search::ProgressSink = std::sync::Arc::new(move |progress| {
+        if let Err(error) = window.emit(super::markdown_search::SEARCH_EVENT, progress) {
+            crate::app_logger::warn("MarkdownSearch", &format!("发送搜索进度失败：{error}"));
+        }
+    });
     let request = match request {
         MarkdownRequest::WritingStats { query } => return value(manager.writing_stats(owner, query).await?),
         MarkdownRequest::CancelWritingStats { request_id } => {
@@ -108,6 +120,12 @@ pub(crate) async fn markdown_document_command(
         request => request,
     };
     tauri::async_runtime::spawn_blocking(move || match request {
+        MarkdownRequest::StartSearch { query } => value(manager.start_search(&owner, query, Some(search_sink))?),
+        MarkdownRequest::ReadSearchPage { task_id, from_index, limit } => value(manager.search_page(&owner, &task_id, from_index, limit)?),
+        MarkdownRequest::SearchTaskProgress { task_id } => value(manager.search_progress(&owner, &task_id)?),
+        MarkdownRequest::PrepareReplaceAll { query } => value(manager.prepare_replace_all(&owner, query, Some(search_sink))?),
+        MarkdownRequest::CommitReplaceAll { document_id, task_id, operation_id } => value(manager.commit_replace_all(&owner, &document_id, &task_id, &operation_id)?),
+        MarkdownRequest::CancelTask { task_id } | MarkdownRequest::ReleaseTask { task_id } => { manager.release_search(&owner, &task_id); value(()) },
         MarkdownRequest::WritingStats { .. } | MarkdownRequest::CancelWritingStats { .. } => unreachable!(),
         MarkdownRequest::Open { path, text, fresh } => {
             value(if fresh {

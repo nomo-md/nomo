@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { MarkdownSearchResults } from '../lib/markdown-document/searchController';
   import { captureExportAppearance, captureExportSnapshot } from './services/export/snapshot';
   import { createWritingStatsController } from './services/writingStatsController';
   import { onDestroy, onMount, tick } from 'svelte';
@@ -587,11 +588,15 @@
   let searchWrapAround = true;
   let searchMatches: EditorSearchMatch[] = [];
   let sessionSearchAbort: AbortController | undefined;
-  let sessionSearchRevision = -1;
-  let sessionSearchRanges: Array<{ preservedPrefix: string; preservedSuffix: string }> = [];
+  let sessionReplaceAbort: AbortController | undefined;
+  let sessionSearchResults: MarkdownSearchResults | undefined;
+  let sessionSearchKey = '';
+  let sessionSearchBusy = false;
+  let sessionSearchProgress = '';
   let searchActiveIndex = 0;
   let searchMatchCount = 0;
   let lastSearchSignature = '';
+  let lastSearchMode = mode;
   let searchDebounceTimer: number | null = null;
 
   const CONTENT_ANALYSIS_DEBOUNCE_MS = 120;
@@ -4054,7 +4059,7 @@
         if (outlineChanged || outline !== current.outline) outline = current.outline;
         outlineProjection = current.outlineProjection;
         if (tab.documentId) { markdown = ''; savedMarkdown = ''; largeDocumentMode = false; readonlyDocumentMode = false; }
-        if (changed && searchPanelOpen) scheduleSearchRefresh({ preserveActive: true, selectActive: false });
+        if (changed && searchPanelOpen && !sessionReplaceAbort) scheduleSearchRefresh({ preserveActive: true, selectActive: false });
       }
       scheduleSessionAnalysis(tab.id, application);
       if (reason !== 'index-progress') {
@@ -4410,7 +4415,7 @@
     workspaceTransferFlushing = true;
     try {
       await documentCloseCoordinator.awaitSettled();
-      sessionAnalysisAbort?.abort(); sessionSearchAbort?.abort(); sessionAnalysisKey = '';
+      sessionAnalysisAbort?.abort(); invalidateSessionSearch(); sessionAnalysisKey = '';
       if (sessionAnalysisTimer) { clearTimeout(sessionAnalysisTimer); sessionAnalysisTimer = undefined; }
       await workspaceRestorePreparation;
       await deferredWorkspaceRestore;
@@ -4770,7 +4775,7 @@
   }
 
   function closeSearchPanel() {
-    sessionSearchAbort?.abort();
+    invalidateSessionSearch();
     if (isSegmentedTextTab(tabs.find((tab) => tab.id === activeTabId))) {
       segmentedWorkspace?.closeSearch();
       return;
@@ -4849,11 +4854,11 @@
   }
 
   function moveSearchMatch(direction: -1 | 1) {
-    if (searchMatches.length === 0) return;
+    if (sessionSearchBusy || searchMatchCount === 0) return;
     const nextIndex = searchActiveIndex + direction;
-    if ((nextIndex < 0 || nextIndex >= searchMatches.length) && !searchWrapAround) return;
-    searchActiveIndex = (nextIndex + searchMatches.length) % searchMatches.length;
-    selectActiveSearchMatch();
+    if ((nextIndex < 0 || nextIndex >= searchMatchCount) && !searchWrapAround) return;
+    searchActiveIndex = (nextIndex + searchMatchCount) % searchMatchCount;
+    void selectActiveSearchMatch();
   }
 
   function countSearchMatches() {
@@ -4861,20 +4866,23 @@
   }
 
   function replaceCurrentSearchMatch() {
-    if (readonlyDocumentMode || searchMatches.length === 0) return;
-    const match = searchMatches[searchActiveIndex];
-    if (!match) return;
+    if (readonlyDocumentMode || sessionSearchBusy || searchMatchCount === 0) return;
     const application = getMarkdownApplicationSession(editor);
     if (application) {
+      const results = sessionSearchResults, index = searchActiveIndex, replacement = searchReplacement;
+      if (!results) return;
       void application.ready.then(async doc => {
+        const match = await results.match(index); if (!match) return;
         await doc.session.flushEdits();
-        if (doc.state.status.revision !== sessionSearchRevision) throw new Error('正文已变化，请重新搜索后替换。');
+        if (sessionSearchResults !== results || doc.state.status.revision !== results.snapshotRevision) throw new Error('正文已变化，请重新搜索后替换。');
         await doc.session.applyEdits({ viewGeneration: doc.session.state.viewGeneration, historyGroupId: crypto.randomUUID(),
-          edits: [{ fromByte: match.from, toByte: match.to, insertedText: (sessionSearchRanges[searchActiveIndex]?.preservedPrefix ?? '') + searchReplacement + (sessionSearchRanges[searchActiveIndex]?.preservedSuffix ?? '') }] });
+          edits: [{ fromByte: match.fromByte, toByte: match.toByte, insertedText: match.preservedPrefix + replacement + match.preservedSuffix }] });
         refreshSearchMatches({ preserveActive: true, selectActive: true });
       }).catch(error => showVisibleError(error, t.saveFileFailed()));
       return;
     }
+    const match = searchMatches[searchActiveIndex];
+    if (!match) return;
 
     if (getActiveEditorMode() === 'source') {
       const nextMarkdown = replaceTextRange(markdown, match, searchReplacement);
@@ -4890,14 +4898,23 @@
   }
 
   function replaceAllSearchMatches() {
-    if (readonlyDocumentMode || !searchQuery) return;
+    if (readonlyDocumentMode || sessionSearchBusy || !searchQuery) return;
     const application = getMarkdownApplicationSession(editor);
     if (application) {
-      const abort = new AbortController(); sessionSearchAbort?.abort(); sessionSearchAbort = abort;
-      void application.ready.then(doc => doc.replaceAll(searchQuery, searchReplacement, {
+      invalidateSessionSearch();
+      const abort = new AbortController(); sessionSearchAbort = abort; sessionReplaceAbort = abort;
+      const query = searchQuery, replacement = searchReplacement;
+      sessionSearchBusy = true; sessionSearchProgress = t.searchWorking({ count: 0 });
+      application.captureSelection();
+      void application.replaceAll(query, replacement, {
         signal: abort.signal, caseSensitive: searchCaseSensitive, wholeWord: searchWholeWord,
-      })).then(count => { statusMessage = t.replacedMatchCount({ count }); refreshSearchMatches({ selectActive: true }); })
-        .catch(error => { if (!abort.signal.aborted) showVisibleError(error, t.saveFileFailed()); });
+        onProgress: progress => { if (!abort.signal.aborted) sessionSearchProgress = t.searchWorking({ count: progress.matchCount }); },
+      }).then(count => { statusMessage = t.replacedMatchCount({ count }); })
+        .catch(error => { if (!abort.signal.aborted && !(error instanceof DOMException && error.name === 'AbortError')) showVisibleError(error, t.saveFileFailed()); })
+        .finally(() => {
+          if (sessionReplaceAbort === abort) sessionReplaceAbort = undefined;
+          if (sessionSearchAbort === abort) refreshSearchMatches({ selectActive: true });
+        });
       return;
     }
     let replaced = 0;
@@ -4928,6 +4945,7 @@
   function refreshSearchMatches(options?: { preserveActive?: boolean; selectActive?: boolean }) {
     clearSearchDebounceTimer();
     if (!searchPanelOpen) {
+      invalidateSessionSearch();
       searchMatches = [];
       searchMatchCount = 0;
       lastSearchSignature = '';
@@ -4935,17 +4953,27 @@
     }
     const application = getMarkdownApplicationSession(editor);
     if (application) {
-      sessionSearchAbort?.abort(); const abort = new AbortController(); sessionSearchAbort = abort;
+      const key = `${activeTabId}|${application.document?.session.state.viewGeneration}|${searchQuery}|${searchCaseSensitive}|${searchWholeWord}`;
+      if (sessionSearchResults && sessionSearchKey === key) {
+        if (options?.selectActive) void selectActiveSearchMatch(); return;
+      }
+      invalidateSessionSearch();
+      const abort = new AbortController(); sessionSearchAbort = abort;
       const tabId = activeTabId;
-      void application.ready.then(doc => doc.search(searchQuery, { signal: abort.signal, caseSensitive: searchCaseSensitive, wholeWord: searchWholeWord }))
+      const query = searchQuery;
+      searchMatches = []; sessionSearchBusy = !!query; sessionSearchProgress = t.searchWorking({ count: 0 });
+      if (!options?.preserveActive) searchActiveIndex = 0;
+      void application.ready.then(doc => doc.search(query, { signal: abort.signal, caseSensitive: searchCaseSensitive, wholeWord: searchWholeWord,
+        onProgress: progress => { if (!abort.signal.aborted) sessionSearchProgress = t.searchWorking({ count: progress.matchCount }); },
+      }))
         .then(result => {
-          if (abort.signal.aborted || activeTabId !== tabId || !searchPanelOpen) return;
-          sessionSearchRevision = result.snapshotRevision;
-          sessionSearchRanges = result.matches;
-          searchMatches = result.matches.map((match, index) => ({ id: `${match.fromByte}:${match.toByte}`, index, from: match.fromByte, to: match.toByte, text: searchQuery }));
-          searchMatchCount = searchMatches.length; searchActiveIndex = Math.min(searchActiveIndex, Math.max(0, searchMatches.length - 1));
+          if (abort.signal.aborted || activeTabId !== tabId || !searchPanelOpen) { void result.dispose(); return; }
+          sessionSearchResults = result; sessionSearchKey = key;
+          searchMatchCount = result.totalCount; searchActiveIndex = Math.min(searchActiveIndex, Math.max(0, result.totalCount - 1));
+          sessionSearchBusy = false; sessionSearchProgress = '';
           if (options?.selectActive) void selectActiveSearchMatch();
-        }).catch(error => { if (!abort.signal.aborted) showVisibleError(error, t.saveFileFailed()); });
+        }).catch(error => { if (!abort.signal.aborted && !(error instanceof DOMException && error.name === 'AbortError')) showVisibleError(error, t.saveFileFailed()); })
+        .finally(() => { if (sessionSearchAbort === abort) { sessionSearchBusy = false; sessionSearchProgress = ''; } });
       return;
     }
 
@@ -4990,11 +5018,18 @@
   }
 
   function scheduleSearchRefresh(options?: { preserveActive?: boolean; selectActive?: boolean }) {
+    if (getMarkdownApplicationSession(editor)) invalidateSessionSearch();
     clearSearchDebounceTimer();
     searchDebounceTimer = window.setTimeout(() => {
       searchDebounceTimer = null;
       refreshSearchMatches(options);
     }, SEARCH_DEBOUNCE_MS);
+  }
+  function invalidateSessionSearch() {
+    sessionSearchAbort?.abort(); sessionSearchAbort = undefined; sessionReplaceAbort = undefined;
+    const results = sessionSearchResults; sessionSearchResults = undefined; sessionSearchKey = '';
+    if (results) void results.dispose().catch(error => showVisibleError(error, t.saveFileFailed()));
+    sessionSearchBusy = false; sessionSearchProgress = ''; searchMatchCount = 0;
   }
 
   function clearSearchDebounceTimer() {
@@ -5005,16 +5040,25 @@
   }
 
   async function selectActiveSearchMatch() {
-    const match = searchMatches[searchActiveIndex];
-    if (!match) return;
     const application = getMarkdownApplicationSession(editor);
     if (application) {
+      const results = sessionSearchResults, index = searchActiveIndex;
+      if (!results || sessionSearchBusy) return;
       const input = document.activeElement instanceof HTMLInputElement && document.activeElement.closest('.search-replace-panel') ? document.activeElement : null;
       const start = input?.selectionStart; const end = input?.selectionEnd;
-      await application.selectRange(match.from, match.to);
-      if (input) { input.focus({ preventScroll: true }); if (start != null && end != null) input.setSelectionRange(start, end); }
+      try {
+        const match = await results.match(index);
+        if (!match || sessionSearchResults !== results || searchActiveIndex !== index || !searchPanelOpen) return;
+        await application.selectRange(match.fromByte, match.toByte);
+      } catch (error) {
+        if (sessionSearchResults === results) { invalidateSessionSearch(); refreshSearchMatches({ preserveActive: true, selectActive: true }); }
+        return;
+      }
+      if (input && searchPanelOpen && sessionSearchResults === results) { input.focus({ preventScroll: true }); if (start != null && end != null) input.setSelectionRange(start, end); }
       return;
     }
+    const match = searchMatches[searchActiveIndex];
+    if (!match) return;
     cancelPendingReadingPositionRestore();
 
     const isSearchFocused = document.activeElement?.closest('.search-replace-panel') !== null;
@@ -5808,7 +5852,7 @@
       async prepare() {
         if (externalChangeDialogTargetTabId && ids.includes(externalChangeDialogTargetTabId)) closeExternalChangeDialog();
         if (ids.some(tabId => sessionAnalysisKey.startsWith(`${tabId}:`))) cancelSessionAnalysis();
-        if (ids.includes(activeTabId)) sessionSearchAbort?.abort();
+        if (ids.includes(activeTabId)) invalidateSessionSearch();
         for (const { tab, runtime } of members) {
           closingUiIds.add(tab.id); documentActions.cancelPendingAutoSave(tab.id);
           runtime.session?.stopCloseEnhancements();
@@ -7229,7 +7273,7 @@
     bootEditor.destroy();
     markdownLintController.destroy();
     if (sessionAnalysisTimer) clearTimeout(sessionAnalysisTimer);
-    sessionAnalysisAbort?.abort(); sessionSearchAbort?.abort();
+    sessionAnalysisAbort?.abort(); invalidateSessionSearch();
   });
 
   function syncFromEditor(event: EditorChangeEvent) {
@@ -7778,10 +7822,11 @@
   $: {
     const activeDocument = tabs.find((tab) => tab.id === activeTabId);
     if (isMarkdownTab(activeDocument)) {
-      const signature = `${searchPanelOpen}|${mode}|${searchCaseSensitive}|${searchWholeWord}|${markdown}`;
+      const signature = `${activeTabId}|${searchPanelOpen}|${mode}|${searchCaseSensitive}|${searchWholeWord}|${markdown}`;
       if (signature !== lastSearchSignature) {
         lastSearchSignature = signature;
-        refreshSearchMatches({ preserveActive: true, selectActive: false });
+        const modeChanged = lastSearchMode !== mode; lastSearchMode = mode;
+        refreshSearchMatches({ preserveActive: true, selectActive: modeChanged && !!sessionSearchResults });
       }
     }
   }
@@ -8398,6 +8443,8 @@
   {searchWrapAround}
   {searchActiveIndex}
   {searchMatchCount}
+  {sessionSearchBusy}
+  {sessionSearchProgress}
   {autoSaveEnabled}
   {autoSaveDelayMs}
   softwareUpdateState={softwareUpdateSnapshot}

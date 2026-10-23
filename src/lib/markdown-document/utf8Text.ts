@@ -164,9 +164,16 @@ export class Utf8Text {
     this.checkRange(from, to);
     if (!this.isBoundary(from) || !this.isBoundary(to))
       throw new RangeError('编辑范围切开了 UTF-8 字符或 CRLF。');
+    return this.replaceScalars(from, to, Utf8Text.from(text));
+  }
+  /** 仅供未发布的批量候选树：允许内部切开 CRLF，仍禁止切开 UTF-8 标量。 */
+  replaceScalars(from: number, to: number, inserted: Utf8Text) {
+    this.checkRange(from, to);
+    if (((this.byteAt(from) ?? 0) & 0xc0) === 0x80 || ((this.byteAt(to) ?? 0) & 0xc0) === 0x80)
+      throw new RangeError('编辑范围切开了 UTF-8 字符。');
     const [left, rest] = split(this.root, from);
     const [, right] = split(rest, to - from);
-    return new Utf8Text(join(join(left, Utf8Text.from(text).root), right));
+    return new Utf8Text(join(join(left, inserted.root), right));
   }
   equals(other: Utf8Text): boolean {
     if (this.root === other.root) return true;

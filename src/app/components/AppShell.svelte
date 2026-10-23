@@ -164,6 +164,8 @@
   export let searchWrapAround: boolean;
   export let searchActiveIndex: number;
   export let searchMatchCount: number;
+  export let sessionSearchBusy = false;
+  export let sessionSearchProgress = '';
   export let autoSaveEnabled: boolean;
   export let autoSaveDelayMs: number;
   export let segmentedWorkspace: SegmentedTextEditorWorkspace | null = null;
@@ -579,6 +581,8 @@
               wrapAround={searchWrapAround}
               activeIndex={searchActiveIndex}
               matchCount={searchMatchCount}
+              busy={sessionSearchBusy}
+              progressText={sessionSearchProgress}
               readonly={readonlyDocumentMode}
               updateQuery={updateSearchQuery}
               updateReplacement={updateSearchReplacement}

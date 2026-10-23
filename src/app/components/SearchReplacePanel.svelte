@@ -50,6 +50,7 @@
   export let showActivePosition = true;
   export let readonly: boolean;
   export let busy = false;
+  export let progressText = '';
   export let updateQuery: (event: Event) => void;
   export let updateReplacement: (event: Event) => void;
   export let toggleCaseSensitive: () => void;
@@ -103,6 +104,7 @@
 
     if (event.key === 'Enter') {
       event.preventDefault();
+      if (busy) return;
       if (event.shiftKey ? !backwards : backwards) {
         findPrevious();
       } else {
@@ -390,7 +392,9 @@
         </div>
 
         <div class="search-feedback" aria-live="polite">
-          {#if query && matchCount > 0}
+          {#if busy && progressText}
+            {progressText}
+          {:else if query && matchCount > 0}
             {showActivePosition
               ? t.searchMatchCount({
                   current: Math.min(Math.max(activeIndex + 1, 1), matchCount),

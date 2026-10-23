@@ -1,4 +1,5 @@
 //! Markdown 会话：完整源文本、历史及快照独立于 WebView 生命周期。
+pub(super) mod search;
 use super::{
     chunk_reader::{AddedStore, DocumentSnapshot, OriginalFile},
     edit_journal::BaselineIdentity,
@@ -129,6 +130,7 @@ struct Session {
     dirty: bool,
     ack: HashMap<String, ([u8; 32], MarkdownStatus)>,
     ack_order: VecDeque<String>,
+    search_ack: VecDeque<(String, super::markdown_search::ReplaceResult)>,
     closed: bool,
     save_gate: Arc<Mutex<()>>,
     active_group: Option<(String, String)>,
@@ -253,6 +255,7 @@ pub(crate) struct MarkdownDocumentSessionManager {
     snapshots: Arc<Mutex<HashMap<String, CapturedSnapshot>>>,
     path_operations: Arc<Mutex<()>>,
     writing_stats: super::writing_stats::WritingStatsService,
+    search: super::markdown_search::SearchService,
 }
 impl MarkdownDocumentSessionManager {
     pub(crate) fn new(root: PathBuf) -> TextDocumentResult<Self> {
@@ -265,6 +268,7 @@ impl MarkdownDocumentSessionManager {
             snapshots: Arc::new(Mutex::new(HashMap::new())),
             path_operations: Arc::new(Mutex::new(())),
             writing_stats: Default::default(),
+            search: Default::default(),
         })
     }
     fn session(&self, document_id: &str) -> TextDocumentResult<Arc<Mutex<Session>>> {
@@ -384,6 +388,7 @@ impl MarkdownDocumentSessionManager {
             dirty: false,
             ack: HashMap::new(),
             ack_order: VecDeque::new(),
+            search_ack: VecDeque::new(),
             closed: false,
             save_gate: Arc::new(Mutex::new(())),
             active_group: None,
@@ -506,6 +511,7 @@ impl MarkdownDocumentSessionManager {
             dirty,
             ack: HashMap::new(),
             ack_order: VecDeque::new(),
+            search_ack: VecDeque::new(),
             closed: false,
             save_gate: Arc::new(Mutex::new(())),
             active_group: None,
@@ -705,6 +711,7 @@ impl MarkdownDocumentSessionManager {
         );
         if result.revision != transaction.base_revision {
             self.writing_stats.invalidate(&transaction.document_id, false);
+            self.search.invalidate(&transaction.document_id, None);
         }
         session.ack_order.push_back(transaction.operation_id);
         if session.ack_order.len() > 128 {
@@ -731,82 +738,78 @@ impl MarkdownDocumentSessionManager {
             ));
         }
         session.active_group = None;
-        let mut patches = Vec::new();
-        let (entries, undo, next_redo, selection) = if redo {
-            let Some(offset) = session.manifest.redo else {
-                return Ok(session.status());
+        let mut tree = session.current.tree.clone();
+        let mut staged_head = session.manifest.event;
+        let derived = session.manifest.derived;
+        // 每次只读取/写入一个历史批次。最终 marker 发布前所有批次都不可见。
+        let mut stage = |session: &mut Session, edits: Vec<TreeEdit>| -> TextDocumentResult<()> {
+            tree = apply_tree_edits(tree.clone(), &edits)?;
+            let record = HistoryRecord {
+                previous_event: staged_head, group: if redo { "redo" } else { "undo" }.into(),
+                parent_undo: session.manifest.undo, previous_redo: session.manifest.redo,
+                edits, inverse: vec![], group_entries: vec![], selection_before: None, selection_after: None,
             };
+            staged_head = Some(session.history.append_staged(&record)?);
+            Ok(())
+        };
+        let (entries, undo, next_redo, selection) = if redo {
+            let Some(offset) = session.manifest.redo else { return Ok(session.status()); };
             let record = session.history.read(offset)?;
             let mut selection = session.manifest.selection.clone();
             for entry in record.group_entries.iter().rev() {
                 let entry = session.history.read(*entry)?;
-                patches.extend(entry.edits);
-                selection = entry.selection_after;
+                if !derived { stage(&mut session, entry.edits)?; }
+                if entry.selection_after.is_some() { selection = entry.selection_after; }
             }
-            (
-                record.group_entries.clone(),
-                record.group_entries.first().copied(),
-                HistoryPointer::Existing(record.previous_redo),
-                selection,
-            )
+            (record.group_entries.clone(), record.group_entries.first().copied(),
+                HistoryPointer::Existing(record.previous_redo), selection)
         } else {
-            let Some(mut offset) = session.manifest.undo else {
-                return Ok(session.status());
-            };
+            let Some(mut offset) = session.manifest.undo else { return Ok(session.status()); };
             let group = session.history.read(offset)?.group;
             let mut entries = Vec::new();
-            let (parent, selection) = loop {
+            let mut selection = session.manifest.selection.clone();
+            let parent = loop {
                 let entry = session.history.read(offset)?;
-                patches.extend(entry.inverse);
+                if !derived { stage(&mut session, entry.inverse)?; }
+                if entry.selection_before.is_some() { selection = entry.selection_before; }
                 entries.push(offset);
                 let parent = entry.parent_undo;
                 if let Some(previous) = parent {
-                    if session.history.read(previous)?.group == group {
-                        offset = previous;
-                        continue;
-                    }
+                    if session.history.read(previous)?.group == group { offset = previous; continue; }
                 }
-                break (parent, entry.selection_before);
+                break parent;
             };
             (entries, parent, HistoryPointer::This, selection)
         };
-        // 派生目录改变了旧补丁的坐标。历史仍指向原始用户事件，从不可变片段恢复该
-        // 事件的完整树，再由前端物化它的目录；不把旧坐标套在新目录上，也不丢失 redo。
-        let tree = if session.manifest.derived {
-            let target = if redo {
-                entries.first().copied()
-            } else {
-                match entries.last() {
-                    Some(offset) => session.history.read(*offset)?.previous_event,
-                    None => None,
-                }
+        // 派生目录改变旧坐标时按不可变片段恢复，仍分批记录，不物化整个片段数组。
+        if derived {
+            let target = if redo { entries.first().copied() } else {
+                match entries.last() { Some(offset) => session.history.read(*offset)?.previous_event, None => None }
             };
             let base_length = session.manifest.source_map.utf8_len;
-            let restored = session
-                .history
-                .replay(PieceTree::from_original(base_length), target)?;
-            patches = vec![TreeEdit {
-                from: 0,
-                to: session.current.len(),
-                pieces: extract_pieces(&restored, 0, restored.len())?,
-            }];
-            restored
-        } else {
-            apply_tree_edits(session.current.tree.clone(), &patches)?
-        };
+            let restored = session.history.replay(PieceTree::from_original(base_length), target)?;
+            let current_length = session.current.len();
+            stage(&mut session, vec![TreeEdit { from: 0, to: current_length, pieces: vec![] }])?;
+            let mut position = 0;
+            let mut batch = Vec::new();
+            while position < restored.len() {
+                let (piece, _) = restored.piece_at(position).ok_or_else(|| error("history-corrupt", "恢复片段缺失"))?;
+                batch.push(TreeEdit { from: position, to: position, pieces: vec![piece.clone()] });
+                position += piece.len();
+                if batch.len() == 2048 { stage(&mut session, std::mem::take(&mut batch))?; }
+            }
+            if !batch.is_empty() { stage(&mut session, batch)?; }
+        }
+        drop(stage);
         let record = HistoryRecord {
-            previous_event: session.manifest.event,
-            group: if redo { "redo" } else { "undo" }.into(),
-            parent_undo: session.manifest.undo,
-            previous_redo: session.manifest.redo,
-            edits: patches,
-            inverse: vec![],
-            group_entries: entries,
-            selection_before: session.manifest.selection.clone(),
-            selection_after: selection,
+            previous_event: staged_head, group: if redo { "redo" } else { "undo" }.into(),
+            parent_undo: session.manifest.undo, previous_redo: session.manifest.redo,
+            edits: vec![], inverse: vec![], group_entries: entries,
+            selection_before: session.manifest.selection.clone(), selection_after: selection,
         };
         let result = session.publish(record, tree, HistoryPointer::Existing(undo), next_redo)?;
         self.writing_stats.invalidate(document_id, false);
+        self.search.invalidate(document_id, None);
         Ok(result)
     }
     pub(crate) fn capture(
@@ -1016,6 +1019,7 @@ impl MarkdownDocumentSessionManager {
         }
         session.owner = target.into();
         self.writing_stats.invalidate(document_id, true);
+        self.search.invalidate(document_id, None);
         Ok(())
     }
     /// 多文档归属和工作区提交共享同一临界区；持久化失败时全部仍归源窗口。
@@ -1063,6 +1067,7 @@ impl MarkdownDocumentSessionManager {
         for session in &mut sessions {
             session.owner = target.into();
             self.writing_stats.invalidate(&session.manifest.document_id, true);
+            self.search.invalidate(&session.manifest.document_id, None);
         }
         Ok(result)
     }
@@ -1086,6 +1091,7 @@ impl MarkdownDocumentSessionManager {
             }
             session.closed = true;
             self.writing_stats.invalidate(document_id, true);
+            self.search.invalidate(document_id, None);
         }
         lock(&self.sessions)?.remove(document_id);
         Ok(())
@@ -1093,6 +1099,7 @@ impl MarkdownDocumentSessionManager {
     /// WebView 已销毁，前端不再有机会释放快照。等保存结束后释放该窗口资源，保留磁盘恢复资料。
     pub(crate) fn detach_owner(&self, owner: &str) -> TextDocumentResult<()> {
         self.writing_stats.cancel(owner, None);
+        self.search.cancel_owner(owner);
         let _path_operation = lock(&self.path_operations)?;
         let handles: Vec<_> = lock(&self.sessions)?.values().cloned().collect();
         for handle in handles {
@@ -1106,6 +1113,7 @@ impl MarkdownDocumentSessionManager {
             session.closed = true;
             let document_id = session.manifest.document_id.clone();
             self.writing_stats.invalidate(&document_id, true);
+            self.search.invalidate(&document_id, None);
             lock(&self.snapshots)?.retain(|_, snapshot| snapshot.document_id != document_id);
             lock(&self.sessions)?.remove(&document_id);
         }
@@ -1135,6 +1143,7 @@ impl MarkdownDocumentSessionManager {
         for session in &mut sessions {
             session.closed = true; session.cleanup.remove = true;
             self.writing_stats.invalidate(&session.manifest.document_id, true);
+            self.search.invalidate(&session.manifest.document_id, None);
         }
         let mut registry = lock(&self.sessions)?;
         for (id, _) in documents { registry.remove(&id); }
@@ -1166,6 +1175,7 @@ impl MarkdownDocumentSessionManager {
             session.closed = true;
             session.cleanup.remove = true;
             self.writing_stats.invalidate(document_id, true);
+            self.search.invalidate(document_id, None);
         }
         lock(&self.sessions)?.remove(document_id);
         drop(session);
@@ -1808,11 +1818,15 @@ fn read_window(
     })
 }
 fn snapshots_equal(a: &DocumentSnapshot, b: &DocumentSnapshot) -> TextDocumentResult<bool> {
+    snapshots_equal_cancelled(a, b, &std::sync::atomic::AtomicBool::new(false))
+}
+fn snapshots_equal_cancelled(a: &DocumentSnapshot, b: &DocumentSnapshot, cancel: &std::sync::atomic::AtomicBool) -> TextDocumentResult<bool> {
     if a.len() != b.len() {
         return Ok(false);
     }
     let mut offset = 0;
     while offset < a.len() {
+        super::markdown_search::check_cancel(cancel)?;
         let (left, left_relative) = a
             .tree
             .piece_at(offset)
@@ -1837,6 +1851,7 @@ fn snapshots_equal(a: &DocumentSnapshot, b: &DocumentSnapshot) -> TextDocumentRe
         }
         let end = offset + count;
         while offset < end {
+            super::markdown_search::check_cancel(cancel)?;
             let count = (end - offset).min(64 * 1024) as usize;
             if a.read_range(offset, count)? != b.read_range(offset, count)? {
                 return Ok(false);

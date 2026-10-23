@@ -259,7 +259,8 @@ describe('渐进 Markdown 文档运行时', () => {
     await vi.waitFor(() => expect(runtime.state.progress.state).toBe('ready'), { timeout: 5000 });
     expect(runtime.state.progress.indexedBytes).toBe(runtime.state.status.byteLength);
     const matches = await runtime.search('搜索尾部', { signal: new AbortController().signal });
-    expect(matches.matches).toHaveLength(1);
+    expect(matches.totalCount).toBe(1);
+    expect((await matches.page(0)).matches).toHaveLength(1);
     await runtime.replaceAll('搜索尾部', '替换完成', { signal: new AbortController().signal });
     expect((await runtime.readMarkdown()).endsWith('替换完成')).toBe(true);
     await runtime.session.undo();

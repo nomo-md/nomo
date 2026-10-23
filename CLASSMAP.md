@@ -157,7 +157,10 @@
 | 全文准入与共享驻留预算 | `src/lib/markdown-document/mountPolicy.ts`, `residentBudget.ts`, `windowingLimits.ts` | `residentTracker.ts`, `enhancements.ts`, `structure.ts`, `structureIndex.ts`, `runtime.ts`, `viewportHost.ts` | 修改窗口化比例（75%–400%，默认 100% 对应 1 MiB / 6000 排版单元）、共享容量派生与原位更新、增强分类统计、同窗语义/源码宿主的可撤销预占与 DOM/图片增量计量、压力锁存和恢复；窗口挂载与回收仍由现有宿主执行 |
 | 真实窗口与布局策略 | `src/lib/markdown-document/viewportHost.ts` | `mountWindow.ts`, `layoutCache.ts`, `runtime.ts`, `mountPolicy.ts`, `viewport.ts`, `scheduler.ts`, `editor-document.css` | 首屏与覆盖计时、稳定块组、3–6 屏准备和回收、原位 DOM 更新、全局选区与阅读锚点、大纲定位；完整索引挂载前完成权限交接，文档持有布局分区并共用全窗 2048 项/2 MiB 预算，关闭文档释放 |
 | 语义窗口标题锚点 | `src/lib/editor-core/plugins/headingAnchors.ts` | `src/lib/editor-core/ProseMirrorEditorCore.ts`, `src/lib/markdown-document/viewportHost.ts` | 修改全局标题 ID 的 PM decoration、跨窗口重名标题定位或大纲点击后的显式滚动；宿主不得直接修改标题 DOM 属性 |
-| 全文选区与任务 | `src/lib/markdown-document/selection.ts`, `tasks.ts` | `runtime.ts`, `controller.ts`, `port.ts` | 修改跨窗口选区、完整快照复制、剪切冲突保护、全文搜索替换及取消 |
+| 全文选区 | `src/lib/markdown-document/selection.ts` | `runtime.ts`, `controller.ts`, `port.ts` | 修改跨窗口选区、完整快照复制、剪切冲突保护 |
+| Markdown 原生搜索与分页 | `src-tauri/src/text_document/markdown_search/` | `markdown_commands.rs`, `src/lib/markdown-document/searchProtocol.ts`, `searchController.ts`, `port.ts`, `App.svelte` | Unicode 字面量流式匹配、精确计数、稀疏检查点、128 条分页、三页前端缓存、窗口任务取消与释放；不传正文或完整命中数组 |
+| Markdown 原生全部替换 | `src-tauri/src/text_document/markdown_session/search.rs` | `markdown_history.rs`, `controller.ts`, `markdownApplicationSession.ts`, `semanticWindow.ts`, `sourceWindow.ts` | 后台候选树、共享替换片段、分批历史、原子发布、幂等重试、提交写入门禁、选区和阅读位置映射 |
+| 浏览器搜索契约适配 | `src/lib/markdown-document/memorySearchPort.ts` | `searchController.test.ts`, `searchSamples.json`, `tasks.ts`, `session.ts`, `utf8Text.ts` | 浏览器开发及契约测试；桌面失败不回退 JS 全文扫描，旧扫描器仅在浏览器适配与语义对照中使用 |
 | 自动目录派生 | `src/lib/markdown-document/automaticToc.ts` | `runtime.ts`, `controller.ts`, `session.ts`, `markdown_session.rs`, `src/lib/toc/tocService.ts` | 修改完整索引物化目录、原始目录保留、派生事务及撤销/重做语义 |
 | 实现边界与实机验收 | `docs/markdown-loading.md` | `scripts/generate-markdown-loading-fixtures.mjs`, `src/lib/markdown-document/*.test.ts` | 更新迁移进度、固定文档、代码验证入口或双平台验收记录 |
 
@@ -1259,12 +1262,13 @@
 **Kind:** service
 
 **Owns:**
-- 搜索/替换算法和状态管理
-- 搜索高亮与编辑器交互
+- 非 Markdown 原生会话路径的前端搜索/替换辅助算法
+- 旧编辑器搜索高亮与交互适配
 
 **Does not own：**
 - 不拥有搜索面板 UI（在 SearchReplacePanel.svelte 中）
 - 不拥有编辑器内高亮插件（在 searchHighlight.ts 中）
+- 不拥有 Markdown 文档会话的原生任务与有界分页（在 markdown_search/、searchController.ts 中）
 
 **Called by:** `src/app/components/SearchReplacePanel.svelte`, `src/app/App.svelte`
 

@@ -12,6 +12,7 @@ import {
   readCompleteSnapshot,
 } from '../../lib/markdown-document/port';
 import { ProgressiveMarkdownDocument } from '../../lib/markdown-document/runtime';
+import type { SearchOptions } from '../../lib/markdown-document/searchProtocol';
 import { normalizeMarkdownWindowingScalePercent, resolveMarkdownWindowingLimits } from '../../lib/markdown-document/windowingLimits';
 import { MarkdownViewportHost, type MarkdownPresentation, type OutlineNavigationClock } from '../../lib/markdown-document/viewportHost';
 import { utf8Length, utf16ToUtf8 } from '../../lib/markdown-document/utf8Text';
@@ -581,7 +582,7 @@ export class MarkdownApplicationSession {
   private get sessionWritable() {
     const state = this.document?.session.state;
     return !!state && !this.disposed && !this.options.readonly && !state.failure &&
-      !this.document?.state.failure && !state.closing && !state.historyBusy;
+      !this.document?.state.failure && !state.closing && !state.historyBusy && !state.nativeCommitBusy;
   }
   get writable() { return this.sessionWritable && !!this.currentHost?.writable; }
   private get historyWritable() {
@@ -857,6 +858,20 @@ export class MarkdownApplicationSession {
   }
   selectRange(fromByte: number, toByte: number) {
     return this.currentHost?.selectRange({ anchorByte: fromByte, headByte: toByte });
+  }
+  async replaceAll(query: string, replacement: string, options: SearchOptions) {
+    const doc = await this.ready;
+    const hosts = [this.semanticHost, this.sourceHost].filter((host): host is MarkdownViewportHost => !!host);
+    const result = await doc.searches.replaceAll(query, replacement, options, () => {
+      this.captureSelection();
+      return { selection: doc.selection.selection,
+        anchors: [this.tab.globalScrollAnchor?.byteOffset ?? doc.selection.selection.headByte, ...hosts.map(host => host.position.byteOffset)] };
+    }, anchors => {
+      this.tab.globalScrollAnchor = { byteOffset: anchors[0], line: 1 };
+      this.semanticReadingPosition = undefined; this.sourceReadingPosition = undefined;
+      hosts.forEach((host, index) => host.scrollToByte(anchors[index + 1]));
+    });
+    return result.count;
   }
   async flush() {
     // 打开失败没有待提交视图；错误已通过 onFailure 显示，不能阻断其它标签的切换。

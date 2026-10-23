@@ -272,7 +272,7 @@ export class MarkdownViewportHost {
   get writable() {
     const state = this.document.session.state;
     if (this.hidden || this.disposed || this.options.readonly || this.viewFailure ||
-      this.document.state.failure || state.historyBusy || state.closing || state.failure) return false;
+      this.document.state.failure || state.historyBusy || state.nativeCommitBusy || state.closing || state.failure) return false;
     return !!(this.active?.semantic?.editable ||
       (this.active?.source && !this.active.source.bridge.isStale));
   }
@@ -938,7 +938,7 @@ export class MarkdownViewportHost {
     if (this.active?.restricted && (event.ctrlKey || event.metaKey) && ['z', 'y'].includes(event.key.toLowerCase())) {
       event.preventDefault(); event.stopImmediatePropagation();
       const state = this.document.session.state;
-      if (!this.options.readonly && !this.hidden && !state.failure && !this.document.state.failure && !state.closing && !state.historyBusy)
+      if (!this.options.readonly && !this.hidden && !state.failure && !this.document.state.failure && !state.closing && !state.historyBusy && !state.nativeCommitBusy)
         void this.document.session.undo(event.key.toLowerCase() === 'y' || event.shiftKey)
           .then(() => this.reveal(this.document.selection.selection.headByte, true)).catch(this.callbacks.onFailure);
       return;

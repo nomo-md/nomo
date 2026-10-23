@@ -95,7 +95,7 @@ export class MarkdownSourceWindow {
       onState: () =>
         queueMicrotask(() => {
           if (this.destroyed || !view) return;
-          const blocked = this.applicationReadonly || this.bridge.isStale || !!session.state.failure || session.state.historyBusy || session.state.closing;
+          const blocked = this.applicationReadonly || this.bridge.isStale || !!session.state.failure || session.state.historyBusy || session.state.nativeCommitBusy || session.state.closing;
           if (view.state.readOnly !== blocked)
             view.dispatch({
               effects: this.readonly.reconfigure([
@@ -175,7 +175,7 @@ export class MarkdownSourceWindow {
     });
   }
   private submit(transaction: Transaction, fromByte: number) {
-    if (this.bridge.isStale || this.session.state.historyBusy || this.session.state.closing)
+    if (this.bridge.isStale || this.session.state.historyBusy || this.session.state.nativeCommitBusy || this.session.state.closing)
       throw new Error('源码窗口正在更新，请稍后输入。');
     const previous = this.coordinates;
     const patches: Array<{ from: number; to: number; insert: string }> = [];
@@ -260,7 +260,7 @@ export class MarkdownSourceWindow {
   setReadonly(readonly: boolean) {
     this.applicationReadonly = readonly;
     const state = this.session.state;
-    const blocked = readonly || this.bridge.isStale || !!state.failure || state.historyBusy || state.closing;
+    const blocked = readonly || this.bridge.isStale || !!state.failure || state.historyBusy || state.nativeCommitBusy || state.closing;
     if (!this.destroyed && this.view.state.readOnly !== blocked)
       this.view.dispatch({ effects: this.readonly.reconfigure([EditorState.readOnly.of(blocked), EditorView.editable.of(!blocked)]) });
   }
