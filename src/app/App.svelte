@@ -3893,12 +3893,12 @@
     void pending.then(() => pendingEditorOperations.delete(pending), () => pendingEditorOperations.delete(pending));
     return pending;
   }
-  async function awaitPendingEditorOperations(ids?: readonly string[]) {
+  async function awaitPendingEditorOperations(ids?: readonly string[], flush = true) {
     if (ids) await documentCloseCoordinator.operations.awaitSource(ids, ['edit', 'copy']);
     else while (pendingEditorOperations.size) await Promise.allSettled([...pendingEditorOperations]);
     const runtimes = [...documentRuntimes.values()].filter(runtime => !runtime.disposed && (!ids || ids.includes(runtime.tabId)));
     if (ids) await Promise.all(runtimes.map(runtime => runtime.images.awaitPendingInsertions()));
-    await Promise.all(runtimes.map(runtime => runtime.session?.flush()));
+    if (flush) await Promise.all(runtimes.map(runtime => runtime.session?.flush()));
   }
 
   function handleWorkspaceContextMenu(event: MouseEvent) {
@@ -5516,7 +5516,14 @@
       const runtime = documentRuntimes.get(id);
       if (!runtime) return;
       if (sessionAnalysisKey.startsWith(`${id}:`)) cancelSessionAnalysis();
-      await runtime.session?.close(true);
+      try { await runtime.session?.close(true); }
+      catch (error) {
+        const state = runtime.session?.document?.session.state;
+        logError('MarkdownDocument', '打开替换旧会话失败', { tabId: id,
+          documentId: state?.committed.documentId, revision: state?.committed.revision,
+          pendingTransactions: state?.pendingTransactions, error: String(error) });
+        throw error;
+      }
       runtime.disposed = true; runtime.unsubscribe(); documentRuntimes.delete(id);
       if (editor === runtime.editor) editor = bootEditor;
     },
@@ -5838,6 +5845,7 @@
     const itemPositions = originalItems.map(item => workspaceItems.findIndex(candidate => candidate.id === item.id));
     const decisions: PersistedPendingClose['decisions'] = {};
     const revisions: Record<string, number> = {};
+    const preparationFailures = new Set<string>();
     const timings: Record<string, number> = {};
     let views: Promise<void> = Promise.resolve();
     const resume = () => {
@@ -5858,6 +5866,21 @@
       try { await persistWorkspaceStateNow({ ensureDraftIds: false, preparedClose: true }); }
       catch (error) { if (previous) pendingCloseRecords.set(id, previous); else pendingCloseRecords.delete(id); throw error; }
     };
+    const detachVisibleTabs = () => {
+      const wasActive = ids.includes(activeTabId);
+      const nextId = wasActive ? getAdjacentWorkspaceTabId(activeTabId) : undefined;
+      for (const member of members) closingDocuments.set(member.tab.id, member);
+      tabs = tabs.filter(tab => !ids.includes(tab.id));
+      workspaceItems = workspaceItems.filter(item => !getWorkspaceItemTabIds(item).some(tabId => ids.includes(tabId)));
+      if (previewTabId && ids.includes(previewTabId)) previewTabId = null;
+      if (wasActive) {
+        const next = tabs.find(tab => tab.id === nextId) ?? tabs[Math.min(Math.min(...positions), tabs.length - 1)];
+        if (next) { activeTabId = next.id; loadTabState(next); }
+        else { editor = bootEditor; clearAllTabsWithoutCreatingBlank({ skipPersist: true }); }
+      }
+      void updateWindowTitle();
+      requestAnimationFrame(() => setTimeout(() => { timings.firstPaint = performance.now(); logInfo('DocumentClose', '关闭前台完成', { id, tabIds: ids, timings }); }, 0));
+    };
     return documentCloseCoordinator.request(ids, {
       async prepare() {
         if (externalChangeDialogTargetTabId && ids.includes(externalChangeDialogTargetTabId)) closeExternalChangeDialog();
@@ -5870,7 +5893,9 @@
         await documentCloseCoordinator.operations.awaitSource(ids, ['edit']);
         for (const member of members) member.runtime = getDocumentRuntime(member.tab);
         await Promise.all(members.map(member => member.runtime.images.awaitPendingInsertions()));
-        await Promise.all(members.map(async ({ runtime }) => runtime.session?.prepareViewClose()));
+        await Promise.all(members.map(async ({ tab, runtime }) => {
+          if (await runtime.session?.prepareViewClose()) preparationFailures.add(tab.id);
+        }));
         for (const { tab } of members) revisions[tab.id] = tab.version;
       },
       async decide() {
@@ -5878,8 +5903,8 @@
         await documentCloseCoordinator.operations.awaitSaveCapture(ids);
         for (const { tab } of members) {
           if (discardWithoutConfirmation) { decisions[tab.id] = 'discard'; continue; }
-          if (!tab.dirty) { decisions[tab.id] = 'clean'; continue; }
-          if (documentCloseCoordinator.operations.coversRevision(tab.id, revisions[tab.id])) { decisions[tab.id] = 'save'; continue; }
+          if (!tab.dirty && !preparationFailures.has(tab.id)) { decisions[tab.id] = 'clean'; continue; }
+          if (!preparationFailures.has(tab.id) && documentCloseCoordinator.operations.coversRevision(tab.id, revisions[tab.id])) { decisions[tab.id] = 'save'; continue; }
           const choice = await confirmAction(t.confirmCloseModifiedFile(), { title: tab.fileName,
             okLabel: t.discardChanges(), cancelLabel: t.cancel(), saveLabel: t.save() });
           if (choice === false) return false;
@@ -5887,27 +5912,18 @@
           if (choice === 'save' && !await documentActions.chooseCloseSavePath(tab.id)) return false;
         }
         // 所有成员确认后统一接受最终保存，避免取消另一成员时提前产生新写入。
-        for (const { tab } of members) if (decisions[tab.id] === 'save' && !documentCloseCoordinator.operations.coversRevision(tab.id, revisions[tab.id]))
+        for (const { tab } of members) if (decisions[tab.id] === 'save' &&
+          (preparationFailures.has(tab.id) || !documentCloseCoordinator.operations.coversRevision(tab.id, revisions[tab.id])))
           void documentActions.saveForClose(tab.id).catch(error => showVisibleError(error, t.saveFileFailed()));
         return true;
       },
       persist,
       detach() {
-        const wasActive = ids.includes(activeTabId);
-        const nextId = wasActive ? getAdjacentWorkspaceTabId(activeTabId) : undefined;
-        for (const member of members) closingDocuments.set(member.tab.id, member);
-        tabs = tabs.filter(tab => !ids.includes(tab.id));
-        workspaceItems = workspaceItems.filter(item => !getWorkspaceItemTabIds(item).some(tabId => ids.includes(tabId)));
-        if (previewTabId && ids.includes(previewTabId)) previewTabId = null;
-        if (wasActive) {
-          const next = tabs.find(tab => tab.id === nextId) ?? tabs[Math.min(Math.min(...positions), tabs.length - 1)];
-          if (next) { activeTabId = next.id; loadTabState(next); }
-          else { editor = bootEditor; clearAllTabsWithoutCreatingBlank({ skipPersist: true }); }
-        }
-        void updateWindowTitle();
-        requestAnimationFrame(() => setTimeout(() => { timings.firstPaint = performance.now(); logInfo('DocumentClose', '关闭前台完成', { id, tabIds: ids, timings }); }, 0));
+        // 故障视图必须留在原 DOM 中；存储关闭失败时不能用新宿主替换尚未确认的输入。
+        if (!preparationFailures.size) detachVisibleTabs();
       },
       releaseViews() {
+        if (preparationFailures.size) return views;
         // 让 Svelte 更新与相邻正文先绘制；宏任务回收不占用当前点击的微任务链。
         views = afterMarkdownClosePaint().then(async () => {
           const diagnostics = (await Promise.all(members.map(member => member.runtime.session?.releaseCloseViews()))).flatMap(value => value ?? []);
@@ -5922,8 +5938,10 @@
             throw new Error(`${tab.fileName} 尚有未保存内容，已恢复标签。`);
         }
       },
+      isDiscarding: tabId => decisions[tabId] === 'discard',
       async release() {
         await MarkdownApplicationSession.closeTogether(members.map(member => ({ application: member.runtime.session!, discard: decisions[member.tab.id] === 'discard' })));
+        if (preparationFailures.size) detachVisibleTabs();
         for (const { tab, runtime } of members) {
           runtime.disposed = true; runtime.unsubscribe();
           documentRuntimes.delete(tab.id); closingDocuments.delete(tab.id); closingUiIds.delete(tab.id);
@@ -6090,7 +6108,8 @@
     const activeTab = tabs.find((tab) => tab.id === sourceTabId);
     if (!isSegmentedTextTab(activeTab)) {
       // 手动保存等待已受理的图片；图片内部的首次保存走 saveDocumentById，避免自等待。
-      try { await awaitPendingEditorOperations([sourceTabId]); }
+      // 保存入口自己负责重试失败事务；这里仅等待已受理操作，不能在重试前再次 flush 拦截。
+      try { await awaitPendingEditorOperations([sourceTabId], false); }
       catch (error) { showVisibleError(error, t.saveFileFailed()); return false; }
       if (!tabs.some(tab => tab.id === sourceTabId) || closingUiIds.has(sourceTabId)) return false;
       return saveMarkdownDocument(saveAs, sourceTabId);

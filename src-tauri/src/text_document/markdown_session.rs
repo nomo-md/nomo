@@ -1071,6 +1071,22 @@ impl MarkdownDocumentSessionManager {
         }
         Ok(result)
     }
+    /// 保持快照保护门禁，并为生命周期故障提供有界诊断。
+    fn require_released_snapshots(&self, document_id: &str, operation: &str, message: &str) -> TextDocumentResult<()> {
+        let snapshots = lock(&self.snapshots)?;
+        let count = snapshots.values().filter(|snapshot| snapshot.document_id == document_id).count();
+        if count == 0 { return Ok(()); }
+        // 仅故障时记录有界句柄与修订，不记录路径或正文；区分旧索引残留与当前任务占用。
+        let retained: Vec<_> = snapshots.iter()
+            .filter(|(_, snapshot)| snapshot.document_id == document_id)
+            .take(8)
+            .map(|(id, snapshot)| format!("{}@{}", id, snapshot.content.revision))
+            .collect();
+        crate::app_logger::warn("MarkdownSnapshot", &format!(
+            "operation={operation} documentId={document_id} activeSnapshots={count} retained={}", retained.join(",")
+        ));
+        Err(error("document-busy", message))
+    }
     /// 释放本窗口的内存映射，但保留恢复资料。已移交的会话由目标窗口继续持有。
     pub(crate) fn detach(&self, owner: &str, document_id: &str) -> TextDocumentResult<()> {
         let Some(handle) = lock(&self.sessions)?.get(document_id).cloned() else {
@@ -1083,12 +1099,7 @@ impl MarkdownDocumentSessionManager {
             if session.owner != owner {
                 return Ok(());
             }
-            if lock(&self.snapshots)?
-                .values()
-                .any(|snapshot| snapshot.document_id == document_id)
-            {
-                return Err(error("document-busy", "文档仍有正在使用的完整快照"));
-            }
+            self.require_released_snapshots(document_id, "detach", "文档仍有正在使用的完整快照")?;
             session.closed = true;
             self.writing_stats.invalidate(document_id, true);
             self.search.invalidate(document_id, None);
@@ -1131,12 +1142,9 @@ impl MarkdownDocumentSessionManager {
         let _saving = gates.iter().map(|gate| lock(gate)).collect::<TextDocumentResult<Vec<_>>>()?;
         let mut sessions = handles.iter().map(|handle| lock(handle)).collect::<TextDocumentResult<Vec<_>>>()?;
         {
-            let snapshots = lock(&self.snapshots)?;
             for ((id, discard), session) in documents.iter().zip(sessions.iter()) {
                 session.owner(owner)?;
-                if snapshots.values().any(|snapshot| &snapshot.document_id == id) {
-                    return Err(error("document-busy", "组合文档仍有正在使用的完整快照"));
-                }
+                self.require_released_snapshots(id, "close-many", "组合文档仍有正在使用的完整快照")?;
                 if session.dirty && !discard { return Err(error("unsaved-document", "组合文档尚有未保存内容")); }
             }
         }
@@ -1163,12 +1171,7 @@ impl MarkdownDocumentSessionManager {
         {
             let mut session = lock(&session)?;
             session.owner(owner)?;
-            if lock(&self.snapshots)?
-                .values()
-                .any(|snapshot| snapshot.document_id == document_id)
-            {
-                return Err(error("document-busy", "文档仍有正在使用的完整快照"));
-            }
+            self.require_released_snapshots(document_id, "close", "文档仍有正在使用的完整快照")?;
             if session.dirty && !discard {
                 return Err(error("unsaved-document", "文档尚有未保存内容"));
             }

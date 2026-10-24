@@ -120,14 +120,14 @@ export class MarkdownSemanticWindow {
     this.options.onPresentationChange?.();
   }
   /** 调用方先等待组字和确认；失败窗口必须继续保留，可供重试或复制恢复。 */
-  dispose(prepared = false) {
-    if (!prepared) this.core.commitPendingEdits();
-    if (this.bridge.pinned || this.core.hasUnsettledProjection())
+  dispose(prepared = false, discard = false) {
+    if (!prepared && !discard) this.core.commitPendingEdits();
+    if (!discard && (this.bridge.pinned || this.core.hasUnsettledProjection()))
       throw new Error('正在编辑的语义区域不能回收。');
     this.detachEdits();
     this.disposed = true;
     this.resolveReady();
-    this.bridge.dispose();
-    this.core.destroy({ prepared });
+    this.bridge.dispose(discard);
+    this.core.destroy({ prepared: prepared || discard });
   }
 }

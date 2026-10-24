@@ -17,6 +17,18 @@ function scenario(overrides: Partial<DocumentCloseHooks> = {}) {
 }
 
 describe('后台关闭的所有权与操作保护', () => {
+  it('明确丢弃仍等待在途保存，但保存失败不撤销丢弃决定', async () => {
+    const coordinator = new DocumentCloseCoordinator(), gate = deferred<boolean>();
+    const { hooks } = scenario({ isDiscarding: id => id === 'a' });
+    const save = coordinator.operations.run('a', 'save', async operation => {
+      operation.snapshot(2); const result = await gate.promise;
+      operation.saveResult = { status: 'failed', error: 'disk error' }; return result;
+    });
+    await coordinator.request(['a'], hooks);
+    expect(hooks.release).not.toHaveBeenCalled();
+    gate.resolve(false); await save; await coordinator.awaitSettled();
+    expect(hooks.release).toHaveBeenCalledOnce(); expect(hooks.restore).not.toHaveBeenCalled();
+  });
   it('按文档等待编辑操作不受其他标签阻塞，关联文档完成前仍须等待', async () => {
     const operations = new DocumentOperationRegistry(), unrelated = deferred(), related = deferred();
     const other = operations.run('other', 'edit', () => unrelated.promise);

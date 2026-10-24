@@ -87,7 +87,7 @@ export class AutomaticMarkdownToc {
         });
         this.original = { snapshot: original, index: originalIndex };
       } catch (error) {
-        await this.session.port.releaseSnapshot(original);
+        await this.session.releaseSnapshot(original);
         throw error;
       }
     }
@@ -128,7 +128,8 @@ export class AutomaticMarkdownToc {
   async dispose() {
     this.abort.abort();
     await this.running?.catch(() => undefined);
-    if (this.original) await this.session.port.releaseSnapshot(this.original.snapshot);
+    const original = this.original;
     this.original = null;
+    if (original) await this.session.releaseSnapshot(original.snapshot);
   }
 }

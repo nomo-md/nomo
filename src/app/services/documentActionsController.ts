@@ -375,10 +375,8 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
     }
     try {
       const doc = await application.ready;
-      if (doc.session.state.failure) {
-        if (automatic) return false;
-        await doc.retry();
-      }
+      if (automatic && doc.session.state.failure) return false;
+      if (!automatic) await application.flush(true);
       let path = task?.targetPath ?? (!saveAs && !tab.diskReadonly ? tab.nativePath : null);
       if (options.getDesktopEnabled() && !path) {
         const { save } = await import('@tauri-apps/plugin-dialog');
@@ -581,8 +579,9 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       // 分段会话关闭前需要 flush journal/close session，由其工作区统一编排。
       return;
     }
-    await getMarkdownApplicationSession(getDocumentEditor(tabId))?.flush();
-    flushDocumentRuntime(tabId);
+    const application = getMarkdownApplicationSession(getDocumentEditor(tabId));
+    const preparationFailure = await application?.prepareViewClose();
+    if (!application) flushDocumentRuntime(tabId);
 
     logCloseDiagnostics('documentActions.closeTab: 进入关闭流程', {
       tabId,
@@ -594,7 +593,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       savedMarkdownLength: tabToClose.savedMarkdown?.length ?? null,
     });
 
-    if (tabToClose.dirty && !discardChanges) {
+    if ((tabToClose.dirty || preparationFailure) && !discardChanges) {
       const message = t.confirmCloseModifiedFile();
       logCloseDiagnostics('documentActions.closeTab: 准备弹出未保存确认框', {
         tabId,
@@ -612,7 +611,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
       });
 
       // cancel → 取消关闭
-      if (confirmClose === false) return;
+      if (confirmClose === false) { application?.resume(); return; }
 
       // 用户选择保存后再关闭
       if (confirmClose === 'save') {
@@ -622,7 +621,7 @@ export function createDocumentActionsController(options: DocumentActionsOptions)
             tabId,
             fileName: tabToClose.fileName,
           });
-          return;
+          application?.resume(); return;
         }
       }
     } else {

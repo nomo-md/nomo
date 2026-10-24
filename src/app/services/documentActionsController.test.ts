@@ -180,6 +180,37 @@ afterEach(() => {
 });
 
 describe('documentActionsController', () => {
+  it('会话保存使用允许恢复的 flush，成功后才捕获和标记保存', async () => {
+    const tab = createTab({ documentId: 'md-retry' });
+    const { options } = createOptions([tab]);
+    const order: string[] = [];
+    const flush = vi.fn(async (retry: boolean) => { expect(retry).toBe(true); order.push('retry'); });
+    const session = {
+      state: { failure: new Error('write failed'), committed: { dirty: false }, pendingTransactions: 0 },
+      withSnapshot: async (task: (snapshot: unknown) => Promise<void>) => { order.push('capture'); await task({ revision: 1 }); },
+      saveCaptured: async () => { order.push('save'); },
+    };
+    vi.spyOn(applicationSessions, 'getMarkdownApplicationSession').mockReturnValue({ flush, ready: Promise.resolve({ session }) } as any);
+    vi.spyOn(desktopStorage, 'statMarkdownFile').mockResolvedValue({ path: tab.nativePath!, exists: true, isFile: true, sizeBytes: 10, modifiedAt: 2, readonly: false });
+    const controller = createDocumentActionsController(options as any);
+    expect(await controller.saveMarkdownFile()).toBe(true);
+    expect(order).toEqual(['retry', 'capture', 'save']); expect(tab.dirty).toBe(false);
+  });
+  it('提交失败仍可选择丢弃，取消则恢复原标签', async () => {
+    const tab = createTab();
+    const { options, getState } = createOptions([tab]);
+    const close = vi.fn(async () => {}), resume = vi.fn();
+    vi.spyOn(applicationSessions, 'getMarkdownApplicationSession').mockReturnValue({
+      prepareViewClose: async () => new Error('write failed'), close, resume,
+    } as any);
+    const controller = createDocumentActionsController(options as any);
+    vi.mocked(confirmAction).mockResolvedValueOnce(false);
+    await controller.closeTab(tab.id);
+    expect(close).not.toHaveBeenCalled(); expect(resume).toHaveBeenCalledOnce(); expect(getState().tabs).toContain(tab);
+    vi.mocked(confirmAction).mockResolvedValueOnce(true);
+    await controller.closeTab(tab.id);
+    expect(close).toHaveBeenCalledWith(true); expect(getState().tabs).not.toContain(tab);
+  });
   it.each([false, true])('重新加载使用独立会话，替换失败只释放候选正文：失败=%s', async fails => {
     const tab = createTab({ documentId: 'md-old', dirty: false,
       externalFileChange: { ...createEmptyExternalFileChange(), type: 'modified' } });

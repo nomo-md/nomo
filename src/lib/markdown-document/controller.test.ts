@@ -1,8 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MarkdownSessionController } from './controller';
 import { createMemoryMarkdownPort, readCompleteSnapshot } from './port';
 
 describe('Markdown 会话协调', () => {
+  it('快照释放失败仍保留句柄，关闭前重试且不误报已释放', async () => {
+    const port = createMemoryMarkdownPort();
+    const controller = new MarkdownSessionController(port, await port.openDocument({ text: '完整正文' }));
+    const release = vi.spyOn(port, 'releaseSnapshot').mockRejectedValueOnce(new Error('release failed'));
+    await expect(controller.withSnapshot(snapshot => readCompleteSnapshot(port, snapshot))).rejects.toThrow('release failed');
+    await expect(port.close(controller.documentId, true)).rejects.toThrow('快照');
+    await controller.close(true);
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(release.mock.calls[1]).toEqual(release.mock.calls[0]);
+  });
   it('统计等待组字而不确认草稿，取消等待不提交输入', async () => {
     const port = createMemoryMarkdownPort();
     const controller = new MarkdownSessionController(port, await port.openDocument({ text: '正文' }));

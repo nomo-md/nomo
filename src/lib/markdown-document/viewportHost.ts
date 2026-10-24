@@ -589,10 +589,8 @@ export class MarkdownViewportHost {
       const retry = globalThis.document.createElement('button');
       retry.type = 'button'; retry.textContent = '重试';
       retry.onclick = () => {
-        this.viewFailure = undefined;
-        element.remove(); this.preparationIndicator = undefined;
         void this.document.retry().then(() => {
-          if (!this.hidden && !this.disposed) { this.requestPreparation(); this.schedule(); }
+          this.resumeAfterRetry();
         }).catch(error => { this.viewFailure = error; this.showFailure(); });
       };
       element.append(message, retry); this.target.append(element);
@@ -608,6 +606,13 @@ export class MarkdownViewportHost {
       }
     }
     this.publishPresentation();
+  }
+  /** 只在会话恢复成功后解除视图故障；不销毁包含待确认输入的窗口。 */
+  resumeAfterRetry() {
+    this.viewFailure = undefined;
+    this.preparationIndicator?.remove(); this.preparationIndicator = undefined;
+    for (const view of this.mounted) view.semantic?.setFailure(false);
+    if (!this.hidden && !this.disposed) { this.requestPreparation(); this.schedule(); }
   }
   private onFocus = (event: FocusEvent) => {
     const view = this.mounted.find((view) => view.element.contains(event.target as Node));
@@ -1702,15 +1707,15 @@ export class MarkdownViewportHost {
     element.style.height = `${Math.max(0, height)}px`;
     return element;
   }
-  private destroyView(view: Mounted, prepared = false) {
+  private destroyView(view: Mounted, prepared = false, discard = false) {
     const started = prepared ? performance.now() : 0;
     if (this.selectionOwner === view) this.selectionOwner = undefined;
     this.resources.release(view.element);
     // 布局结果已由测量批次发布；回收只释放视图，避免 DOM 写入之间再同步读布局。
     this.observer?.unobserve(view.element);
     this.dirty.delete(view);
-    view.semantic?.dispose(prepared);
-    view.source?.dispose();
+    view.semantic?.dispose(prepared, discard);
+    view.source?.dispose(discard);
     view.element.remove();
     this.stats.destroyed++;
     if (prepared) {
@@ -2121,8 +2126,8 @@ export class MarkdownViewportHost {
     if (hidden) { await this.unmountViews(); this.disconnectBudget(); }
     else { this.connectBudget(); this.schedule(); }
   }
-  private async unmountViews(prepared = false) {
-    if (!prepared) await this.document.session.flushEdits();
+  private async unmountViews(prepared = false, discard = false) {
+    if (!prepared && !discard) await this.document.session.flushEdits();
     await this.renderDone;
     this.removeInput();
     const views = this.mounted;
@@ -2131,13 +2136,13 @@ export class MarkdownViewportHost {
     this.callbacks.onActive(undefined, undefined);
     this.target.replaceChildren();
     this.spacers.clear();
-    if (prepared) await reclaimMarkdownViews(views.map(view => () => this.destroyView(view, true)));
-    else for (const view of views) this.destroyView(view);
+    if (prepared) await reclaimMarkdownViews(views.map(view => () => this.destroyView(view, true, discard)));
+    else for (const view of views) this.destroyView(view, false, discard);
   }
-  dispose(options?: { prepared?: boolean }): Promise<void> {
-    return this.disposal ??= this.disposeResources(!!options?.prepared);
+  dispose(options?: { prepared?: boolean; discard?: boolean }): Promise<void> {
+    return this.disposal ??= this.disposeResources(!!options?.prepared, !!options?.discard);
   }
-  private async disposeResources(prepared: boolean) {
+  private async disposeResources(prepared: boolean, discard: boolean) {
     setRenderSuspended(this.target, true);
     this.cancelOutlineNavigation();
     this.interruptRead?.();
@@ -2187,7 +2192,7 @@ export class MarkdownViewportHost {
     this.target.removeEventListener(TABLE_LAYOUT_READY_EVENT, this.onTableLayout);
     this.target.removeEventListener('load', this.onAsset, true);
     this.target.ownerDocument.fonts?.removeEventListener('loadingdone', this.onFont);
-    await this.unmountViews(prepared);
+    await this.unmountViews(prepared, discard);
     this.disconnectBudget();
     this.disposed = true;
     this.generation++;

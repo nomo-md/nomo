@@ -54,6 +54,7 @@ export class ProgressiveMarkdownDocument {
   private toc: AutomaticMarkdownToc;
   private completed: MarkdownIndexedSnapshot | null = null;
   private indexingSnapshot: SnapshotReference | undefined;
+  private ending?: Promise<void>;
   private currentIndex: MarkdownStructureIndex | null = null;
   private invalidation?: MarkdownIndexInvalidation;
   private forceFullIndex = false;
@@ -105,7 +106,7 @@ export class ProgressiveMarkdownDocument {
         this.completed = { index: this.currentIndex, snapshot: this.indexingSnapshot };
         this.invalidation = undefined;
         this.forceFullIndex = false;
-        if (previous) void this.port.releaseSnapshot(previous.snapshot).catch(error => {
+        if (previous) void this.session.releaseSnapshot(previous.snapshot).catch(error => {
           this.failure = error;
           this.publish();
         });
@@ -292,6 +293,8 @@ export class ProgressiveMarkdownDocument {
     this.building = (async () => {
       let snapshot: SnapshotReference | undefined;
       try {
+        await this.session.awaitSnapshotReleases();
+        abort.signal.throwIfAborted();
         snapshot = await this.port.captureSnapshot(this.session.documentId);
         this.indexingSnapshot = snapshot;
         abort.signal.throwIfAborted();
@@ -331,7 +334,7 @@ export class ProgressiveMarkdownDocument {
         this.timings.indexed = performance.now() - this.started;
         this.failure = null;
         this.publish();
-        if (previous) await this.port.releaseSnapshot(previous.snapshot);
+        if (previous) await this.session.releaseSnapshot(previous.snapshot);
         if (this.completed && !this.hidden) {
           await this.toc.apply(this.completed.index, this.completed.snapshot);
         }
@@ -341,8 +344,8 @@ export class ProgressiveMarkdownDocument {
           this.publish();
         }
       } finally {
-        if (snapshot && snapshot !== this.completed?.snapshot) await this.port.releaseSnapshot(snapshot);
         this.indexingSnapshot = undefined;
+        if (snapshot && snapshot !== this.completed?.snapshot) await this.session.releaseSnapshot(snapshot);
       }
     })().finally(() => {
       this.building = null;
@@ -405,7 +408,7 @@ export class ProgressiveMarkdownDocument {
         this.tocPossible = index.blocks.some(block => block.kind === 'toc_block' || block.kind === 'html_block');
         const changed = await this.toc.apply(index, snapshot);
         if (!changed && snapshot.revision === this.session.state.committed.revision && !this.session.state.pendingTransactions) return;
-      } finally { await this.port.releaseSnapshot(snapshot); }
+      } finally { await this.session.releaseSnapshot(snapshot); }
     }
   }
   search(query: string, options: SearchOptions) {
@@ -436,9 +439,11 @@ export class ProgressiveMarkdownDocument {
     this.setHidden(true); this.abort?.abort(); this.generation++;
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
     markdownWorkScheduler.cancel(this); this.queuedYield?.(); this.queuedYield = null;
-    await this.building;
-    await this.toc.dispose(); this.toc = new AutomaticMarkdownToc(this.session, this.build);
-    if (this.completed) { await this.port.releaseSnapshot(this.completed.snapshot); this.completed = null; }
+    await this.building?.catch(() => undefined);
+    try { await this.toc.dispose(); }
+    finally { this.toc = new AutomaticMarkdownToc(this.session, this.build); }
+    if (this.completed) { await this.session.releaseSnapshot(this.completed.snapshot); this.completed = null; }
+    await this.session.awaitSnapshotReleases();
     this.currentIndex = null;
   }
   /** 关闭准备只取消可重建索引，保护保存/导出正在物化的目录和快照。 */
@@ -448,25 +453,24 @@ export class ProgressiveMarkdownDocument {
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
     markdownWorkScheduler.cancel(this); this.queuedYield?.(); this.queuedYield = null;
   }
+  private finish(operation: () => Promise<void>): Promise<void> {
+    if (this.ending) return this.ending;
+    const ending = Promise.resolve().then(operation);
+    this.ending = ending;
+    void ending.finally(() => { if (this.ending === ending) this.ending = undefined; }).catch(() => {});
+    return ending;
+  }
   /** 跨窗归属已提交后只释放本 WebView 的任务与快照，不关闭原生文档。 */
-  async detach() {
+  detach(): Promise<void> { return this.finish(() => this.detachResources()); }
+  private async detachResources() {
     if (this.closed) return;
-    await this.searches.dispose();
-    this.closed = true; this.abort?.abort();
-    this.visibleDemands.clear();
-    if (this.timer) clearTimeout(this.timer);
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    markdownWorkScheduler.cancel(this); this.queuedYield?.(); this.queuedYield = null;
-    await this.session.prepareClose(true);
-    await this.building;
-    await this.toc.dispose();
-    if (this.completed) { await this.port.releaseSnapshot(this.completed.snapshot); this.completed = null; }
-    this.unsubscribe(); this.unsubscribeChanges(); this.selection.dispose(); this.listeners.clear(); this.pressureOwners.clear();
-    this.layouts.dispose();
-    await this.port.detach?.(this.session.documentId);
+    await this.closeResources(true, () => this.port.detach?.(this.session.documentId) ?? Promise.resolve());
   }
   /** 卸载使用 setHidden；只有完成关闭/丢弃流程才释放会话和磁盘历史。 */
-  async close(discard = false, closeStorage?: () => Promise<void>) {
+  close(discard = false, closeStorage?: () => Promise<void>): Promise<void> {
+    return this.finish(() => this.closeResources(discard, closeStorage));
+  }
+  private async closeResources(discard: boolean, closeStorage?: () => Promise<void>) {
     if (this.closed) return;
     await this.searches.cancel();
     if (!discard) await this.session.flushEdits();
@@ -475,19 +479,18 @@ export class ProgressiveMarkdownDocument {
     this.abort?.abort();
     if (this.timer) clearTimeout(this.timer);
     if (this.idleTimer) clearTimeout(this.idleTimer);
-    markdownWorkScheduler.cancel(this);
-    this.queuedYield?.();
-    this.queuedYield = null;
+    markdownWorkScheduler.cancel(this); this.queuedYield?.(); this.queuedYield = null;
     let tocDisposed = false;
     try {
       await this.session.prepareClose(discard);
-      await this.building;
-      await this.toc.dispose();
+      await this.building?.catch(() => undefined);
       tocDisposed = true;
+      await this.toc.dispose();
       if (this.completed) {
-        await this.port.releaseSnapshot(this.completed.snapshot);
+        await this.session.releaseSnapshot(this.completed.snapshot);
         this.completed = null;
       }
+      await this.session.awaitSnapshotReleases();
       await this.session.closePrepared(discard, closeStorage);
     } catch (error) {
       this.session.cancelClose();
@@ -496,12 +499,8 @@ export class ProgressiveMarkdownDocument {
       this.scheduleIndex();
       throw error;
     }
-    this.unsubscribe();
-    this.unsubscribeChanges();
+    this.unsubscribe(); this.unsubscribeChanges(); this.selection.dispose(); this.listeners.clear(); this.pressureOwners.clear();
     await this.searches.dispose();
-    this.selection.dispose();
     this.layouts.dispose();
-    this.listeners.clear();
-    this.pressureOwners.clear();
   }
 }

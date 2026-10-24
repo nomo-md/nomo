@@ -63,6 +63,8 @@ export class MarkdownSessionController {
   private listeners = new Set<(state: MarkdownControllerState) => void>();
   private changeListeners = new Set<(change: MarkdownControllerChange) => void>();
   private snapshotTasks = new Set<Promise<unknown>>();
+  // 保存、搜索准备和索引共用释放确认。失败句柄不能丢失，也不再继续积累新快照。
+  private snapshotReleases = new Map<SnapshotReference, Promise<void> | null>();
   beforeSnapshot?: (signal?: AbortSignal) => Promise<void>;
 
   constructor(
@@ -322,6 +324,7 @@ export class MarkdownSessionController {
     finally { this.nativeCommit = null; this.nativeCommitBusy = false; this.emit(); }
   }
   async captureSnapshot(intent: 'explicit' | 'automatic' = 'explicit', signal?: AbortSignal): Promise<SnapshotReference> {
+    await this.awaitSnapshotReleases();
     await this.flushEdits(intent);
     signal?.throwIfAborted();
     await this.beforeSnapshot?.(signal);
@@ -333,19 +336,37 @@ export class MarkdownSessionController {
     intent: 'explicit' | 'automatic' = 'explicit',
     signal?: AbortSignal,
   ): Promise<T> {
-    this.assertOpen();
-    if (this.closing) throw new Error('文档正在关闭。');
-    const operation = (async () => {
+    return this.withSnapshotTask(async () => {
       const snapshot = await this.captureSnapshot(intent, signal);
       try { return await task(snapshot); }
-      finally { await this.port.releaseSnapshot(snapshot); }
-    })();
+      finally { await this.releaseSnapshot(snapshot); }
+    });
+  }
+  /** 包括搜索的目录准备；登记必须先于任何可能取得快照的异步工作。 */
+  async withSnapshotTask<T>(task: () => Promise<T>): Promise<T> {
+    this.assertOpen();
+    if (this.closing) throw new Error('文档正在关闭。');
+    const operation = Promise.resolve().then(task);
     this.snapshotTasks.add(operation);
     try { return await operation; }
     finally { this.snapshotTasks.delete(operation); }
   }
   async awaitSnapshotTasks() {
     while (this.snapshotTasks.size) await Promise.allSettled([...this.snapshotTasks]);
+  }
+  releaseSnapshot(snapshot: SnapshotReference): Promise<void> {
+    const pending = this.snapshotReleases.get(snapshot);
+    if (pending) return pending;
+    const operation = Promise.resolve().then(() => this.port.releaseSnapshot(snapshot)).then(
+      () => { this.snapshotReleases.delete(snapshot); },
+      error => { this.snapshotReleases.set(snapshot, null); throw error; },
+    );
+    this.snapshotReleases.set(snapshot, operation);
+    return operation;
+  }
+  async awaitSnapshotReleases() {
+    while (this.snapshotReleases.size)
+      await Promise.all([...this.snapshotReleases.keys()].map(snapshot => this.releaseSnapshot(snapshot)));
   }
   async save(path: string, options: { overwriteExternal?: boolean; automatic?: boolean } = {}) {
     return this.withSnapshot(
@@ -388,7 +409,10 @@ export class MarkdownSessionController {
   /** 先阻止新快照和输入，再排空已开始的任务；索引快照由文档运行时随后释放。 */
   async prepareClose(discard = false) {
     this.assertOpen();
-    if (this.nativeCommit) await this.nativeCommit;
+    if (this.nativeCommit) {
+      if (discard) await this.nativeCommit.catch(() => undefined);
+      else await this.nativeCommit;
+    }
     if (!discard) await this.flushEdits();
     if (this.closing) throw new Error('文档正在关闭。');
     this.closing = true;
@@ -397,6 +421,7 @@ export class MarkdownSessionController {
       if (!discard) await this.flushQueue();
       else await this.running;
       await this.awaitSnapshotTasks();
+      await this.awaitSnapshotReleases();
     } catch (error) {
       this.cancelClose();
       throw error;

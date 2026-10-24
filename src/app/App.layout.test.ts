@@ -1340,10 +1340,10 @@ describe('App outline layout', () => {
     expect(tauriLibSource).not.toContain('窗口隐藏到托盘：{label}');
   });
 
-  it('only skips close confirmation for clean preview tabs', () => {
+  it('only skips close confirmation for clean tabs whose preparation succeeded', () => {
     const start = appSource.indexOf('function closeMarkdownTabs(');
     const close = appSource.slice(start, appSource.indexOf('async function createNewFile()', start));
-    expect(close).toContain("if (!tab.dirty) { decisions[tab.id] = 'clean'; continue; }");
+    expect(close).toContain("if (!tab.dirty && !preparationFailures.has(tab.id)) { decisions[tab.id] = 'clean'; continue; }");
     expect(close).toContain('documentCloseCoordinator.operations.coversRevision(tab.id, revisions[tab.id])');
     expect(close).toContain('confirmAction(t.confirmCloseModifiedFile()');
     expect(appSource).toContain('await closeMarkdownTabs([tabId], discardWithoutConfirmation)');

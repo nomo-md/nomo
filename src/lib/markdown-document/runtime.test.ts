@@ -29,6 +29,62 @@ const localBuild: typeof buildMarkdownIndex = (port, snapshot, options) =>
   });
 
 describe('渐进 Markdown 文档运行时', () => {
+  it.each(['close', 'detach'] as const)('%s 取消并等待搜索准备阶段持有的快照', async action => {
+    const port = createMemoryMarkdownPort();
+    const status = await port.openDocument({ text: '# 标题\n\n正文' });
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let signal: AbortSignal | undefined;
+    const runtime = new ProgressiveMarkdownDocument(port, status, async (...args) => {
+      signal = args[2].signal; entered(); await gate;
+      return localBuild(...args);
+    });
+    runtime.setHidden(true);
+    await runtime.session.applyEdits({ viewGeneration: 0, historyGroupId: 'typing',
+      edits: [{ fromByte: 0, toByte: 0, insertedText: '新' }] });
+    const search = runtime.search('正文', { signal: new AbortController().signal });
+    const cancelled = expect(search).rejects.toMatchObject({ name: 'AbortError' });
+    await started;
+    const close = vi.spyOn(port, 'close');
+    let finished = false;
+    const ending = (action === 'close' ? runtime.close(true) : runtime.detach()).then(() => { finished = true; });
+    await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+    expect(finished).toBe(false); expect(close).not.toHaveBeenCalled();
+    release(); await cancelled; await ending;
+    if (action === 'detach') await port.close(status.documentId, true);
+  });
+  it('替换局部索引后的异步释放仍阻止关闭', async () => {
+    const port = createMemoryMarkdownPort();
+    let releaseBuild!: () => void, publish!: () => void;
+    const published = new Promise<void>(resolve => { publish = resolve; });
+    const gate = new Promise<void>(resolve => { releaseBuild = resolve; });
+    const runtime = new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '# 标题\n\n正文' }), async (...args) => {
+      const index = await localBuild(...args);
+      if (args[1].revision === 1) { publish(); await gate; }
+      return index;
+    });
+    await vi.waitFor(() => expect(runtime.state.progress.state).toBe('ready'));
+    const release = port.releaseSnapshot.bind(port);
+    let releaseOld!: () => void;
+    const oldGate = new Promise<void>(resolve => { releaseOld = resolve; });
+    let first = true;
+    const releasing = vi.spyOn(port, 'releaseSnapshot').mockImplementation(async snapshot => {
+      if (first) { first = false; await oldGate; }
+      return release(snapshot);
+    });
+    await runtime.session.applyEdits({ viewGeneration: 0, historyGroupId: 'first', edits: [{ fromByte: 0, toByte: 0, insertedText: '甲' }] });
+    await published;
+    await runtime.session.applyEdits({ viewGeneration: 1, historyGroupId: 'second', edits: [{ fromByte: 0, toByte: 0, insertedText: '乙' }] });
+    await vi.waitFor(() => expect(releasing).toHaveBeenCalled());
+    const close = vi.spyOn(port, 'close');
+    const closing = runtime.close(true);
+    releaseBuild();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(close).not.toHaveBeenCalled();
+    releaseOld(); await closing;
+    expect(close).toHaveBeenCalledOnce();
+  });
   it('配置更新通知同模式宿主，静止恢复且隐藏和关闭取消复查', async () => {
     const port = createMemoryMarkdownPort();
     const runtime = new ProgressiveMarkdownDocument(port, await port.openDocument({ text: '完整正文\n\n尾段' }), localBuild);

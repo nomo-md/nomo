@@ -57,6 +57,54 @@ async function setup(text: string, onRequestSource?: (isCurrent: () => boolean) 
 }
 
 describe('应用 Markdown 会话入口', () => {
+  it('手动保存重试相同事务，保留输入和撤销历史', async () => {
+    const { application, doc, tab } = await setup('原文');
+    const apply = vi.spyOn(doc.port, 'applyTransaction').mockRejectedValueOnce(new Error('temporary write error'));
+    await expect(doc.session.applyEdits({ viewGeneration: 0, historyGroupId: 'input',
+      edits: [{ fromByte: 0, toByte: 0, insertedText: '新' }] })).rejects.toThrow('temporary write error');
+    expect(tab.dirty).toBe(true);
+    await expect(application.flush()).rejects.toThrow('temporary write error');
+    await application.flush(true);
+    expect(apply.mock.calls[1]).toEqual(apply.mock.calls[0]);
+    await doc.session.save('saved.md');
+    expect(tab.dirty).toBe(false); expect(await application.readMarkdown()).toBe('新原文');
+    await doc.session.undo(); expect(await application.readMarkdown()).toBe('原文');
+  });
+  it.each(['semantic', 'source'] as const)('失败的 %s 输入允许取消或丢弃关闭，存储关闭失败仍保留视图', async mode => {
+    const { application, doc, tab } = await setup('原文');
+    const target = document.body.appendChild(document.createElement('div'));
+    if (mode === 'source') { await application.setViewMode('source'); application.mountSource(target); }
+    else application.editor.mount(target);
+    await vi.waitFor(() => expect(application.writable).toBe(true));
+    const host = (application as any)[mode === 'source' ? 'sourceHost' : 'semanticHost'];
+    const view = host.mounted[0][mode];
+    const apply = vi.spyOn(doc.port, 'applyTransaction').mockRejectedValue(new Error('write failed'));
+    view.bridge.commit({ source: '新原文', edits: [{ fromByte: 0, toByte: 0, insertedText: '新' }] }, 'input');
+    await vi.waitFor(() => expect(doc.session.state.failure).toBeTruthy());
+    expect(await application.prepareViewClose()).toBeTruthy();
+    application.resume();
+    expect(doc.session.state.pendingTransactions).toBe(1); expect(tab.dirty).toBe(true);
+    await application.prepareViewClose();
+    await application.releaseCloseViews();
+    expect(target.childElementCount).toBeGreaterThan(0);
+    const close = vi.spyOn(doc.port, 'close').mockRejectedValueOnce(new Error('storage busy'));
+    await expect(application.close(true)).rejects.toThrow('storage busy');
+    expect(view.bridge.text).toBe('新原文'); expect(doc.session.state.pendingTransactions).toBe(1);
+    await application.close(true);
+    expect(close).toHaveBeenLastCalledWith(doc.session.documentId, true);
+    expect(target.childElementCount).toBe(0); expect(apply).toHaveBeenCalledOnce();
+  });
+  it('空白标签挂载与索引在途时可重复关闭并替换为新文档', async () => {
+    for (let round = 0; round < 20; round++) {
+      const { application, doc } = await setup('');
+      const target = document.body.appendChild(document.createElement('div'));
+      application.editor.mount(target);
+      if (round % 2) await vi.waitFor(() => expect(doc.state.progress.state).toBe('ready'));
+      await Promise.all([application.close(true), application.close(true)]);
+      await expect(doc.port.status(doc.session.documentId)).rejects.toThrow('已关闭');
+      expect(target.childElementCount).toBe(0); target.remove();
+    }
+  });
   it('初始元数据订阅只读取一次前缀，编辑后的新修订仍刷新 front matter', async () => {
     const port = createMemoryMarkdownPort(), read = vi.spyOn(port, 'readWindow');
     vi.spyOn(ProgressiveMarkdownDocument, 'open').mockImplementation(async (_, input) =>

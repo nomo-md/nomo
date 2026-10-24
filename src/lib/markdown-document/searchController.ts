@@ -123,6 +123,7 @@ export class MarkdownSearchController {
   private generation = 0;
   private active = new Set<() => Promise<void>>();
   private releases = new Set<Promise<void>>();
+  private preparations = new Map<AbortController, Promise<unknown>>();
   private readonly unsubscribe: () => void;
   constructor(private readonly session: MarkdownSessionController) {
     // base 尚在提交草稿/物化目录时，变化属于即将捕获的新版本。只撤销已启动任务；
@@ -131,12 +132,23 @@ export class MarkdownSearchController {
   }
   private async base(options: SearchOptions) {
     const generation = ++this.generation;
-    await this.releaseTasks();
-    await this.session.flushEdits(); options.signal.throwIfAborted();
-    await this.session.beforeSnapshot?.(options.signal); options.signal.throwIfAborted();
-    await this.session.awaitTransactions();
-    if (generation !== this.generation || this.session.state.closing) throw new DOMException('搜索任务已取消', 'AbortError');
-    return { revision: this.session.state.committed.revision, generation: this.session.state.viewGeneration, requestGeneration: generation };
+    for (const controller of this.preparations.keys()) controller.abort();
+    const abort = new AbortController();
+    const cancel = () => abort.abort();
+    options.signal.addEventListener('abort', cancel, { once: true });
+    if (options.signal.aborted) cancel();
+    const operation = this.session.withSnapshotTask(async () => {
+      await this.releaseTasks();
+      abort.signal.throwIfAborted();
+      await this.session.flushEdits(); abort.signal.throwIfAborted();
+      await this.session.beforeSnapshot?.(abort.signal); abort.signal.throwIfAborted();
+      await this.session.awaitTransactions();
+      if (generation !== this.generation || this.session.state.closing) throw new DOMException('搜索任务已取消', 'AbortError');
+      return { revision: this.session.state.committed.revision, generation: this.session.state.viewGeneration, requestGeneration: generation };
+    });
+    this.preparations.set(abort, operation);
+    try { return await operation; }
+    finally { options.signal.removeEventListener('abort', cancel); this.preparations.delete(abort); }
   }
   private query(query: string, revision: number, options: SearchOptions): SearchQuery {
     return { documentId: this.session.documentId, baseRevision: revision, requestId: crypto.randomUUID(),
@@ -180,7 +192,11 @@ export class MarkdownSearchController {
     }
   }
   async cancel() {
-    this.generation++; await this.releaseTasks();
+    this.generation++;
+    const preparations = [...this.preparations];
+    for (const [abort] of preparations) abort.abort();
+    await this.releaseTasks();
+    await Promise.allSettled(preparations.map(([, operation]) => operation));
   }
   private async releaseTasks() {
     const work = [...this.active]; this.active.clear();

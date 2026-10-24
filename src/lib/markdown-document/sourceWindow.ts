@@ -275,11 +275,11 @@ export class MarkdownSourceWindow {
     if (!this.destroyed && this.view.state.readOnly !== blocked)
       this.view.dispatch({ effects: this.readonly.reconfigure([EditorState.readOnly.of(blocked), EditorView.editable.of(!blocked)]) });
   }
-  dispose() {
-    if (this.composing || this.bridge.pinned) throw new Error('正在编辑的源码区域不能回收。');
+  dispose(discard = false) {
+    if (!discard && (this.composing || this.bridge.pinned)) throw new Error('正在编辑的源码区域不能回收。');
     this.destroyed = true;
     this.detachEdits();
-    this.bridge.dispose();
+    this.bridge.dispose(discard);
     this.view.destroy();
   }
 }

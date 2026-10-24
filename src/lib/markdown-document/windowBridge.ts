@@ -111,8 +111,8 @@ export class MarkdownWindowBridge {
       this.callbacks.onError(error);
     });
   }
-  dispose() {
-    if (this.pending) throw new Error('窗口仍有未确认输入，不能回收。');
+  dispose(discard = false) {
+    if (this.pending && !discard) throw new Error('窗口仍有未确认输入，不能回收。');
     this.unsubscribeChanges();
     this.unsubscribe();
   }

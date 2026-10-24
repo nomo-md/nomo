@@ -94,6 +94,7 @@ export interface DocumentCloseHooks {
   detach(): void;
   releaseViews(): Promise<void>;
   validate(): void;
+  isDiscarding?(tabId: string): boolean;
   release(): Promise<void>;
   restore(error?: unknown): Promise<void>;
   resume(): void;
@@ -151,7 +152,8 @@ export class DocumentCloseCoordinator {
             const saves = [...watched.operations].filter(operation => operation.kind === 'save');
             const results = await Promise.allSettled(saves.map(operation => operation.promise));
             if (transaction.cancelled) return;
-            const failed = saves.find((operation, index) => operation.saveResult?.status === 'failed' || operation.saveResult?.status === 'cancelled' || results[index].status === 'rejected' || (results[index].status === 'fulfilled' && results[index].value === false));
+            const failed = saves.find((operation, index) => !hooks.isDiscarding?.(operation.tabId) &&
+              (operation.saveResult?.status === 'failed' || operation.saveResult?.status === 'cancelled' || results[index].status === 'rejected' || (results[index].status === 'fulfilled' && results[index].value === false)));
             if (failed) throw new Error(failed.saveResult?.error ?? '保存未完成，已恢复关闭的文档。');
             hooks.mark?.('operationsFinished');
             await views; hooks.mark?.('viewsReleased');
