@@ -38,6 +38,7 @@ export interface MountedMarkdownEdits {
   awaitCompositionEnd(): Promise<void>;
   commitPendingEdits(): void | Promise<void>;
   hasUnconfirmedDraft?(): boolean;
+  hasUnsettledEdits?(): boolean;
 }
 
 /**
@@ -124,6 +125,10 @@ export class MarkdownSessionController {
     this.assertOpen();
     this.mounted.add(view);
     return () => this.mounted.delete(view);
+  }
+  /** 派生目录不能穿过尚未进入会话队列的输入或中文组字。 */
+  get hasUnsettledEdits() {
+    return [...this.mounted].some(view => view.hasUnsettledEdits?.());
   }
 
   applyEdits(input: MarkdownEditInput): Promise<MarkdownSessionStatus> {

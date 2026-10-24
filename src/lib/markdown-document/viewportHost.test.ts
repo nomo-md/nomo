@@ -11,6 +11,8 @@ import { estimateMarkdownBlockHeight } from './viewport';
 import { MarkdownSemanticWindow } from './semanticWindow';
 import { markdownResidentBudget } from './residentBudget';
 import { resolveMarkdownWindowingLimits } from './windowingLimits';
+import type { EditorView } from 'prosemirror-view';
+import { splitBlock, joinBackward } from 'prosemirror-commands';
 
 const localBuild: typeof buildMarkdownIndex = (port, snapshot, options) =>
   buildMarkdownIndex(port, snapshot, {
@@ -42,12 +44,12 @@ afterEach(async () => {
     reserved: { views: 0, sourceBytes: 0, domNodes: 0, imageBytes: 0 } });
   document.body.replaceChildren();
 });
-async function setup(text: string, mode: 'semantic' | 'source' = 'semantic', onOpenSource?: (range: { fromByte: number; toByte: number; byte: number }) => void) {
+async function setup(text: string, mode: 'semantic' | 'source' = 'semantic', onOpenSource?: (range: { fromByte: number; toByte: number; byte: number }) => void, build = localBuild) {
   const port = createMemoryMarkdownPort();
   const runtime = new ProgressiveMarkdownDocument(
     port,
     await port.openDocument({ text }),
-    localBuild,
+    build,
   );
   cleanups.push(() => runtime.close(true));
   await vi.waitFor(() => expect(runtime.state.progress.state).toBe('ready'));
@@ -67,6 +69,16 @@ async function setup(text: string, mode: 'semantic' | 'source' = 'semantic', onO
   cleanups.push(() => host.dispose());
   await vi.waitFor(() => expect(target.querySelector('.markdown-session-window')).not.toBeNull());
   return { port, runtime, host, target, failures };
+}
+
+async function settleInput(runtime: ProgressiveMarkdownDocument, host: MarkdownViewportHost) {
+  await runtime.session.flushEdits();
+  await vi.waitFor(() => {
+    expect(runtime.state.progress.state).toBe('ready');
+    expect(runtime.state.index?.revision).toBe(runtime.state.status.revision);
+  });
+  await (host as unknown as { render(): Promise<void> }).render();
+  await new Promise(resolve => setTimeout(resolve, 40));
 }
 
 function outlineGeometry(target: HTMLElement, positions: number[]) {
@@ -973,7 +985,7 @@ describe('完整会话的真实窗口宿主', () => {
     } finally { release(); await host.dispose(); await source.dispose(); await runtime.close(true); }
   });
 
-  it('编辑替换块组后恢复输入焦点，主动移到其他控件时不抢回', async () => {
+  it('外部编辑替换块组后恢复输入焦点，主动移到其他控件时不抢回', async () => {
     const { host, target, runtime } = await setup('# 标题\n\n正文');
     const nativeFocus = HTMLElement.prototype.focus;
     // jsdom 不把 contenteditable div 视为可聚焦元素；浏览器原生支持。
@@ -986,18 +998,284 @@ describe('完整会话的真实窗口宿主', () => {
     const old = target.querySelector<HTMLElement>('.ProseMirror')!;
     old.focus();
     expect(target.contains(document.activeElement)).toBe(true);
-    host.activeCore!.execute({ type: 'insertText', text: '新' });
+    await runtime.session.applyEdits({ viewGeneration: runtime.session.state.viewGeneration,
+      historyGroupId: 'external-1', edits: [{ fromByte: 2, toByte: 2, insertedText: '新' }] });
     (document.activeElement as HTMLElement).blur();
     await vi.waitFor(() => expect(target.querySelector('.ProseMirror')).not.toBe(old));
     await runtime.session.flushEdits();
     await vi.waitFor(() => expect(target.contains(document.activeElement)).toBe(true));
     const next = target.querySelector('.ProseMirror');
-    host.activeCore!.execute({ type: 'insertText', text: '另' });
+    await runtime.session.applyEdits({ viewGeneration: runtime.session.state.viewGeneration,
+      historyGroupId: 'external-2', edits: [{ fromByte: 2, toByte: 2, insertedText: '另' }] });
     const button = document.body.appendChild(document.createElement('button'));
     button.focus();
     await vi.waitFor(() => expect(target.querySelector('.ProseMirror')).not.toBe(next));
     expect(document.activeElement).toBe(button);
     } finally { focus.mockRestore(); }
+  });
+  it('混合节点普通输入接纳新索引，保留编辑器、未修改节点和选区', async () => {
+    const text = '正文\n\n| 列 | 值 |\n| --- | --- |\n| a | b |\n\n![图片](./card.png)\n\n$$\nx^2\n$$\n\n```text\ncode\n```\n\n<details open>\n<summary>标题</summary>\n\n内容\n\n</details>\n';
+    const { runtime, host, target, failures } = await setup(text);
+    await host.reveal(0, true);
+    const core = host.activeCore!, dom = target.querySelector('.ProseMirror');
+    const nodes = ['table', '.image-node', '.math-block', '.code-card', '.details-block'].map(selector => {
+      const node = target.querySelector(selector);
+      expect(node).not.toBeNull();
+      return node!;
+    });
+    const before = host.diagnostics;
+    for (const input of ['A', '中', '😀']) {
+      expect(core.execute({ type: 'insertText', text: input })).toBe(true);
+      const view = (core as unknown as { view: EditorView }).view;
+      const selection = view.state.selection;
+      await settleInput(runtime, host);
+      expect(host.activeCore).toBe(core);
+      expect(target.querySelector('.ProseMirror')).toBe(dom);
+      expect(nodes.every(node => node.isConnected)).toBe(true);
+      expect(view.state.selection.eq(selection)).toBe(true);
+      expect(host.diagnostics.created).toBe(before.created);
+      expect(host.diagnostics.destroyed).toBe(before.destroyed);
+    }
+    expect(await runtime.readMarkdown()).toBe('A中😀' + text);
+    expect(failures).toEqual([]);
+  });
+  it('输入确认保留待输入格式，用户切换控件后不抢焦点', async () => {
+    const { runtime, host, target, failures } = await setup('正文');
+    await host.reveal(0, true);
+    const core = host.activeCore!, view = (core as unknown as { view: EditorView }).view;
+    view.dispatch(view.state.tr.addStoredMark(view.state.schema.marks.strong.create()));
+    view.dispatch(view.state.tr.insertText('A'));
+    const marks = view.state.storedMarks;
+    const button = document.body.appendChild(document.createElement('button'));
+    button.focus();
+    await settleInput(runtime, host);
+    expect(target.querySelector('.ProseMirror')).toBe(view.dom);
+    expect(view.state.storedMarks).toEqual(marks);
+    expect(document.activeElement).toBe(button);
+    expect(await runtime.readMarkdown()).toBe('**A**正文');
+    expect(failures).toEqual([]);
+  });
+  it('段落拆分合并、反向选区删除及空文档接续输入保持实例', async () => {
+    const { runtime, host, target, failures } = await setup('甲乙丙丁');
+    await host.reveal(0, true);
+    const core = host.activeCore!, dom = target.querySelector('.ProseMirror');
+    const view = (core as unknown as { view: EditorView }).view;
+    core.restoreSelectionSnapshot({ anchor: 3, head: 3 });
+    expect(splitBlock(view.state, view.dispatch, view)).toBe(true);
+    await settleInput(runtime, host);
+    expect(await runtime.readMarkdown()).toBe('甲乙\n\n丙丁');
+    expect(host.activeCore).toBe(core);
+    expect(joinBackward(view.state, view.dispatch, view)).toBe(true);
+    await settleInput(runtime, host);
+    expect(await runtime.readMarkdown()).toBe('甲乙丙丁');
+    core.restoreSelectionSnapshot({ anchor: 4, head: 2 });
+    view.dispatch(view.state.tr.deleteSelection());
+    const selection = view.state.selection;
+    await settleInput(runtime, host);
+    expect(await runtime.readMarkdown()).toBe('甲丁');
+    expect(view.state.selection.eq(selection)).toBe(true);
+    core.restoreSelectionSnapshot({ anchor: 1, head: 3 });
+    view.dispatch(view.state.tr.deleteSelection());
+    await settleInput(runtime, host);
+    expect(await runtime.readMarkdown()).toBe('');
+    expect(target.querySelector('.ProseMirror')).toBe(dom);
+    core.execute({ type: 'insertText', text: '新正文' });
+    await settleInput(runtime, host);
+    expect(await runtime.readMarkdown()).toBe('新正文');
+    expect(target.querySelector('.ProseMirror')).toBe(dom);
+    expect(failures).toEqual([]);
+  });
+  it('确认期间继续输入和确认失败重试，保留原窗口与完整正文', async () => {
+    const { port, runtime, host, target, failures } = await setup('正文');
+    await host.reveal(0, true);
+    const core = host.activeCore!, dom = target.querySelector('.ProseMirror');
+    const apply = port.applyTransaction;
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    port.applyTransaction = async (...args) => { await waiting; return apply(...args); };
+    try {
+      core.execute({ type: 'insertText', text: 'A' }); core.commitPendingEdits();
+      core.execute({ type: 'insertText', text: 'B' }); core.commitPendingEdits();
+      expect(runtime.session.state.pendingTransactions).toBe(2);
+      expect(target.querySelector('.ProseMirror')).toBe(dom);
+    } finally { release(); }
+    await settleInput(runtime, host);
+    expect(target.querySelector('.ProseMirror')).toBe(dom);
+    port.applyTransaction = async () => { throw new Error('模拟确认失败'); };
+    core.execute({ type: 'insertText', text: 'C' }); core.commitPendingEdits();
+    await vi.waitFor(() => expect(runtime.session.state.failure).not.toBeNull());
+    expect(target.querySelector('.ProseMirror')).toBe(dom);
+    expect(target.textContent).toContain('ABC正文');
+    port.applyTransaction = apply;
+    await runtime.retry();
+    await settleInput(runtime, host);
+    expect(target.querySelector('.ProseMirror')).toBe(dom);
+    expect(await runtime.readMarkdown()).toBe('ABC正文');
+    expect(failures.some(error => error instanceof Error && error.message === '模拟确认失败')).toBe(true);
+  });
+  it('双栏自身输入保留实例，对侧更新且统一撤销重做恢复正文和选区', async () => {
+    const { runtime, host, target, failures } = await setup('正文');
+    const pane = document.body.appendChild(document.createElement('div'));
+    pane.className = 'source-pane';
+    const sourceTarget = pane.appendChild(document.createElement('div'));
+    const source = new MarkdownViewportHost(runtime, sourceTarget, 'source', {}, {
+      onActive() {}, onFailure: error => failures.push(error), writeClipboard: async () => {},
+    });
+    cleanups.push(() => source.dispose());
+    await vi.waitFor(() => expect(source.activeSource).toBeDefined());
+    await host.reveal(0, true);
+    const dom = target.querySelector('.ProseMirror');
+    host.activeCore!.execute({ type: 'insertText', text: '新' });
+    await settleInput(runtime, host);
+    await vi.waitFor(() => expect(source.activeSource!.view.state.doc.toString()).toBe('新正文'));
+    expect(target.querySelector('.ProseMirror')).toBe(dom);
+    const sourceDom = sourceTarget.querySelector('.cm-editor');
+    source.activeSource!.view.dispatch({ changes: { from: 0, insert: '另' }, selection: { anchor: 1 } });
+    await settleInput(runtime, source);
+    expect(sourceTarget.querySelector('.cm-editor')).toBe(sourceDom);
+    await vi.waitFor(() => expect(target.textContent).toContain('另新正文'));
+    await runtime.session.undo(); await settleInput(runtime, host);
+    expect(await runtime.readMarkdown()).toBe('新正文');
+    await runtime.session.undo(); await settleInput(runtime, host);
+    expect(await runtime.readMarkdown()).toBe('正文');
+    await runtime.session.undo(true); await settleInput(runtime, host);
+    expect(await runtime.readMarkdown()).toBe('新正文');
+    expect(runtime.session.state.committed.selection).toEqual({ anchorByte: 3, headByte: 3 });
+    await runtime.session.undo(true); await settleInput(runtime, host);
+    expect(await runtime.readMarkdown()).toBe('另新正文');
+    expect(failures).toEqual([]);
+  });
+  it('中文组字和收尾阶段保留视图，确认后接纳索引且一次撤销整个组字', async () => {
+    const { runtime, host, target, failures } = await setup('正文');
+    await host.reveal(0, true);
+    const core = host.activeCore!, view = (core as unknown as { view: EditorView }).view;
+    const dom = view.dom;
+    let composing = true;
+    Object.defineProperty(view, 'composing', { configurable: true, get: () => composing });
+    try {
+      dom.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+      view.dispatch(view.state.tr.insertText('zhong', 1));
+      await new Promise(resolve => setTimeout(resolve, 180));
+      await runtime.session.awaitTransactions();
+      await vi.waitFor(() => expect(runtime.state.index?.revision).toBe(runtime.state.status.revision));
+      await (host as unknown as { render(): Promise<void> }).render();
+      expect(target.querySelector('.ProseMirror')).toBe(dom);
+      expect(core.hasUnsettledProjection()).toBe(true);
+      view.dispatch(view.state.tr.insertText('中文', 1, 6));
+      const selection = view.state.selection;
+      composing = false;
+      dom.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '中文' }));
+      expect(core.hasUnsettledProjection()).toBe(true);
+      await core.awaitCompositionEnd();
+      expect(core.hasUnsettledProjection()).toBe(false);
+      await settleInput(runtime, host);
+      expect(target.querySelector('.ProseMirror')).toBe(dom);
+      expect(view.state.selection.eq(selection)).toBe(true);
+      expect(await runtime.readMarkdown()).toBe('中文正文');
+      await runtime.session.undo(); await settleInput(runtime, host);
+      expect(await runtime.readMarkdown()).toBe('正文');
+      await runtime.session.undo(true); await settleInput(runtime, host);
+      expect(await runtime.readMarkdown()).toBe('中文正文');
+      expect(failures).toEqual([]);
+    } finally { composing = false; delete (view as unknown as { composing?: boolean }).composing; }
+  });
+  it('旧索引迟到不能替换接续输入或回写旧正文', async () => {
+    let started!: () => void, release!: () => void;
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const build: typeof localBuild = async (port, snapshot, options) => {
+      if (snapshot.revision === 1) { started(); await blocked; }
+      return localBuild(port, snapshot, options);
+    };
+    const { runtime, host, target, failures } = await setup('正文', 'semantic', undefined, build);
+    await host.reveal(0, true);
+    const core = host.activeCore!, dom = target.querySelector('.ProseMirror');
+    try {
+      core.execute({ type: 'insertText', text: '甲' });
+      await runtime.session.flushEdits(); await entered;
+      core.execute({ type: 'insertText', text: '乙' });
+      await runtime.session.flushEdits();
+      expect(target.querySelector('.ProseMirror')).toBe(dom);
+    } finally { release(); }
+    await settleInput(runtime, host);
+    expect(target.querySelector('.ProseMirror')).toBe(dom);
+    expect(await runtime.readMarkdown()).toBe('甲乙正文');
+    expect(failures).toEqual([]);
+  });
+  it.each(['semantic', 'source'] as const)('标题输入与自动目录同步原位更新，撤销恢复手写目录：%s', async mode => {
+    const text = '# 标题\n\n<!-- toc -->\n- 手写目录\n<!-- /toc -->\n\n| 列 | 值 |\n| --- | --- |\n| a | b |\n';
+    const { runtime, host, target, failures } = await setup(text, mode);
+    await host.reveal(0, true);
+    const selector = mode === 'semantic' ? '.ProseMirror' : '.cm-editor';
+    const dom = target.querySelector(selector), table = target.querySelector('table');
+    const before = host.diagnostics;
+    if (mode === 'semantic') host.activeCore!.execute({ type: 'insertText', text: '新' });
+    else host.activeSource!.view.dispatch({ changes: { from: 2, insert: '新' }, selection: { anchor: 3 } });
+    await vi.waitFor(() => expect(runtime.state.status.hasDerivedEdits).toBe(true));
+    await settleInput(runtime, host);
+    expect(target.querySelector(selector) === dom).toBe(true);
+    if (table) expect(target.querySelector('table')).toBe(table);
+    expect(host.diagnostics.created).toBe(before.created);
+    expect(host.diagnostics.destroyed).toBe(before.destroyed);
+    const after = await runtime.readMarkdown();
+    expect(after).toContain('# 新标题');
+    expect(after).toContain('[新标题](#新标题)');
+    await runtime.session.undo(); await settleInput(runtime, host);
+    expect(await runtime.readMarkdown()).toBe(text);
+    await runtime.session.undo(true); await settleInput(runtime, host);
+    expect(await runtime.readMarkdown()).toBe(after);
+    expect(failures).toEqual([]);
+  });
+  it('目录派生等待未提交输入和中文组字，恢复后只更新目录节点', async () => {
+    const text = '# 标题\n\n<!-- toc -->\n<!-- /toc -->';
+    const { runtime, host, target, failures } = await setup(text);
+    await host.reveal(0, true);
+    const dom = target.querySelector('.ProseMirror');
+    let unsettled = true;
+    const detach = runtime.session.attachEdits({ awaitCompositionEnd: async () => {}, commitPendingEdits() {},
+      hasUnsettledEdits: () => unsettled });
+    try {
+      host.activeCore!.execute({ type: 'insertText', text: '新' });
+      await settleInput(runtime, host);
+      expect(runtime.state.status.hasDerivedEdits).not.toBe(true);
+      expect(target.querySelector('.ProseMirror') === dom).toBe(true);
+      unsettled = false;
+      expect(await runtime.readMarkdown()).toContain('[新标题](#新标题)');
+      await settleInput(runtime, host);
+      expect(target.querySelector('.ProseMirror') === dom).toBe(true);
+      expect(failures).toEqual([]);
+    } finally { detach(); }
+  });
+  it('依赖的屏外引用变化必须刷新受影响窗口', async () => {
+    const text = '[引用][ref]\n\n' + '段落\n\n'.repeat(90) + '[ref]: /old\n';
+    const { runtime, host, target, failures } = await setup(text);
+    await host.reveal(0, true);
+    const old = target.querySelector('.ProseMirror');
+    expect(target.querySelector('a')?.getAttribute('href')).toBe('/old');
+    const fromByte = new TextEncoder().encode(text.slice(0, text.indexOf('/old'))).length;
+    await runtime.session.applyEdits({ viewGeneration: runtime.session.state.viewGeneration,
+      historyGroupId: 'reference', edits: [{ fromByte, toByte: fromByte + 4, insertedText: '/new' }] });
+    await settleInput(runtime, host);
+    expect(target.querySelector('.ProseMirror')).not.toBe(old);
+    expect(target.querySelector('a')?.getAttribute('href')).toBe('/new');
+    expect(failures).toEqual([]);
+  });
+  it('编辑跨越分组块数上限时安全重分组，全文无缺口且历史可恢复', async () => {
+    const text = '段落\n\n'.repeat(64);
+    const { runtime, host, target, failures } = await setup(text);
+    await host.reveal(0, true);
+    const core = host.activeCore!, view = (core as unknown as { view: EditorView }).view;
+    core.restoreSelectionSnapshot({ anchor: 2, head: 2 });
+    expect(splitBlock(view.state, view.dispatch, view)).toBe(true);
+    await settleInput(runtime, host);
+    expect(target.querySelectorAll('.ProseMirror p').length).toBeGreaterThanOrEqual(65);
+    expect(await runtime.readMarkdown()).toBe('段\n\n落\n\n' + '段落\n\n'.repeat(63));
+    const groups = (host as unknown as { groups: Array<{ from: number; to: number }> }).groups;
+    expect(groups.every(group => group.to - group.from <= 64)).toBe(true);
+    expect(groups.every((group, i) => group.from === (groups[i - 1]?.to ?? 0))).toBe(true);
+    await runtime.session.undo(); await settleInput(runtime, host);
+    expect(await runtime.readMarkdown()).toBe(text);
+    expect(failures).toEqual([]);
   });
   it('调低比例收缩现有视图，保留可见 DOM 与完整正文，再调高后空闲恢复', async () => {
     const text = ('x'.repeat(1022) + '\n\n').repeat(900);

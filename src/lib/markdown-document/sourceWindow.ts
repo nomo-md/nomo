@@ -1,4 +1,4 @@
-import { EditorState, Compartment, type Transaction } from '@codemirror/state';
+import { EditorState, Compartment, Transaction } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 import { defaultKeymap } from '@codemirror/commands';
 import type { MarkdownSessionController } from './controller';
@@ -6,6 +6,7 @@ import type { DocumentSelection, DocumentWindow, SourceEdit } from './protocol';
 import { MarkdownWindowBridge } from './windowBridge';
 import { utf16ToUtf8, utf8ToUtf16 } from './utf8Text';
 import { sourceEmojiSuggestions } from '../emoji/sourceSuggestions';
+import { getSourceTextChanges } from './textChanges';
 
 let sourceWindowTheme: ReturnType<typeof EditorView.theme> | undefined;
 function getSourceWindowTheme() {
@@ -92,6 +93,15 @@ export class MarkdownSourceWindow {
     this.bridge = new MarkdownWindowBridge(session, window, {
       onStale: options.onStale,
       onError: options.onFailure,
+      onDerivedSource: source => {
+        if (!view || this.composing || this.bridge.pinned) return false;
+        const coordinates = new SourceWindowCoordinates(source);
+        const changes = getSourceTextChanges(this.coordinates.text, coordinates.text);
+        // 已提交的派生补丁只映射当前局部选区，不经 dispatchTransactions 再次写入会话。
+        view.update([view.state.update({ changes, annotations: Transaction.addToHistory.of(false) })]);
+        this.coordinates = coordinates;
+        return true;
+      },
       onState: () =>
         queueMicrotask(() => {
           if (this.destroyed || !view) return;
@@ -167,6 +177,7 @@ export class MarkdownSourceWindow {
       },
     });
     this.detachEdits = session.attachEdits({
+      hasUnsettledEdits: () => this.composing || this.bridge.pinned,
       awaitCompositionEnd: () =>
         this.composing
           ? new Promise((resolve) => this.compositionWaiters.add(resolve))

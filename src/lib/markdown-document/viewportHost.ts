@@ -7,7 +7,7 @@ import {
   MarkdownHeightIndex,
   estimateMarkdownBlockHeight,
 } from './viewport';
-import { MarkdownStableGroups, MarkdownScrollDemand, MARKDOWN_VIEWPORT_POLICY, type MarkdownBlockGroup } from './mountWindow';
+import { MarkdownStableGroups, MarkdownScrollDemand, MARKDOWN_VIEWPORT_POLICY, type MarkdownBlockGroup, type MarkdownRetainedGroup } from './mountWindow';
 import { markdownResidentBudget, UNKNOWN_IMAGE_BYTES, type MarkdownResidentBudget, type ResidentToken } from './residentBudget';
 import { MarkdownResidentTracker } from './residentTracker';
 import { MarkdownLayoutBatch, markdownWorkScheduler, MarkdownTaskPriority } from './scheduler';
@@ -24,6 +24,8 @@ interface Mounted {
   key: string;
   groupId?: string;
   signature?: string;
+  indexRevision?: number;
+  references?: MarkdownStructureIndex['references'];
   layoutKey?: string;
   from?: number;
   to?: number;
@@ -222,6 +224,7 @@ export class MarkdownViewportHost {
       });
     this.observer?.observe(target);
     this.detachInput = document.session.attachEdits({
+      hasUnsettledEdits: () => this.composing,
       awaitCompositionEnd: () =>
         this.composing
           ? new Promise((resolve) => this.compositionWaiters.add(resolve))
@@ -653,7 +656,60 @@ export class MarkdownViewportHost {
     const references = block.references.length ? JSON.stringify(block.references.map(key => this.index?.references[key])) : '[]';
     return `${block.id}:${block.contentVersion ?? block.version}:${block.sourceHash}:${references}:${this.layoutContext}`;
   }
+  private rangeSignature(index: MarkdownStructureIndex, from: number, to: number) {
+    return JSON.stringify(index.blocks.slice(from, to).map(block =>
+      [block.id, block.contentVersion ?? block.version, block.sourceHash,
+        block.references.map(key => index.references[key])]));
+  }
+  /** 自身输入已在 PM/CM 中生效，只接纳结构身份；不能把确认当作一次外部正文替换。 */
+  private retainSynchronizedWindows(index: MarkdownStructureIndex): MarkdownRetainedGroup[] {
+    const retained: MarkdownRetainedGroup[] = [];
+    for (const view of this.mounted) {
+      const bridge = view.semantic?.bridge ?? view.source?.bridge;
+      if (!bridge || view.indexRevision === index.revision || this.pinned(view) ||
+        !bridge.isSynchronized(index.revision)) continue;
+      const { fromByte, toByte } = view.window;
+      if (toByte - fromByte > MARKDOWN_VIEWPORT_POLICY.groupBytes) continue;
+      // 二分后只检查一个有界窗口；禁止在普通输入时逐窗口扫描全文结构。
+      let low = 0, high = index.blocks.length;
+      while (low < high) { const mid = (low + high) >>> 1;
+        if (index.blocks[mid].fromByte < fromByte) low = mid + 1; else high = mid; }
+      const from = low;
+      let to = from;
+      if (index.blocks[from]?.fromByte === fromByte) {
+        while (to < index.blocks.length && to - from < MARKDOWN_VIEWPORT_POLICY.groupBlocks &&
+          index.blocks[to].toByte <= toByte) to++;
+      }
+      const empty = fromByte === 0 && toByte === 0 && index.totalBytes === 0;
+      if (!empty && (to === from || index.blocks[to - 1].toByte !== toByte)) continue;
+      const blocks = index.blocks.slice(from, to);
+      if (view.semantic && blocks.some(block => block.mode !== 'semantic' || block.references.some(key => {
+        const before = view.references?.[key], after = index.references[key];
+        return before?.href !== after?.href || before?.title !== after?.title;
+      }))) continue;
+      const signature = empty ? undefined : this.rangeSignature(index, from, to);
+      if (view.signature !== signature) {
+        if (view.layoutKey) this.layoutCache.delete(view.layoutKey);
+        view.layoutKey = undefined;
+        this.markDirty(view);
+      }
+      view.signature = signature;
+      view.indexRevision = index.revision;
+      if (view.semantic) {
+        view.references = index.references;
+        view.semantic.core.updateSourceProjectionReferences(index.references);
+      }
+      view.from = from; view.to = to;
+      // 原始源文只在对应索引接纳后更新，防止测量把新正文写入旧结构的缓存。
+      view.window.text = bridge.text;
+      view.groupId = empty ? undefined : view.groupId ?? `retained:${view.key}`;
+      view.key = `${view.groupId ?? '0:0'}:${!!view.semantic}`;
+      if (view.groupId) retained.push({ id: view.groupId, from, to });
+    }
+    return retained;
+  }
   private updateStructureIndex(index: MarkdownStructureIndex | null, geometryChanged = false) {
+    const retained = index ? this.retainSynchronizedWindows(index) : [];
     const previousLength = this.heights.length;
     const appendOnly = index === this.index && (index?.blocks.length ?? 0) >= previousLength;
     const structureChanged = index !== this.index || (index?.blocks.length ?? 0) !== previousLength || index?.blocks.at(-1) !== this.lastIndexedBlock;
@@ -669,10 +725,10 @@ export class MarkdownViewportHost {
       this.heights.rebuild(index.blocks.length, i => heightFor(index.blocks[i]));
     else for (let i = this.heights.length; i < (index?.blocks.length ?? 0); i++) this.heights.append(heightFor(index!.blocks[i]));
     this.lastIndexedBlock = index?.blocks.at(-1);
-    if (structureChanged) {
+    if (structureChanged || retained.length) {
       const previousGroups = this.groups.length;
-      this.groups = this.grouping.update(index?.blocks ?? []);
-      if (appendOnly) {
+      this.groups = this.grouping.update(index?.blocks ?? [], retained);
+      if (appendOnly && !retained.length) {
         for (let i = Math.max(0, previousGroups - 1); i < this.groups.length; i++) this.groupById.set(this.groups[i].id, this.groups[i]);
         for (let i = Math.max(0, previousLength - 1); i < (index?.blocks.length ?? 0); i++) this.blockPositions.set(index!.blocks[i].id, i);
       } else {
@@ -1164,6 +1220,10 @@ export class MarkdownViewportHost {
       const index = state.index?.revision === state.status.revision ? state.index : null;
       // 编辑后索引暂时失效时保留原视图，不能把尾部光标退回首屏。
       if (!index && this.mounted.length) return;
+      // 新修订的渐进索引尚未覆盖现有窗口时，继续显示已确认的正文，不能用半组替换整组。
+      if (index && index.progress.state !== 'ready' && this.mounted.some(view =>
+        view.window.toByte > index.progress.indexedBytes &&
+        (view.semantic?.bridge ?? view.source?.bridge)?.isSynchronized(index.revision))) return;
       const style = getComputedStyle(this.target);
       const context = `${this.target.clientWidth}|${style.font}|${style.lineHeight}|${style.letterSpacing}|${this.scale}|${this.geometryVersion}|${this.assetVersion}`;
       const geometryChanged = context !== this.layoutContext;
@@ -1291,9 +1351,7 @@ export class MarkdownViewportHost {
           plans.push({
             ...range,
             groupId: range.id,
-            signature: JSON.stringify(index.blocks.slice(range.from, range.to).map(block =>
-              [block.id, block.contentVersion ?? block.version, block.sourceHash,
-                block.references.map(key => index.references[key])])),
+            signature: this.rangeSignature(index, range.from, range.to),
             fromByte,
             toByte,
             semantic,
@@ -1400,7 +1458,8 @@ export class MarkdownViewportHost {
           if (this.outlineNavigation && !this.outlineNavigation.aligned) this.outlineNavigation.sample.readMs += readFinished - started;
           const element = globalThis.document.createElement('div');
           element.className = 'markdown-session-window';
-          view = { key, element, window, groupId: plan.groupId, signature: plan.signature };
+          view = { key, element, window, groupId: plan.groupId, signature: plan.signature,
+            indexRevision: state.status.revision, references: plan.semantic ? index?.references : undefined };
           created.push(view);
           const stale = () => this.schedule();
           if (plan.restricted) {

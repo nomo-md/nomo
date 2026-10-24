@@ -42,6 +42,7 @@ export class MarkdownSemanticWindow {
         options.onStale();
       },
       onRebase: (fromByte) => core?.rebaseSourceProjection(fromByte),
+      onDerivedSource: (source) => core?.applyDerivedTocSource(source) ?? false,
       onError: options.onFailure,
       onState: () => this.syncPermission(),
     });
@@ -83,6 +84,7 @@ export class MarkdownSemanticWindow {
       awaitCompositionEnd: () => this.core.awaitCompositionEnd(),
       commitPendingEdits: () => this.core.commitPendingEdits(),
       hasUnconfirmedDraft: () => this.core.hasPendingMathInlineDraft(),
+      hasUnsettledEdits: () => this.composing || this.core.hasUnsettledProjection(),
     });
   }
   get editable() { return this.attached && !this.effectiveReadonly; }

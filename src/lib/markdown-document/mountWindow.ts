@@ -11,6 +11,9 @@ export interface MarkdownBlockGroup extends MarkdownMountRange {
   blockIds: readonly string[];
 }
 
+/** 宿主已核对正文、修订和完整结构边界的现有窗口。 */
+export interface MarkdownRetainedGroup { id: string; from: number; to: number; }
+
 /** 已发布组封口；追加索引不会扩展旧组，编辑只重组失配区域。 */
 export class MarkdownStableGroups {
   private groups: MarkdownBlockGroup[] = [];
@@ -18,9 +21,15 @@ export class MarkdownStableGroups {
   private indexedBlocks: readonly MarkdownStructureBlock[] | undefined;
   private indexedLength = 0;
   private lastBlock: MarkdownStructureBlock | undefined;
-  update(blocks: readonly MarkdownStructureBlock[]): readonly MarkdownBlockGroup[] {
+  update(blocks: readonly MarkdownStructureBlock[], retained: readonly MarkdownRetainedGroup[] = []): readonly MarkdownBlockGroup[] {
+    const preserved = [...retained].sort((a, b) => a.from - b.from);
+    for (let i = 0; i < preserved.length; i++) {
+      const range = preserved[i];
+      if (range.from < 0 || range.to <= range.from || range.to > blocks.length ||
+        (i > 0 && preserved[i - 1].to > range.from)) throw new Error('保留窗口的结构范围无效。');
+    }
     // 同一索引只会追加或延长尾块；已发布组仍封口，不再扫描已确认前缀。
-    if (blocks === this.indexedBlocks && blocks.length >= this.indexedLength) {
+    if (!preserved.length && blocks === this.indexedBlocks && blocks.length >= this.indexedLength) {
       const tail = this.groups.at(-1);
       if (this.indexedLength && blocks[this.indexedLength - 1]?.id !== this.lastBlock?.id) {
         // 身份改变由完整匹配路径处理，不能用追加假设掩盖索引替换。
@@ -34,16 +43,28 @@ export class MarkdownStableGroups {
     }
     const old = new Map(this.groups.map(group => [group.blockIds[0], group]));
     const next: MarkdownBlockGroup[] = [];
+    let retainedIndex = 0;
     for (let from = 0; from < blocks.length;) {
+      const keep = preserved[retainedIndex];
+      if (keep?.from === from) {
+        next.push({ ...keep, visible: false, blockIds: blocks.slice(from, keep.to).map(block => block.id) });
+        from = keep.to;
+        retainedIndex++;
+        continue;
+      }
+      const end = keep?.from ?? blocks.length;
       const previous = old.get(blocks[from].id);
-      const matches = previous && previous.blockIds.every((id, i) => blocks[from + i]?.id === id);
+      const matches = previous && from + previous.blockIds.length <= end &&
+        previous.blockIds.length <= MARKDOWN_VIEWPORT_POLICY.groupBlocks &&
+        (previous.blockIds.length === 1 || blocks[from + previous.blockIds.length - 1]?.toByte - blocks[from].fromByte <= MARKDOWN_VIEWPORT_POLICY.groupBytes) &&
+        previous.blockIds.every((id, i) => blocks[from + i]?.id === id);
       if (matches) {
         next.push({ ...previous, from, to: from + previous.blockIds.length });
         from += previous.blockIds.length;
         continue;
       }
       let to = from + 1;
-      while (to < blocks.length && blocks[from].mode === 'semantic' &&
+      while (to < end && blocks[from].mode === 'semantic' &&
         blocks[to].mode === 'semantic' && !old.has(blocks[to].id) &&
         to - from < MARKDOWN_VIEWPORT_POLICY.groupBlocks &&
         blocks[to].toByte - blocks[from].fromByte <= MARKDOWN_VIEWPORT_POLICY.groupBytes) to++;

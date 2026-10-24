@@ -257,7 +257,7 @@ export class ProseMirrorEditorCore implements EditorCore {
   }
 
   hasUnsettledProjection(): boolean {
-    return !!this.view?.composing || !!this.pendingMarkdownDoc || this.hasPendingMathInlineDraft();
+    return !!this.view?.composing || !!this.projectionCompositionTimer || !!this.pendingMarkdownDoc || this.hasPendingMathInlineDraft();
   }
   atSourceWindowBoundary(direction: -1 | 1): boolean {
     const state = this.view?.state ?? this.suspendedState;
@@ -320,6 +320,46 @@ export class ProseMirrorEditorCore implements EditorCore {
       anchorByte: this.sourceSelectionBefore.anchorByte + delta,
       headByte: this.sourceSelectionBefore.headByte + delta,
     };
+  }
+  /** 宿主已确认现有节点依赖未变化；仅同步以后输入所需的解析上下文。 */
+  updateSourceProjectionReferences(references: NonNullable<EditorCoreOptions['documentProjection']>['references']): void {
+    if (this.options.documentProjection) this.options.documentProjection.references = references;
+  }
+  /** 会话已提交的自动目录只更新 TOC 属性，不能反馈成新输入或替换其他节点。 */
+  applyDerivedTocSource(source: string): boolean {
+    const view = this.view, projection = this.options.documentProjection;
+    if (!view || !projection || !this.sourceProjection || this.hasUnsettledProjection()) return false;
+    const before = this.parseSemanticDocument(this.markdown).doc;
+    const next = this.parseSemanticDocument(source).doc;
+    if (next.childCount !== before.childCount) return false;
+    const replacements: ProseMirrorNode[] = [];
+    let valid = true;
+    before.forEach((node, _pos, i) => {
+      const replacement = next.child(i);
+      if (node.type.name === 'toc_block' && replacement.type === node.type) replacements.push(replacement);
+      else if (!node.eq(replacement)) valid = false;
+    });
+    if (!valid) return false;
+    const transaction = view.state.tr;
+    let tocIndex = 0;
+    view.state.doc.forEach((node, pos) => {
+      if (node.type.name !== 'toc_block') return;
+      const replacement = replacements[tocIndex++];
+      if (!replacement) { valid = false; return; }
+      if (!node.eq(replacement)) transaction.setNodeMarkup(pos, undefined, replacement.attrs, replacement.marks);
+    });
+    if (!valid || tocIndex !== replacements.length) return false;
+    const nextProjection = new MarkdownSourceProjection(source, transaction.doc, projection.fromByte, projection);
+    // 不经过 dispatchTransaction：这是已经进入统一历史的派生补丁，不能再提交一次。
+    view.updateState(view.state.apply(transaction.setMeta('addToHistory', false).setStoredMarks(view.state.storedMarks)));
+    this.sourceProjection = nextProjection;
+    this.markdown = source;
+    this.dirty = source !== this.originalMarkdown;
+    this.semanticViewDirty = false;
+    this.contentRevision++; this.syncRenderRevision++; this.version++;
+    this.syncSnapshot = null;
+    this.emit('content-sync');
+    return true;
   }
   private sourceSelectionBefore?: DocumentSelection;
 
@@ -505,7 +545,8 @@ export class ProseMirrorEditorCore implements EditorCore {
     const view = this.view;
     if (!view || this.runtime.readonly) return Promise.resolve();
     const nodeComposition = awaitActiveEditCompositionEnd(view);
-    const documentComposition = !isInlineSourceComposing(view)
+    // 收到 compositionend 后插件状态可能仍待收尾，不能再等待下一次结束事件。
+    const documentComposition = !isInlineSourceComposing(view) || this.projectionCompositionTimer !== null
       ? Promise.resolve()
       : new Promise<void>((resolve) => {
           const finish = () => {
@@ -517,7 +558,11 @@ export class ProseMirrorEditorCore implements EditorCore {
           this.compositionWaiters.add(finish);
           view.dom.addEventListener('compositionend', onEnd, { once: true });
         });
-    return Promise.all([documentComposition, nodeComposition]).then(() => undefined);
+    return Promise.all([documentComposition, nodeComposition]).then(async () => {
+      // compositionend 的最终 DOM 输入与投影提交在下一任务收尾；关闭/保存也必须等待它。
+      if (this.projectionCompositionTimer !== null)
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+    });
   }
 
   unmount(prepared = false): void {

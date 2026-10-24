@@ -71,7 +71,7 @@ export class AutomaticMarkdownToc {
       return false;
     const generation = this.session.state.viewGeneration;
     if (
-      this.session.state.pendingTransactions ||
+      this.session.state.pendingTransactions || this.session.hasUnsettledEdits ||
       snapshot.revision !== this.session.state.committed.revision
     )
       return false;
@@ -111,7 +111,7 @@ export class AutomaticMarkdownToc {
     if (
       !edits.length ||
       generation !== this.session.state.viewGeneration ||
-      this.session.state.pendingTransactions
+      this.session.state.pendingTransactions || this.session.hasUnsettledEdits
     )
       return false;
     const selection = this.session.state.committed.selection;

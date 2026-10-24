@@ -4,6 +4,18 @@ import { MarkdownStructureScanner } from './structure';
 import { MarkdownLayoutCache } from './layoutCache';
 
 describe('稳定块组与有界准备', () => {
+  it('保留已确认编辑窗口的新结构区间，前后余段不丢失或重叠', () => {
+    const blocks = new MarkdownStructureScanner(0).push('段落\n\n'.repeat(140), true).blocks;
+    const grouping = new MarkdownStableGroups();
+    const initial = grouping.update(blocks);
+    const changed = blocks.map((block, i) => i === 10 ? { ...block, id: 'edited' } : block);
+    const groups = grouping.update(changed, [{ id: initial[0].id, from: 5, to: 65 }]);
+    expect(groups.find(group => group.id === initial[0].id)).toMatchObject({ from: 5, to: 65 });
+    expect(groups.flatMap(group => group.blockIds)).toEqual(changed.map(block => block.id));
+    expect(groups.every((group, i) => group.from === (groups[i - 1]?.to ?? 0))).toBe(true);
+    expect(groups.every(group => group.to - group.from <= 64)).toBe(true);
+    expect(grouping.update(changed)).toBe(groups);
+  });
   it('同一索引追加保留已封口组对象，仅更新尾部', () => {
     const blocks = new MarkdownStructureScanner(0).push('段落\n\n'.repeat(200), true).blocks;
     const incremental = blocks.slice(0, 70), grouping = new MarkdownStableGroups();
