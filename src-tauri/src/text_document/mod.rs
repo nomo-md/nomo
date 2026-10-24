@@ -13,6 +13,7 @@ pub(crate) mod markdown_commands;
 mod markdown_history;
 mod markdown_search;
 mod writing_stats;
+mod structure_index;
 pub(crate) mod markdown_session;
 mod piece_tree;
 mod session;

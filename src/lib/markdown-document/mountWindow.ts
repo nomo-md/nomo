@@ -64,7 +64,7 @@ export class MarkdownStableGroups {
         continue;
       }
       let to = from + 1;
-      while (to < end && blocks[from].mode === 'semantic' &&
+      while (to < end && blocks[from].kind !== 'native_region' && blocks[to].kind !== 'native_region' && blocks[from].mode === 'semantic' &&
         blocks[to].mode === 'semantic' && !old.has(blocks[to].id) &&
         to - from < MARKDOWN_VIEWPORT_POLICY.groupBlocks &&
         blocks[to].toByte - blocks[from].fromByte <= MARKDOWN_VIEWPORT_POLICY.groupBytes) to++;
@@ -79,7 +79,7 @@ export class MarkdownStableGroups {
   private append(blocks: readonly MarkdownStructureBlock[], start: number) {
     for (let from = start; from < blocks.length;) {
       let to = from + 1;
-      while (to < blocks.length && blocks[from].mode === 'semantic' && blocks[to].mode === 'semantic' &&
+      while (to < blocks.length && blocks[from].kind !== 'native_region' && blocks[to].kind !== 'native_region' && blocks[from].mode === 'semantic' && blocks[to].mode === 'semantic' &&
         to - from < MARKDOWN_VIEWPORT_POLICY.groupBlocks &&
         blocks[to].toByte - blocks[from].fromByte <= MARKDOWN_VIEWPORT_POLICY.groupBytes) to++;
       this.groups.push({ id: `group-${++this.serial}`, from, to, visible: false,

@@ -4052,13 +4052,16 @@
       if (!current || current.disposed || current.session !== application || closingDocuments.has(tab.id)) return;
       const loading = application.document?.state;
       const indexed = loading?.index;
+      if (application.document?.usesNativeStructure) current.outlineProjection.setLocalHeadings(application.document.localHeadings);
       const outlineChanged = !!indexed && (observedOutlineRevision !== indexed.revision || observedOutlineCount !== indexed.outline.length || observedOutline !== indexed.outline);
       if (indexed && outlineChanged) {
         current.outline = indexed.outline;
         observedOutline = indexed.outline;
         observedOutlineCount = indexed.outline.length; observedOutlineRevision = indexed.revision;
       }
-      if (loading) {
+      if (loading && application.document?.nativeStructure) {
+        current.outlineProjection.bindNative(application.document.nativeStructure.client, loading.progress.state, loading.failure);
+      } else if (loading && !application.document?.usesNativeStructure) {
         current.outlineProjection.update(indexed?.outline ?? (current.outlineProjection.revision === loading.status.revision ? current.outlineProjection.headings : []), loading.status.revision,
           loading.progress.state, loading.failure);
         current.outline = current.outlineProjection.headings;

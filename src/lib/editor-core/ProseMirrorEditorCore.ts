@@ -136,7 +136,7 @@ import {
 import { schema } from './schema';
 import { addTableRowAfter, addTableRowBefore, findTableContext } from './tableCommands';
 import { handleTripleClickByDetail } from './tripleClickSelection';
-import { updateTocBlocks } from '../toc/tocService';
+import { updateTocBlocks, extractDocumentTocItems } from '../toc/tocService';
 import type {
   EditorAnchorRect,
   EditorClipboardPayload,
@@ -484,8 +484,9 @@ export class ProseMirrorEditorCore implements EditorCore {
           new CommentBlockNodeView(node, view, getPos as () => number),
         comment_inline: (node, view, getPos) =>
           new CommentInlineNodeView(node, view, getPos as () => number, this.isRestoringNodeSelection(getPos)),
-        footnote_ref: (node, view) => new FootnoteRefNodeView(node, view),
-        footnote_def: (node, view) => new FootnoteDefNodeView(node, view),
+        footnote_ref: (node, view) => new FootnoteRefNodeView(node, view, this.options.footnotes, error => this.options.onError?.({ message: String(error), cause: error } as import('./types').EditorError)),
+        footnote_def: (node, view) => new FootnoteDefNodeView(node, view, this.options.footnotes,
+          error => this.options.onError?.({ message: String(error), cause: error } as import('./types').EditorError)),
         math_inline: (node, view, getPos) =>
           new MathInlineNodeView(node, view, getPos as () => number, this.isRestoringNodeSelection(getPos)),
         math_block: (node, view, getPos) =>
@@ -500,7 +501,8 @@ export class ProseMirrorEditorCore implements EditorCore {
         }),
         horizontal_rule: (node, view, getPos) =>
           new HorizontalRuleNodeView(node, view, getPos as () => number),
-        toc_block: (node, view, getPos) => new TocBlockNodeView(node, view, getPos as () => number),
+        toc_block: (node, view, getPos) => new TocBlockNodeView(node, view, getPos as () => number,
+          this.options.documentProjection ? this.options.onOpenLink : undefined),
       },
     });
     this.suspendedState = null;
@@ -2118,6 +2120,14 @@ export class ProseMirrorEditorCore implements EditorCore {
     }
 
     if (docChanged) {
+      if (this.options.onLocalHeadings) {
+        const headingState = headingAnchorsKey.getState(nextState);
+        const anchors = headingState?.decorations;
+        this.options.onLocalHeadings(extractDocumentTocItems(nextState.doc).flatMap(heading => {
+          const id = anchors?.find(heading.pos, heading.pos + 1).find(item => item.from === heading.pos)?.spec.headingId;
+          return typeof id === 'string' ? [{ id, title: heading.title, level: heading.level }] : [];
+        }), headingState?.ownedIds ?? []);
+      }
       if (this.sourceProjection && !this.pendingMarkdownDoc) {
         this.sourceSelectionBefore = this.projectSelection(this.sourceProjection, previousSelection);
       }

@@ -61,7 +61,6 @@ export class MarkdownApplicationSession {
   private mounting?: Promise<void>;
   private mountRequested = false;
   private scrollOrigin: 'semantic' | 'source' | undefined;
-  private scrollUntil = 0;
   private frontMatterRevision = -1;
   private windowingScalePercent = 100;
   private pendingFocus = false;
@@ -88,6 +87,8 @@ export class MarkdownApplicationSession {
     this.fallback = createEditorCore(this.options);
     const overrides: Partial<EditorCore> = {
       mount: (target) => {
+        // 组合交换可先挂载新 pane，再销毁旧 pane；宿主不能继续持有旧容器。
+        if (this.semanticTarget && this.semanticTarget !== target) void this.unmount().catch(onFailure);
         this.semanticTarget = target;
         this.beginOpening(target);
         void this.mountViews().catch(error => this.failOpening(target, error));
@@ -368,17 +369,17 @@ export class MarkdownApplicationSession {
       onOpenSource: (range: { byte: number }) => { void this.openSource(range.byte).catch(this.onFailure); },
       onFailure: this.onFailure,
       onNavigationIntent: () => {
+        this.scrollOrigin = mode;
         (mode === 'source' ? this.semanticHost : this.sourceHost)?.cancelOutlineNavigation();
       },
       writeClipboard: (text: string) => writeEditorClipboard({ text, html: '' }, this.desktop),
       onScroll: (byte: number) => {
         if (
           this.viewMode !== 'split' ||
-          (this.scrollOrigin !== mode && performance.now() < this.scrollUntil)
+          mode !== (this.scrollOrigin ?? this.activeHostMode ?? 'semantic')
         )
           return;
-        this.scrollOrigin = mode;
-        this.scrollUntil = performance.now() + 120;
+        // 从属栏的迟到测量可能远超过 120 ms；接管必须来自真实输入，不能按超时解锁。
         (mode === 'source' ? this.semanticHost : this.sourceHost)?.scrollToByte(byte);
       },
     });
@@ -425,21 +426,26 @@ export class MarkdownApplicationSession {
     doc.setHidden(!this.semanticTarget && !this.sourceTarget);
   }
   mountSource(target: HTMLElement) {
+    if (this.sourceTarget && this.sourceTarget !== target) this.unmountSource(this.sourceTarget);
     this.sourceTarget = target;
     this.beginOpening(target);
     void this.mountViews().catch(error => this.failOpening(target, error));
-    return () => {
-      if (this.sourceTarget !== target) return;
-      this.clearOpening(target);
-      this.sourceTarget = undefined;
-      this.source = undefined;
-      if (this.preparedForClose) return;
-      const host = this.sourceHost;
+    return () => this.unmountSource(target);
+  }
+  private unmountSource(target: HTMLElement) {
+    if (this.sourceTarget !== target) return;
+    this.clearOpening(target);
+    this.sourceTarget = undefined;
+    this.source = undefined;
+    if (this.preparedForClose) return;
+    const host = this.sourceHost;
+    if (target.isConnected) {
       this.sourceReadingPosition = host?.captureReadingPosition() ?? this.sourceReadingPosition;
-      this.sourceHost = undefined;
-      this.teardown = this.teardown.then(() => host?.dispose({ prepared: this.preparedForClose }));
-      void this.teardown.catch(this.onFailure);
-    };
+      if (this.viewMode === 'source') this.tab.globalScrollAnchor = host?.position ?? this.tab.globalScrollAnchor;
+    }
+    this.sourceHost = undefined;
+    this.teardown = this.teardown.then(() => host?.dispose({ prepared: this.preparedForClose }));
+    void this.teardown.catch(this.onFailure);
   }
   setViewMode(mode: 'semantic' | 'source' | 'split') {
     const generation = ++this.modeGeneration;
@@ -482,24 +488,29 @@ export class MarkdownApplicationSession {
   async unmount() {
     // 故障视图包含尚未确认的用户输入；直到存储端确认关闭前都保留，以便取消或失败恢复。
     if (this.preparedForClose && this.closePreparationFailure && !this.discardCloseViews) return;
-    if (!this.preparedForClose) await this.document?.session.flushEdits();
+    // Svelte 会在 flush 的异步等待期间拆掉滚动容器；先同步保存仍在屏幕上的位置。
+    if (!this.preparedForClose && this.semanticTarget?.isConnected) {
+      this.captureSelection();
+      this.tab.globalScrollAnchor = this.currentHost?.position ?? this.tab.globalScrollAnchor;
+      this.semanticReadingPosition = this.semanticHost?.captureReadingPosition() ?? this.semanticReadingPosition;
+      this.sourceReadingPosition = this.sourceHost?.captureReadingPosition() ?? this.sourceReadingPosition;
+    }
+    const flush = this.preparedForClose ? Promise.resolve() : this.document?.session.flushEdits();
     this.sourceRequest++; this.pendingSourceByte = undefined;
     this.clearOpening(this.semanticTarget);
     this.clearPendingFocus();
-    if (!this.preparedForClose) {
-      this.captureSelection();
-      this.tab.globalScrollAnchor =
-        (this.source ? this.sourceHost : this.semanticHost)?.position ?? this.tab.globalScrollAnchor;
-    }
     this.semanticTarget = undefined;
     const host = this.semanticHost;
-    if (!this.preparedForClose) this.semanticReadingPosition = host?.captureReadingPosition() ?? this.semanticReadingPosition;
     this.semanticHost = undefined;
-    this.teardown = this.teardown.then(() => host?.dispose({ prepared: this.preparedForClose, discard: this.discardCloseViews }));
-    await this.teardown;
-    this.document?.setHidden(!this.sourceTarget);
+    // 组合标签可以在 flush 完成前绑定新容器；拆除只持有旧宿主，不能迟到清空新绑定。
     this.active = undefined;
     this.source = undefined;
+    this.teardown = this.teardown.then(async () => {
+      await flush;
+      await host?.dispose({ prepared: this.preparedForClose, discard: this.discardCloseViews });
+    });
+    await this.teardown;
+    this.document?.setHidden(!this.semanticTarget && !this.sourceTarget);
   }
   async readMarkdown(signal?: AbortSignal) {
     return (await this.ready).readMarkdown(signal);
@@ -853,12 +864,11 @@ export class MarkdownApplicationSession {
       this.currentHost ?? (this.viewMode === 'source' ? this.sourceHost : this.semanticHost)
     )?.reveal(byte, focus);
   }
-  async revealOutlineHeading(byte: number) {
+  async revealOutlineHeading(byte: number, expectedRevision?: number) {
     const origin = this.currentHost;
     this.scrollOrigin = origin?.mode;
-    this.scrollUntil = 0;
     const hosts = this.viewMode === 'split' ? [this.semanticHost, this.sourceHost] : [origin];
-    const clock: OutlineNavigationClock = { requestedAt: performance.now() };
+    const clock: OutlineNavigationClock = { requestedAt: performance.now(), expectedRevision };
     // 两栏各按自己的可见高度精确定位；跟随栏不能抢夺焦点或接管活动栏。
     await Promise.all(hosts.map(host => host?.reveal(byte, host === origin, 'outline', clock)));
   }

@@ -491,6 +491,7 @@ impl MarkdownDocumentSessionManager {
             drop(data);
             if result.changed_count > 0 {
                 self.writing_stats.invalidate(document_id, false);
+                self.structure.invalidate(document_id, false);
                 self.search.invalidate(document_id, Some(task_id));
             }
             task.emit("completed", task.snapshot.len(), result.count, None);

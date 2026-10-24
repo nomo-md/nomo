@@ -21,6 +21,7 @@ export class TocBlockNodeView {
     node: ProseMirrorNode,
     private readonly view: EditorView,
     private readonly getPos: () => number,
+    private readonly openHeading?: (href: string) => void,
   ) {
     this.node = node;
     this.dom = document.createElement('section');
@@ -131,6 +132,8 @@ export class TocBlockNodeView {
   }
 
   private scrollToHeading(headingId: string): void {
+    if (this.view.composing) return;
+    if (this.openHeading) { this.openHeading(`#${encodeURIComponent(headingId)}`); return; }
     const headings = extractDocumentTocItems(this.view.state.doc);
     const heading = headings.find((item) => item.id === headingId);
     if (!heading) return;

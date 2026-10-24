@@ -22,11 +22,14 @@ export interface MarkdownEditInput {
   selectionAfter?: DocumentSelection;
 }
 export interface MarkdownControllerChange {
+  selectionAfter?: DocumentSelection;
+  nativeEdits?: readonly NativeRangeEdit[];
   derived?: boolean;
   generation: number;
   /** 历史恢复没有局部补丁时，视图必须重新读取，不得猜测位置。 */
   edits?: readonly SourceEdit[];
 }
+export interface NativeRangeEdit { fromByte: number; toByte: number; insertedBytes: number }
 interface Pending {
   input: MarkdownEditInput;
   operationId: string;
@@ -56,8 +59,8 @@ export class MarkdownSessionController {
   private closed = false;
   private historyBusy = false;
   private nativeCommitBusy = false;
-  private nativeCommit: Promise<ReplaceResult> | null = null;
-  private nativeRecovery: (() => Promise<ReplaceResult>) | null = null;
+  private nativeCommit: Promise<{ status: MarkdownSessionStatus }> | null = null;
+  private nativeRecovery: (() => Promise<{ status: MarkdownSessionStatus }>) | null = null;
   private closing = false;
   private mounted = new Set<MountedMarkdownEdits>();
   private listeners = new Set<(state: MarkdownControllerState) => void>();
@@ -112,10 +115,10 @@ export class MarkdownSessionController {
     this.changeListeners.add(listener);
     return () => this.changeListeners.delete(listener);
   }
-  private changed(edits?: readonly SourceEdit[], derived = false) {
+  private changed(edits?: readonly SourceEdit[], derived = false, nativeEdits?: readonly NativeRangeEdit[], selectionAfter?: DocumentSelection) {
     for (const listener of this.changeListeners) {
       try {
-        listener({ generation: this.generation, edits, derived });
+        listener({ generation: this.generation, edits, derived, nativeEdits, selectionAfter });
       } catch (error) {
         queueMicrotask(() => {
           throw error;
@@ -155,7 +158,7 @@ export class MarkdownSessionController {
         reject,
       }),
     );
-    this.changed(edits, input.derived);
+    this.changed(edits, input.derived, undefined, input.selectionAfter);
     this.emit();
     this.startDrain();
     return promise;
@@ -276,16 +279,20 @@ export class MarkdownSessionController {
       this.emit();
     }
   }
-  private acceptNativeReplacement(result: ReplaceResult) {
+  private acceptNativeReplacement(result: { status: MarkdownSessionStatus; nativeEdits?: readonly NativeRangeEdit[] | null }) {
     if (result.status.documentId !== this.documentId || result.status.revision < this.committed.revision)
       throw new DocumentConflictError('原生替换返回了过期确认。');
     const changed = result.status.revision !== this.committed.revision;
     this.committed = result.status;
-    if (changed) { this.generation++; this.changed(); }
+    if (changed) { this.generation++; this.changed(undefined, !!result.nativeEdits, result.nativeEdits ?? undefined); }
   }
   /** 准备期间允许输入，最终发布前关闭所有写入口并排空间隙事务。 */
   async commitNativeReplacement(base: { revision: number; generation: number }, signal: AbortSignal,
     commit: () => Promise<ReplaceResult>, mapped?: (result: ReplaceResult) => void): Promise<ReplaceResult> {
+    return this.commitNativeMutation(base, signal, commit, mapped);
+  }
+  async commitNativeMutation<T extends { status: MarkdownSessionStatus }>(base: { revision: number; generation: number }, signal: AbortSignal,
+    commit: () => Promise<T>, mapped?: (result: T) => void): Promise<T> {
     await this.flushEdits(); signal.throwIfAborted();
     if (this.closing || this.historyBusy || this.nativeCommitBusy) throw new DocumentConflictError();
     this.nativeCommitBusy = true; this.emit();
@@ -293,7 +300,7 @@ export class MarkdownSessionController {
       await this.flushQueue(); signal.throwIfAborted();
       if (this.generation !== base.generation || this.committed.revision !== base.revision || this.pending.length)
         throw new DocumentConflictError('正文已有新输入，旧替换已取消。');
-      let result: ReplaceResult;
+      let result: T;
       try { result = await commit(); }
       catch (error) {
         if (error instanceof DocumentConflictError || (error instanceof Error && typeof (error as { code?: unknown }).code === 'string')) throw error;
@@ -301,7 +308,7 @@ export class MarkdownSessionController {
         try { result = await commit(); }
         catch (failure) {
           this.nativeRecovery = async () => {
-            let recovered: ReplaceResult;
+            let recovered: T;
             try { recovered = await commit(); }
             catch (error) {
               // 已释放候选且同版本仍在，确认该操作未发布；解除故障门禁，不在新请求中自动重做。

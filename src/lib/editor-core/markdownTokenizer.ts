@@ -4,6 +4,7 @@ import { unescapeAll } from 'markdown-it/lib/common/utils.mjs';
 import { normalizeLinkHref } from './link';
 import { transformCalloutTokens } from './callout/calloutParser';
 import { registerDetailsRule } from './details/detailsSyntax';
+import { registerGfmAutolinks } from './gfmAutolinks';
 
 export const WRAPPED_IMAGE_HTML =
   /<p\s+align="(left|center|right)"\s*>\s*(<img\s+[^>]+(?:\/>|>))\s*<\/p>/gi;
@@ -143,6 +144,7 @@ export function recordInlineSourceRanges(markdown: MarkdownIt): void {
 
 export function createMarkdownTokenizer(options: { inlineSource?: boolean; literalHtmlCode?: boolean } = {}): MarkdownIt {
   const markdownIt = MarkdownIt('commonmark', { html: true }).enable(['table', 'strikethrough']);
+  registerGfmAutolinks(markdownIt);
   markdownIt.validateLink = (url: string) => normalizeLinkHref(url) !== null;
   let scriptDepth = 0;
   markdownIt.inline.ruler.before('escape', 'script_space', (state, silent) => {
@@ -165,6 +167,24 @@ export function createMarkdownTokenizer(options: { inlineSource?: boolean; liter
     let end = start + 1;
     for (; end < state.posMax; end++) {
       const char = state.src[end];
+      // 代码中的 ^/~ 是字面量，不能截断外层上/下标并破坏后续行内解析。
+      if (char === '`') {
+        const run = /^`+/.exec(state.src.slice(end))![0];
+        let closing = end + run.length;
+        while ((closing = state.src.indexOf(run, closing)) >= 0 && closing < state.posMax) {
+          if (state.src[closing - 1] !== '`' && state.src[closing + run.length] !== '`') break;
+          closing += run.length;
+        }
+        if (closing >= 0 && closing + run.length <= state.posMax &&
+            !/[\r\n]/.test(state.src.slice(end, closing))) {
+          end = closing + run.length - 1;
+          continue;
+        }
+      }
+      if (char === '<') {
+        const code = /^<code(?:\s(?:[^"'<>]|"[^"]*"|'[^']*')*)?>[^\r\n]*?<\/code\s*>/i.exec(state.src.slice(end, state.posMax));
+        if (code) { end += code[0].length - 1; continue; }
+      }
       if (char === '\n' || char === '\r') return false;
       if (char === '\\' && end + 1 < state.posMax) {
         if (/[\r\n]/.test(state.src[end + 1])) return false;

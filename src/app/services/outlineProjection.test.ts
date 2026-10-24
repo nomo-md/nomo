@@ -35,6 +35,11 @@ describe('progressive outline lifetime', () => {
     model.toggle(nested[0]); finish(model);
     expect(model.isCollapsed(nested[1])).toBe(false);
     expect(model.identity(nested[0])).not.toBe(model.identity(nested[1]));
+    const temporary = [
+      { ...heading('local-heading:1'), blockId: '', blockHeadingIndex: 0 },
+      { ...heading('local-heading:2'), blockId: '', blockHeadingIndex: 0 },
+    ];
+    expect(temporary.map(item => model.identity(item))).toEqual(['local-heading:1', 'local-heading:2']);
   });
 
   it('appends at a parent boundary without reprocessing or losing a user collapse', () => {

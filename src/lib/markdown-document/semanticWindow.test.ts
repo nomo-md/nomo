@@ -8,6 +8,22 @@ import { MarkdownSemanticWindow } from './semanticWindow';
 import { utf8Length } from './utf8Text';
 
 describe('真实 ProseMirror 窗口接入会话', () => {
+  it('原生目录范围通知保留未触及的 PM 实例并重定位源文坐标', async () => {
+    const port = createMemoryMarkdownPort();
+    const session = new MarkdownSessionController(port, await port.openDocument({ text: 'toc\n\nBody' }));
+    const target = document.body.appendChild(document.createElement('div'));
+    const view = new MarkdownSemanticWindow(session, await port.readWindow(session.documentId,0,5,9),
+      {target,onStale(){},onHistory(){},onFailure(error){throw error;}});
+    view.activate(); await view.whenReady;
+    const dom=target.querySelector('.ProseMirror');
+    await session.commitNativeMutation({revision:0,generation:0},new AbortController().signal,async()=>({
+      status: await port.applyTransaction(session.documentId,{baseRevision:0,operationId:'toc',historyGroupId:'toc',derived:true,edits:[{fromByte:0,toByte:3,insertedText:'long toc'}]}),
+      nativeEdits:[{fromByte:0,toByte:3,insertedBytes:8}],
+    }));
+    expect(view.bridge.isStale).toBe(false); expect(view.bridge.window.fromByte).toBe(10);
+    expect(target.querySelector('.ProseMirror')).toBe(dom); expect(target.textContent).toContain('Body');
+    view.dispose(); target.remove(); await session.close(true);
+  });
   it('相同源文选区不更新视图，实际选区及待输入格式变化仍完整恢复', async () => {
     const text = '# Header\n\nBody';
     const port = createMemoryMarkdownPort();

@@ -111,6 +111,73 @@ function outlineGeometry(target: HTMLElement, positions: number[]) {
 }
 
 describe('完整会话的真实窗口宿主', () => {
+  it('输入待确认时，旧大纲不能用字节位置读取新的中文源码', async () => {
+    const { runtime, host } = await setup('# one\n\n# two\n', 'source');
+    const source = host.activeSource!;
+    const measure = vi.spyOn(source, 'byteTop');
+    source.view.dispatch({ changes: { from: 0, insert: '中文' } });
+    expect(() => host.activeOutlineId).not.toThrow();
+    expect(measure).not.toHaveBeenCalled();
+    await settleInput(runtime, host);
+    expect(() => host.activeOutlineId).not.toThrow();
+  });
+  it('同修订范围细化替换前部粗摘要后，导航位置包含新加载的文首块', async () => {
+    const { runtime, host } = await setup('# first\n\nbody\n\n# last\n');
+    const index = runtime.state.index!;
+    const details = [...index.blocks];
+    const coarse = { ...details[0], id: 'region:prefix', kind: 'native_region', toByte: details[1].toByte };
+    const projection = vi.spyOn(index, 'blocks', 'get').mockReturnValue([coarse, ...details.slice(2)]);
+    const view = host as unknown as { updateStructureIndex(structure: typeof index): void; blockPositions: Map<string, number> };
+    try {
+      view.updateStructureIndex(index);
+      expect(view.blockPositions.has(details[0].id)).toBe(false);
+      projection.mockReturnValue(details);
+      view.updateStructureIndex(index);
+      expect(view.blockPositions.get(details[0].id)).toBe(0);
+      expect(view.blockPositions.get(details[1].id)).toBe(1);
+      expect(view.blockPositions.has(coarse.id)).toBe(false);
+    } finally { projection.mockRestore(); }
+    await expect(host.reveal(0, false, 'selection', { requestedAt: performance.now(), expectedRevision: -1 })).rejects.toThrow();
+  });
+
+  it('另一宿主替换共享详情时，旧视口锚点仍使用对应的几何快照', async () => {
+    const { runtime, host } = await setup('# first\n\nbody\n\n# last\n');
+    const index = runtime.state.index!;
+    const details = [...index.blocks];
+    const view = host as unknown as { generation: number; indexedBlocks: typeof details;
+      restoreAnchor(anchor: unknown, direct: boolean): void; captureAnchor(direct: boolean): unknown };
+    const projection = vi.spyOn(index, 'blocks', 'get').mockReturnValue([
+      { ...details[0], id: 'region:all', kind: 'native_region', toByte: index.totalBytes },
+    ]);
+    try {
+      expect(() => view.restoreAnchor({ id: details.at(-1)!.id, offset: 0, fallback: 0,
+        generation: view.generation }, true)).not.toThrow();
+      expect(view.captureAnchor(true)).toBeDefined();
+      expect(view.indexedBlocks).toEqual(details);
+    } finally { projection.mockRestore(); }
+  });
+
+  it('共享详情退回粗摘要时暂停旧 DOM 的块级测量，细化后恢复范围', async () => {
+    const { runtime, host } = await setup('# first\n\nbody\n\n# last\n');
+    const index = runtime.state.index!;
+    const details = [...index.blocks];
+    const view = host as unknown as { updateStructureIndex(structure: typeof index): void;
+      mounted: Array<{ from?: number; to?: number }> };
+    const mounted = view.mounted[0];
+    const original = { from: mounted.from, to: mounted.to };
+    const coarse = { ...details[0], id: 'region:all', kind: 'native_region', toByte: index.totalBytes };
+    const projection = vi.spyOn(index, 'blocks', 'get').mockReturnValue([coarse]);
+    const lookup = vi.spyOn(index, 'blockAt').mockReturnValue(coarse);
+    try {
+      view.updateStructureIndex(index);
+      expect(mounted.from).toBeUndefined();
+      expect(mounted.to).toBeUndefined();
+      lookup.mockRestore(); projection.mockReturnValue(details);
+      view.updateStructureIndex(index);
+      expect({ from: mounted.from, to: mounted.to }).toEqual(original);
+    } finally { lookup.mockRestore(); projection.mockRestore(); }
+  });
+
   it('屏外追加保留可见窗口及滚动高度，文末引用和完整索引仍立即更新', async () => {
     let append!: () => void, finish!: () => void;
     const second = new Promise<void>(resolve => { append = resolve; });
@@ -1134,7 +1201,11 @@ describe('完整会话的真实窗口宿主', () => {
     await settleInput(runtime, source);
     expect(sourceTarget.querySelector('.cm-editor')).toBe(sourceDom);
     await vi.waitFor(() => expect(target.textContent).toContain('另新正文'));
-    await runtime.session.undo(); await settleInput(runtime, host);
+    await runtime.session.undo();
+    const restoredSelection = runtime.selection.selection;
+    // 旧 PM 仍在展示时捕获选区，不得把旧修订的中文偏移写回会话。
+    expect(host.captureSelection()).toEqual(restoredSelection);
+    await settleInput(runtime, host);
     expect(await runtime.readMarkdown()).toBe('新正文');
     await runtime.session.undo(); await settleInput(runtime, host);
     expect(await runtime.readMarkdown()).toBe('正文');

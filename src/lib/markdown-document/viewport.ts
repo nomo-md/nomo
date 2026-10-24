@@ -81,6 +81,7 @@ export function estimateMarkdownBlockHeight(
   charactersPerLine = 80,
   lineHeight = 24,
 ) {
+  if (block.kind === 'native_region') return Math.max(lineHeight, block.layoutUnits * (lineHeight + 8));
   const sourceLines = Math.max(1, block.toLine - block.fromLine);
   const wrappedLines = Math.ceil(
     (block.toByte - block.fromByte) / (Math.max(20, charactersPerLine) * 2),

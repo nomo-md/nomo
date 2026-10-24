@@ -5,7 +5,7 @@ import {
   type OutlineMoveFailureReason,
   type OutlineSectionMoveRequest,
 } from '../../lib/outline/outlineReorder';
-import type { OutlineItem } from '../../lib/outline/outlineService';
+import { extractOutline, type OutlineItem } from '../../lib/outline/outlineService';
 import type { OutlineProjection } from './outlineProjection';
 import { t } from '../i18n';
 import { getMarkdownApplicationSession } from './markdownApplicationSession';
@@ -57,6 +57,8 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
   }
 
   function isOutlineItemExpandable(index: number) {
+    const native = options.getOutlineProjection?.()?.native;
+    if (native) return !!native.snapshot?.rows[index]?.hasChildren;
     return getOutlineItemExpandable(options.getOutline(), index);
   }
 
@@ -103,11 +105,21 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
 
   function jumpToOutlineItem(item: OutlineItem) {
     if (options.isActive?.() === false) return;
+    if ('local' in item && item.local) { options.setStatusMessage('标题正在校准，请稍后定位。'); return; }
     const editor = options.getEditor();
     const generation = ++outlineJumpGeneration;
     options.onExplicitJumpIntent?.();
     const application = getMarkdownApplicationSession(editor);
     if (application) {
+      if (application.document?.usesNativeStructure) {
+        const key = 'blockId' in item ? `${item.blockId}:${'blockHeadingIndex' in item ? item.blockHeadingIndex : 0}` : item.id;
+        void application.document.resolveStructure('blockId' in item ? 'heading' : 'slug', key).then(async result => {
+          if (generation !== outlineJumpGeneration || options.isActive?.() === false || options.getEditor() !== editor) return;
+          if (result.status !== 'found') throw new Error('当前修订中已不存在此标题。');
+          options.setActiveOutlineId(result.target.slug ?? item.id);
+          await application.revealOutlineHeading(result.target.fromByte, result.revision);
+        }).catch(error => { if (generation === outlineJumpGeneration) options.setStatusMessage(String(error)); }); return;
+      }
       const heading = application.document?.state.index?.outline.find(heading => heading.id === item.id);
       if (heading) {
         options.setActiveOutlineId(item.id);
@@ -158,6 +170,35 @@ export function createOutlineInteractionController(options: OutlineInteractionOp
     }
     const application = getMarkdownApplicationSession(options.getEditor());
     if (application) {
+      const native = options.getOutlineProjection?.()?.native;
+      if (native && application.document) {
+        const source = native.snapshot?.rows[request.sourceIndex], target = native.snapshot?.rows[request.targetIndex];
+        if (!source || !target) return false;
+        if (source.local || target.local || options.getOutlineProjection?.()?.localHeadings?.size) {
+          options.setStatusMessage('标题正在校准，请稍后移动。'); return false;
+        }
+        const document = application.document;
+        void (async () => {
+          await document.session.flushEdits();
+          const [currentSource, currentTarget] = await Promise.all([
+            document.resolveStructure('heading', `${source.blockId}:${source.blockHeadingIndex}`),
+            document.resolveStructure('heading', `${target.blockId}:${target.blockHeadingIndex}`),
+          ]);
+          if (currentSource.status !== 'found' || currentTarget.status !== 'found') throw new Error('章节已变化，请重新选择移动目标。');
+          const revision = document.state.status.revision;
+          if (currentSource.revision !== revision || currentTarget.revision !== revision)
+            throw new Error('章节已变化，移动已取消。');
+          await application.transformMarkdown(text => {
+            if (revision !== document.state.status.revision || options.isActive?.() === false) throw new Error('章节已变化，移动已取消。');
+            // 章节重排保留现有显式全文操作；不进入编辑期间的结构索引路径。
+            const headings = extractOutline(text);
+            const sourceIndex = headings.findIndex(item => item.line === currentSource.target.line);
+            const targetIndex = headings.findIndex(item => item.line === currentTarget.target.line);
+            const result = reorderOutlineSection(text, headings, { ...request, sourceIndex, targetIndex });
+            if (!result.ok) throw new Error(getOutlineMoveFailureMessage(result.reason)); return result.markdown;
+          });
+        })().catch(error => options.setStatusMessage(String(error))); return true;
+      }
       const index = application.document?.state.index;
       if (!index || index.progress.state !== 'ready' || index.revision !== application.document?.state.status.revision) {
         options.setStatusMessage(t.outlineLoading());

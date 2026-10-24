@@ -29,6 +29,9 @@ sha2 = "0.10"
 unicode-segmentation = "=1.13.2"
 unicode-properties = "0.1"
 regex = "1"
+pulldown-cmark = { version = "=0.13.5", default-features = false, features = ["html"] }
+html-escape = "=0.2.15"
+rusqlite = { version = "=0.40.2", features = ["bundled", "fallible_uint", "hooks"] }
 web_atoms = "0.2"
 semver = "1"
 sys-locale = "0.3"

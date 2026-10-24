@@ -1,4 +1,5 @@
 import type { EditorCoreOptions, EditorRuntimeOptions } from '../editor-core/types';
+import { recordAcceptance } from './acceptanceProbe';
 import type { ProgressiveMarkdownDocument } from './runtime';
 import type { MarkdownIndexChange } from './incrementalIndex';
 import { MarkdownSemanticWindow } from './semanticWindow';
@@ -37,7 +38,7 @@ interface Mounted {
   restrictedByte?: number;
   measured?: boolean;
 }
-export interface OutlineNavigationClock { requestedAt: number; startedAt?: number; }
+export interface OutlineNavigationClock { requestedAt: number; startedAt?: number; expectedRevision?: number; }
 interface OutlineNavigationSample {
   revision: number; byte: number; duration?: number; inputGateMs: number;
   kind: 'animated' | 'direct'; windowLimited: boolean; targetLoaded: boolean;
@@ -150,6 +151,7 @@ export class MarkdownViewportHost {
   private scale = 1;
   private contentTop = 0;
   private lastIndexedBlock: MarkdownStructureIndex['blocks'][number] | undefined;
+  private indexedBlocks: MarkdownStructureIndex['blocks'] | undefined;
   private readonly scroll: HTMLElement;
   private readonly budget: MarkdownResidentBudget;
   private readonly resources: MarkdownResidentTracker;
@@ -357,6 +359,7 @@ export class MarkdownViewportHost {
     if (signature !== this.presentationSignature) {
       this.presentationSignature = signature;
       this.target.dataset.presentation = next.phase;
+      if (import.meta.env.VITE_NOMO_ACCEPTANCE === '1') recordAcceptance('presentation', { ...next });
       this.callbacks.onPresentation?.(next);
     }
   }
@@ -372,9 +375,9 @@ export class MarkdownViewportHost {
     return this.document.selection.selection;
   }
   get position() {
-    const first = this.index?.blocks[this.heights.indexAt(this.localScrollTop)];
+    const first = this.indexedBlocks?.[this.heights.indexAt(this.localScrollTop)];
     const restricted = this.mounted.find(view => view.restricted && view.from !== undefined &&
-      this.index?.blocks[view.from]?.id === first?.id);
+      this.indexedBlocks?.[view.from]?.id === first?.id);
     return {
       byteOffset: this.locatedByte ?? restricted?.restrictedByte ?? first?.fromByte ?? this.active?.window.fromByte ?? 0,
       line: first?.fromLine ?? 1,
@@ -409,6 +412,10 @@ export class MarkdownViewportHost {
   }
   private headingTop(byte: number, id: string): number | undefined {
     const view = this.mounted.find(view => byte >= view.window.fromByte && byte < view.window.toByte);
+    // 旧大纲可继续显示，但其字节位置不能解释正在编辑或其他修订的局部正文。
+    if (!view || view.window.revision !== this.index?.revision) return undefined;
+    const bridge = view.semantic?.bridge ?? view.source?.bridge;
+    if (bridge && !bridge.isSynchronized(this.index.revision)) return undefined;
     if (view?.restricted) return view.element.getBoundingClientRect().top;
     return view?.semantic?.core.headingAnchorTop(id) ?? view?.source?.byteTop(byte);
   }
@@ -432,10 +439,12 @@ export class MarkdownViewportHost {
     this.generation++;
     return true;
   }
-  private onNavigationIntent = () => {
+  private onNavigationIntent = (event?: Event) => {
     this.restoredReadingAnchor = undefined;
     this.budget.interacting(this);
-    if (this.cancelOutlineNavigation()) this.callbacks.onNavigationIntent?.();
+    this.cancelOutlineNavigation();
+    // 只有输入事件可以接管双栏同步；异步布局产生的 scroll 不能冒充用户意图。
+    if (event) this.callbacks.onNavigationIntent?.();
   };
   private onBudgetComposition = (event: CompositionEvent) => {
     this.budget.holdInteraction(this, 'composition', event.type === 'compositionstart');
@@ -459,6 +468,9 @@ export class MarkdownViewportHost {
   }
   private selection(view = this.active): DocumentSelection | undefined {
     if (view !== this.selectionOwner) return undefined;
+    // 历史/原生派生后旧 DOM 仍用于展示，不能覆盖已映射到新修订的全局选区。
+    if (this.document.session.state.historyBusy || this.document.session.state.nativeCommitBusy ||
+      view?.semantic?.bridge.isStale || view?.source?.bridge.isStale) return undefined;
     if (view?.restricted) {
       const byte = view.restrictedByte ?? view.window.fromByte;
       return { anchorByte: byte, headByte: byte };
@@ -469,9 +481,9 @@ export class MarkdownViewportHost {
     this.selectionOwner = this.active;
     if (!this.composing) this.captureSelection();
   };
-  private onInput = () => {
+  private onInput = (event: Event) => {
     this.selectionOwner = this.active;
-    this.onNavigationIntent();
+    this.onNavigationIntent(event);
     this.focusAfterRemount = this.target.contains(globalThis.document.activeElement);
     this.document.interacting();
   };
@@ -646,8 +658,11 @@ export class MarkdownViewportHost {
     if (!view) return;
     this.invalidateStable();
     if (view.layoutKey) this.layoutCache.delete(view.layoutKey);
-    if (this.index && view.from !== undefined && view.to !== undefined)
-      for (let i = view.from; i < view.to; i++) this.layoutCache.delete(this.blockLayoutKey(this.index.blocks[i]));
+    if (view.from !== undefined && view.to !== undefined)
+      for (let i = view.from; i < view.to; i++) {
+        const block = this.indexedBlocks?.[i];
+        if (block) this.layoutCache.delete(this.blockLayoutKey(block));
+      }
     this.markDirty(view);
     this.measureDirty();
   };
@@ -716,9 +731,11 @@ export class MarkdownViewportHost {
   private updateStructureIndex(index: MarkdownStructureIndex | null, geometryChanged = false) {
     const retained = index ? this.retainSynchronizedWindows(index) : [];
     const previousLength = this.heights.length;
-    const appendOnly = index === this.index && (index?.blocks.length ?? 0) >= previousLength;
-    const structureChanged = index !== this.index || (index?.blocks.length ?? 0) !== previousLength || index?.blocks.at(-1) !== this.lastIndexedBlock;
-    if (index !== this.index || (index?.blocks.length ?? 0) < previousLength || geometryChanged) {
+    // 原生范围细化在同一修订内替换数组，可能改变任意前缀；仅旧 JS 的同数组追加可复用位置前缀。
+    const replaced = index?.blocks !== this.indexedBlocks;
+    const appendOnly = !replaced && index === this.index && (index?.blocks.length ?? 0) >= previousLength;
+    const structureChanged = replaced || index !== this.index || (index?.blocks.length ?? 0) !== previousLength || index?.blocks.at(-1) !== this.lastIndexedBlock;
+    if (replaced || index !== this.index || (index?.blocks.length ?? 0) < previousLength || geometryChanged) {
       this.index = index;
       this.heights = new MarkdownHeightIndex();
     }
@@ -730,6 +747,7 @@ export class MarkdownViewportHost {
       this.heights.rebuild(index.blocks.length, i => heightFor(index.blocks[i]));
     else for (let i = this.heights.length; i < (index?.blocks.length ?? 0); i++) this.heights.append(heightFor(index!.blocks[i]));
     this.lastIndexedBlock = index?.blocks.at(-1);
+    this.indexedBlocks = index?.blocks;
     if (structureChanged || retained.length) {
       const previousGroups = this.groups.length;
       this.groups = this.grouping.update(index?.blocks ?? [], retained);
@@ -741,6 +759,18 @@ export class MarkdownViewportHost {
         for (const group of this.groups) this.groupById.set(group.id, group);
         this.blockPositions.clear();
         if (index) for (let i = 0; i < index.blocks.length; i++) this.blockPositions.set(index.blocks[i].id, i);
+      }
+      // 原生细化会在同一修订内替换任意前缀；两个宿主共享索引，旧数组下标不能继续解释 DOM 行号。
+      // 身份/源文没有变化也要重新定位已挂载范围，未被当前详情覆盖时暂停其块级测量。
+      if (replaced && index) for (const view of this.mounted) {
+        const first = index.blockAt(view.window.fromByte);
+        const last = index.blockAt(Math.max(view.window.fromByte, view.window.toByte - 1));
+        const from = first && this.blockPositions.get(first.id), end = last && this.blockPositions.get(last.id);
+        if (view.indexRevision === index.revision && first?.fromByte === view.window.fromByte &&
+          last?.toByte === view.window.toByte && from !== undefined && end !== undefined &&
+          !index.blocks.slice(from, end + 1).some(block => block.kind === 'native_region')) {
+          view.from = from; view.to = end + 1;
+        } else { view.from = undefined; view.to = undefined; }
       }
     }
   }
@@ -770,16 +800,17 @@ export class MarkdownViewportHost {
     if (!forDirect && this.outlineNavigation && !this.outlineNavigation.aligned) return undefined;
     if ((!forDirect && this.preferredByte !== undefined && !this.outlineNavigation) || !this.index) return undefined;
     const index = this.heights.indexAt(this.localScrollTop);
-    const block = this.index.blocks[index];
+    const block = this.indexedBlocks?.[index];
     if (!block) return undefined;
     const rect = this.scroll.getBoundingClientRect();
     const view = this.mounted.find(view => view.from !== undefined && view.from <= index && view.to! > index);
     let semantic: ReturnType<NonNullable<Mounted['semantic']>['core']['captureBlockReadingAnchor']>;
     try { semantic = view?.semantic?.core.captureBlockReadingAnchor(this.target.getBoundingClientRect().left + 12, rect.top + 4); }
     catch { /* 未完成布局时使用块级高度锚点。 */ }
-    const line = semantic && view?.from !== undefined ? this.index.blocks[view.from].fromLine + semantic.line - 1 : undefined;
+    const first = view?.from === undefined ? undefined : this.indexedBlocks?.[view.from];
+    const line = semantic && first ? first.fromLine + semantic.line - 1 : undefined;
     const hit = line === undefined || view?.from === undefined ? block :
-      this.index.blocks.slice(view.from, view.to).reverse().find(block => block.fromLine <= line) ?? block;
+      this.indexedBlocks?.slice(view.from, view.to).reverse().find(block => block.kind !== 'native_region' && block.fromLine <= line) ?? block;
     return { id: hit.id, offset: semantic?.offset ?? 0,
       screen: semantic ? semantic.top - rect.top : undefined,
       fallback: this.localScrollTop - this.heights.top(this.blockPositions.get(hit.id) ?? index),
@@ -792,15 +823,20 @@ export class MarkdownViewportHost {
       (!forDirect && this.preferredByte !== undefined && !this.outlineNavigation)) return;
     const index = this.blockPositions.get(anchor.id);
     if (index === undefined) return;
-    const block = this.index!.blocks[index];
+    const block = this.indexedBlocks?.[index];
+    if (!block) return;
     const view = this.mounted.find(view => block.fromByte >= view.window.fromByte && block.fromByte < view.window.toByte);
-    const rect = anchor.screen === undefined || view?.from === undefined ? undefined :
-      view.semantic?.core.blockReadingAnchorRect(block.fromLine - this.index!.blocks[view.from].fromLine + 1, anchor.offset);
+    const first = view?.from === undefined ? undefined : this.indexedBlocks?.[view.from];
+    const rect = anchor.screen === undefined || !first || first.fromByte !== view?.window.fromByte ||
+      view?.indexRevision !== this.index?.revision ? undefined :
+      view.semantic?.core.blockReadingAnchorRect(block.fromLine - first.fromLine + 1, anchor.offset);
     if (this.restoredReadingAnchor && !view?.measured) return;
     const top = rect && anchor.screen !== undefined
       ? this.localScrollTop + (rect.top - this.scroll.getBoundingClientRect().top - anchor.screen) / this.scale
       : this.heights.top(index) + anchor.fallback;
-    if (Math.abs(top - this.localScrollTop) >= 1) { this.stats.anchorCorrections++; this.scrollTo(top); }
+    if (Math.abs(top - this.localScrollTop) >= 1) {
+      this.stats.anchorCorrections++; this.scrollTo(top);
+    }
     if (this.restoredReadingAnchor === anchor) this.readingAnchor = { ...anchor, generation: this.generation };
   }
   private markDirty(view: Mounted) {
@@ -827,15 +863,17 @@ export class MarkdownViewportHost {
       for (const { view, height, top, blocks, tables } of values) {
         view.measured = height > 0;
         if (view.layoutKey && height > 0 && this.hasOriginalSource(view)) this.layoutCache.put(view.layoutKey, { height, tables });
-        if (height < 1 || view.from === undefined || view.to === undefined || !this.index) continue;
-        if (view.window.fromByte !== this.index.blocks[view.from]?.fromByte ||
-          view.window.toByte !== this.index.blocks[view.to - 1]?.toByte) continue;
+        const geometry = this.indexedBlocks;
+        if (height < 1 || view.from === undefined || view.to === undefined || !geometry ||
+          view.indexRevision !== this.index?.revision) continue;
+        if (view.window.fromByte !== geometry[view.from]?.fromByte ||
+          view.window.toByte !== geometry[view.to - 1]?.toByte) continue;
         const old = this.heights.top(view.to) - this.heights.top(view.from);
         const measured: number[] = [];
         const tops = new Map(blocks?.map(block => [block.line, block.top]) ?? []);
         for (let i = view.from; i < view.to; i++) {
-          const line = this.index.blocks[i].fromLine - this.index.blocks[view.from].fromLine + 1;
-          const nextLine = this.index.blocks[i + 1]?.fromLine - this.index.blocks[view.from].fromLine + 1;
+          const line = geometry[i].fromLine - geometry[view.from].fromLine + 1;
+          const nextLine = geometry[i + 1]?.fromLine - geometry[view.from].fromLine + 1;
           const start = i === view.from ? top : tops.get(line);
           const end = i + 1 === view.to ? top + height * this.scale : tops.get(nextLine);
           measured.push(Math.max(1, start !== undefined && end !== undefined
@@ -848,7 +886,7 @@ export class MarkdownViewportHost {
           const adjusted = flexible > 0 ? 1 + Math.max(0, height - measured.length) * (value - 1) / flexible : Math.max(1, height / measured.length);
           const i = view.from! + offset;
           if (Math.abs(this.heights.height(i) - adjusted) >= .1) { this.heights.update(i, adjusted); changed = true; }
-          if (this.hasOriginalSource(view)) this.layoutCache.put(this.blockLayoutKey(this.index!.blocks[i]), { height: adjusted });
+          if (this.hasOriginalSource(view)) this.layoutCache.put(this.blockLayoutKey(geometry[i]), { height: adjusted });
         });
         if (changed) this.stats.heightChanges++;
       }
@@ -903,9 +941,10 @@ export class MarkdownViewportHost {
     this.paintSelection();
   };
   private onPointerUp = () => {
-    if (this.pointerAnchor === undefined) return;
+    // 脚注/目录按钮没有可编辑的源码坐标，但仍必须释放其窗口的按压保护。
+    const hadAnchor = this.pointerAnchor !== undefined;
     this.budget.holdInteraction(this, 'pointer', false);
-    const selected = this.selection();
+    const selected = hadAnchor ? this.selection() : undefined;
     if (selected && !this.globalSelection) this.document.selection.set(selected);
     this.pointerAnchor = undefined;
     this.pointerView = undefined;
@@ -993,7 +1032,7 @@ export class MarkdownViewportHost {
     }
   }
   private onKey = (event: KeyboardEvent) => {
-    this.onNavigationIntent();
+    this.onNavigationIntent(event);
     if (event.target instanceof HTMLElement && event.target.closest('button') &&
       ['Enter', ' '].includes(event.key)) return;
     if (this.active?.restricted && (event.ctrlKey || event.metaKey) && ['z', 'y'].includes(event.key.toLowerCase())) {
@@ -1178,7 +1217,9 @@ export class MarkdownViewportHost {
       void this.render().catch((error) => {
         if (
           error instanceof DocumentConflictError ||
-          (error as { code?: string })?.code === 'revision-conflict'
+          (error as { code?: string })?.code === 'revision-conflict' ||
+          (error instanceof Error && error.name === 'AbortError') ||
+          ['structure-cancelled', 'structure-generation-expired'].includes((error as { code?: string })?.code ?? '')
         )
           this.schedule();
         else { this.viewFailure = error; this.showFailure(); this.callbacks.onFailure(error); }
@@ -1227,18 +1268,39 @@ export class MarkdownViewportHost {
       if (!index && this.mounted.length) return;
       // 新修订的渐进索引尚未覆盖现有窗口时，继续显示已确认的正文，不能用半组替换整组。
       if (index && index.progress.state !== 'ready' && this.mounted.some(view =>
-        view.window.toByte > index.progress.indexedBytes &&
-        (view.semantic?.bridge ?? view.source?.bridge)?.isSynchronized(index.revision))) return;
+        view.window.toByte > index.progress.indexedBytes)) return;
       const style = getComputedStyle(this.target);
       const context = `${this.target.clientWidth}|${style.font}|${style.lineHeight}|${style.letterSpacing}|${this.scale}|${this.geometryVersion}|${this.assetVersion}`;
       const geometryChanged = context !== this.layoutContext;
       const previousAnchor = geometryChanged ? (this.readingAnchor ?? this.captureAnchor()) :
-        index !== this.index ? this.captureAnchor() : undefined;
+        index !== this.index || index?.blocks !== this.indexedBlocks ? this.captureAnchor() : undefined;
       this.layoutContext = context;
       this.updateStructureIndex(index, geometryChanged);
       if (geometryChanged) for (const view of this.mounted) this.markDirty(view);
       this.restoreAnchor(previousAnchor);
+      const nativeIndex = this.document.nativeStructure;
+      if (nativeIndex && nativeIndex === index && index.blocks.length) {
+        const viewportHeight = (this.scroll.clientHeight || 800) / this.scale;
+        const desiredByte = this.preferredByte ?? this.scrollByte ?? this.outlineNavigation?.byte;
+        const at = desiredByte !== undefined ? index.blocks.indexOf(index.blockAt(desiredByte)!) : this.heights.indexAt(this.localScrollTop);
+        const region = index.blocks[Math.max(0, at)];
+        const nearFrom = this.heights.indexAt(Math.max(0, this.localScrollTop - viewportHeight * 3));
+        const nearTo = this.heights.indexAt(this.localScrollTop + viewportHeight * 7) + 1;
+        if (region?.kind === 'native_region' || index.blocks.slice(Math.max(0, nearFrom), nearTo).some(block => block.kind === 'native_region')) {
+          const ratio = Math.max(0, Math.min(1, (this.localScrollTop - this.heights.top(at)) / Math.max(1, this.heights.height(at))));
+          const byte = desiredByte ?? Math.floor(region.fromByte + ratio * (region.toByte - region.fromByte));
+          const anchor = previousAnchor ?? this.captureAnchor();
+          // 先覆盖视口目标，再预取前后邻域；密集标题下前缀不能耗尽详情预算。
+          const ranges = [{ fromByte: byte, toByte: Math.min(state.status.byteLength, byte + 8192) },
+            { fromByte: Math.max(0, byte - 2048), toByte: byte },
+            ...this.mounted.filter(view => this.pinned(view)).map(view => ({ fromByte: view.window.fromByte, toByte: view.window.toByte }))];
+          await nativeIndex.refine(this, ranges, new AbortController().signal);
+          if (this.disposed || this.hidden || generation !== this.generation || this.document.nativeStructure !== nativeIndex) return;
+          this.updateStructureIndex(index, true); this.restoreAnchor(anchor);
+        }
+      }
       this.alignOutlineHeading();
+      const plannedBlocks = index?.blocks;
       const navigating = this.outlineNavigation && !this.outlineNavigation.aligned;
       const requestedByte = this.preferredByte ?? this.scrollByte;
       let requestedTop = navigating ? Math.max(0, (this.outlineNavigation!.goal - this.contentTop) / this.scale) : undefined;
@@ -1332,6 +1394,7 @@ export class MarkdownViewportHost {
         for (const range of [...candidates.values()].sort((a, b) => a.from - b.from)) {
           const first = index.blocks[range.from];
           const last = index.blocks[range.to - 1];
+          if (first.kind === 'native_region' || last.kind === 'native_region') continue;
           const semantic = this.mode === 'semantic' && first.mode === 'semantic';
           const restricted = this.mode === 'semantic' && first.mode === 'raw';
           let fromByte = first.fromByte;
@@ -1400,7 +1463,8 @@ export class MarkdownViewportHost {
       let createdCount = 0;
       const focused = this.focusAfterRemount || this.target.contains(globalThis.document.activeElement);
       // 标题导航已有经过索引确认的全局坐标；调度不重复序列化表格来反算当前光标。
-      const selected = this.outlineNavigation ? { anchorByte: this.outlineNavigation.byte, headByte: this.outlineNavigation.byte } : this.globalSelection
+      const selected = this.outlineNavigation ? { anchorByte: this.outlineNavigation.byte, headByte: this.outlineNavigation.byte } : this.preferredByte !== undefined
+        ? { anchorByte: this.preferredByte, headByte: this.preferredByte } : this.globalSelection
         ? this.document.selection.selection
         : this.captureSelection();
       for (const plan of plans) {
@@ -1443,6 +1507,7 @@ export class MarkdownViewportHost {
             plan.toByte,
           ), cancelled]);
           const readFinished = performance.now();
+          if (index?.blocks !== plannedBlocks) { this.again = true; return; }
           if (this.interruptRead === interrupt) this.interruptRead = undefined;
           const preparing = this.outlineNavigation;
           if (window && preparing?.kind === 'animated' && preparing.elapsed === 0 && this.scroll.clientHeight > 0) {
@@ -1467,6 +1532,7 @@ export class MarkdownViewportHost {
             indexRevision: state.status.revision, references: plan.semantic ? index?.references : undefined };
           created.push(view);
           const stale = () => this.schedule();
+          const localHeadingOwner = {};
           if (plan.restricted) {
             view.restricted = true;
             element.classList.add('markdown-session-restricted');
@@ -1485,6 +1551,46 @@ export class MarkdownViewportHost {
           } else if (plan.semantic) {
             view.semantic = new MarkdownSemanticWindow(this.document.session, window, {
               ...this.options,
+              onLocalHeadings: this.document.usesNativeStructure ? (headings, ownedIds) => this.document.previewHeadings(localHeadingOwner, {
+                headings, ownedIds, fromByte: view?.window.fromByte ?? window.fromByte, toByte: view?.window.toByte ?? window.toByte,
+              }) : undefined,
+              footnotes: this.document.usesNativeStructure ? {
+                preview: async (label, signal) => {
+                  const revision = this.document.session.state.committed.revision;
+                  const result = await this.document.resolveStructure('footnote', label, signal);
+                  if (result.status !== 'found') return { state: result.status };
+                  const { fromByte, toByte } = result.target;
+                  const status = this.document.session.state.committed;
+                  if (status.revision !== revision) throw new DocumentConflictError();
+                  const source = await this.document.port.readWindow(status.documentId, status.revision, fromByte, Math.min(toByte, fromByte + 8192));
+                  signal.throwIfAborted();
+                  if (this.document.session.state.committed.revision !== revision) throw new DocumentConflictError();
+                  return { state: 'found', source: source.text, truncated: source.toByte < toByte };
+                },
+                jump: async (label, signal) => {
+                  await this.document.session.flushEdits();
+                  const result = await this.document.resolveStructure('footnote', label, signal);
+                  signal.throwIfAborted();
+                  if (result.status !== 'found') throw new Error('当前修订中没有此脚注定义。');
+                  await this.reveal(result.target.fromByte, true, 'selection', { requestedAt: performance.now(), expectedRevision: result.revision });
+                },
+                returnToReference: async (label, signal) => {
+                  await this.document.session.flushEdits();
+                  const result = await this.document.resolveStructure('footnoteReference', label, signal);
+                  signal.throwIfAborted();
+                  if (result.status !== 'found') throw new Error('当前修订中没有此脚注引用。');
+                  await this.reveal(result.target.fromByte, true, 'selection', { requestedAt: performance.now(), expectedRevision: result.revision });
+                },
+              } : this.options.footnotes,
+              onOpenLink: href => {
+                if (this.document.usesNativeStructure && href.startsWith('#')) {
+                  let slug: string; try { slug = decodeURIComponent(href.slice(1)); } catch { slug = href.slice(1); }
+                  void this.document.resolveStructure('slug', slug).then(result => {
+                    if (result.status !== 'found') throw new Error('当前修订中没有此标题锚点。');
+                    if (!this.disposed && !this.hidden) return this.reveal(result.target.fromByte, false, 'selection', { requestedAt: performance.now(), expectedRevision: result.revision });
+                  }).catch(this.callbacks.onFailure);
+                } else this.options.onOpenLink?.(href);
+              },
               target: element,
               references: index?.references,
               onStale: stale,
@@ -1587,7 +1693,8 @@ export class MarkdownViewportHost {
       const navigationTop = this.outlineNavigation ? this.localScrollTop : undefined;
       this.stats.batches++;
       this.stats.ranges++;
-      const anchor = requestedTop === undefined || this.outlineNavigation ? this.captureAnchor() : undefined;
+      // 前面的细化/分组已改写范围下标；跨修订替换 DOM 时仍使用接入前捕获的阅读位置。
+      const anchor = requestedTop === undefined || this.outlineNavigation ? previousAnchor ?? this.captureAnchor() : undefined;
       // 脱离 DOM 时完成权限交接，随后连续写入占位和窗口，不穿插几何读取。
       if (state.progress.state === 'ready' || (this.outlineNavigation && !this.outlineNavigation.aligned))
         for (const view of created) view.semantic?.prepareAttachment();
@@ -1683,7 +1790,11 @@ export class MarkdownViewportHost {
       if (performance.now() - this.demand.lastScroll >= MARKDOWN_VIEWPORT_POLICY.quietMs)
         this.readingAnchor = this.captureAnchor();
     } catch (error) {
-      if (!(error instanceof DocumentConflictError) && (error as { code?: string })?.code !== 'revision-conflict') {
+      if (!(error instanceof DocumentConflictError) && (error as { code?: string })?.code !== 'revision-conflict' &&
+          !(error instanceof Error && error.name === 'AbortError') &&
+          !['structure-cancelled', 'structure-generation-expired'].includes((error as { code?: string })?.code ?? '')) {
+        if (import.meta.env.VITE_NOMO_ACCEPTANCE === '1') recordAcceptance('viewport-failure', {
+          message: error instanceof Error ? error.stack?.slice(0, 3000) : String(error), mode: this.mode });
         this.viewFailure = error;
         this.showFailure();
       }
@@ -1710,6 +1821,10 @@ export class MarkdownViewportHost {
   private destroyView(view: Mounted, prepared = false, discard = false) {
     const started = prepared ? performance.now() : 0;
     if (this.selectionOwner === view) this.selectionOwner = undefined;
+    if (this.active === view) {
+      this.active = undefined;
+      this.callbacks.onActive(undefined, undefined);
+    }
     this.resources.release(view.element);
     // 布局结果已由测量批次发布；回收只释放视图，避免 DOM 写入之间再同步读布局。
     this.observer?.unobserve(view.element);
@@ -1802,6 +1917,8 @@ export class MarkdownViewportHost {
     this.generation++;
     await this.document.session.flushEdits();
     if (navigation !== this.navigation || this.disposed || this.hidden) return;
+    if (clock.expectedRevision !== undefined && clock.expectedRevision !== this.document.state.status.revision)
+      throw new DocumentConflictError();
     this.globalSelection = false;
     this.removeInput();
     this.clearSelectionPaint();
@@ -2036,6 +2153,11 @@ export class MarkdownViewportHost {
         byte === this.document.state.status.byteLength && byte === view.window.toByte),
     );
     if (view) {
+      if (this.document.usesNativeStructure && !this.outlineNavigation) {
+        const block = this.index?.blockAt(byte);
+        const position = block && this.blockPositions.get(block.id);
+        if (position !== undefined) this.scrollTo(this.heights.top(position));
+      }
       this.preferredByte = undefined;
       this.active = view;
       this.selectionOwner = view;
@@ -2129,6 +2251,7 @@ export class MarkdownViewportHost {
   private async unmountViews(prepared = false, discard = false) {
     if (!prepared && !discard) await this.document.session.flushEdits();
     await this.renderDone;
+    this.document.releaseStructureOwner(this);
     this.removeInput();
     const views = this.mounted;
     this.mounted = [];

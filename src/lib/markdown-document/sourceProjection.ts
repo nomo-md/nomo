@@ -134,6 +134,10 @@ export class MarkdownSourceProjection {
 
   private resolvePositionByte(position: number): number | null {
     if (position < 0 || position > this.doc.content.size) return null;
+    // 编辑器为脚注等特殊块补出的空尾段没有源码；先定位 EOF，不能让
+    // 临时 marker 的序列化空行参与坐标，否则会返回文件末尾之外的字节。
+    if (position >= removeEmptyTrailingParagraph(this.doc).content.size)
+      return this.fromByte + utf16ToUtf8(this.source, this.source.length);
     const resolved = this.doc.resolve(position);
     if (resolved.parent.inlineContent) {
       // 用实际序列化规则定位文本光标；插入仅在临时不可变节点上发生，不进入会话或历史。
@@ -172,8 +176,6 @@ export class MarkdownSourceProjection {
         /* 空尾段或不可内联的原子节点使用已验证的块边界。 */
       }
     }
-    if (position >= removeEmptyTrailingParagraph(this.doc).content.size)
-      return this.fromByte + utf16ToUtf8(this.source, this.source.length);
     if (position === 0) return this.fromByte;
     const anchors = parseMarkdownWithSyncAnchors(this.source, this.context).anchors;
     const anchor =

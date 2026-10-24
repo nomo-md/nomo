@@ -762,7 +762,7 @@
     const relativeY = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
     const placement: OutlineDropPlacement =
       relativeY < 0.3 ? 'before' : relativeY > 0.7 ? 'after' : 'inside';
-    const plan = planOutlineSectionMove(outline, {
+    const plan = planOutlineSectionMove(projection.native ? projection.headings : outline, {
       sourceIndex: pendingOutlineDrag.sourceIndex,
       targetIndex,
       placement,
@@ -784,15 +784,16 @@
     if (
       targetIndex === outlineExpandTargetIndex ||
       !isOutlineItemExpandable(targetIndex) ||
-      !projection.isCollapsed(outline[targetIndex])
+      !projection.isCollapsed((projection.native ? projection.headings : outline)[targetIndex])
     ) {
-      if (outline[targetIndex] && !projection.isCollapsed(outline[targetIndex])) clearOutlineExpandTimer();
+      const item = (projection.native ? projection.headings : outline)[targetIndex];
+      if (item && !projection.isCollapsed(item)) clearOutlineExpandTimer();
       return;
     }
     clearOutlineExpandTimer();
     outlineExpandTargetIndex = targetIndex;
     outlineExpandTimer = setTimeout(() => {
-      const item = outline[targetIndex];
+      const item = (projection.native ? projection.headings : outline)[targetIndex];
       if (outlineDragging && item && projection.isCollapsed(item)) {
         outlineViewport?.capture();
         toggleOutlineItemExpanded(item);
@@ -1250,7 +1251,7 @@
           <p class="outline-progress" role="status">{t.outlineLoadFailed()} <button type="button" on:click={retryOutline}>{t.outlineRetry()}</button></p>
         {:else if outlineView.loading}
           <p class="outline-progress" role="status">{t.outlineLoading()}</p>
-        {:else if outline.length === 0}
+        {:else if projection.processed === 0}
           <p>{t.documentHasNoHeadings()}</p>
         {/if}
       </aside>

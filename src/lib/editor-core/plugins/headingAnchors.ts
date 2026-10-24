@@ -4,8 +4,10 @@ import { Decoration, DecorationSet } from 'prosemirror-view';
 
 interface HeadingAnchors {
   ids: readonly string[] | null;
+  ownedIds: readonly string[];
   decorations: DecorationSet;
 }
+let nextLocalHeading = 0;
 
 export const headingAnchorsKey = new PluginKey<HeadingAnchors>('headingAnchors');
 
@@ -26,13 +28,22 @@ export function headingAnchorsPlugin(): Plugin<HeadingAnchors> {
   return new Plugin<HeadingAnchors>({
     key: headingAnchorsKey,
     state: {
-      init: () => ({ ids: [], decorations: DecorationSet.empty }),
+      init: () => ({ ids: [], ownedIds: [], decorations: DecorationSet.empty }),
       apply(tr, value) {
         const ids: readonly string[] | undefined = tr.getMeta(headingAnchorsKey);
-        if (ids !== undefined) return { ids, decorations: decorate(tr.doc, ids) };
+        if (ids !== undefined) return { ids, ownedIds: ids, decorations: decorate(tr.doc, ids) };
         if (!tr.docChanged) return value;
         // 编辑期间映射既有锚点；下一次索引刷新重新对齐标题（含新增/删除）。
-        return { ids: null, decorations: value.decorations.map(tr.mapping, tr.doc) };
+        let decorations = value.decorations.map(tr.mapping, tr.doc);
+        const added: Decoration[] = [];
+        tr.doc.descendants((node, pos) => {
+          if (node.type.name !== 'heading') return;
+          if (!decorations.find(pos, pos + 1).some(item => item.from === pos))
+            added.push(Decoration.node(pos, pos + node.nodeSize, {}, { headingId: `local-heading:${++nextLocalHeading}`, local: true }));
+          return false;
+        });
+        decorations = decorations.add(tr.doc, added);
+        return { ids: null, ownedIds: value.ownedIds, decorations };
       },
     },
     props: { decorations: state => headingAnchorsKey.getState(state)?.decorations },

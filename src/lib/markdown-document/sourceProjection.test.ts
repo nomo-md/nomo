@@ -1,9 +1,17 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
-import { EditorState } from 'prosemirror-state';
+import { EditorState, Selection } from 'prosemirror-state';
 import { parseMarkdown } from '../editor-core/markdown';
 import { MarkdownSourceProjection } from './sourceProjection';
 import { MarkdownDocumentSession } from './session';
+import { ensureTrailingParagraph } from '../editor-core/plugins/trailingParagraph';
+
+it('脚注后的编辑器空尾段定位到真实 EOF，不包含临时标记引入的空行', () => {
+  const source = '[^note]: 跨窗口脚注内容。\n';
+  const doc = ensureTrailingParagraph(parseMarkdown(source)).doc;
+  const projection = new MarkdownSourceProjection(source, doc, 1000);
+  expect(projection.positionToByte(Selection.atEnd(doc).head)).toBe(1000 + new TextEncoder().encode(source).length);
+});
 
 function replaceText(source: string, old: string, replacement: string) {
   const doc = parseMarkdown(source);
@@ -30,6 +38,15 @@ function replaceText(source: string, old: string, replacement: string) {
 }
 
 describe('语义窗口的源文写回', () => {
+  it('GFM 裸链接保持源码范围，普通正文编辑不改写网址和邮箱', () => {
+    const source='中文 www.example.com/a_(b) 和 foo+bar@example.com 尾部';
+    const doc=parseMarkdown(source);
+    const projection=new MarkdownSourceProjection(source,doc);
+    expect(projection.project(doc).source).toBe(source);
+    expect(replaceText(source,'尾部','结尾').source).toBe(source.replace('尾部','结尾'));
+    const links:string[]=[];doc.descendants(node=>{if(node.isText && node.marks.some(mark=>mark.type.name==='link'))links.push(node.text!);});
+    expect(links).toEqual(['www.example.com/a_(b)','foo+bar@example.com']);
+  });
   it('Mermaid 后含下划线的普通文本可映射并恢复正反向选区端点', () => {
     const source = '# 图表\n\n```mermaid\nflowchart TD\n' + Array.from({ length: 399 }, (_, i) => `N${i}[步骤 ${i}] --> N${i + 1}[步骤 ${i + 1}]`).join('\n') + '\n```\n\n\n\nNOMO_END — 文件终点。\n';
     const doc = parseMarkdown(source), projection = new MarkdownSourceProjection(source, doc);

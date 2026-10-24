@@ -3,6 +3,8 @@ import { TextSelection } from 'prosemirror-state';
 import type { EditorView } from 'prosemirror-view';
 import { onInterfaceLocaleChanged, t } from '../../../app/i18n';
 import { projectInlineSource } from '../InlineSourceCodec';
+import type { EditorCoreOptions } from '../types';
+import { parseMarkdown } from '../markdown';
 
 type FootnoteDefinitionLocation = {
   node: ProseMirrorNode;
@@ -33,8 +35,10 @@ export class FootnoteRefNodeView {
   private positionHandler: (() => void) | null = null;
   private closeTimer: number | null = null;
   private unsubscribeLocale: () => void = () => undefined;
+  private previewRequest: AbortController | null = null;
+  private navigation = new AbortController();
 
-  constructor(node: ProseMirrorNode, view: EditorView) {
+  constructor(node: ProseMirrorNode, view: EditorView, private native?: EditorCoreOptions['footnotes'], private onFailure?: (error: unknown) => void) {
     this.node = node;
     this.view = view;
 
@@ -101,6 +105,7 @@ export class FootnoteRefNodeView {
   }
 
   destroy(): void {
+    this.navigation.abort();
     this.unsubscribeLocale();
     this.closePreview();
   }
@@ -114,6 +119,10 @@ export class FootnoteRefNodeView {
   }
 
   private jumpToDefinition(): void {
+    if (this.view.composing) return;
+    if (this.native) {
+      void this.native.jump(this.id, this.navigation.signal).catch(error => { if (!this.navigation.signal.aborted) this.onFailure?.(error); }); return;
+    }
     const definition = this.findDefinition();
     if (!definition) return;
 
@@ -176,6 +185,7 @@ export class FootnoteRefNodeView {
   }
 
   private closePreview(): void {
+    this.previewRequest?.abort(); this.previewRequest = null;
     this.clearCloseTimer();
     if (this.positionHandler) {
       window.removeEventListener('scroll', this.positionHandler, true);
@@ -216,6 +226,26 @@ export class FootnoteRefNodeView {
       this.previewTitle.textContent = t.footnoteTitle({ id: this.id });
     }
     this.previewContent.textContent = '';
+    if (this.native) {
+      this.previewRequest?.abort(); const request = this.previewRequest = new AbortController();
+      this.previewContent.textContent = '正在读取脚注…';
+      void this.native.preview(this.id, request.signal).then(result => {
+        if (request.signal.aborted || !this.previewContent) return;
+        this.previewContent.textContent = '';
+        if (result.state !== 'found') {
+          this.previewContent.textContent = result.state === 'incomplete' ? '脚注仍在索引中…' : t.footnoteMissing({ id: this.id }); return;
+        }
+        if (result.truncated) this.previewContent.textContent = `${result.source ?? ''}…`;
+        else {
+          const doc = parseMarkdown(result.source ?? ''); let definition: ProseMirrorNode | null = null;
+          doc.descendants(node => { if (!definition && node.type.name === 'footnote_def') definition = node; return !definition; });
+          if (definition) this.previewContent.appendChild(DOMSerializer.fromSchema(this.view.state.schema).serializeFragment(projectInlineSource(definition).content, { document }));
+          else this.previewContent.textContent = result.source ?? t.footnoteEmpty();
+        }
+        this.updatePreviewPosition();
+      }).catch(error => { if (!request.signal.aborted && this.previewContent) { this.previewContent.textContent = String(error); this.onFailure?.(error); } });
+      return;
+    }
     const definition = this.findDefinition();
     if (!definition || definition.node.content.size === 0) {
       this.previewContent.classList.add('is-missing');

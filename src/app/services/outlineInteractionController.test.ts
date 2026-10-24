@@ -11,6 +11,33 @@ afterEach(() => {
 });
 
 describe('outlineInteractionController', () => {
+  it('rejects native chapter targets resolved across different revisions', async () => {
+    const markdown = '# One\n\n# Two';
+    const outline = extractOutline(markdown);
+    const editor = createEditorCore({ markdown });
+    const transformMarkdown = vi.fn();
+    const setStatusMessage = vi.fn();
+    vi.spyOn(applicationSessions, 'getMarkdownApplicationSession').mockReturnValue({
+      document: { state: { status: { revision: 3 } }, session: { flushEdits: async () => {} },
+        resolveStructure: vi.fn().mockResolvedValueOnce({ status: 'found', revision: 2, target: { line: 1 } })
+          .mockResolvedValueOnce({ status: 'found', revision: 3, target: { line: 3 } }) }, transformMarkdown,
+    } as unknown as applicationSessions.MarkdownApplicationSession);
+    const controller = createOutlineInteractionController({
+      getMode: () => 'semantic', getMarkdown: () => markdown, getOutline: () => outline,
+      getOutlineProjection: () => ({ native: { snapshot: { rows: outline.map((row, i) =>
+        ({ ...row, blockId: `b${i}`, blockHeadingIndex: 0 })) } } }) as never,
+      getCollapsedOutlineIds: () => new Set(), setCollapsedOutlineIds: vi.fn(),
+      getOutlineVisible: () => true, setOutlineVisible: vi.fn(), setActiveOutlineId: vi.fn(),
+      getSuppressOutlineScrollUntil: () => 0, setSuppressOutlineScrollUntil: vi.fn(),
+      getSemanticPane: () => document.createElement('section'), getSourcePane: () => document.createElement('section'),
+      getSourceEditor: () => undefined, getEditor: () => editor, getReadonly: () => false, setStatusMessage,
+    });
+    expect(controller.moveOutlineSection({ sourceIndex: 0, targetIndex: 1, placement: 'after' })).toBe(true);
+    await vi.waitFor(() => expect(setStatusMessage).toHaveBeenCalledWith(expect.stringContaining('移动已取消')));
+    expect(transformMarkdown).not.toHaveBeenCalled();
+    editor.destroy();
+  });
+
   it('requires a complete matching revision and rejects an edit while a chapter move is queued', () => {
     const markdown = '# One\n\none\n\n# Two\n\ntwo';
     const outline = extractOutline(markdown);

@@ -1,4 +1,5 @@
 import { MarkdownSessionController } from './controller';
+import { recordAcceptance } from './acceptanceProbe';
 import { buildMarkdownIndex, type MarkdownIndexedSnapshot, type MarkdownIndexChange } from './incrementalIndex';
 import { invalidateMarkdownIndex, type MarkdownIndexInvalidation } from './indexInvalidation';
 import { MarkdownMountPolicy, type MarkdownMountMode } from './mountPolicy';
@@ -14,6 +15,10 @@ import { emptyEnhancements } from './enhancements';
 import { createMarkdownDocumentLayouts } from './layoutCache';
 import { MarkdownSearchController } from './searchController';
 import type { SearchOptions } from './searchProtocol';
+import { NativeStructureClient } from './nativeStructureClient';
+import { NativeMarkdownStructureIndex } from './nativeStructureIndex';
+import type { StructureQueryPort, StructureTarget } from './structureProtocol';
+import type { LocalHeadingWindow } from './localHeadingProjection';
 
 export interface MarkdownLoadingState {
   status: MarkdownSessionStatus;
@@ -56,6 +61,7 @@ export class ProgressiveMarkdownDocument {
   private indexingSnapshot: SnapshotReference | undefined;
   private ending?: Promise<void>;
   private currentIndex: MarkdownStructureIndex | null = null;
+  private previousNative: NativeMarkdownStructureIndex | null = null;
   private invalidation?: MarkdownIndexInvalidation;
   private forceFullIndex = false;
   private abort: AbortController | null = null;
@@ -80,6 +86,37 @@ export class ProgressiveMarkdownDocument {
   private publishedSignature = '';
   private publishedFailure: unknown;
   private visibleDemands = new Map<object, MarkdownVisibleDemand>();
+  private nativeTocRunning: Promise<void> | null = null;
+  private nativeTocAbort: AbortController | null = null;
+  localHeadings = new Map<object, LocalHeadingWindow>();
+  private localHeadingLease = Symbol('local-headings');
+  private localHeadingRevision = -1;
+  previewHeadings(owner: object, window: LocalHeadingWindow) {
+    const next = new Map(this.localHeadings).set(owner, window);
+    try { (this.nativeStructure ?? this.previousNative)?.client.retain(this.localHeadingLease, [...next.values()]); }
+    catch (error) { this.failure = error; this.publish(true); return; }
+    this.localHeadings = next;
+    this.localHeadingRevision = this.session.state.committed.revision;
+    this.publish(true);
+  }
+  get nativeStructure() { return this.currentIndex instanceof NativeMarkdownStructureIndex ? this.currentIndex : null; }
+  releaseStructureOwner(owner: object) { this.nativeStructure?.release(owner); this.previousNative?.release(owner); }
+  get usesNativeStructure() { return !!this.port.startStructure && !!this.port.queryStructure; }
+  async resolveStructure(namespace: 'heading' | 'slug' | 'footnote' | 'link' | 'footnoteReference', key: string, signal = new AbortController().signal): Promise<StructureTarget & { revision: number }> {
+    await this.session.awaitTransactions();
+    for (;;) {
+      signal.throwIfAborted();
+      await this.refreshIndex();
+      const client = this.nativeStructure?.client;
+      if (!client) throw new Error('当前原生结构索引不可用。');
+      const response = await client.query<StructureTarget>({ kind: 'resolve', namespace, key }, signal);
+      if (response.revision !== this.session.state.committed.revision) continue;
+      const result = response.items[0];
+      if (!result) throw new Error('原生目标查询没有返回状态。');
+      if (result.status !== 'incomplete' || response.state === 'ready') return { ...result, revision: response.revision };
+      await new Promise(resolve => setTimeout(resolve, 30));
+    }
+  }
 
   constructor(
     readonly port: MarkdownDocumentPort,
@@ -118,6 +155,12 @@ export class ProgressiveMarkdownDocument {
       else {
         this.forceFullIndex = true;
         this.invalidation = undefined;
+      }
+      if (this.currentIndex instanceof NativeMarkdownStructureIndex) {
+        if (this.currentIndex.progress.state === 'ready') {
+          this.previousNative?.dispose(); this.previousNative = this.currentIndex;
+          this.currentIndex.client.dispose();
+        } else this.currentIndex.dispose();
       }
       this.currentIndex = null;
       this.timings.indexed = undefined;
@@ -163,7 +206,7 @@ export class ProgressiveMarkdownDocument {
       index: this.currentIndex,
       progress,
       mountMode: this.mode,
-      windowLimited: this.policy.windowLimited,
+      windowLimited: this.usesNativeStructure || this.policy.windowLimited,
       mountRestriction: this.policy.restriction,
       failure: this.failure,
       timings: { ...this.timings },
@@ -187,6 +230,7 @@ export class ProgressiveMarkdownDocument {
       performance.now() - this.latestInteraction < 2000,
       this.pressureOwners.size > 0,
     );
+    if (this.usesNativeStructure) this.mode = 'windowed';
     const state = this.state;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
@@ -204,6 +248,8 @@ export class ProgressiveMarkdownDocument {
     // 滚动只更新时间和挂载策略；元数据没有变化时不让应用反复派生大纲、持久化标签。
     if (!force && signature === this.publishedSignature && this.publishedFailure === state.failure) return;
     this.publishedSignature = signature; this.publishedFailure = state.failure;
+    if (import.meta.env.VITE_NOMO_ACCEPTANCE === '1') recordAcceptance('index', { documentId: state.status.documentId, revision: state.status.revision,
+      state: state.progress.state, timings: state.timings, failure: !!state.failure });
     for (const listener of this.listeners) listener(state, change);
   }
   noteVisible(stage: 'readable' | 'editable' | 'stable') {
@@ -224,6 +270,10 @@ export class ProgressiveMarkdownDocument {
   }
   setHidden(hidden: boolean) {
     this.hidden = hidden;
+    const native = this.nativeStructure;
+    if (native) void this.port.updateStructureDemand?.(native.client.identity, !hidden, 1).catch(error => {
+      if ((error as { code?: string })?.code !== 'revision-conflict') { this.failure = error; this.publish(); }
+    });
     if (hidden) {
       void this.searches.cancel().catch(error => { this.failure = error; this.publish(); });
       this.visibleDemands.clear();
@@ -267,7 +317,7 @@ export class ProgressiveMarkdownDocument {
           void this.refreshIndex();
         });
       },
-      this.completed ? 80 : 0,
+      this.completed || this.previousNative ? 80 : 0,
     );
   }
   private async refreshIndex() {
@@ -290,6 +340,45 @@ export class ProgressiveMarkdownDocument {
       return;
     const generation = this.generation;
     const abort = (this.abort = new AbortController());
+    if (this.usesNativeStructure) {
+      this.building = (async () => {
+        try {
+          const status = this.session.state.committed;
+          const client = await NativeStructureClient.open(this.port as StructureQueryPort, status.documentId, status.revision, abort.signal);
+          const index = new NativeMarkdownStructureIndex(client, status.byteLength);
+          if (generation !== this.generation || this.closed) { index.dispose(); return; }
+          this.currentIndex = index;
+          for (;;) {
+            const complete = await index.refresh(abort.signal);
+            if (generation !== this.generation || this.closed) return;
+            if (this.hidden) { await this.port.updateStructureDemand?.(client.identity, false, 1); return; }
+            if (complete && this.previousNative) {
+              const previous = this.previousNative;
+              await index.adopt(previous, abort.signal);
+              previous.dispose(); if (this.previousNative === previous) this.previousNative = null;
+            }
+            if (complete && status.revision > this.localHeadingRevision && !this.session.hasUnsettledEdits) {
+              this.localHeadings = new Map(); client.releaseRetained(this.localHeadingLease);
+            }
+            this.failure = null; this.publish(true);
+            if (complete) { this.timings.indexed = performance.now() - this.started; this.publish(true); break; }
+            // 首批结构尚未出现时不额外等待完整后台轮询周期；已有可见前缀后恢复低频查询。
+            await new Promise(resolve => setTimeout(resolve, index.progress.indexedBytes ? 80 : 16)); abort.signal.throwIfAborted();
+          }
+        } catch (error) {
+          if (!abort.signal.aborted && !this.closed) { this.failure = error; this.publish(); }
+        }
+      })().finally(() => {
+        this.building = null;
+        if (!this.closed && !this.hidden && this.nativeStructure?.progress.state === 'ready' && this.session.state.committed.revision > 0) {
+          void this.materializeNativeToc().catch(error => {
+            if (!this.closed && (error as { name?: string })?.name !== 'AbortError' &&
+              (error as { code?: string })?.code !== 'revision-conflict' && !(error instanceof DocumentConflictError)) { this.failure = error; this.publish(); }
+          });
+        }
+      });
+      await this.building; return;
+    }
     this.building = (async () => {
       let snapshot: SnapshotReference | undefined;
       try {
@@ -363,7 +452,7 @@ export class ProgressiveMarkdownDocument {
     const generation = this.session.state.viewGeneration;
     byte = Math.max(0, Math.min(byte, status.byteLength));
     const index = this.currentIndex?.revision === status.revision ? this.currentIndex : null;
-    const block = index?.blockAt(byte);
+    const block = this.nativeStructure ? (await this.nativeStructure.client.blocks(Math.max(0, byte === status.byteLength ? byte - 1 : byte), byte + 1)).items[0] : index?.blockAt(byte);
     if (requestedMode === 'semantic' && status.byteLength > 0 &&
       (!block || byte > block.toByte || (byte === block.toByte && byte < status.byteLength)))
       return { mode: 'preparing', fromByte: byte, toByte: byte, blockIds: [] };
@@ -390,7 +479,48 @@ export class ProgressiveMarkdownDocument {
     );
   }
   /** 保存、恢复、导出在冻结前物化同版本目录，后台窗口是否挂载不影响完整性。 */
+  private materializeNativeToc(signal?: AbortSignal): Promise<void> {
+    if (this.closed) return Promise.reject(new DOMException('文档已关闭。', 'AbortError'));
+    if (this.nativeTocRunning) return this.nativeTocRunning;
+    const abort = this.nativeTocAbort = new AbortController();
+    const cancel = () => abort.abort(signal?.reason);
+    if (signal?.aborted) cancel();
+    else signal?.addEventListener('abort', cancel, { once: true });
+    return this.nativeTocRunning = this.applyNativeToc(abort.signal).finally(() => {
+      signal?.removeEventListener('abort', cancel);
+      this.nativeTocRunning = null; this.nativeTocAbort = null;
+    });
+  }
+  private async applyNativeToc(signal: AbortSignal) {
+    if (this.session.state.committed.revision === 0) return;
+    if (!this.port.materializeStructureToc) throw new Error('原生自动目录协议不可用。');
+    await this.session.flushEdits();
+    const base = { revision: this.session.state.committed.revision, generation: this.session.state.viewGeneration };
+    const client = await NativeStructureClient.open(this.port as StructureQueryPort, this.session.documentId, base.revision, signal);
+    try {
+      await this.port.updateStructureDemand?.(client.identity, true, 2);
+      while ((await client.query({ kind: 'progress' }, signal)).state !== 'ready') {
+        await new Promise(resolve => setTimeout(resolve, 40)); signal.throwIfAborted();
+      }
+      const request = { identity: client.identity, operationId: crypto.randomUUID(), editGeneration: base.generation,
+        selection: this.selection.selection };
+      await this.session.commitNativeMutation(base, signal, () => this.port.materializeStructureToc!(request));
+    } finally {
+      if (this.hidden) await this.port.updateStructureDemand?.(client.identity, false, 1).catch(() => undefined);
+      client.dispose();
+    }
+  }
   async materializeToc(signal?: AbortSignal) {
+    if (this.usesNativeStructure) {
+      for (;;) {
+        signal?.throwIfAborted();
+        try { await this.materializeNativeToc(signal); return; }
+        catch (error) {
+          if (this.closed || (!(error instanceof DocumentConflictError) &&
+              (error as { code?: string })?.code !== 'revision-conflict')) throw error;
+        }
+      }
+    }
     // 初始版本保持原片段；已证明没有目录的普通文档无需为保存/搜索等待结构任务。
     if (this.session.state.committed.revision === 0 || this.tocPossible === false) return;
     for (;;) {
@@ -444,7 +574,7 @@ export class ProgressiveMarkdownDocument {
     finally { this.toc = new AutomaticMarkdownToc(this.session, this.build); }
     if (this.completed) { await this.session.releaseSnapshot(this.completed.snapshot); this.completed = null; }
     await this.session.awaitSnapshotReleases();
-    this.currentIndex = null;
+    this.nativeStructure?.dispose(); this.previousNative?.dispose(); this.previousNative = null; this.currentIndex = null;
   }
   /** 关闭准备只取消可重建索引，保护保存/导出正在物化的目录和快照。 */
   cancelBackgroundWork() {
@@ -475,6 +605,7 @@ export class ProgressiveMarkdownDocument {
     await this.searches.cancel();
     if (!discard) await this.session.flushEdits();
     this.closed = true;
+    this.nativeTocAbort?.abort();
     this.visibleDemands.clear();
     this.abort?.abort();
     if (this.timer) clearTimeout(this.timer);
@@ -484,6 +615,7 @@ export class ProgressiveMarkdownDocument {
     try {
       await this.session.prepareClose(discard);
       await this.building?.catch(() => undefined);
+      await this.nativeTocRunning?.catch(() => undefined);
       tocDisposed = true;
       await this.toc.dispose();
       if (this.completed) {
@@ -500,6 +632,8 @@ export class ProgressiveMarkdownDocument {
       throw error;
     }
     this.unsubscribe(); this.unsubscribeChanges(); this.selection.dispose(); this.listeners.clear(); this.pressureOwners.clear();
+    this.nativeStructure?.dispose(); this.previousNative?.dispose(); this.previousNative = null;
+    this.localHeadings.clear(); NativeStructureClient.releaseDocument(this.session.documentId);
     await this.searches.dispose();
     this.layouts.dispose();
   }

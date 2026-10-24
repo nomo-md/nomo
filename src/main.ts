@@ -1,4 +1,5 @@
 import './app/styles/theme.css';
+import { installAcceptanceProbe } from './lib/markdown-document/acceptanceProbe';
 import './app/styles/global.css';
 import { mount } from 'svelte';
 import { installAutoHideScrollbars } from './app/services/scrollbarVisibility';
@@ -6,6 +7,7 @@ import { bootstrapThemeFromSnapshot } from './app/services/themeManager';
 import { createPerfTimer, initializeLogger, logError, logInfo } from './lib/services/logger';
 
 bootstrapThemeFromSnapshot();
+installAcceptanceProbe();
 
 const target = document.getElementById('app');
 const startupTimer = createPerfTimer('App', '前端入口加载');

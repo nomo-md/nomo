@@ -1,5 +1,7 @@
 //! Markdown 会话：完整源文本、历史及快照独立于 WebView 生命周期。
 pub(super) mod search;
+mod structure;
+mod toc;
 use super::{
     chunk_reader::{AddedStore, DocumentSnapshot, OriginalFile},
     edit_journal::BaselineIdentity,
@@ -131,6 +133,7 @@ struct Session {
     ack: HashMap<String, ([u8; 32], MarkdownStatus)>,
     ack_order: VecDeque<String>,
     search_ack: VecDeque<(String, super::markdown_search::ReplaceResult)>,
+    toc_ack: VecDeque<(String, [u8; 32], MarkdownStatus)>,
     closed: bool,
     save_gate: Arc<Mutex<()>>,
     active_group: Option<(String, String)>,
@@ -256,6 +259,7 @@ pub(crate) struct MarkdownDocumentSessionManager {
     path_operations: Arc<Mutex<()>>,
     writing_stats: super::writing_stats::WritingStatsService,
     search: super::markdown_search::SearchService,
+    structure: super::structure_index::StructureService,
 }
 impl MarkdownDocumentSessionManager {
     pub(crate) fn new(root: PathBuf) -> TextDocumentResult<Self> {
@@ -263,6 +267,7 @@ impl MarkdownDocumentSessionManager {
             crate::app_logger::warn("WritingStats", &format!("清理遗留统计文件失败：{}", error.message));
         }
         Ok(Self {
+            structure: super::structure_index::StructureService::new(&root)?,
             root,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             snapshots: Arc::new(Mutex::new(HashMap::new())),
@@ -389,6 +394,7 @@ impl MarkdownDocumentSessionManager {
             ack: HashMap::new(),
             ack_order: VecDeque::new(),
             search_ack: VecDeque::new(),
+            toc_ack: VecDeque::new(),
             closed: false,
             save_gate: Arc::new(Mutex::new(())),
             active_group: None,
@@ -512,6 +518,7 @@ impl MarkdownDocumentSessionManager {
             ack: HashMap::new(),
             ack_order: VecDeque::new(),
             search_ack: VecDeque::new(),
+            toc_ack: VecDeque::new(),
             closed: false,
             save_gate: Arc::new(Mutex::new(())),
             active_group: None,
@@ -711,6 +718,7 @@ impl MarkdownDocumentSessionManager {
         );
         if result.revision != transaction.base_revision {
             self.writing_stats.invalidate(&transaction.document_id, false);
+            self.structure.edited(&transaction.document_id, &edits.iter().map(|edit| (edit.from_byte, edit.to_byte, edit.inserted_text.len() as u64)).collect::<Vec<_>>());
             self.search.invalidate(&transaction.document_id, None);
         }
         session.ack_order.push_back(transaction.operation_id);
@@ -741,8 +749,13 @@ impl MarkdownDocumentSessionManager {
         let mut tree = session.current.tree.clone();
         let mut staged_head = session.manifest.event;
         let derived = session.manifest.derived;
+        let mut structure_invalidation = None;
         // 每次只读取/写入一个历史批次。最终 marker 发布前所有批次都不可见。
         let mut stage = |session: &mut Session, edits: Vec<TreeEdit>| -> TextDocumentResult<()> {
+            for edit in &edits {
+                structure_invalidation = super::structure_index::Invalidation::merge(structure_invalidation,
+                    &[(edit.from, edit.to, edit.pieces.iter().map(|piece| piece.len()).sum())]);
+            }
             tree = apply_tree_edits(tree.clone(), &edits)?;
             let record = HistoryRecord {
                 previous_event: staged_head, group: if redo { "redo" } else { "undo" }.into(),
@@ -809,6 +822,9 @@ impl MarkdownDocumentSessionManager {
         };
         let result = session.publish(record, tree, HistoryPointer::Existing(undo), next_redo)?;
         self.writing_stats.invalidate(document_id, false);
+        if let Some(change) = structure_invalidation {
+            self.structure.edited(document_id, &[(change.from, change.to, (change.to - change.from).saturating_add_signed(change.delta))]);
+        } else { self.structure.invalidate(document_id, false); }
         self.search.invalidate(document_id, None);
         Ok(result)
     }
@@ -1019,6 +1035,7 @@ impl MarkdownDocumentSessionManager {
         }
         session.owner = target.into();
         self.writing_stats.invalidate(document_id, true);
+        self.structure.invalidate(document_id, true);
         self.search.invalidate(document_id, None);
         Ok(())
     }
@@ -1067,6 +1084,7 @@ impl MarkdownDocumentSessionManager {
         for session in &mut sessions {
             session.owner = target.into();
             self.writing_stats.invalidate(&session.manifest.document_id, true);
+            self.structure.invalidate(&session.manifest.document_id, true);
             self.search.invalidate(&session.manifest.document_id, None);
         }
         Ok(result)
@@ -1102,6 +1120,7 @@ impl MarkdownDocumentSessionManager {
             self.require_released_snapshots(document_id, "detach", "文档仍有正在使用的完整快照")?;
             session.closed = true;
             self.writing_stats.invalidate(document_id, true);
+            self.structure.invalidate(document_id, true);
             self.search.invalidate(document_id, None);
         }
         lock(&self.sessions)?.remove(document_id);
@@ -1124,6 +1143,7 @@ impl MarkdownDocumentSessionManager {
             session.closed = true;
             let document_id = session.manifest.document_id.clone();
             self.writing_stats.invalidate(&document_id, true);
+            self.structure.invalidate(&document_id, true);
             self.search.invalidate(&document_id, None);
             lock(&self.snapshots)?.retain(|_, snapshot| snapshot.document_id != document_id);
             lock(&self.sessions)?.remove(&document_id);
@@ -1151,6 +1171,7 @@ impl MarkdownDocumentSessionManager {
         for session in &mut sessions {
             session.closed = true; session.cleanup.remove = true;
             self.writing_stats.invalidate(&session.manifest.document_id, true);
+            self.structure.invalidate(&session.manifest.document_id, true);
             self.search.invalidate(&session.manifest.document_id, None);
         }
         let mut registry = lock(&self.sessions)?;
@@ -1178,6 +1199,7 @@ impl MarkdownDocumentSessionManager {
             session.closed = true;
             session.cleanup.remove = true;
             self.writing_stats.invalidate(document_id, true);
+            self.structure.invalidate(document_id, true);
             self.search.invalidate(document_id, None);
         }
         lock(&self.sessions)?.remove(document_id);

@@ -7,6 +7,7 @@ import type { DocumentStatus, DocumentTransaction, DocumentWindow } from './prot
 import { DocumentConflictError } from './protocol';
 import type { MarkdownEncoding } from '../services/storage';
 import type { NativeStatsRequest, NativeStatsResponse } from '../outline/writingStatsProtocol';
+import type { StructureQueryPort } from './structureProtocol';
 
 export interface MarkdownSessionStatus extends DocumentStatus {
   encoding?: MarkdownEncoding;
@@ -19,7 +20,10 @@ export interface SnapshotReference {
   revision: number;
   byteLength: number;
 }
-export interface MarkdownDocumentPort extends MarkdownSearchPort {
+export interface MarkdownDocumentPort extends MarkdownSearchPort, Partial<StructureQueryPort> {
+  materializeStructureToc?(request: { identity: import('./structureProtocol').StructureIdentity; operationId: string; editGeneration: number;
+    selection?: import('./protocol').DocumentSelection }): Promise<{ status: MarkdownSessionStatus; changed: boolean;
+      nativeEdits?: import('./controller').NativeRangeEdit[] | null }>;
   writingStats?(request: NativeStatsRequest): Promise<NativeStatsResponse>;
   cancelWritingStats?(requestId?: number): Promise<void>;
   openDocument(
@@ -67,6 +71,11 @@ function native<T>(request: Record<string, unknown>): Promise<T> {
 }
 export function createNativeMarkdownPort(): MarkdownDocumentPort {
   return {
+    materializeStructureToc: request => native({ type: 'materializeStructureToc', ...request }),
+    startStructure: (documentId, revision) => native({ type: 'startStructure', documentId, revision }),
+    queryStructure: (identity, query) => native({ type: 'queryStructure', identity, query }),
+    updateStructureDemand: (identity, active, priority) => native({ type: 'structureDemand', identity, active, priority }),
+    closeStructureOutline: (documentId, viewId) => native({ type: 'closeStructureOutline', documentId, viewId }),
     listenSearch: listener => listen(MARKDOWN_SEARCH_EVENT, event => listener(event.payload as import('./searchProtocol').SearchProgress)),
     startSearch: request => native({ type: 'startSearch', ...request }),
     readSearchPage: (taskId, fromIndex, limit) => native({ type: 'readSearchPage', taskId, fromIndex, limit }),

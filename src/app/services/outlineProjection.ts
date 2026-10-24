@@ -1,11 +1,16 @@
 import type { OutlineItem } from '../../lib/outline/outlineService';
 import type { DocumentTaskState } from '../../lib/markdown-document/protocol';
+import { NativeOutlineView } from '../../lib/markdown-document/nativeOutlineView';
+import type { NativeStructureClient } from '../../lib/markdown-document/nativeStructureClient';
+import type { StructureOutlineRow } from '../../lib/markdown-document/structureProtocol';
+import { projectLocalHeadings, type LocalHeadingWindow } from '../../lib/markdown-document/localHeadingProjection';
 
 export interface OutlineListAnchor {
   id: string;
   key?: string;
   index: number;
   offset: number;
+  byte?: number;
 }
 
 export type OutlineIndexPhase = DocumentTaskState;
@@ -16,6 +21,33 @@ export type OutlineIndexPhase = DocumentTaskState;
  * 修订替换重用/清空派生容器，完整索引删除失效状态，关闭文档 dispose 全部释放。
  */
 export class OutlineProjection {
+  native: NativeOutlineView | null = null;
+  localHeadings: ReadonlyMap<object, LocalHeadingWindow> = new Map();
+  projectRows(rows: readonly StructureOutlineRow[], lastPage = true) { return projectLocalHeadings(rows, this.localHeadings.values(), lastPage); }
+  setLocalHeadings(headings: ReadonlyMap<object, LocalHeadingWindow>) {
+    if (headings === this.localHeadings) return;
+    this.localHeadings = headings; this.generation++;
+  }
+  private nativeMutation: Promise<unknown> | null = null;
+  bindNative(client: NativeStructureClient, phase: OutlineIndexPhase, failure: unknown) {
+    if (this.native) this.native.bind(client); else this.native = new NativeOutlineView(client, this.defaultLevel);
+    if (this.revision !== client.identity.revision || this.phase !== phase || this.failure !== failure) this.generation++;
+    this.revision = client.identity.revision; this.phase = phase; this.failure = failure;
+  }
+  async loadNative(from: number) {
+    if (!this.native) return null;
+    await this.nativeMutation;
+    const previous = this.native.snapshot;
+    const view = await this.native.load(from);
+    if (view) {
+      if (previous && previous.fromIndex !== view.fromIndex) this.generation++;
+      this.headings = view.rows; this.processed = view.visibleCount;
+      this.expandableCount = view.rows.filter(row => row.hasChildren).length;
+      this.collapsedExpandableCount = view.rows.filter(row => row.hasChildren && row.collapsed).length;
+      this.failure = this.native.failure;
+    }
+    return view;
+  }
   headings: readonly OutlineItem[] = [];
   revision = -1;
   generation = 0;
@@ -41,7 +73,7 @@ export class OutlineProjection {
   private defaultLevel: number;
   constructor(readonly documentId: string, private preferredLevel = 6) { this.defaultLevel = preferredLevel; }
 
-  get complete() { return this.processed === this.headings.length && !this.pruning; }
+  get complete() { return this.native ? !!this.native.snapshot?.projectionComplete : this.processed === this.headings.length && !this.pruning; }
   get ready() { return !this.disposed && this.phase === 'ready' && this.complete && !this.failure; }
 
   update(headings: readonly OutlineItem[], revision: number, phase: OutlineIndexPhase, failure: unknown = null) {
@@ -71,20 +103,30 @@ export class OutlineProjection {
 
   identity(item: OutlineItem) {
     // 结构索引在未受编辑影响的前缀/尾部保留 blockId；重复标题的 slug 会重新编号。
-    return 'blockId' in item && typeof item.blockId === 'string'
+    return 'blockId' in item && typeof item.blockId === 'string' && item.blockId.length > 0
       ? `${item.blockId}:${'blockHeadingIndex' in item ? item.blockHeadingIndex : 0}` : item.id;
   }
 
   isCollapsed(item: OutlineItem) {
+    if (this.native) return !!(item as StructureOutlineRow).collapsed;
     return this.overrides.get(this.identity(item)) ?? item.level >= this.defaultLevel;
   }
 
   toggle(item: OutlineItem) {
+    if (this.native) {
+      const view = this.native; this.generation++;
+      this.nativeMutation = Promise.resolve(this.nativeMutation).then(() => view.toggle(item as StructureOutlineRow))
+        .catch(error => { this.failure = error; }); return;
+    }
     this.overrides.set(this.identity(item), !this.isCollapsed(item));
     this.reset();
   }
 
   setDefaultLevel(level: number) {
+    if (this.native) {
+      const view = this.native; this.generation++; this.defaultLevel = level;
+      this.nativeMutation = Promise.resolve(this.nativeMutation).then(() => view.setLevel(level)).catch(error => { this.failure = error; }); return;
+    }
     this.defaultLevel = level;
     this.overrides.clear();
     this.reset();
@@ -141,6 +183,8 @@ export class OutlineProjection {
   }
 
   dispose() {
+    if (this.native) void this.native.dispose().catch(error => { this.failure = error; });
+    this.native = null;
     this.disposed = true;
     this.reset();
     this.headings = [];

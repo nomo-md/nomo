@@ -26,6 +26,8 @@ export class OutlineViewportController {
   private resize: ResizeObserver;
   private lastScrollTop = 0;
   private restoreOffset = -1;
+  private nativeBusy = false;
+  private nativeTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private panel: HTMLElement, private projection: OutlineProjection,
     private publish: (snapshot: OutlineViewportSnapshot) => void) {
@@ -52,6 +54,7 @@ export class OutlineViewportController {
   }
 
   private enqueue(urgent = false) {
+    if (this.projection.native) return;
     if (this.disposed || this.projection.complete) return;
     const generation = this.projection.generation;
     markdownWorkScheduler.enqueue(this, 'outline-projection', urgent ? MarkdownTaskPriority.NearViewport : MarkdownTaskPriority.Index, () => {
@@ -76,6 +79,17 @@ export class OutlineViewportController {
     if (measure?.offsetHeight) this.pitch = measure.offsetHeight + 8;
     if (list) this.listTop = list.getBoundingClientRect().top - rect.top + this.panel.scrollTop - this.panel.clientTop;
     this.height = Math.max(this.pitch, this.panel.clientHeight - Math.max(0, this.listTop - this.panel.scrollTop));
+    if (this.projection.native) {
+      const previous = this.projection.native.snapshot;
+      // 输入投影不能等待正在排队的 IPC，也不能因旧 client 已取消而延迟到原生校准。
+      if (previous && this.projection.localHeadings.size) {
+        this.rows = this.projection.projectRows(previous.rows, previous.projectionComplete && previous.fromIndex + previous.rows.length >= previous.visibleCount)
+          .map((item, index) => ({ item, index, position: item.position }));
+        this.publish({ rows: this.rows, height: Math.max(0, (previous.visibleCount + this.rows.length - previous.rows.length) * this.pitch - 8),
+          pitch: this.pitch, loading: !this.projection.ready, focusedId: this.focusedId, generation: this.projection.generation });
+      }
+      void this.renderNative(); return;
+    }
     const anchor = this.projection.anchor;
     if (this.pendingRestore) {
       const position = anchor ? this.projection.positionFor(anchor) : 0;
@@ -111,12 +125,56 @@ export class OutlineViewportController {
     this.enqueue(this.pendingRestore || this.projection.visible.length * this.pitch < top + this.height);
   };
 
+  private async renderNative() {
+    if (this.nativeBusy || this.disposed) return;
+    this.nativeBusy = true;
+    let from = Math.max(0, Math.floor((this.panel.scrollTop - this.listTop - this.height) / this.pitch));
+    const generation = this.projection.generation;
+    try {
+      const anchor = this.projection.anchor;
+      let restoreTop: number | undefined;
+      if (this.pendingRestore && anchor?.key && anchor.byte !== undefined) {
+        const position = await this.projection.native!.locate(anchor.key, anchor.byte);
+        if (generation !== this.projection.generation || this.disposed) return;
+        from = Math.max(0, position - Math.ceil(this.height / this.pitch));
+        restoreTop = this.listTop + position * this.pitch + anchor.offset;
+      }
+      const view = await this.projection.loadNative(from);
+      if (this.disposed || generation !== this.projection.generation || !view) return;
+      this.pendingRestore = false;
+      this.rows = this.projection.projectRows(view.rows, view.projectionComplete && view.fromIndex + view.rows.length >= view.visibleCount)
+        .map((item, index) => ({ item, index, position: item.position }));
+      this.publish({ rows: this.rows, height: Math.max(0, (view.visibleCount + this.rows.length - view.rows.length) * this.pitch - 8), pitch: this.pitch,
+        loading: !this.projection.ready, focusedId: this.focusedId, generation });
+      if (restoreTop !== undefined) queueMicrotask(() => { if (!this.disposed) this.panel.scrollTop = restoreTop; });
+      if (this.pendingFocus) queueMicrotask(() => {
+        if (this.disposed) return;
+        const target = Array.from(this.panel.querySelectorAll<HTMLElement>('[data-outline-id]'))
+          .find(row => row.dataset.outlineId === this.pendingFocus)?.querySelector<HTMLButtonElement>('.outline-link');
+        if (target) { target.focus({ preventScroll: true }); this.pendingFocus = ''; }
+      });
+    } catch (error) {
+      if ((error as { name?: string })?.name === 'AbortError' ||
+        ['revision-conflict', 'structure-cancelled', 'structure-generation-expired'].includes((error as { code?: string })?.code ?? '')) return;
+      if (!this.disposed) { this.projection.failure = error; this.publish({ rows: this.rows,
+        height: Math.max(0, (this.projection.native?.snapshot?.visibleCount ?? 0) * this.pitch - 8),
+        pitch: this.pitch, loading: false, focusedId: this.focusedId, generation }); }
+    } finally {
+      this.nativeBusy = false;
+      if (!this.disposed && !this.projection.failure && (!this.projection.ready || generation !== this.projection.generation ||
+        from !== Math.max(0, Math.floor((this.panel.scrollTop - this.listTop - this.height) / this.pitch)))) {
+        clearTimeout(this.nativeTimer); this.nativeTimer = setTimeout(this.schedule, 40);
+      }
+    }
+  }
+
   capture() {
     if (this.pendingRestore || !this.rows.length) return;
     const top = Math.max(0, this.panel.scrollTop - this.listTop);
     const position = Math.floor(top / this.pitch);
     const row = this.rows.find(row => row.position === position);
-    if (row) this.projection.anchor = { id: row.item.id, key: this.projection.identity(row.item), index: row.index, offset: top - position * this.pitch };
+    if (row) this.projection.anchor = { id: row.item.id, key: this.projection.identity(row.item), index: row.index, offset: top - position * this.pitch,
+      byte: 'byte' in row.item ? Number(row.item.byte) : undefined };
   }
 
   private onScroll = () => {
@@ -140,6 +198,35 @@ export class OutlineViewportController {
   keydown(event: KeyboardEvent, toggle: (item: OutlineWindowRow['item']) => void) {
     const row = (event.target as HTMLElement)?.closest<HTMLElement>('[data-outline-id]');
     if (!row || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (this.projection.native) {
+      const position = Number(row.dataset.outlinePosition);
+      const item = this.projection.native.snapshot?.rows.find(item => item.position === position);
+      if (!item) return;
+      let next = position;
+      switch (event.key) {
+        case 'ArrowDown': next++; break; case 'ArrowUp': next--; break;
+        case 'PageDown': next += Math.ceil(this.height / this.pitch); break;
+        case 'PageUp': next -= Math.ceil(this.height / this.pitch); break;
+        case 'Home': next = 0; break; case 'End': next = (this.projection.native.snapshot?.visibleCount ?? 1) - 1; break;
+        case 'ArrowRight': if (item.hasChildren && item.collapsed) { toggle(item); this.update(); } else next++; break;
+        case 'ArrowLeft': if (item.hasChildren && !item.collapsed) { toggle(item); this.update(); }
+          else {
+            event.preventDefault();
+            void this.projection.native.locate(`${item.blockId}:${item.blockHeadingIndex}`, item.byte, true).then(async parent => {
+              const view = await this.projection.loadNative(parent); if (this.disposed) return;
+              const found = view?.rows.find(row => row.position === parent);
+              if (found) { this.pendingFocus = found.id; this.panel.scrollTop = this.listTop + parent * this.pitch; this.schedule(); }
+            }).catch(error => { if (!this.disposed && error?.name !== 'AbortError') this.projection.failure = error; });
+            return;
+          } break;
+        default: return;
+      }
+      event.preventDefault(); next = Math.max(0, next);
+      void this.projection.loadNative(next).then(view => {
+        if (this.disposed) return; const found = view?.rows.find(row => row.position === next);
+        if (found) { this.focusedId = found.id; this.pendingFocus = found.id; this.panel.scrollTop = this.listTop + next * this.pitch; this.schedule(); }
+      }).catch(error => { this.projection.failure = error; this.schedule(); }); return;
+    }
     const model = this.projection;
     let position = Number(row.dataset.outlinePosition);
     const index = model.visible[position];
@@ -185,6 +272,7 @@ export class OutlineViewportController {
     if (this.disposed) return;
     this.capture();
     this.disposed = true;
+    clearTimeout(this.nativeTimer);
     markdownWorkScheduler.cancel(this);
     if (this.frame) cancelAnimationFrame(this.frame);
     this.resize.disconnect();

@@ -13,6 +13,11 @@ use tauri::{Emitter, State, WebviewWindow};
     rename_all_fields = "camelCase"
 )]
 pub(crate) enum MarkdownRequest {
+    MaterializeStructureToc { identity: super::structure_index::Identity, operation_id: String, edit_generation: u64, selection: Option<super::markdown_history::MarkdownSelection> },
+    StartStructure { document_id: String, revision: u64 },
+    QueryStructure { identity: super::structure_index::Identity, query: super::structure_index::Query },
+    StructureDemand { identity: super::structure_index::Identity, active: bool, priority: u8 },
+    CloseStructureOutline { document_id: String, view_id: String },
     StartSearch { #[serde(flatten)] query: super::markdown_search::SearchQuery },
     ReadSearchPage { task_id: String, from_index: u64, limit: usize },
     SearchTaskProgress { task_id: String },
@@ -120,6 +125,11 @@ pub(crate) async fn markdown_document_command(
         request => request,
     };
     tauri::async_runtime::spawn_blocking(move || match request {
+        MarkdownRequest::MaterializeStructureToc { identity, operation_id, edit_generation, selection } => value(manager.materialize_structure_toc(&owner, identity, operation_id, edit_generation, selection)?),
+        MarkdownRequest::StartStructure { document_id, revision } => value(manager.start_structure(&owner, &document_id, revision)?),
+        MarkdownRequest::QueryStructure { identity, query } => value(manager.query_structure(&owner, identity, query)?),
+        MarkdownRequest::StructureDemand { identity, active, priority } => value(manager.structure_demand(&owner, identity, active, priority)?),
+        MarkdownRequest::CloseStructureOutline { document_id, view_id } => value(manager.close_structure_outline(&owner, &document_id, &view_id)?),
         MarkdownRequest::StartSearch { query } => value(manager.start_search(&owner, query, Some(search_sink))?),
         MarkdownRequest::ReadSearchPage { task_id, from_index, limit } => value(manager.search_page(&owner, &task_id, from_index, limit)?),
         MarkdownRequest::SearchTaskProgress { task_id } => value(manager.search_progress(&owner, &task_id)?),

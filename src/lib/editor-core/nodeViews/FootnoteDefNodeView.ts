@@ -2,6 +2,7 @@ import type { Node as ProseMirrorNode } from 'prosemirror-model';
 import { TextSelection } from 'prosemirror-state';
 import type { EditorView, ViewMutationRecord } from 'prosemirror-view';
 import { onInterfaceLocaleChanged, t } from '../../../app/i18n';
+import type { EditorCoreOptions } from '../types';
 
 /**
  * 底部脚注定义 NodeView：展示定义标记、返回正文入口，并保留内容区原生编辑能力。
@@ -14,8 +15,10 @@ export class FootnoteDefNodeView {
   private view: EditorView;
   private marker: HTMLButtonElement;
   private unsubscribeLocale: () => void = () => undefined;
+  private navigation?: AbortController;
 
-  constructor(node: ProseMirrorNode, view: EditorView) {
+  constructor(node: ProseMirrorNode, view: EditorView,
+    private footnotes?: EditorCoreOptions['footnotes'], private onFailure?: (error: unknown) => void) {
     this.node = node;
     this.view = view;
 
@@ -60,6 +63,7 @@ export class FootnoteDefNodeView {
   }
 
   destroy(): void {
+    this.navigation?.abort();
     this.unsubscribeLocale();
   }
 
@@ -73,6 +77,14 @@ export class FootnoteDefNodeView {
   }
 
   private jumpToFirstReference(): void {
+    if (this.view.composing) return;
+    if (this.footnotes?.returnToReference) {
+      this.navigation?.abort(); const request = this.navigation = new AbortController();
+      void this.footnotes.returnToReference(this.id, request.signal).catch(error => {
+        if (!request.signal.aborted) this.onFailure?.(error);
+      });
+      return;
+    }
     let refEndPos: number | null = null;
     this.view.state.doc.descendants((node, pos) => {
       if (refEndPos !== null) return false;

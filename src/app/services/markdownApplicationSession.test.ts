@@ -57,6 +57,86 @@ async function setup(text: string, onRequestSource?: (isCurrent: () => boolean) 
 }
 
 describe('应用 Markdown 会话入口', () => {
+  it('源码组合交换先挂载新容器时，旧清理不影响新宿主', async () => {
+    const { application, failures } = await setup('# 源码交换\n\n内容');
+    await application.setViewMode('source');
+    const previous = document.body.appendChild(document.createElement('div'));
+    const cleanup = application.mountSource(previous);
+    await vi.waitFor(() => expect(previous.querySelector('.cm-editor')).not.toBeNull());
+    const next = document.body.appendChild(document.createElement('div'));
+    application.mountSource(next);
+    cleanup(); previous.remove();
+    await vi.waitFor(() => expect(next.querySelector('.cm-content')?.textContent).toContain('源码交换'));
+    expect(previous.querySelector('.cm-editor')).toBeNull();
+    expect(failures).toEqual([]);
+  });
+  it('组合交换先接管新容器时，宿主不再保留旧 DOM', async () => {
+    const { application, failures } = await setup('# 交换正文\n\n内容');
+    const previous = document.body.appendChild(document.createElement('div'));
+    application.editor.mount(previous);
+    await vi.waitFor(() => expect(application.writable).toBe(true));
+    const next = document.body.appendChild(document.createElement('div'));
+    application.editor.mount(next);
+    previous.remove();
+    await vi.waitFor(() => expect(next.querySelector('h1')?.textContent).toBe('交换正文'));
+    expect(previous.querySelector('.ProseMirror')).toBeNull();
+    expect(application.writable).toBe(true);
+    expect(failures).toEqual([]);
+  });
+  it('组合标签重挂载先于旧宿主 flush 完成时，新容器仍正常挂载', async () => {
+    const { application, doc } = await setup('# 组合正文\n\n内容');
+    const previous = document.body.appendChild(document.createElement('div'));
+    application.editor.mount(previous);
+    await vi.waitFor(() => expect(application.writable).toBe(true));
+    let finish!: () => void;
+    const flush = vi.spyOn(doc.session, 'flushEdits').mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+    const unmount = application.unmount();
+    const next = document.body.appendChild(document.createElement('div'));
+    application.editor.mount(next);
+    previous.remove(); finish(); await unmount;
+    await vi.waitFor(() => expect(next.querySelector('h1')?.textContent).toBe('组合正文'));
+    expect(application.writable).toBe(true);
+    flush.mockRestore();
+  });
+  it('双栏从属栏的迟到布局滚动不能反向接管，真实输入仍可切换同步方向', async () => {
+    const { application } = await setup('# 标题\n\n正文');
+    const semantic = document.body.appendChild(document.createElement('div'));
+    const source = document.body.appendChild(document.createElement('div'));
+    application.editor.mount(semantic);
+    await vi.waitFor(() => expect(application.writable).toBe(true));
+    await application.setViewMode('split'); application.mountSource(source);
+    await vi.waitFor(() => expect(source.querySelector('.cm-editor')).not.toBeNull());
+    const left = (application as any).semanticHost, right = (application as any).sourceHost;
+    const scrollLeft = vi.spyOn(left, 'scrollToByte').mockImplementation(() => {});
+    const scrollRight = vi.spyOn(right, 'scrollToByte').mockImplementation(() => {});
+    semantic.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true }));
+    left.callbacks.onScroll(12);
+    expect(scrollRight).toHaveBeenLastCalledWith(12);
+    const now = vi.spyOn(performance, 'now').mockReturnValue(performance.now() + 5000);
+    right.callbacks.onScroll(3);
+    expect(scrollLeft).not.toHaveBeenCalled();
+    source.dispatchEvent(new WheelEvent('wheel'));
+    right.callbacks.onScroll(20);
+    expect(scrollLeft).toHaveBeenLastCalledWith(20);
+    left.callbacks.onScroll(1);
+    expect(scrollRight).toHaveBeenCalledTimes(1);
+    now.mockRestore();
+  });
+  it('标签拆除前同步保存阅读位置，不读取异步 flush 后已脱离的滚动容器', async () => {
+    const { application, doc, tab } = await setup('# 标题\n\n正文');
+    const target = document.body.appendChild(document.createElement('div'));
+    application.editor.mount(target);
+    await vi.waitFor(() => expect(application.writable).toBe(true));
+    const host = (application as any).semanticHost;
+    vi.spyOn(host, 'position', 'get').mockImplementation(() => ({ byteOffset: target.isConnected ? 12 : 0, line: 3 }));
+    let finish!: () => void;
+    const flush = vi.spyOn(doc.session, 'flushEdits').mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
+    const unmount = application.unmount();
+    expect(tab.globalScrollAnchor?.byteOffset).toBe(12);
+    target.remove(); flush.mockRestore(); finish();
+    await unmount;
+    expect(tab.globalScrollAnchor?.byteOffset).toBe(12);
+  });
   it('手动保存重试相同事务，保留输入和撤销历史', async () => {
     const { application, doc, tab } = await setup('原文');
     const apply = vi.spyOn(doc.port, 'applyTransaction').mockRejectedValueOnce(new Error('temporary write error'));

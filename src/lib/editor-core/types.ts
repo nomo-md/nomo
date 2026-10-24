@@ -219,6 +219,12 @@ export type EditorCommand =
 export type EditorListener = (event: EditorChangeEvent) => void;
 
 export interface EditorCoreOptions {
+  onLocalHeadings?(headings: Array<{ id: string; title: string; level: number }>, ownedIds: readonly string[]): void;
+  footnotes?: {
+    preview(label: string, signal: AbortSignal): Promise<{ state: 'found' | 'missing' | 'incomplete'; source?: string; truncated?: boolean }>;
+    jump(label: string, signal: AbortSignal): Promise<void>;
+    returnToReference?(label: string, signal: AbortSignal): Promise<void>;
+  };
   /** 文档会话的局部投影；仅窗口控制器使用，窗口字符串不代表完整文档。 */
   documentProjection?: {
     fromByte: number;

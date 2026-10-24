@@ -34,6 +34,13 @@ export class MarkdownWindowBridge {
     this.generation = session.state.viewGeneration;
     this.unsubscribeChanges = session.subscribeChanges((change) => {
       if (this.submitting || this.stale) return;
+      if (change.nativeEdits && !change.nativeEdits.some(edit => edit.fromByte <= this.window.toByte && edit.toByte >= this.window.fromByte)) {
+        const delta = change.nativeEdits.filter(edit => edit.toByte < this.window.fromByte)
+          .reduce((sum, edit) => sum + edit.insertedBytes - (edit.toByte - edit.fromByte), 0);
+        this.window.fromByte += delta; this.window.toByte += delta;
+        this.generation = change.generation;
+        callbacks.onRebase?.(this.window.fromByte);
+      }
       if (change.edits && !editsTouchRange(change.edits, this.window)) {
         this.window.fromByte = mapMarkdownByte(this.window.fromByte, change.edits);
         this.window.toByte = mapMarkdownByte(this.window.toByte, change.edits);

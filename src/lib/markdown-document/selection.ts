@@ -33,7 +33,8 @@ export class MarkdownGlobalSelection {
           (delta, edit) => delta + utf8Length(edit.insertedText) - (edit.toByte - edit.fromByte),
           0,
         );
-        this.assign(mapMarkdownSelection(this.current, change.edits));
+        // 语义窗口可能以整块补丁写回，边界映射无法还原块内光标；采用事务的精确结果。
+        this.assign(change.selectionAfter ?? mapMarkdownSelection(this.current, change.edits));
       } else {
         this.byteLength = session.state.committed.byteLength;
         this.assign(

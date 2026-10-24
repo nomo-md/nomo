@@ -21,6 +21,17 @@ async function setup(text: string) {
 }
 
 describe('全文选区与未挂载正文', () => {
+  it('整块语义补丁保留事务内光标供后续原生目录派生使用', async () => {
+    const { session, selection, close } = await setup('# 原标题\n\n正文');
+    selection.set({ anchorByte: 2, headByte: 2 });
+    const pending = session.applyEdits({ viewGeneration: 0, historyGroupId: 'heading',
+      edits: [{ fromByte: 0, toByte: 11, insertedText: '# 新原标题' }],
+      selectionAfter: { anchorByte: 5, headByte: 5 } });
+    expect(selection.selection).toEqual({ anchorByte: 5, headByte: 5 });
+    await pending;
+    expect(selection.selection).toEqual({ anchorByte: 5, headByte: 5 });
+    await close();
+  });
   it('没有挂载任何视图也能全选、复制、替换和撤销完整正文', async () => {
     const source = '第一段😀\r\n' + '中部\r\n'.repeat(60_000) + '尾部  \n\n';
     const { session, selection, read, close } = await setup(source);
