@@ -38,8 +38,8 @@
 | 高亮 | ✅ `<mark>`<br>⚡ 7 色文字色与背景色（`nomo-fg-*` / `nomo-bg-*` class，兼容 style 写法），深浅色主题自适应 | ⏳ P0：工具栏颜色选择器（依赖 Popover 组件）。<br>⏳ Web 版需补上这些 class 的 CSS，才能双向一致。 |
 | 引用、提示块 | ✅ 多层引用；GitHub 五种提示块，配色与 Web 一致 | ⏳ P1：Obsidian 式自定义标题 `> [!tip] 标题`；可折叠提示块。 |
 | 代码块 | ✅ 语言标签、轻量语法高亮<br>⚡ 复制按钮 | ⏳ P1：行号（对应 Web 版设置项）、语言选择、Tab 缩进、tree-sitter 高亮（与 Shiki 观感对齐）。 |
-| 公式 | 🟡 只显示 TeX 源码 | ⏳ P1：方案对比后选型：①离屏 WebView 跑 KaTeX（MyGo 版做法）；②纯 Rust 的 TeX 数学排版。 |
-| Mermaid | 🟡 显示源码与占位标签 | ⏳ P1：离屏 WebView 渲染成 SVG 后缓存，与公式共用一套离屏渲染管线。 |
+| 公式 | ⚡ 纯 Rust 渲染：latex-rust（TeX 规则排版，STIX Two Math）→ SVG → resvg 位图；行内公式按基线嵌入正文，块级公式居中；后台渲染、LRU 缓存（128 MiB），浅色与深色自动换色 | 已知限制：`\text{}` 中的中文因 STIX 无汉字而失败（显示源码与原因），⏳ P1 拆分文本段改用正文字体；超高矩阵的可伸缩括号偏短（latex-rust 局限）；超宽公式最小缩到 0.6 倍，再超出部分被裁剪，⏳ P2 横向滚动；表格单元格内的行内公式仍显示源码。 |
+| Mermaid | ⚡ 纯 Rust 渲染：merman（对齐 Mermaid 12.1.0，Zed 同款后端）的 resvg 兼容管线，文字用冬青黑体真实测量；浅色用 default 主题、深色用 dark 主题 | 冬青黑体在首次渲染图表时加载并常驻约 23 MiB（苹方 78 MiB 超出 merman 的常驻上限）。⏳ P2：主题色与 Nomo 配色对齐、点击放大查看。 |
 | 图片 | ✅ 本地图片异步解码、尺寸上限、LRU 缓存<br>⚡ `{align= width=}`、`<p align><img width>` | ⏳ P1：拖拽调整尺寸、远程图片、粘贴或拖入图片自动保存到 `assets/`。 |
 | 脚注、HTML、Front Matter、折叠块 | ✅ 脚注引用与定义、行内及块级 HTML、YAML 卡片、`<details>` 标题行<br>⚡ 隐藏 `<!-- toc -->` 标记 | ⏳ P1：`<details>` 真正折叠；目录块按标题自动生成。 |
 | 搜索替换 | ✅ 后台全文搜索、区分大小写、逐个替换与全部替换（全部替换合并为一个撤销步骤） | ⏳ P2：正则表达式、仅在选区内替换。 |
@@ -141,6 +141,7 @@ GPUI 0.2.2 只提供 `div`、`svg`、`img`、`uniform_list`、`anchored` 等原�
 | gpui 官方 `examples/input.rs` 组字选区计算 | 删空组字后重输会越界崩溃 | 编辑器和输入框都改为相对组字起点计算 | — |
 | 自绘元素没有无障碍树 | 读屏读不到正文 | 计划接入 AccessKit | — |
 | 等宽字体缺字时 CoreText 级联回退到苹方，gpui 按 PostScript 名复用已加载的苹方光栅化 | 字形 ID 与字形表不匹配，源码模式汉字乱码 | 排版时把 Menlo 不含的字符显式切给正文字体（`layout.rs` 的 `mono_covers`） | — |
+| Mermaid 默认的 HTML 标签（`foreignObject`）resvg 不支持；默认的估算测量与实际字宽不一致 | 流程图文字丢失、类图文字被截断 | 使用 merman 的 `SvgPipeline::resvg_safe()`，并用冬青黑体做真实字体测量（`embeds.rs`） | — |
 | PingFang SC 是系统资源字体 | 已确认 gpui 能解析，600 字重可用 | 正文以 PingFang SC 为主字体 | — |
 | pulldown-cmark 0.13.5 上下标规则 | `H~2~O` 不识别为下标 | 文档建议用 `<sub>` / `<sup>` | 解析器更新后复核 |
 

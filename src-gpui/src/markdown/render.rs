@@ -5,7 +5,8 @@
 //! 用于点击定位、选区与搜索高亮。
 
 use super::highlight;
-use crate::layout::{ColorRole, InlineStyle, ParaSpec, TextLayout, Wrap, layout_text};
+use crate::embeds::{EmbedKind, EmbedState};
+use crate::layout::{ColorRole, InlineObject, InlineStyle, OBJECT_CHAR, ParaSpec, TextLayout, Wrap, layout_text};
 use crate::theme::{Family, Metrics};
 use gpui::Window;
 use pulldown_cmark::{Alignment, BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
@@ -40,6 +41,8 @@ pub enum DisplayItem {
     Checkbox { x: f32, y: f32, size: f32, checked: bool, source: usize },
     /// 代码块右上角的复制按钮；`text` 为代码正文。
     CopyButton { x: f32, y: f32, size: f32, text: Rc<str> },
+    /// 已渲染的公式或 Mermaid 图（位图在 `EmbedStore` 中，以 `key` 查找）；`source` 为块内源码偏移。
+    Embed { x: f32, y: f32, w: f32, h: f32, key: u64, source: usize },
 }
 
 pub struct BlockLayout {
@@ -54,6 +57,7 @@ impl BlockLayout {
             .map(|item| match item {
                 DisplayItem::Text { layout, map, .. } => layout.estimated_bytes() + map.len() * 32,
                 DisplayItem::CopyButton { text, .. } => text.len() + 64,
+                DisplayItem::Embed { .. } => 64,
                 _ => 64,
             })
             .sum()
@@ -63,6 +67,12 @@ impl BlockLayout {
     pub fn source_at(&self, x: f32, y: f32) -> Option<usize> {
         let mut best: Option<(f32, usize)> = None;
         for item in &self.items {
+            if let DisplayItem::Embed { x: ix, y: iy, w, h, source, .. } = item {
+                if x >= *ix && x <= ix + w && y >= *iy && y <= iy + h {
+                    return Some(*source);
+                }
+                continue;
+            }
             let DisplayItem::Text { x: ix, y: iy, layout, map } = item else { continue };
             let height = layout.height();
             let distance = if y < *iy { iy - y } else if y > iy + height { y - iy - height } else { 0.0 };
@@ -124,17 +134,27 @@ pub struct RenderEnv<'a> {
     pub code_line_numbers: bool,
     /// 设置“渲染行内代码”：关闭时行内代码按源码（含反引号）显示。
     pub inline_code: bool,
+    /// 查询公式或图表的渲染状态（返回缓存键与状态）；未请求过的条目由调用方登记后台渲染，此处视为渲染中。
+    pub embed: &'a dyn Fn(EmbedKind, &str) -> (u64, EmbedState),
 }
 
 struct ParaBuilder {
     text: String,
     spans: Vec<(Range<usize>, InlineStyle)>,
     map: Vec<MapSeg>,
+    objects: Vec<InlineObject>,
 }
 
 impl ParaBuilder {
     fn new() -> Self {
-        Self { text: String::new(), spans: Vec::new(), map: Vec::new() }
+        Self { text: String::new(), spans: Vec::new(), map: Vec::new(), objects: Vec::new() }
+    }
+
+    /// 追加一个行内对象（占位字符），整体映射到 `source`。
+    fn push_object(&mut self, object: InlineObject, style: InlineStyle, source: usize) {
+        let at = self.text.len();
+        self.push(&OBJECT_CHAR.to_string(), style, Some((source, false)));
+        self.objects.push(InlineObject { at, ..object });
     }
 
     fn is_empty(&self) -> bool {
@@ -586,8 +606,7 @@ pub fn layout_block(source: &str, width: f32, env: &RenderEnv, window: &Window) 
             }
             Event::InlineMath(tex) => {
                 builder.image_only = false;
-                let style = InlineStyle { mono: true, italic: true, color: ColorRole::Accent, ..builder.base };
-                builder.para.push(&tex, style, Some((range.start + 1, true)));
+                builder.inline_math(&tex, range.start + 1);
             }
             Event::DisplayMath(tex) => builder.display_math(&tex, range.start + 2),
             Event::InlineHtml(html) => match builder.inline.apply_html(&html) {
@@ -741,6 +760,7 @@ impl Builder<'_> {
             font_size: self.font_size,
             line_height: self.line_height,
             wrap: if self.heading.is_some() { Wrap::Greedy } else { self.env.wrap },
+            objects: para.objects,
         };
         (spec, para.map)
     }
@@ -850,6 +870,16 @@ impl Builder<'_> {
     fn code_block(&mut self, lang: &str, text: &str, text_start: usize) {
         self.flush_paragraph();
         self.apply_gap();
+        let mut failure = None;
+        if lang == "mermaid" {
+            match self.mermaid(text, text_start) {
+                Ok(()) => {
+                    self.gap(self.env.metrics.paragraph_gap());
+                    return;
+                }
+                Err(message) => failure = Some(message),
+            }
+        }
         let metrics = self.env.metrics;
         let x = self.indent;
         let width = self.width - self.indent;
@@ -858,7 +888,7 @@ impl Builder<'_> {
         let header = 26.0 * metrics.zoom;
         let label = match lang {
             "" => "代码".to_string(),
-            "mermaid" => "Mermaid · 图表预览未实现".to_string(),
+            "mermaid" => format!("Mermaid · {}", failure.as_deref().unwrap_or("渲染失败")),
             other => other.to_string(),
         };
         let label_spec = ParaSpec::plain(label, InlineStyle { bold: true, color: ColorRole::Muted, ..Default::default() }, Family::Text, 12.0 * metrics.zoom, header, Wrap::Greedy);
@@ -885,6 +915,7 @@ impl Builder<'_> {
                 font_size: metrics.code_size(),
                 line_height: metrics.code_line_height(),
                 wrap: Wrap::Greedy,
+                objects: Vec::new(),
             };
             let layout = Rc::new(layout_text(&spec, (width - pad * 2.0 - gutter).max(40.0), self.window));
             let height = layout.height();
@@ -903,20 +934,107 @@ impl Builder<'_> {
         self.gap(metrics.paragraph_gap());
     }
 
+    /// 行内公式：渲染就绪时以占位字符嵌入正文并按基线对齐；高于 1.3 倍行高时等比缩小，
+    /// 避免撑开行距。未就绪或失败时显示 TeX 源码（失败时用警示色）。
+    fn inline_math(&mut self, tex: &str, source: usize) {
+        let (key, state) = (self.env.embed)(EmbedKind::Math { display: false }, tex);
+        match state {
+            EmbedState::Ready(info) => {
+                let limit = self.line_height * 1.3;
+                let scale = if info.height > limit { limit / info.height } else { 1.0 };
+                let object = InlineObject { at: 0, width: info.width * scale, ascent: (info.height - info.depth) * scale, descent: info.depth * scale, key };
+                let style = self.inline.style(self.base);
+                self.para.push_object(object, style, source);
+            }
+            state => {
+                let color = if matches!(state, EmbedState::Failed(_)) { ColorRole::Caution } else { ColorRole::Accent };
+                let style = InlineStyle { mono: true, italic: true, color, ..self.base };
+                self.para.push(tex, style, Some((source, true)));
+            }
+        }
+    }
+
+    /// 块级公式：就绪时居中显示位图（过宽时等比缩小到可用宽度）；渲染中或失败时显示源码框，失败另附原因。
     fn display_math(&mut self, tex: &str, source: usize) {
         self.flush_paragraph();
         self.apply_gap();
         let metrics = self.env.metrics;
-        let spec = ParaSpec::plain(tex.trim().to_string(), InlineStyle { mono: true, italic: true, color: ColorRole::Accent, ..Default::default() }, Family::Text, metrics.body_size() * 1.05, metrics.body_line_height(), Wrap::Greedy);
         let width = self.width - self.indent;
+        let (key, state) = (self.env.embed)(EmbedKind::Math { display: true }, tex);
+        if let EmbedState::Ready(info) = &state {
+            let pad = 8.0 * metrics.zoom;
+            let (x, w, h) = self.fit_wide(info.width, info.height);
+            self.items.push(DisplayItem::Embed { x, y: self.y + pad, w, h, key, source });
+            self.y += h + pad * 2.0;
+            self.gap(metrics.paragraph_gap());
+            return;
+        }
+        let spec = ParaSpec::plain(tex.trim().to_string(), InlineStyle { mono: true, italic: true, color: ColorRole::Accent, ..Default::default() }, Family::Text, metrics.body_size() * 1.05, metrics.body_line_height(), Wrap::Greedy);
         let layout = Rc::new(layout_text(&spec, width - 32.0, self.window));
         let text_width = layout.max_line_width();
-        let height = layout.height() + 20.0 * metrics.zoom;
+        let note = match &state {
+            EmbedState::Failed(message) => Some(Rc::new(self.note_layout(message, ColorRole::Caution, width - 32.0))),
+            _ => None,
+        };
+        let note_height = note.as_ref().map_or(0.0, |note| note.height());
+        let height = layout.height() + note_height + 20.0 * metrics.zoom;
         self.items.push(DisplayItem::Rect { x: self.indent, y: self.y, w: width, h: height, paint: Paint::CodeBg, radius: 8.0, border: None });
         let map = vec![MapSeg { text: 0..spec.text.len(), source, exact: false }];
-        self.items.push(DisplayItem::Text { x: self.indent + (width - text_width) / 2.0, y: self.y + 10.0 * metrics.zoom, layout, map });
+        self.items.push(DisplayItem::Text { x: self.indent + (width - text_width) / 2.0, y: self.y + 10.0 * metrics.zoom, layout: layout.clone(), map });
+        if let Some(note) = note {
+            self.items.push(DisplayItem::Text { x: self.indent + 16.0, y: self.y + 10.0 * metrics.zoom + layout.height(), layout: note, map: Vec::new() });
+        }
         self.y += height;
         self.gap(metrics.paragraph_gap());
+    }
+
+    /// 宽内容（公式、图表）的摆放：能放下时在正文宽度内居中；过宽时先等比缩小，缩放下限 0.6，
+    /// 仍放不下的部分从正文左缘起向右延伸到编辑区右缘，再超出由编辑区裁剪（Web 版为横向滚动）。
+    /// 返回 (x, 宽, 高)。
+    fn fit_wide(&self, width: f32, height: f32) -> (f32, f32, f32) {
+        let available = self.width - self.indent;
+        if width <= available {
+            return (self.indent + (available - width) / 2.0, width, height);
+        }
+        let wide = (self.env.wide_width - self.indent).max(available);
+        let scale = (wide / width).clamp(0.6, 1.0);
+        let (w, h) = (width * scale, height * scale);
+        let x = if w <= wide { self.indent + (available - w).max(0.0) / 2.0 } else { self.indent };
+        (x.min(self.indent + (wide - w).max(0.0)), w, h)
+    }
+
+    /// 小号提示文字（渲染失败原因等）。
+    fn note_layout(&self, text: &str, color: ColorRole, width: f32) -> TextLayout {
+        let metrics = self.env.metrics;
+        let spec = ParaSpec::plain(text.to_string(), InlineStyle { color, ..Default::default() }, Family::Text, metrics.body_size() * 0.8, metrics.body_line_height() * 0.8, Wrap::Greedy);
+        layout_text(&spec, width.max(40.0), self.window)
+    }
+
+    /// Mermaid 代码块：就绪时居中显示图（过宽时等比缩小）；渲染中显示占位框。
+    /// 返回 Ok 表示已按图表处理；Err 携带失败原因，调用方退回代码块并在标签中显示原因。
+    fn mermaid(&mut self, text: &str, source: usize) -> Result<(), String> {
+        let metrics = self.env.metrics;
+        let width = self.width - self.indent;
+        let (key, state) = (self.env.embed)(EmbedKind::Mermaid, text);
+        match state {
+            EmbedState::Ready(info) => {
+                let pad = 8.0 * metrics.zoom;
+                let (x, w, h) = self.fit_wide(info.width, info.height);
+                self.items.push(DisplayItem::Embed { x, y: self.y + pad, w, h, key, source });
+                self.y += h + pad * 2.0;
+                Ok(())
+            }
+            EmbedState::Pending => {
+                let h = 120.0 * metrics.zoom;
+                self.items.push(DisplayItem::Rect { x: self.indent, y: self.y, w: width, h, paint: Paint::CodeBg, radius: 8.0, border: Some(Paint::CodeBorder) });
+                let note = Rc::new(self.note_layout("正在渲染 Mermaid 图表…", ColorRole::Muted, width - 32.0));
+                let note_width = note.max_line_width();
+                self.items.push(DisplayItem::Text { x: self.indent + (width - note_width) / 2.0, y: self.y + (h - note.height()) / 2.0, layout: note, map: Vec::new() });
+                self.y += h;
+                Ok(())
+            }
+            EmbedState::Failed(message) => Err(message.to_string()),
+        }
     }
 
     fn rule(&mut self) {
@@ -1064,6 +1182,7 @@ impl Builder<'_> {
             font_size,
             line_height,
             wrap: Wrap::Greedy,
+            objects: Vec::new(),
         };
         // 列宽：按自然宽度分配；总宽超出时按比例压缩超出部分，每列保底为自身自然宽度与 120px 的较小者，
         // 保证短表头不折行。
@@ -1186,6 +1305,7 @@ pub fn source_line_spec(line: &str, context: highlight::LineContext, lang: &str,
         font_size,
         line_height,
         wrap: Wrap::Greedy,
+        objects: Vec::new(),
     }
 }
 

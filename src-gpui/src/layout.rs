@@ -100,6 +100,20 @@ pub enum Wrap {
     KnuthPlass,
 }
 
+/// 行内对象的占位字符（U+FFFC OBJECT REPLACEMENT CHARACTER）。
+pub const OBJECT_CHAR: char = '\u{FFFC}';
+
+/// 嵌在段落中的行内对象（如行内公式）：`at` 为占位字符的字节偏移，宽度与基线上下尺寸为逻辑像素，
+/// `key` 由调用方解释（公式渲染缓存键）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InlineObject {
+    pub at: usize,
+    pub width: f32,
+    pub ascent: f32,
+    pub descent: f32,
+    pub key: u64,
+}
+
 /// 段落输入。`spans` 按起点递增且互不重叠，未覆盖的字节使用 `base` 样式。
 #[derive(Clone, Debug)]
 pub struct ParaSpec {
@@ -110,11 +124,13 @@ pub struct ParaSpec {
     pub font_size: f32,
     pub line_height: f32,
     pub wrap: Wrap,
+    /// 行内对象，按 `at` 递增。
+    pub objects: Vec<InlineObject>,
 }
 
 impl ParaSpec {
     pub fn plain(text: String, base: InlineStyle, family: Family, font_size: f32, line_height: f32, wrap: Wrap) -> Self {
-        Self { text, spans: Vec::new(), base, family, font_size, line_height, wrap }
+        Self { text, spans: Vec::new(), base, family, font_size, line_height, wrap, objects: Vec::new() }
     }
 
     /// 布局缓存键：内容、样式、字号与行宽共同决定排版结果。
@@ -129,6 +145,9 @@ impl ParaSpec {
         self.wrap.hash(&mut hasher);
         width.to_bits().hash(&mut hasher);
         generation().hash(&mut hasher);
+        for object in &self.objects {
+            (object.at, object.width.to_bits(), object.ascent.to_bits(), object.descent.to_bits(), object.key).hash(&mut hasher);
+        }
         hasher.finish()
     }
 
@@ -161,6 +180,8 @@ struct Glyph {
     font_id: FontId,
     id: GlyphId,
     emoji: bool,
+    /// 行内对象的占位字形：只占位置，不绘制。
+    object: bool,
 }
 
 /// 一行视觉行：段内字节 `start..end`；`glues` 是 (生效字节, 累计偏移) 递增表。
@@ -180,9 +201,24 @@ pub struct TextLayout {
     font_size: f32,
     baseline: f32,
     styles: Vec<(Range<usize>, InlineStyle)>,
+    objects: Vec<InlineObject>,
 }
 
 impl TextLayout {
+    /// 行内对象的绘制矩形（相对段落左上角）：(key, x, y, 宽, 高)，按基线对齐。
+    pub fn object_rects(&self) -> Vec<(u64, f32, f32, f32, f32)> {
+        self.objects
+            .iter()
+            .filter_map(|object| {
+                let line_index = self.lines.iter().position(|line| object.at >= line.start && object.at < line.end)?;
+                let line = &self.lines[line_index];
+                let x = self.x_in_line(line, object.at);
+                let baseline = line_index as f32 * self.line_height + self.baseline;
+                Some((object.key, x, baseline - object.ascent, object.width, object.ascent + object.descent))
+            })
+            .collect()
+    }
+
     pub fn height(&self) -> f32 {
         self.lines.len().max(1) as f32 * self.line_height
     }
@@ -310,6 +346,9 @@ impl TextLayout {
                     shift = line.glues[glue].1;
                     glue += 1;
                 }
+                if glyph.object {
+                    continue;
+                }
                 while style_at + 1 < self.styles.len() && self.styles[style_at].0.end <= glyph.index {
                     style_at += 1;
                 }
@@ -410,21 +449,42 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
                 font_id: run.font_id,
                 id: glyph.id,
                 emoji: glyph.is_emoji,
+                object: false,
             })
         })
         .collect();
+    let mut glyphs = glyphs;
+    let mut natural_width = f32::from(shaped.width);
+    // 行内对象：占位字符按塑形得到的宽度与对象实际宽度之差，平移其后的所有字形。
+    if !spec.objects.is_empty() {
+        let original_x = |byte: usize| glyphs.get(glyphs.partition_point(|glyph| glyph.index < byte)).map_or(natural_width, |glyph| glyph.x);
+        let deltas: Vec<(usize, f32)> = spec
+            .objects
+            .iter()
+            .map(|object| {
+                let end = object.at + OBJECT_CHAR.len_utf8();
+                (object.at, object.width - (original_x(end) - original_x(object.at)))
+            })
+            .collect();
+        for glyph in &mut glyphs {
+            glyph.object = deltas.iter().any(|(at, _)| *at == glyph.index);
+            glyph.x += deltas.iter().filter(|(at, _)| *at < glyph.index).map(|(_, delta)| delta).sum::<f32>();
+        }
+        natural_width += deltas.iter().map(|(_, delta)| delta).sum::<f32>();
+    }
     let ascent = f32::from(shaped.ascent);
     let descent = f32::from(shaped.descent);
     let baseline = ((spec.line_height - (ascent + descent)) / 2.0).max(0.0) + ascent;
     let mut layout = TextLayout {
         text: spec.text.clone(),
         glyphs,
-        natural_width: f32::from(shaped.width),
+        natural_width,
         lines: Vec::new(),
         line_height: spec.line_height,
         font_size: spec.font_size,
         baseline,
         styles,
+        objects: spec.objects.clone(),
     };
     let space_width = spec.font_size * 0.28;
     let mut items = kp::build_items(&layout.text, spec.font_size, space_width, |byte| layout.shaped_x(byte));

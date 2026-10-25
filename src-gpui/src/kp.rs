@@ -44,6 +44,8 @@ fn is_cjk(grapheme: &str) -> bool {
             0x3000..=0x303F | 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF
             | 0xF900..=0xFAFF | 0xFF00..=0xFFEF | 0x20000..=0x2FA1F)
             || "“”‘’".contains(ch)
+            // 行内对象占位符独立成盒，前后都可断行。
+            || ch == '\u{FFFC}'
     })
 }
 

@@ -6,6 +6,7 @@ mod buffer;
 mod cache;
 mod document;
 mod editor;
+mod embeds;
 mod images;
 mod kp;
 mod layout;
@@ -25,6 +26,7 @@ fn main() {
         cx.set_global(theme::Theme::light());
         cx.set_global(settings::Settings::load());
         cx.set_global(images::ImageStore::default());
+        cx.set_global(embeds::EmbedStore::default());
         editor::bind_keys(cx);
         ui::text_field::bind_keys(cx);
         workspace::bind_keys(cx);

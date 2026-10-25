@@ -9,6 +9,7 @@
 
 use crate::buffer::{Buffer, BufferEvent, EditKind};
 use crate::cache::LruCache;
+use crate::embeds::{self, EmbedKind, EmbedSpec, EmbedState, EmbedStore};
 use crate::images::{self, ImageStore};
 use crate::layout::{ColorRole, InlineStyle, ParaSpec, TextLayout, Wrap, layout_text, paint_box};
 use crate::markdown::blocks::BlockKind;
@@ -113,6 +114,12 @@ struct RowCtx<'a> {
     missing: RefCell<Vec<PathBuf>>,
     code_line_numbers: bool,
     inline_code: bool,
+    embeds: &'a EmbedStore,
+    /// 本帧布局中遇到但尚未请求的公式与图表，布局结束后统一提交后台渲染。
+    embed_missing: RefCell<Vec<EmbedSpec>>,
+    /// 公式前景色与图表配色依据。
+    math_color: [u8; 3],
+    dark: bool,
 }
 
 pub struct EditorView {
@@ -341,6 +348,12 @@ impl EditorView {
             ctx.store.generation.hash(&mut hasher);
             ctx.base_dir.hash(&mut hasher);
         }
+        // 含公式或 Mermaid 的块：渲染结果就绪（或被淘汰）时 generation 变化，触发重排；配色随深浅色变化。
+        if text.contains('$') || text.contains("mermaid") {
+            ctx.embeds.generation.hash(&mut hasher);
+            ctx.dark.hash(&mut hasher);
+            ctx.math_color.hash(&mut hasher);
+        }
         let key = hasher.finish();
         let width = self.content_width;
         let wide_width = self.wide_width;
@@ -352,7 +365,20 @@ impl EditorView {
                 }
                 size
             };
+            let em_px = ctx.metrics.body_size();
+            let embed = |kind: EmbedKind, source: &str| {
+                let spec = EmbedSpec { kind, source: source.to_string(), em_px, color: ctx.math_color, dark: ctx.dark };
+                let key = spec.key();
+                match ctx.embeds.state(key) {
+                    Some(state) => (key, state),
+                    None => {
+                        ctx.embed_missing.borrow_mut().push(spec);
+                        (key, EmbedState::Pending)
+                    }
+                }
+            };
             let env = RenderEnv {
+                embed: &embed,
                 metrics: ctx.metrics,
                 wrap: ctx.wrap,
                 base_dir: ctx.base_dir.as_deref(),
@@ -460,7 +486,14 @@ impl EditorView {
         let top = f32::from(bounds.origin.y);
 
         let buffer_entity = self.buffer.clone();
+        let (math_color, dark) = {
+            let theme = cx.global::<Theme>();
+            let color = gpui::Rgba::from(theme.fg);
+            let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+            ([byte(color.r), byte(color.g), byte(color.b)], theme.dark)
+        };
         let missing;
+        let embed_missing;
         let mut scrolled_to = None;
         {
             let buffer = buffer_entity.read(cx);
@@ -474,6 +507,10 @@ impl EditorView {
                 missing: RefCell::new(Vec::new()),
                 code_line_numbers: settings.code_line_numbers,
                 inline_code: settings.inline_code_rendering,
+                embeds: cx.global::<EmbedStore>(),
+                embed_missing: RefCell::new(Vec::new()),
+                math_color,
+                dark,
             };
             let count = self.row_count(buffer);
             let last = count - 1;
@@ -558,6 +595,7 @@ impl EditorView {
                 break;
             }
             missing = ctx.missing.into_inner();
+            embed_missing = ctx.embed_missing.into_inner();
             if self.user_scrolled {
                 self.user_scrolled = false;
                 scrolled_to = Some(());
@@ -565,6 +603,9 @@ impl EditorView {
         }
         if !missing.is_empty() {
             images::request(missing, cx);
+        }
+        if !embed_missing.is_empty() {
+            embeds::request(embed_missing, cx);
         }
         if scrolled_to.is_some() {
             let line = self.top_line(cx);
@@ -720,6 +761,7 @@ impl EditorView {
 
     #[allow(clippy::too_many_arguments)]
     fn paint_block(&self, layout: &BlockLayout, origin: Point<Pixels>, clip: Range<f32>, theme: &Theme, store: &ImageStore, window: &mut Window, cx: &App) {
+        let embeds = cx.global::<EmbedStore>();
         let resolve = |paint: Paint| -> Hsla {
             match paint {
                 Paint::Border => theme.border,
@@ -746,6 +788,25 @@ impl EditorView {
                         continue;
                     }
                     layout.paint(origin + point(px(*x), px(*y)), (clip.start - y)..(clip.end - y), theme, window);
+                    // 行内公式位图按基线贴到占位位置。
+                    for (key, ox, oy, w, h) in layout.object_rects() {
+                        if let Some(image) = embeds.image(key) {
+                            let bounds = Bounds::new(origin + point(px(x + ox), px(y + oy)), size(px(w), px(h)));
+                            let _ = window.paint_image(bounds, Corners::default(), image, 0, false);
+                        }
+                    }
+                }
+                DisplayItem::Embed { x, y, w, h, key, .. } => {
+                    if y + h < clip.start || *y > clip.end {
+                        continue;
+                    }
+                    let bounds = Bounds::new(origin + point(px(*x), px(*y)), size(px(*w), px(*h)));
+                    match embeds.image(*key) {
+                        Some(image) => {
+                            let _ = window.paint_image(bounds, Corners::default(), image, 0, false);
+                        }
+                        None => paint_box(bounds, theme.code_bg, 6.0, None, window),
+                    }
                 }
                 DisplayItem::Image { x, y, w, h, path } => {
                     if y + h < clip.start || *y > clip.end {
