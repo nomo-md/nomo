@@ -1,0 +1,17 @@
+[package]
+name = "nomo-gpui-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-or-later"
+
+# 独立 workspace：原型不进入 src-tauri 构建，也不影响主仓库锁文件。
+[workspace]
+
+[dependencies]
+gpui = "=0.2.2"
+serde = { version = "1", features = ["derive"] }
+unicode-segmentation = "=1.13.2"
+
+[profile.release]
+debug = 1
