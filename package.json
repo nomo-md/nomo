@@ -23,6 +23,7 @@
     "test:win64:shell-extension": "pwsh -NoProfile -File scripts/msix/Build-ShellExtension.ps1 -RunTests",
     "knip": "knip",
     "test": "vitest run",
+    "test:desktop": "node test-lab/runner/cli.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {

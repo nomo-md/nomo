@@ -229,14 +229,31 @@ pub(crate) fn app_data_dir_from_config_path(config_path: &Path) -> Result<PathBu
         .ok_or_else(|| "配置文件路径缺少父目录".to_string())
 }
 
+pub(crate) fn application_data_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    #[cfg(feature = "automation")]
+    if app.config().identifier == "com.nomo.automation" {
+        return crate::automation::profile_root();
+    }
+    app.path()
+        .app_data_dir()
+        .map_err(|error| format!("定位应用数据目录失败：{error}"))
+}
+
+pub(crate) fn application_cache_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    #[cfg(feature = "automation")]
+    if app.config().identifier == "com.nomo.automation" {
+        return Ok(crate::automation::profile_root()?.join("cache"));
+    }
+    app.path()
+        .app_cache_dir()
+        .map_err(|error| format!("定位应用缓存目录失败：{error}"))
+}
+
 pub(crate) fn content_store_dir<R: Runtime>(
     app: &AppHandle<R>,
     directory_name: &str,
 ) -> Result<PathBuf, String> {
-    let app_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("定位应用数据目录失败：{error}"))?;
+    let app_dir = application_data_dir(app)?;
     Ok(app_dir.join(directory_name))
 }
 
@@ -288,10 +305,7 @@ fn migrate_legacy_snapshot_markdown(
 }
 
 fn config_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    let app_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("定位应用数据目录失败：{error}"))?;
+    let app_dir = application_data_dir(app)?;
     fs::create_dir_all(&app_dir).map_err(|error| format!("创建应用数据目录失败：{error}"))?;
     Ok(app_dir.join(CONFIG_FILE_NAME))
 }
@@ -306,6 +320,10 @@ fn backup_broken_config(config_path: &Path) -> Result<(), String> {
 
 /// 步骤1：根据应用标识符构造各平台的应用数据目录路径
 pub(crate) fn resolve_app_data_dir(identifier: &str) -> Option<PathBuf> {
+    #[cfg(feature = "automation")]
+    if identifier == "com.nomo.automation" {
+        return crate::automation::profile_root().ok();
+    }
     #[cfg(target_os = "windows")]
     {
         // 与 Tauri 的 app_data_dir() 保持一致：Windows 使用 Roaming 目录（APPDATA）

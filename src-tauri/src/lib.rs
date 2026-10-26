@@ -1,4 +1,6 @@
 mod app_logger;
+#[cfg(feature = "automation")]
+mod automation;
 mod emoji_catalog;
 mod config;
 mod export;
@@ -25,6 +27,12 @@ use tauri::{Emitter, Manager, WindowEvent};
 pub fn run() {
     // 先生成 context 以获取应用 identifier，便于启动阶段读取配置
     let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    #[cfg(feature = "automation")]
+    let context = {
+        let mut context = context;
+        crate::automation::configure(&mut context).expect("测试程序启动配置无效");
+        context
+    };
 
     // 根据配置提前初始化日志开关，确保渲染模式等启动日志能被记录
     crate::app_logger::init(&context.config().identifier);
@@ -239,7 +247,7 @@ pub fn run() {
             let config = crate::config::ConfigManager::load_or_default(app.handle())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             app.manage(config);
-            let image_root = app.path().app_cache_dir().map_err(std::io::Error::other)?.join("prepared-images-v1");
+            let image_root = crate::config::application_cache_dir(app.handle()).map_err(std::io::Error::other)?.join("prepared-images-v1");
             app.manage(crate::file_system::image_assets::prepared::PreparedImages::new(image_root).map_err(std::io::Error::other)?);
             if let Err(error) = crate::software_update::initialize_installed_release_notes(app.handle())
             {
@@ -248,16 +256,14 @@ pub fn run() {
             app.manage(crate::window::open_targets::OpenTargetRegistry::default());
             crate::window::tab_transfer::recover_journals(app.handle())
                 .map_err(std::io::Error::other)?;
-            let segmented_root = app
-                .path()
-                .app_data_dir()
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?
+            let segmented_root = crate::config::application_data_dir(app.handle())
+                .map_err(std::io::Error::other)?
                 .join("segmented-documents");
             let segmented_manager =
                 crate::text_document::DocumentSessionManager::new(segmented_root)
                     .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             app.manage(segmented_manager);
-            let markdown_root = app.path().app_data_dir().map_err(std::io::Error::other)?.join("markdown-documents");
+            let markdown_root = crate::config::application_data_dir(app.handle()).map_err(std::io::Error::other)?.join("markdown-documents");
             app.manage(crate::text_document::markdown_session::MarkdownDocumentSessionManager::new(markdown_root)
                 .map_err(std::io::Error::other)?);
 
@@ -326,6 +332,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            #[cfg(feature = "automation")]
+            crate::automation::automation_exchange,
+            #[cfg(feature = "automation")]
+            crate::automation::automation_digest,
             crate::text_document::markdown_commands::markdown_document_command,
             crate::emoji_catalog::load_emoji_catalog,
             crate::file_clipboard::copy_file_to_clipboard,

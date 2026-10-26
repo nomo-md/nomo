@@ -7083,6 +7083,8 @@
     await restorePersistedWorkspaceState(result.state);
   }
 
+  let stopAutomation: (() => void) | undefined;
+  let automationDisposed = false;
   onMount(async () => {
     document.addEventListener('visibilitychange', handleStatisticsVisibility);
     appearanceRuntimeActive = true;
@@ -7242,6 +7244,30 @@
       if (transferBootstrap) pendingTransferReceives.set(transferBootstrap.token, transferBootstrap);
       for (const state of pendingTransferReceives.values()) void workspaceTransfer.prepared(state);
       pendingTransferReceives.clear();
+      if (import.meta.env.VITE_NOMO_AUTOMATION === '1' && desktopEnabled && windowLabel === 'main') {
+        const { startAutomationBridge } = await import('./services/automationBridge');
+        if (!automationDisposed) {
+          stopAutomation = startAutomationBridge({
+            getEditor: () => editor, getActiveTabId: () => activeTabId,
+            getMode: () => mode, getTabs: () => tabs, getDirty: () => dirty,
+            open: path => openDocumentPath(path, { message: '', fallbackMessage: '测试打开失败', throwOnReadError: true }),
+            switchTab, changeMode: next => changeEditorMode(next, false),
+            save: () => saveMarkdownFile(), close: id => closeTab(id),
+            create: createNewFile, checkpoint: flushPersistWorkspaceState, exit: requestExitApp,
+            workspace: () => workspaceItems,
+            combine: async (first, second) => {
+              const source = findWorkspaceItemForTab(workspaceItems, first), target = findWorkspaceItemForTab(workspaceItems, second);
+              if (!source || !target) throw new Error('找不到组合成员');
+              await combineWorkspaceItems(source.id, target.id);
+            },
+            ungroup: () => cancelComparison(activeItemId),
+            checkExternal: checkExternalFileChange, reload: reloadExternalFile,
+            autosave: enabled => { autoSaveEnabled = enabled; },
+            resources: () => ({ documentRuntimes: documentRuntimes.size, tabs: tabs.length, folderRoots: folderTree.length }),
+            folder: openFolderInCurrentWindow,
+          });
+        }
+      }
     } finally {
       if (appearanceRuntimeActive && !systemThemeListenerReady) {
         setupSystemThemeListener();
@@ -7256,6 +7282,8 @@
   });
 
   onDestroy(() => {
+    automationDisposed = true;
+    stopAutomation?.();
     document.removeEventListener('visibilitychange', handleStatisticsVisibility);
     wordExportAbort?.abort();
     documentExportAbort?.abort();

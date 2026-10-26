@@ -1,7 +1,13 @@
+const diagnostics = import.meta.env.VITE_NOMO_AUTOMATION === '1' ? new Set<() => { active: number; queued: number }>() : undefined;
+export function getRenderQueueDiagnostics() {
+  return diagnostics ? [...diagnostics].map(read => read()) : [];
+}
 /** 限制昂贵增强任务并发；取消排队项时立即释放闭包，已运行的库调用只等待其结束。 */
 export function createRenderTaskQueue(concurrency: number) {
   let active = 0;
   const queue: Array<() => void> = [];
+  // 队列与渲染器模块同生命周期，仅测试构建登记计数读取器，不持有排队任务。
+  diagnostics?.add(() => ({ active, queued: queue.length }));
   let deadline = 0;
   let resume: ReturnType<typeof setTimeout> | undefined;
   function drain() {

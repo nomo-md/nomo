@@ -1,0 +1,5 @@
+{
+  "suites": ["diagnostics"],
+  "caseIds": ["editing.commands"],
+  "profile": "both"
+}

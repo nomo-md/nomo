@@ -7,7 +7,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow};
+use tauri::{AppHandle, Emitter, Runtime, WebviewWindow};
 
 const GITHUB_LATEST_RELEASE_API: &str = "https://api.github.com/repos/nomo-md/nomo/releases/latest";
 const GITHUB_PROXY_PREFIX: &str = "https://gh-proxy.com/";
@@ -1509,10 +1509,7 @@ fn is_valid_md5(md5: &str) -> bool {
 }
 
 fn software_update_cache_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    Ok(app
-        .path()
-        .app_cache_dir()
-        .map_err(|error| format!("获取更新缓存目录失败：{error}"))?
+    Ok(crate::config::application_cache_dir(app)?
         .join("updates"))
 }
 

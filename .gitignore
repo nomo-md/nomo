@@ -13,6 +13,11 @@ src-tauri/windows-shell-extension/bin/
 src-tauri/windows-shell-extension/obj/
 src-tauri/windows-shell-extension/obj-tests/
 .artifacts/
+test-lab/apps/
+test-lab/results/
+test-lab/fixtures/
+test-lab/baselines/
+test-lab/.cache/
 
 # Local environment
 .env

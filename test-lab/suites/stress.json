@@ -1,0 +1,4 @@
+{
+  "suites": ["stress"],
+  "stressTimeoutMs": 180000
+}

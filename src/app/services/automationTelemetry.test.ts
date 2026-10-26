@@ -1,0 +1,21 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { createAutomationTelemetry } from './automationTelemetry';
+afterEach(() => { document.body.innerHTML = ''; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+it('同一帧内连续输入均被统计，未产生 DOM 变化的输入明确超时', async () => {
+  let now = 0; const frames = new Map<number, FrameRequestCallback>(); let serial = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => now);
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++serial, callback); return serial; });
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
+  vi.stubGlobal('PerformanceObserver', class { static supportedEntryTypes: string[] = []; });
+  const editor = document.createElement('div'); editor.className = 'ProseMirror'; document.body.append(editor);
+  const telemetry = createAutomationTelemetry();
+  const frame = () => { const work = [...frames.values()]; frames.clear(); for (const callback of work) callback(now); };
+  now = 10; editor.dispatchEvent(new InputEvent('beforeinput', { bubbles: true }));
+  now = 20; editor.dispatchEvent(new InputEvent('beforeinput', { bubbles: true }));
+  editor.textContent = 'ab'; await Promise.resolve(); now = 50; frame();
+  expect(telemetry.read().inputToFrameEstimate.count).toBe(2);
+  expect(telemetry.read().inputToFrameEstimate.p50Ms).toBe(30);
+  editor.dispatchEvent(new InputEvent('beforeinput', { bubbles: true })); now = 6000; frame();
+  expect(telemetry.read().unmatchedInputs).toBe(1);
+  telemetry.dispose(); expect(frames.size).toBe(0);
+});

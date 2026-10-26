@@ -596,6 +596,11 @@ export class MarkdownApplicationSession {
     globalThis.document.removeEventListener('focusin', this.cancelFocusOutside, true);
   }
   get presentation() { return this.presentations.get(this.activeHostMode ?? (this.viewMode === 'source' ? 'source' : 'semantic')); }
+  /** 有界只读状态；测试桥按需读取，不创建新的后台探针或正文副本。 */
+  get viewDiagnostics() {
+    return { semantic: this.semanticHost?.diagnostics ?? null, source: this.sourceHost?.diagnostics ?? null,
+      presentations: [...this.presentations.values()] };
+  }
   private get sessionWritable() {
     const state = this.document?.session.state;
     return !!state && !this.disposed && !this.options.readonly && !state.failure &&

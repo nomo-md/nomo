@@ -6,7 +6,7 @@ use std::{
     sync::OnceLock,
     time::{Duration, Instant},
 };
-use tauri::{Manager, Runtime};
+use tauri::Runtime;
 use tokio::{sync::Mutex, task::JoinSet};
 
 const VERSION: &str = "17.0.0";
@@ -215,10 +215,7 @@ async fn serialized_load<T: Send, F: std::future::Future<Output = Result<T, Stri
 }
 
 async fn load_catalog<R: Runtime>(app: tauri::AppHandle<R>) -> Result<EmojiCatalogPayload, String> {
-    let path = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| e.to_string())?
+    let path = crate::config::application_cache_dir(&app)?
         .join("emoji")
         .join("catalog-v1.json");
     let read_path = path.clone();

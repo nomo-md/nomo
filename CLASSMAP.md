@@ -249,6 +249,7 @@
 | Responsibility | Primary code | Related code | Change when |
 |---|---|---|---|
 | 前端日志工具 | `src/lib/services/logger.ts` | `src-tauri/src/app_logger.rs` | 日志级别/缓冲区/性能计时/DevTools 输出 |
+| 桌面脚本回归与性能实验 | `test-lab/runner/cli.mjs` | `test-lab/runner/cases.mjs`, `oracles.mjs`, `statistics.mjs`, `process-lifecycle.mjs`, `sample.ps1`, `counters.ps1`, `test-lab/README.md`, `src/app/services/automationBridge.ts`, `automationTelemetry.ts`, `src-tauri/src/automation.rs`, `src/app/App.svelte`（业务操作注入） | 独立 Release 程序、可选测试集、隔离 profile、精确断言、主/低频采样、全时段统计、质量门禁与清理失败中止；普通构建不启用，不代替 IME／肉眼视觉验收 |
 | 后端日志系统 | `src-tauri/src/app_logger.rs` | `src/lib/services/logger.ts` | 日志文件落盘/轮转/终端输出 |
 | HTML 导出后端 | `src-tauri/src/export.rs` | `src/app/services/exportService.ts` | HTML 文件写入/Base64 读取 |
 | Windows PDF 导出 | `src-tauri/src/export_windows.rs` | `src-tauri/src/export.rs`, `src/lib/typography/exportRuntime.ts` | WebView2 PrintToPdf、目标版心和排版就绪检查 |

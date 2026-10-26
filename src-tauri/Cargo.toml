@@ -13,6 +13,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# 仅供独立配置的脚本测试构建使用，普通发行版不编译测试接口。
+automation = []
+
 [dependencies]
 arboard = { version = "3.6.1", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

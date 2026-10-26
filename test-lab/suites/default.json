@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "dataset": "main",
+  "suites": ["standard"],
+  "configuration": "release",
+  "repetitions": 3,
+  "cycles": 20,
+  "sampleMs": 500,
+  "startupTimeoutMs": 60000,
+  "actionTimeoutMs": 45000,
+  "stressTimeoutMs": 180000,
+  "soakMinutes": 30,
+  "failFast": false,
+  "profile": "cpu",
+  "samplingQuality": { "minimumSamples": 3, "maxMeanSamplerFraction": 0.2, "minimumCoverage": 0.6, "maxGapIntervals": 6 },
+  "budgets": { "retainedBytes": 104857600, "memorySlopeBytesPerMinute": 5242880, "inputP95Ms": 100, "frameP95Ms": 50, "longTaskRate": 30, "longTaskMsPerMinute": 3000 },
+  "warnings": {
+    "relative": 0.2,
+    "durationMs": 10,
+    "privateBytes": 20971520,
+    "cpuMachinePercent": 5,
+    "retainedBytes": 20971520,
+    "memorySlopeBytesPerMinute": 2097152,
+    "inputP95Ms": 10,
+    "frameP95Ms": 4,
+    "longTaskRate": 1,
+    "longTaskMsPerMinute": 100
+  }
+}
