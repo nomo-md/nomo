@@ -6,21 +6,57 @@ mod buffer;
 mod cache;
 mod document;
 mod editor;
+mod editor_control;
 mod embeds;
 mod images;
 mod kp;
 mod layout;
 mod markdown;
+#[path = "../../src-tauri/src/markdown_templates.rs"]
+mod markdown_templates;
 mod settings;
 mod theme;
 mod ui;
+
+#[cfg(feature = "editor-control-demo")]
+#[path = "../../src-tauri/src/text_document/native.rs"]
+#[allow(dead_code)] // 仅接入现有会话 API，其余原版服务保留原实现。
+mod text_document;
+#[cfg(feature = "editor-control-demo")]
+#[path = "../../src-tauri/src/markdown_encoding.rs"]
+mod models;
+#[cfg(feature = "editor-control-demo")]
+#[path = "../../src-tauri/src/file_system/atomic_write.rs"]
+mod file_system;
+#[cfg(feature = "editor-control-demo")]
+mod app_logger {
+    pub fn warn(scope: &str, message: &str) { eprintln!("[{scope}] {message}"); }
+}
+
+// 原版后端的既有异步测试使用 Tauri 的 Tokio 包装；开发宿主测试复用同一运行时语义。
+#[cfg(all(test,feature = "editor-control-demo"))]
+extern crate self as tauri;
+#[cfg(all(test,feature = "editor-control-demo"))]
+mod async_runtime {
+    fn runtime() -> &'static tokio::runtime::Runtime {
+        static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("test runtime"))
+    }
+    pub fn block_on<F: std::future::Future>(future:F)->F::Output { runtime().block_on(future) }
+    pub fn spawn<F:std::future::Future+Send+'static>(future:F)->tokio::task::JoinHandle<F::Output>
+        where F::Output:Send+'static { runtime().spawn(future) }
+}
 
 use gpui::{App, AppContext, Application, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, point, px, size};
 use std::path::PathBuf;
 use ui::workspace::{self, Workspace};
 
 fn main() {
-    let paths: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
+    #[cfg(feature = "editor-control-demo")]
+    let control_demo = std::env::args().any(|argument| argument == "--editor-control-demo");
+    #[cfg(feature = "editor-control-demo")]
+    let native_editor = std::env::args().any(|argument| argument == "--editor-control");
+    let paths: Vec<PathBuf> = std::env::args().skip(1).filter(|argument| argument != "--editor-control-demo" && argument != "--editor-control").map(PathBuf::from).collect();
     Application::new().with_assets(ui::components::Assets).run(move |cx: &mut App| {
         // 先放浅色主题占位，窗口创建后按系统外观立即校正。
         cx.set_global(theme::Theme::light());
@@ -28,11 +64,22 @@ fn main() {
         cx.set_global(images::ImageStore::default());
         cx.set_global(embeds::EmbedStore::default());
         editor::bind_keys(cx);
+        editor_control::view::bind_keys(cx);
         ui::text_field::bind_keys(cx);
         workspace::bind_keys(cx);
         cx.on_action(|_: &workspace::Quit, cx| cx.quit());
         cx.on_action(|_: &workspace::OpenSettings, cx| ui::settings_window::open(cx));
         set_menus(cx);
+
+        #[cfg(feature = "editor-control-demo")]
+        if control_demo || native_editor {
+            cx.on_window_closed(|cx| { if cx.windows().is_empty() { cx.quit(); } }).detach();
+            let bounds = Bounds::centered(None, size(px(1100.0), px(800.0)), cx);
+            cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {title:Some("Nomo · 控件开发".into()),..Default::default()}),..Default::default()},
+                |window,cx| {theme::Theme::apply(window.appearance(),cx);cx.new(|cx| if native_editor { editor_control::demo::ControlDemo::file(paths.first().cloned(), window, cx) } else { editor_control::demo::ControlDemo::new(window,cx) })}).expect("打开控件开发窗口");
+            cx.activate(true);return;
+        }
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
         let options = WindowOptions {

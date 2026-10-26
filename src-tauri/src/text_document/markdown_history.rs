@@ -4,6 +4,7 @@ use super::{
     TextDocumentError, TextDocumentResult,
 };
 use serde::{Deserialize, Serialize};
+use crate::markdown_templates::InlineTemplate;
 use std::{
     collections::{HashMap, VecDeque},
     fs::{File, OpenOptions},
@@ -83,6 +84,11 @@ pub(super) struct HistoryRecord {
     pub(super) group_entries: Vec<u64>,
     pub(super) selection_before: Option<MarkdownSelection>,
     pub(super) selection_after: Option<MarkdownSelection>,
+    /// 只有来源状态变化时随同原有历史存储；旧记录缺省为不改变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) templates_before: Option<Vec<InlineTemplate>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) templates_after: Option<Vec<InlineTemplate>>,
 }
 
 pub(super) struct DiskHistory {
@@ -190,6 +196,17 @@ impl DiskHistory {
         self.hot.insert(offset, (record, size));
         self.order.push_back(offset);
     }
+    pub(super) fn templates_at(&mut self, mut head: Option<u64>) -> TextDocumentResult<Vec<InlineTemplate>> {
+        while let Some(offset) = head {
+            let record = self.read(offset)?;
+            if let Some(templates) = record.templates_after { return Ok(templates); }
+            if record.previous_event.is_some_and(|previous| previous >= offset) {
+                return Err(TextDocumentError::new("history-corrupt", "历史记录存在循环"));
+            }
+            head = record.previous_event;
+        }
+        Ok(Vec::new())
+    }
     pub(super) fn replay(
         &mut self,
         base: PieceTree,
@@ -235,6 +252,8 @@ mod tests {
         let mut history = DiskHistory::open(&path).unwrap();
         history.capacity = 0;
         let record = HistoryRecord {
+            templates_before: None,
+            templates_after: None,
             previous_event: None,
             group: "typing".into(),
             parent_undo: None,

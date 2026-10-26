@@ -39,6 +39,7 @@ impl Focusable for TextField {
 }
 
 impl TextField {
+    pub fn is_composing(&self) -> bool { self.marked.is_some() }
     pub fn new(placeholder: &str, cx: &mut Context<Self>) -> Self {
         Self {
             focus: cx.focus_handle(),
@@ -138,7 +139,9 @@ impl TextField {
     }
 
     fn on_cut(&mut self, _: &FieldCut, window: &mut Window, cx: &mut Context<Self>) {
+        let expected = self.content[self.selected.clone()].to_string();
         self.on_copy(&FieldCopy, window, cx);
+        if cx.read_from_clipboard().and_then(|item| item.text()) != Some(expected) { return; }
         let range = self.selected.clone();
         self.replace(range, "", cx);
     }

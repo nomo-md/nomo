@@ -306,6 +306,17 @@
 | 配置命令 IPC | `src-tauri/src/config/commands.rs` | `src-tauri/src/config/mod.rs` | 设置读写/最近文件/快照/应用设置 IPC |
 | 窗口命令 IPC | `src-tauri/src/window/commands.rs` | `src-tauri/src/window/menu.rs`, `src-tauri/src/window/tray.rs` | 窗口状态保存/设置窗口/菜单安装/强制关闭 IPC |
 
+### GPUI 内部编辑控件（开发入口）
+
+| Responsibility | Primary code | Related code | Change when |
+|---|---|---|---|
+| 窗口控件契约与生命周期 | `src-gpui/src/editor_control/protocol.rs`, `host.rs`, `interaction.rs` | `src/lib/markdown-document/windowBridge.ts`, `viewportHost.ts` | 原版窗口数据、乐观确认、组字/草稿回收门禁、修订与几何适配；生产加载调度仍在原宿主 |
+| 窗口解析与语义编辑 | `src-gpui/src/editor_control/parse.rs`, `dialect.rs`, `commands.rs`, `inline_commands.rs`, `list_commands.rs`, `mapping.rs` | `src-gpui/src/markdown/render.rs`, `src/lib/editor-core/inlineSourceCommands.ts`, `listCommands.ts` | 解析/布局分离、真实语法位置、局部格式/列表结构补丁和源码往返 |
+| 空格式模板来源与历史 | `src-tauri/src/markdown_templates.rs`, `text_document/markdown_session.rs`, `markdown_history.rs` | `src-gpui/src/editor_control/template_projection.rs`, `host.rs`, `native_port.rs` | 显式来源、窗口投影、嵌套、IME 取消、原版历史/恢复/全文替换；不把手写符号推断为模板 |
+| GPUI 控件交互与专用块 | `src-gpui/src/editor_control/view.rs`, `object_ui.rs`, `image_properties.rs`, `table.rs`, `html_table.rs`, `table_widths.rs` | `source_view.rs`, `paint.rs`, `resources.rs`, `menu.rs`, `emoji.rs` | GPUI 输入法/键鼠、源码与语义视图、表格内原子对象、图片属性、命令入口及资源几何 |
+| 原版会话与真实文件宿主 | `src-gpui/src/editor_control/native_port.rs`, `session_window.rs`, `session_actions.rs`, `demo.rs` | `src-tauri/src/text_document/native.rs`, `src-gpui/src/main.rs`, `docs/gpui-editor-control.md` | feature/CLI 入口、原版事务/历史/全文快照、原索引范围/引用/锚点、全局剪贴板及普通替换 |
+| GPUI 连续窗口平台适配 | `src-gpui/src/editor_control/viewport_model.rs`, `viewport_ui.rs`, `resident_budget.rs` | `src/lib/markdown-document/mountWindow.ts`, `viewportPolicy.json`, `windowingLimits.json` | 分组元数据、滚动高度、预取/回收、活动输入移交、共享预算；不拥有正文或重建语法索引，桌面接入仍待验收 |
+
 ### 发布与打包
 
 | Responsibility | Primary code | Related code | Change when |

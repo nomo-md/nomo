@@ -1,14 +1,7 @@
-export const DEFAULT_MARKDOWN_MOUNT_LIMITS = Object.freeze({
-  bytes: 1_048_576,
-  layoutUnits: 6_000,
-  returnBytes: 838_860,
-  returnLayoutUnits: 4_800,
-  idleMilliseconds: 2_000,
-});
+import limits from './windowingLimits.json';
+export const DEFAULT_MARKDOWN_MOUNT_LIMITS = Object.freeze(limits.mount);
 
-export const MARKDOWN_RESIDENT_LIMITS = Object.freeze({
-  views: 32, sourceBytes: 1024 * 1024, domNodes: 20_000, imageBytes: 128 * 1024 * 1024,
-});
+export const MARKDOWN_RESIDENT_LIMITS = Object.freeze(limits.resident);
 
 export type MarkdownMountLimits = Readonly<Record<keyof typeof DEFAULT_MARKDOWN_MOUNT_LIMITS, number>>;
 

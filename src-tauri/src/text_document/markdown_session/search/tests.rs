@@ -305,6 +305,7 @@ fn cancelled_or_stale_preparation_keeps_input_and_commit_retry_is_idempotent() {
         .apply(
             "main",
             MarkdownTransaction {
+                template_update: None,
                 document_id: fixture.status.document_id.clone(),
                 base_revision: 0,
                 operation_id: "typing".into(),
@@ -422,6 +423,7 @@ fn changed_savepoint_is_rechecked_before_publication() {
         .apply(
             "main",
             MarkdownTransaction {
+                template_update: None,
                 document_id: fixture.status.document_id.clone(),
                 base_revision: 0,
                 operation_id: "typing".into(),
@@ -540,4 +542,22 @@ fn release_and_owner_destruction_cancel_tasks_without_pinning_a_closed_document(
         .manager
         .search_progress("main", &next.task_id)
         .is_err());
+}
+
+#[test]
+fn replace_all_maps_template_origins_and_undo_restores_consumed_origins() {
+    for (query,replacement,expected) in [("cat","long cat",Some(10)),("****","text",None)] {
+        let mut fixture = Fixture::new("cat\n\n");
+        fixture.status = super::super::templates::insert_template(&fixture.manager, &fixture.status, 5);
+        let task = fixture.prepare(query, replacement);
+        fixture.commit(&task);
+        let read = |fixture: &Fixture| fixture.manager.read_window("main", &fixture.status.document_id,
+            fixture.status.revision, 0, fixture.status.byte_length).unwrap();
+        assert_eq!(read(&fixture).inline_templates.first().map(|t| t.from_byte),expected);
+        fixture.status = fixture.manager.history("main", &fixture.status.document_id, fixture.status.revision, false).unwrap();
+        assert_eq!(read(&fixture).inline_templates[0].from_byte,5);
+        assert_eq!(read(&fixture).text,"cat\n\n****");
+        fixture.status = fixture.manager.history("main", &fixture.status.document_id, fixture.status.revision, true).unwrap();
+        assert_eq!(read(&fixture).inline_templates.first().map(|t| t.from_byte),expected);
+    }
 }

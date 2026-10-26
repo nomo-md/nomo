@@ -14,13 +14,11 @@ use crate::images::{self, ImageStore};
 use crate::layout::{ColorRole, InlineStyle, ParaSpec, TextLayout, Wrap, layout_text, paint_box};
 use crate::markdown::blocks::BlockKind;
 use crate::markdown::highlight::LineContext;
-use crate::markdown::render::{BlockLayout, DisplayItem, Paint, RenderEnv, layout_block, source_line_spec};
+use crate::markdown::render::{BlockLayout, DisplayItem, RenderEnv, layout_block, source_line_spec};
 use crate::settings::Settings;
 use crate::theme::{Family, Metrics, Theme};
-use crate::ui::components::IconName;
-use gpui::TransformationMatrix;
 use gpui::{
-    App, Bounds, ClipboardItem, ContentMask, Context, Corners, CursorStyle, Element, ElementId, ElementInputHandler,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent, Style,
     Subscription, UTF16Selection, Window, actions, div, point, prelude::*, px, relative, size,
@@ -730,7 +728,7 @@ impl EditorView {
                             }
                         }
                         Part::Block { start, end, layout, .. } => {
-                            self.paint_block(layout, point(px(ox), px(top)), clip.clone(), theme, store, window, cx);
+                            crate::editor_control::paint::paint_block(layout, point(px(ox), px(top)), clip.clone(), theme, store, window, cx);
                             let first = search.matches.partition_point(|range| range.end < *start);
                             for range in search.matches[first..].iter().take_while(|range| range.start <= *end) {
                                 let rel = (range.start.saturating_sub(*start)) as usize..(range.end.min(*end) - start) as usize;
@@ -760,87 +758,6 @@ impl EditorView {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn paint_block(&self, layout: &BlockLayout, origin: Point<Pixels>, clip: Range<f32>, theme: &Theme, store: &ImageStore, window: &mut Window, cx: &App) {
-        let embeds = cx.global::<EmbedStore>();
-        let resolve = |paint: Paint| -> Hsla {
-            match paint {
-                Paint::Border => theme.border,
-                Paint::CodeBg => theme.code_bg,
-                Paint::CodeBorder => theme.code_border,
-                Paint::QuoteBorder => theme.quote_border,
-                Paint::TableBorder => theme.table_border,
-                Paint::TableHeader => theme.table_header_bg,
-                Paint::Surface => theme.surface,
-                Paint::Role(role) => role.resolve(theme),
-            }
-        };
-        for item in &layout.items {
-            match item {
-                DisplayItem::Rect { x, y, w, h, paint, radius, border } => {
-                    if y + h < clip.start || *y > clip.end {
-                        continue;
-                    }
-                    let bounds = Bounds::new(origin + point(px(*x), px(*y)), size(px(*w), px(*h)));
-                    paint_box(bounds, resolve(*paint), *radius, border.map(|border| (resolve(border), 1.0)), window);
-                }
-                DisplayItem::Text { x, y, layout, .. } => {
-                    if y + layout.height() < clip.start || *y > clip.end {
-                        continue;
-                    }
-                    layout.paint(origin + point(px(*x), px(*y)), (clip.start - y)..(clip.end - y), theme, window);
-                    // 行内公式位图按基线贴到占位位置。
-                    for (key, ox, oy, w, h) in layout.object_rects() {
-                        if let Some(image) = embeds.image(key) {
-                            let bounds = Bounds::new(origin + point(px(x + ox), px(y + oy)), size(px(w), px(h)));
-                            let _ = window.paint_image(bounds, Corners::default(), image, 0, false);
-                        }
-                    }
-                }
-                DisplayItem::Embed { x, y, w, h, key, .. } => {
-                    if y + h < clip.start || *y > clip.end {
-                        continue;
-                    }
-                    let bounds = Bounds::new(origin + point(px(*x), px(*y)), size(px(*w), px(*h)));
-                    match embeds.image(*key) {
-                        Some(image) => {
-                            let _ = window.paint_image(bounds, Corners::default(), image, 0, false);
-                        }
-                        None => paint_box(bounds, theme.code_bg, 6.0, None, window),
-                    }
-                }
-                DisplayItem::Image { x, y, w, h, path } => {
-                    if y + h < clip.start || *y > clip.end {
-                        continue;
-                    }
-                    let bounds = Bounds::new(origin + point(px(*x), px(*y)), size(px(*w), px(*h)));
-                    match store.image(path) {
-                        Some(image) => {
-                            let _ = window.paint_image(bounds, Corners::all(px(6.0)), image, 0, false);
-                        }
-                        None => paint_box(bounds, theme.code_bg, 6.0, None, window),
-                    }
-                }
-                DisplayItem::CopyButton { x, y, size: side, .. } => {
-                    if y + side < clip.start || *y > clip.end {
-                        continue;
-                    }
-                    let inset = side * 0.2;
-                    let bounds = Bounds::new(origin + point(px(x + inset), px(y + inset)), size(px(side - inset * 2.0), px(side - inset * 2.0)));
-                    let _ = window.paint_svg(bounds, IconName::Copy.path().into(), TransformationMatrix::unit(), theme.muted, cx);
-                }
-                DisplayItem::Checkbox { x, y, size: side, checked, .. } => {
-                    let bounds = Bounds::new(origin + point(px(*x), px(*y)), size(px(*side), px(*side)));
-                    if *checked {
-                        // 勾号由块布局中紧随其后的文字项绘制。
-                        paint_box(bounds, theme.accent, 4.0, None, window);
-                    } else {
-                        paint_box(bounds, theme.surface, 4.0, Some((theme.muted, 1.4)), window);
-                    }
-                }
-            }
-        }
-    }
-
     fn paint_scrollbar(&self, bounds: Bounds<Pixels>, buffer: &Buffer, theme: &Theme, window: &mut Window) {
         let count = self.row_count(buffer).max(1) as f32;
         let viewport = f32::from(bounds.size.height);

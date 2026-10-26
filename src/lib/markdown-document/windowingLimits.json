@@ -1,0 +1,4 @@
+{
+  "mount": { "bytes": 1048576, "layoutUnits": 6000, "returnBytes": 838860, "returnLayoutUnits": 4800, "idleMilliseconds": 2000 },
+  "resident": { "views": 32, "sourceBytes": 1048576, "domNodes": 20000, "imageBytes": 134217728 }
+}

@@ -71,6 +71,10 @@ pnpm install
 pnpm tauri dev
 ```
 
+### GPUI 窗口编辑控件开发
+
+内部编辑控件通过 `--features editor-control-demo` 构建，支持 `--editor-control-demo` 内置样本和 `--editor-control <文件.md>` 真实文件入口，复用原版 Rust 文档会话。连续窗口接入正在验收，尚未替换默认编辑器，也未完成原版功能与视觉等价验收。运行方式、模块职责、窗口契约、测试和上游缺口见 [GPUI 编辑控件开发记录](docs/gpui-editor-control.md)。
+
 ## 参与项目
 
 欢迎提交 [Issue](https://github.com/nomo-md/nomo/issues) 或 [Pull Request](https://github.com/nomo-md/nomo/pulls)；反馈问题时请附系统版本、复现步骤与样例。

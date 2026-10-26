@@ -1,0 +1,9 @@
+{
+  "baseScreens": 3,
+  "forwardScreens": 6,
+  "retainScreens": 3,
+  "quietMs": 300,
+  "batchMs": 4,
+  "groupBytes": 32768,
+  "groupBlocks": 64
+}

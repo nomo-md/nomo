@@ -148,6 +148,7 @@ mod tests {
             .apply(
                 "main",
                 MarkdownTransaction {
+                    template_update: None,
                     derived: false,
                     document_id: initial.document_id.clone(),
                     base_revision: 0,
@@ -297,6 +298,7 @@ mod tests {
             .apply(
                 "main",
                 MarkdownTransaction {
+                    template_update: None,
                     derived: false,
                     document_id: status.document_id.clone(),
                     base_revision: 0,
@@ -420,6 +422,7 @@ mod tests {
         }).unwrap();
         for (operation, from, to, text) in [("title", 3, 3, "X"), ("toc", 6, 42, "<!-- toc -->\n- [AX](#ax)\n<!-- /toc -->")] {
             status = manager.apply("main", MarkdownTransaction {
+                template_update: None,
                 derived: operation == "toc", document_id: status.document_id.clone(), base_revision: status.revision,
                 operation_id: operation.into(), history_group_id: "typing".into(),
                 edits: vec![MarkdownEdit { from_byte: from, to_byte: to, inserted_text: text.into() }],

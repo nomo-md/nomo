@@ -224,6 +224,7 @@ fn original_mixed_incremental_fixture() {
             .apply(
                 "main",
                 MarkdownTransaction {
+                    template_update: None,
                     derived: false,
                     document_id: doc.document_id.clone(),
                     base_revision: 0,
@@ -420,6 +421,7 @@ fn native_revision_ownership_unsaved_history_and_incremental_cache() {
             .apply(
                 "main",
                 MarkdownTransaction {
+                    template_update: None,
                     derived: false,
                     document_id: doc.document_id.clone(),
                     base_revision: 0,
@@ -509,6 +511,7 @@ fn native_revision_ownership_unsaved_history_and_incremental_cache() {
             .apply(
                 "main",
                 MarkdownTransaction {
+                    template_update: None,
                     derived: false,
                     document_id: doc.document_id.clone(),
                     base_revision: redone.revision,

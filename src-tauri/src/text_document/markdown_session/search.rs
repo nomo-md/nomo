@@ -20,6 +20,7 @@ pub(in crate::text_document) struct PreparedReplacement {
     anchors: Vec<u64>,
     saved_key: Option<String>,
     dirty: bool,
+    inline_templates: Vec<InlineTemplate>,
 }
 
 struct Batch {
@@ -31,6 +32,8 @@ struct Batch {
     inverse: Vec<TreeEdit>,
     bytes: usize,
     selection_before: Option<MarkdownSelection>,
+    templates_before: Vec<InlineTemplate>,
+    templates: Vec<InlineTemplate>,
 }
 impl Batch {
     fn push(
@@ -48,6 +51,8 @@ impl Batch {
         {
             self.flush(manager, task, None)?;
         }
+        markdown_templates::map_templates(&mut self.templates,
+            [(forward.from, forward.to, forward.pieces.iter().map(Piece::len).sum())], false);
         self.bytes += size;
         self.forward.push(forward);
         self.inverse.push(inverse);
@@ -74,6 +79,8 @@ impl Batch {
         }
         self.inverse.reverse();
         let record = HistoryRecord {
+            templates_before: (self.templates_before != self.templates).then(|| self.templates_before.clone()),
+            templates_after: (self.templates_before != self.templates).then(|| self.templates.clone()),
             previous_event: self.head,
             group: self.group.clone(),
             parent_undo: self.undo,
@@ -84,7 +91,10 @@ impl Batch {
             selection_before: self.selection_before.take(),
             selection_after,
         };
-        debug_assert!(serde_json::to_vec(&record).unwrap().len() <= HISTORY_BATCH_BYTES);
+        // 正文批次原预算不变；稀疏来源元数据另计，历史热缓存仍按完整序列化字节计量。
+        let metadata_bytes = serde_json::to_vec(&(&record.templates_before, &record.templates_after)).unwrap().len() + 128;
+        debug_assert!(serde_json::to_vec(&record).unwrap().len() <= HISTORY_BATCH_BYTES + metadata_bytes);
+        self.templates_before = self.templates.clone();
         let offset = session.history.append_staged(&record)?;
         self.head = Some(offset);
         self.undo = Some(offset);
@@ -232,6 +242,8 @@ impl MarkdownDocumentSessionManager {
                     inverse: vec![],
                     bytes: 0,
                     selection_before: request.selection.clone(),
+                    templates_before: session.manifest.inline_templates.clone(),
+                    templates: session.manifest.inline_templates.clone(),
                 },
                 session.history.durability_handle()?,
             )
@@ -380,6 +392,7 @@ impl MarkdownDocumentSessionManager {
             anchors,
             saved_key,
             dirty,
+            inline_templates: batch.templates,
         });
         task.emit("prepared", task.snapshot.len(), scanned.count, None);
         Ok(())
@@ -464,6 +477,7 @@ impl MarkdownDocumentSessionManager {
                 manifest.undo = prepared.head;
                 manifest.redo = None;
                 manifest.selection = prepared.selection.clone();
+                manifest.inline_templates = prepared.inline_templates.clone();
                 session.persist(&manifest)?;
                 session.current.tree = prepared.tree.clone();
                 session.current.revision = manifest.revision;

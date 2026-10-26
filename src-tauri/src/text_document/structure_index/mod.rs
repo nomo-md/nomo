@@ -7,4 +7,4 @@ mod source_anchors;
 mod store;
 pub(super) use invalidation::Invalidation;
 pub(super) use service::StructureService;
-pub(super) use store::{Identity, Query, Response};
+pub(crate) use store::{Identity, Query, Response};

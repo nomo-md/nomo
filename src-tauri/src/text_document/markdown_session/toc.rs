@@ -347,6 +347,7 @@ impl MarkdownDocumentSessionManager {
         let status = self.apply(
             owner,
             MarkdownTransaction {
+                template_update: None,
                 derived: true,
                 document_id: identity.document_id.clone(),
                 base_revision: identity.revision,
@@ -405,6 +406,7 @@ mod tests {
             .apply(
                 "main",
                 MarkdownTransaction {
+                    template_update: None,
                     derived: false,
                     document_id: initial.document_id.clone(),
                     base_revision: 0,
@@ -429,6 +431,7 @@ mod tests {
             .apply(
                 "main",
                 MarkdownTransaction {
+                    template_update: None,
                     derived: false,
                     document_id: initial.document_id.clone(),
                     base_revision: body.revision,

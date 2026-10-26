@@ -9,6 +9,7 @@ use gpui::{
     Bounds, FontId, GlyphId, Hsla, Pixels, Point, TextRun, Window, fill, point, px, size,
 };
 use std::hash::{Hash, Hasher};
+use unicode_segmentation::UnicodeSegmentation;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -105,13 +106,18 @@ pub const OBJECT_CHAR: char = '\u{FFFC}';
 
 /// 嵌在段落中的行内对象（如行内公式）：`at` 为占位字符的字节偏移，宽度与基线上下尺寸为逻辑像素，
 /// `key` 由调用方解释（公式渲染缓存键）。
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum InlineAsset {
+    Embed(u64),
+    Image(std::path::PathBuf),
+}
+#[derive(Clone, Debug, PartialEq)]
 pub struct InlineObject {
     pub at: usize,
     pub width: f32,
     pub ascent: f32,
     pub descent: f32,
-    pub key: u64,
+    pub key: InlineAsset,
 }
 
 /// 段落输入。`spans` 按起点递增且互不重叠，未覆盖的字节使用 `base` 样式。
@@ -146,7 +152,7 @@ impl ParaSpec {
         width.to_bits().hash(&mut hasher);
         generation().hash(&mut hasher);
         for object in &self.objects {
-            (object.at, object.width.to_bits(), object.ascent.to_bits(), object.descent.to_bits(), object.key).hash(&mut hasher);
+            (object.at, object.width.to_bits(), object.ascent.to_bits(), object.descent.to_bits(), &object.key).hash(&mut hasher);
         }
         hasher.finish()
     }
@@ -206,7 +212,7 @@ pub struct TextLayout {
 
 impl TextLayout {
     /// 行内对象的绘制矩形（相对段落左上角）：(key, x, y, 宽, 高)，按基线对齐。
-    pub fn object_rects(&self) -> Vec<(u64, f32, f32, f32, f32)> {
+    pub fn object_rects(&self) -> Vec<(&InlineAsset, f32, f32, f32, f32)> {
         self.objects
             .iter()
             .filter_map(|object| {
@@ -214,7 +220,7 @@ impl TextLayout {
                 let line = &self.lines[line_index];
                 let x = self.x_in_line(line, object.at);
                 let baseline = line_index as f32 * self.line_height + self.baseline;
-                Some((object.key, x, baseline - object.ascent, object.width, object.ascent + object.descent))
+                Some((&object.key, x, baseline - object.ascent, object.width, object.ascent + object.descent))
             })
             .collect()
     }
@@ -228,6 +234,8 @@ impl TextLayout {
             + self.glyphs.len() * std::mem::size_of::<Glyph>()
             + self.lines.iter().map(|line| 48 + line.glues.len() * 16).sum::<usize>()
             + self.styles.len() * 48
+            + self.objects.capacity() * std::mem::size_of::<InlineObject>()
+            + self.objects.iter().map(|o| match &o.key { InlineAsset::Image(path) => path.as_os_str().len(), _ => 0 }).sum::<usize>()
     }
 
     /// 最宽视觉行的宽度，用于表格列宽和行内元素对齐。
@@ -408,8 +416,9 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
         let text = &spec.text[range.clone()];
         let mut start = 0;
         let mut current: Option<bool> = None;
-        for (offset, ch) in text.char_indices() {
-            let mono = mono_covers(ch);
+        // 字素簇必须使用同一字体；按字符拆分会把 Emoji 的 ZWJ/肤色修饰拆到另一个 run。
+        for (offset, cluster) in text.grapheme_indices(true) {
+            let mono = cluster.chars().all(mono_covers);
             if current.is_some_and(|value| value != mono) {
                 let segment_family = if current == Some(true) { Family::Mono } else { Family::Text };
                 fonts.push((offset - start, font_for(segment_family, style.bold, style.italic)));
@@ -472,15 +481,16 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
         }
         natural_width += deltas.iter().map(|(_, delta)| delta).sum::<f32>();
     }
-    let ascent = f32::from(shaped.ascent);
-    let descent = f32::from(shaped.descent);
-    let baseline = ((spec.line_height - (ascent + descent)) / 2.0).max(0.0) + ascent;
+    let ascent = spec.objects.iter().map(|o| o.ascent).fold(f32::from(shaped.ascent), f32::max);
+    let descent = spec.objects.iter().map(|o| o.descent).fold(f32::from(shaped.descent), f32::max);
+    let line_height = spec.line_height.max(ascent + descent);
+    let baseline = ((line_height - (ascent + descent)) / 2.0).max(0.0) + ascent;
     let mut layout = TextLayout {
         text: spec.text.clone(),
         glyphs,
         natural_width,
         lines: Vec::new(),
-        line_height: spec.line_height,
+        line_height,
         font_size: spec.font_size,
         baseline,
         styles,

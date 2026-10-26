@@ -2,6 +2,8 @@
 pub(super) mod search;
 mod structure;
 mod toc;
+#[cfg(test)]
+mod templates;
 use super::{
     chunk_reader::{AddedStore, DocumentSnapshot, OriginalFile},
     edit_journal::BaselineIdentity,
@@ -14,6 +16,7 @@ use super::{
 };
 use crate::{file_system::write_file_atomically_with, models::MarkdownEncoding};
 use serde::{Deserialize, Serialize};
+use crate::markdown_templates::{self, InlineTemplate, TemplateUpdate};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
@@ -66,6 +69,8 @@ pub(crate) struct MarkdownTransaction {
     pub(crate) edits: Vec<MarkdownEdit>,
     pub(crate) selection_before: Option<MarkdownSelection>,
     pub(crate) selection_after: Option<MarkdownSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) template_update: Option<TemplateUpdate>,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,6 +95,8 @@ pub(crate) struct MarkdownWindow {
     pub(crate) from_byte: u64,
     pub(crate) to_byte: u64,
     pub(crate) text: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) inline_templates: Vec<InlineTemplate>,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,6 +122,8 @@ struct Manifest {
     redo: Option<u64>,
     selection: Option<MarkdownSelection>,
     saved_tree: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    inline_templates: Vec<InlineTemplate>,
 }
 #[derive(Serialize, Deserialize)]
 struct PendingSave {
@@ -222,6 +231,7 @@ impl Session {
         manifest.undo = undo.resolve(offset);
         manifest.redo = redo.resolve(offset);
         manifest.selection = record.selection_after;
+        if let Some(templates) = record.templates_after { manifest.inline_templates = templates; }
         // 游标持久化成功才确认事务。任何失败均保留旧树、旧历史以及可重试输入。
         self.persist(&manifest)?;
         self.current.tree = tree;
@@ -366,6 +376,7 @@ impl MarkdownDocumentSessionManager {
             added,
         };
         let manifest = Manifest {
+            inline_templates: Vec::new(),
             derived: false,
             version: 1,
             document_id: document_id.clone(),
@@ -581,7 +592,10 @@ impl MarkdownDocumentSessionManager {
                 session.current.revision,
             ));
         }
-        read_window(document_id, &session.current, from, to)
+        let mut window = read_window(document_id, &session.current, from, to)?;
+        window.inline_templates = session.manifest.inline_templates.iter()
+            .filter(|t| t.from_byte < window.to_byte && t.to_byte > window.from_byte).cloned().collect();
+        Ok(window)
     }
     pub(crate) fn apply(
         &self,
@@ -674,7 +688,28 @@ impl MarkdownDocumentSessionManager {
             .filter(|(requested, _)| requested == &transaction.history_group_id)
             .map(|(_, group)| group.clone())
             .unwrap_or_else(|| id("group"));
+        let mut templates = session.manifest.inline_templates.clone();
+        markdown_templates::map_templates(&mut templates, forward.iter()
+            .map(|e| (e.from, e.to, e.pieces.iter().map(Piece::len).sum())), transaction.template_update.is_some());
+        if let Some(update) = transaction.template_update {
+            for template in update.add {
+                if !template.valid_shape() || template.to_byte > candidate.len() {
+                    return Err(error("invalid-template", "新增模板的来源范围无效"));
+                }
+                let (open, close) = template.markers();
+                if candidate.read_range(template.from_byte, open.len())? != open.as_bytes()
+                    || candidate.read_range(template.close_start_byte, close.len())? != close.as_bytes() {
+                    return Err(error("invalid-template", "模板语法与提交正文不一致"));
+                }
+                templates.push(template);
+            }
+        }
+        markdown_templates::canonicalize(&mut templates);
+        if !markdown_templates::valid_set(&templates) { return Err(error("invalid-template", "空模板内容或嵌套关系无效")); }
+        let template_change = templates != session.manifest.inline_templates;
         let record = HistoryRecord {
+            templates_before: template_change.then(|| session.manifest.inline_templates.clone()),
+            templates_after: template_change.then_some(templates),
             previous_event: session.manifest.event,
             group: group.clone(),
             parent_undo: session.manifest.undo,
@@ -685,7 +720,7 @@ impl MarkdownDocumentSessionManager {
             selection_before: transaction.selection_before,
             selection_after: transaction.selection_after,
         };
-        let result = if record.edits.is_empty() {
+        let result = if record.edits.is_empty() && !template_change {
             session.manifest.selection = record.selection_after;
             session.status()
         } else {
@@ -758,6 +793,8 @@ impl MarkdownDocumentSessionManager {
             }
             tree = apply_tree_edits(tree.clone(), &edits)?;
             let record = HistoryRecord {
+            templates_before: None,
+            templates_after: None,
                 previous_event: staged_head, group: if redo { "redo" } else { "undo" }.into(),
                 parent_undo: session.manifest.undo, previous_redo: session.manifest.redo,
                 edits, inverse: vec![], group_entries: vec![], selection_before: None, selection_after: None,
@@ -765,6 +802,7 @@ impl MarkdownDocumentSessionManager {
             staged_head = Some(session.history.append_staged(&record)?);
             Ok(())
         };
+        let mut templates = session.manifest.inline_templates.clone();
         let (entries, undo, next_redo, selection) = if redo {
             let Some(offset) = session.manifest.redo else { return Ok(session.status()); };
             let record = session.history.read(offset)?;
@@ -773,6 +811,7 @@ impl MarkdownDocumentSessionManager {
                 let entry = session.history.read(*entry)?;
                 if !derived { stage(&mut session, entry.edits)?; }
                 if entry.selection_after.is_some() { selection = entry.selection_after; }
+                if let Some(value) = entry.templates_after { templates = value; }
             }
             (record.group_entries.clone(), record.group_entries.first().copied(),
                 HistoryPointer::Existing(record.previous_redo), selection)
@@ -785,6 +824,7 @@ impl MarkdownDocumentSessionManager {
                 let entry = session.history.read(offset)?;
                 if !derived { stage(&mut session, entry.inverse)?; }
                 if entry.selection_before.is_some() { selection = entry.selection_before; }
+                if let Some(value) = entry.templates_before { templates = value; }
                 entries.push(offset);
                 let parent = entry.parent_undo;
                 if let Some(previous) = parent {
@@ -799,6 +839,7 @@ impl MarkdownDocumentSessionManager {
             let target = if redo { entries.first().copied() } else {
                 match entries.last() { Some(offset) => session.history.read(*offset)?.previous_event, None => None }
             };
+            templates = session.history.templates_at(target)?;
             let base_length = session.manifest.source_map.utf8_len;
             let restored = session.history.replay(PieceTree::from_original(base_length), target)?;
             let current_length = session.current.len();
@@ -815,6 +856,8 @@ impl MarkdownDocumentSessionManager {
         }
         drop(stage);
         let record = HistoryRecord {
+            templates_before: Some(session.manifest.inline_templates.clone()),
+            templates_after: Some(templates),
             previous_event: staged_head, group: if redo { "redo" } else { "undo" }.into(),
             parent_undo: session.manifest.undo, previous_redo: session.manifest.redo,
             edits: vec![], inverse: vec![], group_entries: entries,
@@ -1350,6 +1393,7 @@ mod tests {
             .apply(
                 "main",
                 MarkdownTransaction {
+                    template_update: None,
                     derived: true,
                     document_id: title.document_id.clone(),
                     base_revision: title.revision,
@@ -1525,6 +1569,7 @@ mod tests {
             .apply(
                 "main",
                 MarkdownTransaction {
+                    template_update: None,
                     derived: false,
                     document_id: status.document_id.clone(),
                     base_revision: status.revision,
@@ -1734,6 +1779,7 @@ mod tests {
         fs::rename(&manifest, &backup).unwrap();
         fs::create_dir(&manifest).unwrap();
         let transaction = MarkdownTransaction {
+            template_update: None,
             derived: false,
             document_id: opened.document_id.clone(),
             base_revision: 0,
@@ -1835,6 +1881,7 @@ fn read_window(
     let text = String::from_utf8(snapshot.read_range(from, (to - from) as usize)?)
         .map_err(|e| error("invalid-working-source", e.to_string()))?;
     Ok(MarkdownWindow {
+        inline_templates: Vec::new(),
         document_id: document_id.into(),
         revision: snapshot.revision,
         from_byte: from,
