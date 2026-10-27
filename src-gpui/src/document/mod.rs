@@ -1,16 +1,14 @@
-//! 原型文档层：直接编译 `src-tauri` 的持久化 PieceTree，只补齐它依赖的错误类型和一个行首索引。
-//!
-//! 这里不复用 `session.rs`：它与 Tauri 命令、磁盘历史和事件推送耦合，原型只验证
-//! “Rust 后端数据结构能否直接被 GPUI 视图同进程读取”，不验证保存与恢复链路。
+//! 默认编辑器的内存文档层，复用持久化 PieceTree，并维护行首索引。
+//! 开发控件的磁盘会话另由 text_document 管理。
 
 #[allow(dead_code)]
-#[path = "../../../src-tauri/src/text_document/piece_tree.rs"]
+#[path = "../text_document/piece_tree.rs"]
 mod piece_tree;
 
 use piece_tree::{Piece, PieceSource, PieceTree};
 use std::ops::Range;
 
-/// 与 `src-tauri/src/text_document/mod.rs` 中同名类型的字段子集保持一致，供 piece_tree.rs 原样编译。
+/// PieceTree 在默认编辑器中的窄错误类型。
 #[derive(Debug, Clone)]
 pub(crate) struct TextDocumentError {
     pub(crate) code: &'static str,

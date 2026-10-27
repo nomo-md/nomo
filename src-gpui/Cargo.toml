@@ -1,26 +1,28 @@
 [package]
 name = "nomo-gpui"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 publish = false
 license = "AGPL-3.0-or-later"
-description = "Nomo Markdown 编辑器的 GPUI 原生原型"
+description = "Nomo native Markdown editor"
 
-# 独立 workspace：与 src-tauri 并存，不参与其构建，也不改动其锁文件。
-[workspace]
+[[bin]]
+name = "nomo"
+path = "src/main.rs"
 
 [features]
-# 开发宿主才链接原版会话与 SQLite；普通 GPUI 原型的依赖与启动成本不变。
-editor-control-demo = ["dep:encoding_rs", "dep:sha2", "dep:regex", "dep:rusqlite", "dep:tokio", "dep:unicode-properties", "dep:windows-sys", "dep:web_atoms", "dep:reqwest"]
+# 文档会话是正式编辑器的基础；feature 仅保留控件开发外壳。
+editor-control-demo = []
 
 [dependencies]
-gpui = "=0.2.2"
-# 与 src-tauri 锁定的版本一致，保证两端解析结果可对照。
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
+# 保持既有 Markdown 解析版本和语义。
 pulldown-cmark = { version = "=0.13.5", default-features = false }
 unicode-segmentation = "1.13"
 unicode-normalization = "=0.1.26"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+url = "=2.5.8"
 # gpui 已经传递依赖 image 0.25，这里直接使用同一版本解码本地图片。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 # 公式：纯 Rust 的 TeX 数学排版（STIX Two Math），输出字形已转为路径的 SVG。
@@ -29,18 +31,30 @@ latex-rust = "=3.0.1"
 merman = { version = "=0.9.2", features = ["native-fonts"] }
 # 与 gpui 传递依赖的版本一致，用于把 SVG 栅格化为位图。
 resvg = "=0.45.1"
-encoding_rs = { version = "0.8", optional = true }
-sha2 = { version = "0.10", optional = true }
-regex = { version = "1", optional = true }
-rusqlite = { version = "=0.40.2", features = ["bundled", "fallible_uint", "hooks"], optional = true }
-tokio = { version = "1", features = ["sync", "rt-multi-thread", "time"], optional = true }
-reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls"], optional = true }
-unicode-properties = { version = "0.1", optional = true }
+encoding_rs = { version = "0.8" }
+sha2 = { version = "0.10" }
+# 与已有传递依赖共用系统语言探测，避免逐平台维护语言判断。
+sys-locale = "=0.3.2"
+regex = { version = "1" }
+rusqlite = { version = "=0.40.2", features = ["bundled", "fallible_uint", "hooks"] }
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "time"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls"] }
+unicode-properties = { version = "0.1" }
 html-escape = "=0.2.15"
-web_atoms = { version = "0.2", optional = true }
+web_atoms = { version = "0.2" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+arboard = { version = "=3.6.1", default-features = false }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSWorkspace", "NSAccessibility"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "=3.6.1", default-features = false, features = ["wayland-data-control"] }
+ashpd = { version = "=0.11.1", default-features = false, features = ["async-std"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"], optional = true }
+raw-window-handle = "=0.6.2"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
 
-[profile.release]
-debug = 1
+[target.'cfg(windows)'.build-dependencies]
+# 复用依赖图中已有的资源编译器，嵌入 Nomo 图标、版本和 DPI manifest。
+embed-resource = "=3.0.12"

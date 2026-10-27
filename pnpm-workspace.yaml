@@ -1,4 +1,0 @@
-allowBuilds:
-  esbuild: true
-patchedDependencies:
-  mermaid@11.15.0: patches/mermaid@11.15.0.patch

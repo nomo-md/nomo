@@ -1,4 +1,4 @@
-//! 对齐 src/lib/table-layout/widths.ts 的纯列宽策略；自动列宽不写回源码。
+//! 沿用既有语义列宽策略；自动列宽不写回源码。
 #[derive(Clone, Debug)]
 pub struct CellMetrics {
     pub column: usize,

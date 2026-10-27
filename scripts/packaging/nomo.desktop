@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Nomo
+Comment=Native Markdown editor
+Exec=nomo %F
+TryExec=nomo
+Icon=nomo
+Terminal=false
+Categories=Office;TextEditor;
+MimeType=text/markdown;text/plain;application/json;
+StartupNotify=true
+StartupWMClass=com.nomo.desktop

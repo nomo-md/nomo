@@ -1,202 +1,160 @@
-name: Release
+name: Build and release Nomo
 
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    branches: [master, gpui-editor]
+    tags: ['v*.*.*']
+  pull_request:
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: native-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
-    name: Build ${{ matrix.name }}
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: Windows x64
             runner: windows-2022
-            rust-target: ''
-            args: '--bundles nsis'
+            target: x86_64-pc-windows-msvc
+            artifact: windows-x64
           - name: macOS arm64
-            runner: macos-latest
-            rust-target: aarch64-apple-darwin
-            args: '--target aarch64-apple-darwin'
+            runner: macos-14
+            target: aarch64-apple-darwin
+            artifact: macos-arm64
           - name: Linux x64
             runner: ubuntu-24.04
-            rust-target: ''
-            args: '--bundles deb,rpm'
-
+            target: x86_64-unknown-linux-gnu
+            artifact: linux-x64
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install Linux system dependencies
+      - uses: actions/checkout@v5
+      - name: Install Linux build and packaging tools
         if: runner.os == 'Linux'
-        shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libssl-dev \
+            libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libxcb1-dev libxcb-xkb-dev libxcb-randr0-dev \
+            libxcb-xinput-dev libxcb-cursor-dev libvulkan-dev libegl1-mesa-dev \
+            libasound2-dev libudev-dev fonts-noto-cjk xdg-desktop-portal \
+            dpkg-dev rpm desktop-file-utils jq
+      - name: Initialize Windows SDK and MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
         with:
-          node-version: 22
-
-      - name: Setup pnpm
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.5.1 --activate
-
-      - name: Setup Rust
-        if: matrix.rust-target == ''
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup Rust target
-        if: matrix.rust-target != ''
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.rust-target }}
-
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Clean stale Windows release outputs
+          arch: x64
+      - name: Install Windows packaging tools
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          @(
-            'src-tauri\target\release\bundle',
-            'src-tauri\target\release\nsis',
-            'src-tauri\target\release\wix'
-          ) | ForEach-Object {
-            Remove-Item -LiteralPath $_ -Recurse -Force -ErrorAction SilentlyContinue
-          }
-
-      - name: Build macOS Quick Look extension
+          choco install nsis --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
+      - name: Check macOS toolchain
         if: runner.os == 'macOS'
-        shell: bash
-        env:
-          QUICKLOOK_ARCH: ${{ matrix.rust-target == 'aarch64-apple-darwin' && 'arm64' || 'x86_64' }}
-          APPLE_CODESIGN_IDENTITY: '-'
-        run: pnpm run build:quicklook-extension
-
-      - name: Compile macOS app icon
-        if: runner.os == 'macOS'
-        shell: bash
-        run: bash scripts/compile-macos-appicon.sh
-
-      - name: Prepare release body
-        id: release_body
-        shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $notesFile = ".github/release-notes/${{ github.ref_name }}.md"
-          if (Test-Path -LiteralPath $notesFile) {
-            $body = Get-Content -LiteralPath $notesFile -Raw
-          } else {
-            $body = @(
-              'Windows:',
-              '- x64-setup.exe: 安装版',
-              '- x64.zip: 免安装版',
-              '',
-              'macOS:',
-              '- .dmg / .app.tar.gz: arm64',
-              '',
-              'Linux:',
-              '- .deb / .rpm: x64',
-              '- checksums.md5: MD5 校验清单'
-            ) -join "`n"
-          }
-
-          'body<<__RELEASE_BODY__' >> $env:GITHUB_OUTPUT
-          $body.TrimEnd() >> $env:GITHUB_OUTPUT
-          '__RELEASE_BODY__' >> $env:GITHUB_OUTPUT
-
-      - name: Build and publish release assets
-        uses: tauri-apps/tauri-action@v0.6.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_SIGNING_IDENTITY: '-'
+          xcrun --find metal
+          xcrun --find metallib
+          command -v jq
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Nomo ${{ github.ref_name }}
-          releaseBody: ${{ steps.release_body.outputs.body }}
-          releaseDraft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          args: ${{ matrix.args }}
-
-      - name: Package Windows zip
-        if: runner.os == 'Windows'
-        shell: pwsh
+          targets: ${{ matrix.target }}
+      - name: Check both native entrypoints
         run: |
-          $ErrorActionPreference = 'Stop'
-          $version = '${{ github.ref_name }}' -replace '^v', ''
-          $zipRoot = Join-Path $env:RUNNER_TEMP 'nomo-x64'
-          $appDir = Join-Path $zipRoot 'Nomo'
-          $zipPath = Join-Path $env:GITHUB_WORKSPACE "Nomo_${version}_x64.zip"
-
-          Remove-Item -LiteralPath $zipRoot -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path $appDir | Out-Null
-
-          Copy-Item -LiteralPath 'src-tauri\target\release\nomo.exe' -Destination (Join-Path $appDir 'nomo.exe')
-          if (Test-Path -LiteralPath 'src-tauri\target\release\resources') {
-            Copy-Item -LiteralPath 'src-tauri\target\release\resources' -Destination (Join-Path $appDir 'resources') -Recurse
-          }
-
-          Compress-Archive -LiteralPath $appDir -DestinationPath $zipPath -Force
-          "NOMO_ZIP_PATH=$zipPath" >> $env:GITHUB_ENV
-
-      - name: Upload Windows zip release asset
+          cargo check --locked --target ${{ matrix.target }} --bin nomo
+          cargo check --locked --target ${{ matrix.target }} --features editor-control-demo --all-targets
+      - name: Existing default editor tests
+        run: cargo test --locked --release --target ${{ matrix.target }} --bin nomo
+      - name: Existing document and editor-control tests
+        run: cargo test --locked --release --target ${{ matrix.target }} --features editor-control-demo --bin nomo
+      - name: Build developer entrypoint
+        run: cargo build --locked --release --target ${{ matrix.target }} --features editor-control-demo --bin nomo
+      - name: Verify native dependencies
+        shell: bash
+        run: |
+          cargo tree --locked --target ${{ matrix.target }} --all-features --prefix none > dependency-tree.txt
+          if grep -E '^(tauri(-[^ ]*)?|wry|webview2-com|objc2-web-kit) v' dependency-tree.txt; then
+            echo 'Unexpected WebView dependency' >&2
+            exit 1
+          fi
+      - name: Package Windows (rebuild default features)
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload '${{ github.ref_name }}' "$env:NOMO_ZIP_PATH" --clobber
+        run: ./scripts/package-windows.ps1
+      - name: Package macOS (rebuild default features)
+        if: runner.os == 'macOS'
+        run: bash scripts/package-macos.sh
+      - name: Package Linux (rebuild default features)
+        if: runner.os == 'Linux'
+        run: bash scripts/package-linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: .artifacts/packages/*
+          include-hidden-files: true
+          if-no-files-found: error
 
-  checksums:
-    name: Publish MD5 checksums
-    runs-on: ubuntu-latest
+  publish:
+    name: Publish complete release
     needs: build
-    if: ${{ !contains(github.ref_name, '-') }}
-
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Generate and upload checksums.md5
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-x64'
+          path: release-assets
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-arm64
+          path: release-assets
+      - name: Validate version, complete asset set and archives
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/verify-release.py release-assets --tag "$RELEASE_TAG"
+      - name: Publish assets atomically from a draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        shell: bash
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          mkdir -p release-assets
-          gh release download '${{ github.ref_name }}' --dir release-assets --clobber
-          rm -f release-assets/checksums.md5 checksums.md5
-
-          mapfile -d '' files < <(find release-assets -maxdepth 1 -type f ! -name 'checksums.md5' -print0 | sort -z)
-          : > checksums.md5
-          for file in "${files[@]}"; do
-            md5="$(md5sum "$file" | awk '{print $1}')"
-            name="$(basename "$file")"
-            printf '%s  %s\n' "$md5" "$name" >> checksums.md5
-          done
-
-          gh release upload '${{ github.ref_name }}' checksums.md5 --clobber
+          notes=".github/release-notes/$RELEASE_TAG.md"
+          test -f "$notes" || { echo "Missing release notes: $notes" >&2; exit 1; }
+          if gh release view "$RELEASE_TAG" --json isDraft > existing-release.json 2>/dev/null; then
+            test "$(jq -r '.isDraft' existing-release.json)" = true || { echo 'Refusing to replace a published release' >&2; exit 1; }
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Nomo $RELEASE_TAG" --notes-file "$notes"
+          fi
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          printf '%s\n' release-assets/* | sed 's|^release-assets/||' | sort > expected-assets.txt
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort > uploaded-assets.txt
+          diff -u expected-assets.txt uploaded-assets.txt
+          prerelease=false
+          [[ "$RELEASE_TAG" != *-* ]] || prerelease=true
+          gh release edit "$RELEASE_TAG" --draft=false --notes-file "$notes" --prerelease="$prerelease" --latest="$([[ "$prerelease" = false ]] && echo true || echo false)"
 
   update-homebrew-cask:
     name: Update Homebrew cask
     runs-on: ubuntu-latest
-    needs: checksums
-    if: ${{ !contains(github.ref_name, '-') }}
+    needs: publish
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
     permissions:
       contents: write
 
@@ -235,13 +193,8 @@ jobs:
   sync-pages:
     name: Sync release to download sites
     runs-on: ubuntu-latest
-    needs: [build, checksums]
-    if: >-
-      ${{
-        always() &&
-        needs.build.result == 'success' &&
-        (contains(github.ref_name, '-') || needs.checksums.result == 'success')
-      }}
+    needs: publish
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     timeout-minutes: 30
 
     steps:

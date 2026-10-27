@@ -720,7 +720,7 @@ pub fn find_all(text: &str, query: &str, case_sensitive: bool) -> (Vec<Range<u64
 const MAX_SNAPSHOTS_PER_FILE: usize = 20;
 
 /// 把磁盘上的旧版本复制到 `gpui-snapshots/<文件名>/<时间戳>.md`。
-fn write_snapshot(path: &Path) -> std::io::Result<()> {
+pub(crate) fn write_snapshot(path: &Path) -> std::io::Result<()> {
     let root = crate::settings::snapshot_dir().ok_or_else(|| std::io::Error::other("无法确定快照目录"))?;
     let name = path.file_name().map_or_else(|| "untitled".into(), |name| name.to_string_lossy().into_owned());
     let dir = root.join(name);

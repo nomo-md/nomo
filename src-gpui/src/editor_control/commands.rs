@@ -21,6 +21,11 @@ pub enum EditIntent {
     Backspace,
     Delete,
     InsertBlock(String),
+    InsertBlockAt { block: String, caret: usize },
+    InsertCodeBlock(String),
+    InsertMathBlock,
+    InsertDetails,
+    InsertDiagram(String),
     InsertParagraph { before: bool },
     Link { label: String, target: String },
 }
@@ -40,6 +45,11 @@ pub fn apply_semantic(
 ) -> Result<EditResult, ControlError> {
     let base = parsed.identity.from_byte;
     let range = local_range(&parsed.source, base, selection.range())?;
+    if matches!(&intent, EditIntent::InsertCodeBlock(_) | EditIntent::InsertMathBlock | EditIntent::InsertDiagram(_)) {
+        if let Some(result) = super::semantic_selection::wrap_formatted(parsed, selection, range.clone(), &intent)? {
+            return Ok(result);
+        }
+    }
     let Some(cell) = parsed
         .html_tables
         .iter()
@@ -406,6 +416,11 @@ pub fn apply(
                 return Err(ControlError::InvalidRange);
             }
             let lines = selected_lines(source, range);
+            let remove = level > 0 && lines.iter().all(|line| {
+                let raw = &source[line.clone()];
+                let hashes = raw.bytes().take_while(|byte| *byte == b'#').count();
+                hashes == level as usize && raw.as_bytes().get(hashes) == Some(&b' ')
+            });
             let mut edits = Vec::new();
             for line in lines {
                 let raw = &source[line.clone()];
@@ -419,7 +434,7 @@ pub fn apply(
                 edits.push(SourceEdit {
                     from_byte: base + line.start as u64,
                     to_byte: base + (line.start + old) as u64,
-                    inserted_text: if level == 0 {
+                    inserted_text: if level == 0 || remove {
                         String::new()
                     } else {
                         format!("{} ", "#".repeat(level as usize))
@@ -597,6 +612,23 @@ pub fn apply(
             let caret = cut.start;
             Ok(replace(cut, String::new(), caret))
         }
+        EditIntent::InsertCodeBlock(language) => {
+            insert_wrapped_block(parsed, selection, range, Some(&language), "", true)
+        }
+        EditIntent::InsertMathBlock => insert_wrapped_block(parsed, selection, range, None, "E = mc^2", true),
+        EditIntent::InsertDetails => insert_details(parsed, range),
+        EditIntent::InsertDiagram(template) => insert_wrapped_block(parsed, selection, range, Some("mermaid"), &template, false),
+        EditIntent::InsertBlockAt { block, caret } => {
+            let prefix = block.get(..caret).ok_or(ControlError::InvalidRange)?;
+            let eol = line_ending(source, range.start);
+            let normalized = block.replace('\n', eol);
+            let caret_in_block = prefix.replace('\n', eol).len();
+            let mut result = apply(parsed, selection, EditIntent::InsertBlock(block))?;
+            let edit = result.edits.first().ok_or(ControlError::InvalidRange)?;
+            let start = edit.inserted_text.find(&normalized).ok_or(ControlError::InvalidRange)?;
+            result.selection = DocumentSelection::caret(edit.from_byte + (start + caret_in_block) as u64);
+            Ok(result)
+        }
         EditIntent::InsertBlock(block) => {
             let eol = line_ending(source, range.start);
             let before_source = &source[..range.start];
@@ -688,6 +720,143 @@ pub fn map_selection(selection: DocumentSelection, edits: &[SourceEdit]) -> Docu
 pub fn line_start(source: &str, at: usize) -> usize {
     source[..at].rfind('\n').map_or(0, |p| p + 1)
 }
+fn insert_details(parsed: &ParsedWindow, range: Range<usize>) -> Result<EditResult, ControlError> {
+    let source = &*parsed.source;
+    if !parsed.context.ancestors.is_empty() || parsed.nodes.iter().any(|node| matches!(node.kind, "code" | "table" | "html") && node.source.contains(&range.start)) {
+        return Err(ControlError::NeedsContext("当前容器内的折叠块需要完整结构；原文已保留".into()));
+    }
+    let eol = line_ending(source, range.start);
+    let before_source = &source[..range.start];
+    let after_source = &source[range.end..];
+    let before_breaks = before_source[before_source.trim_end_matches(['\r', '\n']).len()..].bytes().filter(|byte| *byte == b'\n').count();
+    let after_breaks = after_source[..after_source.len() - after_source.trim_start_matches(['\r', '\n']).len()].bytes().filter(|byte| *byte == b'\n').count();
+    let before = if before_source.is_empty() { String::new() } else { eol.repeat(2usize.saturating_sub(before_breaks)) };
+    let after = if after_source.is_empty() { String::new() } else { eol.repeat(2usize.saturating_sub(after_breaks)) };
+    let header = format!("<details>{eol}<summary></summary>{eol}{eol}");
+    let selected = &source[range.clone()];
+    let ending = if selected.ends_with('\n') { "" } else { eol };
+    let inserted = format!("{before}{header}{selected}{ending}</details>{after}");
+    let caret = parsed.identity.from_byte + (range.start + before.len() + "<details>".len() + eol.len() + "<summary>".len()) as u64;
+    Ok(EditResult { edits: vec![SourceEdit { from_byte: parsed.identity.from_byte + range.start as u64, to_byte: parsed.identity.from_byte + range.end as u64, inserted_text: inserted }], selection: DocumentSelection::caret(caret), template_update: None })
+}
+
+/// 保留选区原文和方向，围栏长度根据正文计算，避免内容中的反引号提前结束代码块。
+fn insert_wrapped_block(
+    parsed: &ParsedWindow,
+    selection: DocumentSelection,
+    range: Range<usize>,
+    language: Option<&str>,
+    default_body: &str,
+    toggle_existing: bool,
+) -> Result<EditResult, ControlError> {
+    let source = &*parsed.source;
+    let base = parsed.identity.from_byte;
+    let in_code = parsed.nodes.iter().any(|node| {
+        node.kind == "code" && node.source.start <= range.start && range.start < node.source.end
+    });
+    let in_math = parsed.events.iter().any(|(event, span)| {
+        matches!(event, pulldown_cmark::Event::DisplayMath(_))
+            && span.start <= range.start && range.start < span.end
+    });
+    if in_code && language.is_some() && toggle_existing {
+        let node = parsed.nodes.iter().find(|node| node.kind == "code" && node.source.start <= range.start && range.start < node.source.end).unwrap();
+        if node.parent.is_some() || !parsed.context.ancestors.is_empty() || range.end > node.source.end {
+            return Err(ControlError::NeedsContext("嵌套或跨窗口代码块需要完整结构；原文已保留".into()));
+        }
+        return unwrap_fenced_block(parsed, selection, node.source.clone(), true);
+    }
+    if in_math && language.is_none() && toggle_existing {
+        let span = parsed.events.iter().find_map(|(event, span)| {
+            (matches!(event, pulldown_cmark::Event::DisplayMath(_)) && span.start <= range.start && range.start < span.end).then(|| span.clone())
+        }).unwrap();
+        if !parsed.context.ancestors.is_empty() || range.end > span.end {
+            return Err(ControlError::NeedsContext("嵌套或跨窗口公式块需要完整结构；原文已保留".into()));
+        }
+        return unwrap_fenced_block(parsed, selection, span, false);
+    }
+    if in_code || in_math {
+        return Err(ControlError::Unsupported("不能在代码块或公式块中插入另一种块；原文已保留".into()));
+    }
+    let eol = line_ending(source, range.start);
+    let before_source = &source[..range.start];
+    let after_source = &source[range.end..];
+    let before_breaks = before_source[before_source.trim_end_matches(['\r', '\n']).len()..]
+        .bytes().filter(|byte| *byte == b'\n').count();
+    let after_breaks = after_source[..after_source.len() - after_source.trim_start_matches(['\r', '\n']).len()]
+        .bytes().filter(|byte| *byte == b'\n').count();
+    let before = eol.repeat(if before_source.is_empty() { 0 } else { 2usize.saturating_sub(before_breaks) });
+    let after = eol.repeat(if after_source.is_empty() { 0 } else { 2usize.saturating_sub(after_breaks) });
+    let selected = &source[range.clone()];
+    let body = if selected.is_empty() { default_body } else { selected };
+    if language.is_none() && body.contains("$$") { return Err(ControlError::Unsupported("选区包含公式块围栏；原文已保留".into())); }
+    let (opening, closing) = if let Some(language) = language {
+        let ticks = body.split(|ch| ch != '`').map(str::len).max().unwrap_or(0).saturating_add(1).max(3);
+        let fence = "`".repeat(ticks);
+        let language = if language.len() <= 32 && language.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_+#.-".contains(&byte)) { language } else { "" };
+        (format!("{fence}{language}{eol}"), fence)
+    } else {
+        (format!("$${eol}"), "$$".to_string())
+    };
+    let ending = if body.ends_with('\n') { "" } else { eol };
+    if body.len().saturating_add(opening.len()).saturating_add(ending.len()).saturating_add(closing.len()) > crate::text_document::MAX_SEMANTIC_BYTES {
+        return Err(ControlError::NeedsContext("转换后的块超过语义窗口预算；选区原文已保留".into()));
+    }
+    let inserted = format!("{before}{opening}{body}{ending}{closing}{after}");
+    let content_start = base + (range.start + before.len() + opening.len()) as u64;
+    let content_end = content_start + body.len() as u64;
+    let selected_after = if range.is_empty() {
+        DocumentSelection::caret(content_start)
+    } else if selection.anchor_byte <= selection.head_byte {
+        DocumentSelection { anchor_byte: content_start, head_byte: content_end }
+    } else {
+        DocumentSelection { anchor_byte: content_end, head_byte: content_start }
+    };
+    Ok(EditResult {
+        edits: vec![SourceEdit { from_byte: base + range.start as u64, to_byte: base + range.end as u64, inserted_text: inserted }],
+        selection: selected_after,
+        template_update: None,
+    })
+}
+
+/// 仅在当前窗口包含完整围栏时拆除；不读取或复制窗口外的正文。
+fn unwrap_fenced_block(parsed: &ParsedWindow, selection: DocumentSelection, span: Range<usize>, code: bool) -> Result<EditResult, ControlError> {
+    let raw = &parsed.source[span.clone()];
+    let trimmed = raw.trim_end_matches(['\r', '\n']);
+    let suffix = &raw[trimmed.len()..];
+    let (mut content_start, mut content_end) = if code {
+        let first_end = trimmed.find('\n').ok_or_else(|| ControlError::NeedsContext("代码围栏不完整；原文已保留".into()))? + 1;
+        let close_start = trimmed.rfind('\n').map(|at| at + 1).ok_or_else(|| ControlError::NeedsContext("代码围栏不完整；原文已保留".into()))?;
+        let opening = trimmed[..first_end].trim();
+        let closing = trimmed[close_start..].trim();
+        let character = opening.chars().next().unwrap_or(' ');
+        let length = opening.chars().take_while(|ch| *ch == character).count();
+        if !matches!(character, '`' | '~') || length < 3 || closing.len() < length || !closing.chars().all(|ch| ch == character) || close_start < first_end {
+            return Err(ControlError::NeedsContext("代码围栏不完整；原文已保留".into()));
+        }
+        (first_end, close_start)
+    } else {
+        if !trimmed.starts_with("$$") || !trimmed.ends_with("$$") || trimmed.len() < 4 {
+            return Err(ControlError::NeedsContext("公式围栏不完整；原文已保留".into()));
+        }
+        (2, trimmed.len() - 2)
+    };
+    if !code && raw[content_start..].starts_with("\r\n") { content_start += 2; }
+    else if !code && raw[content_start..].starts_with('\n') { content_start += 1; }
+    if raw[..content_end].ends_with("\r\n") { content_end -= 2; }
+    else if raw[..content_end].ends_with('\n') { content_end -= 1; }
+    if content_end < content_start { content_end = content_start; }
+    let content = &raw[content_start..content_end];
+    let inserted = format!("{content}{suffix}");
+    let base = parsed.identity.from_byte;
+    let body_start = base + (span.start + content_start) as u64;
+    let mapped = |position: u64| base + span.start as u64 + position.saturating_sub(body_start).min(content.len() as u64);
+    Ok(EditResult {
+        edits: vec![SourceEdit { from_byte: base + span.start as u64, to_byte: base + span.end as u64, inserted_text: inserted }],
+        selection: DocumentSelection { anchor_byte: mapped(selection.anchor_byte), head_byte: mapped(selection.head_byte) },
+        template_update: None,
+    })
+}
+
 pub fn line_ending(source: &str, at: usize) -> &str {
     if let Some(end) = source[at..].find('\n') {
         if at + end > 0 && source.as_bytes()[at + end - 1] == b'\r' {

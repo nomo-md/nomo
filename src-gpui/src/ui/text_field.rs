@@ -28,6 +28,9 @@ pub struct TextField {
     marked: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    popover_style: bool,
+    emoji_search_style: bool,
+    invalid: bool,
 }
 
 impl EventEmitter<FieldEvent> for TextField {}
@@ -50,14 +53,42 @@ impl TextField {
             marked: None,
             last_layout: None,
             last_bounds: None,
+            popover_style: false,
+            emoji_search_style: false,
+            invalid: false,
         }
     }
 
+    pub fn set_placeholder(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.placeholder.as_ref() != text { self.placeholder = text.to_string().into(); cx.notify(); }
+    }
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.content = text.to_string();
         self.selected = 0..self.content.len();
         self.marked = None;
         cx.emit(FieldEvent::Changed);
+        cx.notify();
+    }
+    pub fn select_file_stem(&mut self, cx: &mut Context<Self>) {
+        let end = self.content.rfind('.').filter(|index| *index > 0).unwrap_or(self.content.len());
+        self.selected = 0..end;
+        self.reversed = false;
+        cx.notify();
+    }
+    pub fn set_tab_stop(&mut self) {
+        self.focus = self.focus.clone().tab_index(0).tab_stop(true);
+    }
+    pub fn set_popover_style(&mut self, cx:&mut Context<Self>) {
+        self.popover_style=true;
+        cx.notify();
+    }
+    pub fn set_emoji_search_style(&mut self, cx: &mut Context<Self>) {
+        self.popover_style = true;
+        self.emoji_search_style = true;
+        cx.notify();
+    }
+    pub fn set_invalid(&mut self, invalid:bool, cx:&mut Context<Self>) {
+        self.invalid=invalid;
         cx.notify();
     }
 
@@ -257,19 +288,22 @@ impl EntityInputHandler for TextField {
 }
 
 impl Render for TextField {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.global::<Theme>();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let animate_theme = Theme::ui_transition_active(cx);
+        let theme = Theme::ui(cx);
+        let border=if self.invalid {gpui::rgb(0xef4444).into()}else if self.emoji_search_style {theme.rail_bg}else if self.popover_style && self.focus.is_focused(window) {theme.accent}else{theme.border};
         div()
+            .relative().children(animate_theme.then(crate::ui::motion::theme_frame))
             .flex_1()
             .key_context("TextField")
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)
-            .h(px(26.0))
-            .px(px(8.0))
-            .rounded(px(6.0))
-            .bg(theme.surface)
+            .h(px(if self.popover_style {34.0}else{26.0}))
+            .px(px(if self.emoji_search_style {0.0}else if self.popover_style {10.0}else{8.0}))
+            .rounded(px(if self.popover_style {4.0}else{6.0}))
+            .bg(if self.emoji_search_style {theme.rail_bg}else if self.popover_style {theme.app_bg}else{theme.surface})
             .border_1()
-            .border_color(theme.border)
+            .border_color(border)
             .flex()
             .items_center()
             .overflow_hidden()
@@ -329,14 +363,14 @@ impl Element for FieldElement {
     }
 
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> FieldPrepaint {
-        let theme = cx.global::<Theme>().clone();
+        let theme = Theme::ui(cx);
         let field = self.field.read(cx);
         let (text, color): (SharedString, Hsla) = if field.content.is_empty() {
             (field.placeholder.clone(), theme.muted)
         } else {
             (field.content.clone().into(), theme.fg)
         };
-        let font = font_for(Family::Text, false, false);
+        let font = if field.popover_style {gpui::font(crate::theme::ui_font_family())}else{font_for(Family::Text, false, false)};
         let base = TextRun { len: text.len(), font, color, background_color: None, underline: None, strikethrough: None };
         let runs = match field.marked.as_ref().filter(|_| !field.content.is_empty()) {
             Some(marked) => vec![
@@ -349,7 +383,7 @@ impl Element for FieldElement {
             .collect(),
             None => vec![base],
         };
-        let line = window.text_system().shape_line(text, px(13.0), &runs, None);
+        let line = window.text_system().shape_line(text, px(if field.popover_style {14.0}else{13.0}), &runs, None);
         let selected = field.selected.clone();
         let (selection, cursor) = if selected.is_empty() || field.content.is_empty() {
             let x = if field.content.is_empty() { px(0.0) } else { line.x_for_index(field.cursor()) };
@@ -394,14 +428,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("delete", FieldDelete, context),
         KeyBinding::new("left", FieldLeft, context),
         KeyBinding::new("right", FieldRight, context),
-        KeyBinding::new("cmd-a", FieldSelectAll, context),
+        KeyBinding::new("secondary-a", FieldSelectAll, context),
         KeyBinding::new("home", FieldHome, context),
         KeyBinding::new("end", FieldEnd, context),
-        KeyBinding::new("cmd-left", FieldHome, context),
-        KeyBinding::new("cmd-right", FieldEnd, context),
-        KeyBinding::new("cmd-v", FieldPaste, context),
-        KeyBinding::new("cmd-c", FieldCopy, context),
-        KeyBinding::new("cmd-x", FieldCut, context),
+        KeyBinding::new("secondary-left", FieldHome, context),
+        KeyBinding::new("secondary-right", FieldEnd, context),
+        KeyBinding::new("secondary-v", FieldPaste, context),
+        KeyBinding::new("secondary-c", FieldCopy, context),
+        KeyBinding::new("secondary-x", FieldCut, context),
         KeyBinding::new("enter", FieldSubmit, context),
         KeyBinding::new("shift-enter", FieldSubmitBack, context),
         KeyBinding::new("escape", FieldCancel, context),

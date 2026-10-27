@@ -1,8 +1,7 @@
 //! 设置页的声明式描述：分区、分组与设置项。
 //!
-//! 分区、分组、文案与取值沿用 Web 版设置窗口（`src/app/components/SettingsWindow.svelte`、
-//! `src/app/i18n.ts`），键名即共享配置文件中的偏好名。`support` 标明 GPUI 版是否已接通该项：
-//! 未接通的项仍可修改并保存，供 Web 版使用，界面上以徽标说明原因。
+//! 键名和取值保留既有配置语义。support 决定当前能力：完全未接通的项隐藏，
+//! 部分接通的项显示范围说明；配置文件中的旧值仍保留。
 
 use crate::ui::components::IconName;
 
@@ -64,7 +63,7 @@ pub const CATEGORIES: &[Category] = &[
                 item("autoSaveEnabled", "自动保存", "停止输入后自动保存已有路径的文档；未命名文档不会自动弹出保存面板。", Control::Toggle, Support::Full),
                 item("autoSaveDelayMs", "自动保存延迟", "输入停止后等待多久再保存。", Control::Range { min: 500.0, max: 5000.0, step: 100.0, unit: "ms" }, Support::Full),
                 item("createSnapshotBeforeSave", "保存前创建快照", "覆盖文件前把旧版本保存到本地快照目录，每个文件保留最近 20 份。", Control::Toggle, Support::Full),
-                item("interfaceLanguage", "界面语言", "选择界面显示语言。", Control::Choice(&[("system", "跟随系统"), ("zh-CN", "简体中文"), ("zh-TW", "繁體中文"), ("en-US", "English"), ("ja-JP", "日本語")]), Support::Partial("界面目前只有简体中文")),
+                item("interfaceLanguage", "界面语言", "选择界面显示语言。", Control::Choice(&[("system", "跟随系统"), ("zh-CN", "简体中文"), ("zh-TW", "繁體中文"), ("en-US", "English"), ("ja-JP", "日本語")]), Support::Partial("工具栏支持四种语言，其余界面目前为简体中文")),
             ],
         }]),
     },
@@ -119,8 +118,8 @@ pub const CATEGORIES: &[Category] = &[
                 title: "字体",
                 items: &[
                     item("uiFontFamily", "界面字体", "留空跟随系统。", Control::Text { placeholder: "跟随系统" }, Support::Full),
-                    item("documentFontFamily", "正文字体", "留空使用苹方。填写已安装字体的字族名。", Control::Text { placeholder: "PingFang SC" }, Support::Full),
-                    item("monoFontFamily", "代码字体", "留空使用 Menlo；汉字自动使用正文字体。", Control::Text { placeholder: "Menlo" }, Support::Full),
+                    item("documentFontFamily", "正文字体", "留空使用当前平台默认正文字体。填写已安装字体的字族名。", Control::Text { placeholder: "系统默认" }, Support::Full),
+                    item("monoFontFamily", "代码字体", "留空使用当前平台默认等宽字体；汉字自动使用正文字体。", Control::Text { placeholder: "系统默认" }, Support::Full),
                 ],
             },
             Group {
@@ -141,7 +140,7 @@ pub const CATEGORIES: &[Category] = &[
                 item("openDefaultBehavior", "打开默认行为", "用于菜单、最近记录和系统文件管理器；目标已打开或当前为空窗口时会直接复用。", Control::Choice(&[("ask-every-time", "每次询问"), ("current-window", "当前窗口"), ("new-window", "新窗口")]), Support::None("目前为单窗口，始终在当前窗口打开")),
                 item("closeWindowBehavior", "关闭窗口行为", "设置点击关闭按钮时的主窗口行为。", Control::Choice(&[("ask-every-time", "每次询问"), ("close-window", "直接关闭"), ("close-to-tray", "最小化到托盘")]), Support::None("暂无托盘")),
                 item("externalFileChangeBehavior", "文件变更默认行为", "检测到外部修改时默认执行的操作。文件被删除或移动时仍会提示。", Control::Choice(&[("reload-external", "载入外部版本"), ("overwrite-external", "保留当前编辑"), ("ignore", "忽略")]), Support::None("尚未监听外部修改")),
-                item("filePreviewEnabled", "文件预览标签", "单击侧栏文件时以预览标签打开，编辑后转为常驻标签。", Control::Toggle, Support::None("尚未实现预览标签")),
+                item("filePreviewEnabled", "文件预览标签", "单击侧栏文件时以预览标签打开，编辑后转为常驻标签。", Control::Toggle, Support::Full),
             ],
         }]),
     },
@@ -150,7 +149,7 @@ pub const CATEGORIES: &[Category] = &[
         icon: IconName::FileImage,
         page: Page::Groups(&[Group {
             title: "图片导入",
-            items: &[item("imageHandlingSettings", "图片处理方式与上传", "粘贴、拖放和上传图片时使用的策略（复制到资源目录、PicGo 上传等），以及默认宽度与对齐。", Control::Info, Support::None("粘贴与上传图片尚未实现，相关设置请在 Web 版中修改"))],
+            items: &[item("imageHandlingSettings", "图片处理方式与上传", "粘贴、拖放和上传图片时使用的策略（复制到资源目录、PicGo 上传等），以及默认宽度与对齐。", Control::Info, Support::None("粘贴与上传图片尚未实现，暂不提供相关设置"))],
         }]),
     },
     Category {
@@ -163,7 +162,7 @@ pub const CATEGORIES: &[Category] = &[
                 item("writingStatsMetric", "默认统计类型", "决定状态栏默认展示行数、词数、字数或字符数。", Control::Choice(&[("lines", "行数"), ("words", "词数"), ("visibleChars", "字数（不含空白）"), ("chars", "字符数")]), Support::Full),
                 item("readingTimeVisible", "显示阅读时间", "按每分钟约 400 字估算。", Control::Toggle, Support::Full),
                 item("outlineVisible", "显示大纲", "在编辑区右上角显示文档大纲。", Control::Toggle, Support::Full),
-                item("outlineDefaultExpandLevel", "大纲默认展开层级", "大纲只列出到指定层级的标题。", Control::Range { min: 1.0, max: 6.0, step: 1.0, unit: " 级" }, Support::Full),
+                item("outlineDefaultExpandLevel", "大纲默认展开层级", "默认展开到指定标题层级，更深的标题可手动展开。", Control::Range { min: 1.0, max: 6.0, step: 1.0, unit: " 级" }, Support::Full),
             ],
         }]),
     },
@@ -194,8 +193,8 @@ pub const CATEGORIES: &[Category] = &[
 /// 快捷键一览（与 `editor.rs`、`workspace.rs` 中的绑定一致）。GPUI 版暂不支持自定义。
 pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
     ("文件", &[("新建", "⌘N"), ("打开文件", "⌘O"), ("打开文件夹", "⌘⇧O"), ("保存", "⌘S"), ("另存为", "⌘⇧S"), ("关闭标签", "⌘W"), ("切换标签", "⌃Tab / ⌃⇧Tab"), ("设置", "⌘,")]),
-    ("视图", &[("切换源码模式", "⌘E"), ("语义 / 源码 / 双栏", "⌘1 / ⌘2 / ⌘3"), ("文档大纲", "⌘⌥O"), ("侧栏", "⌘⌥S"), ("工具栏", "⌘⇧B"), ("切换深浅色", "⌘⇧L"), ("放大 / 缩小 / 实际大小", "⌘= / ⌘- / ⌘0")]),
+    ("视图", &[("切换源码模式", "⌘E"), ("文档大纲", "⌘⌥O"), ("侧栏", "⌘⌥S"), ("工具栏", "⌘⇧B"), ("切换深浅色", "⌘⇧L"), ("放大 / 缩小", "Ctrl+= / Ctrl+-")]),
     ("查找", &[("查找", "⌘F"), ("查找并替换", "⌘⌥F"), ("下一个 / 上一个", "⌘G / ⌘⇧G")]),
-    ("格式", &[("加粗", "⌘B"), ("斜体", "⌘I"), ("下划线", "⌘U"), ("删除线", "⌘⇧X"), ("高亮", "⌘⇧H"), ("行内代码", "⌘⇧C"), ("链接", "⌘K"), ("标题 1–3 / 正文", "⌘⌥1–3 / ⌘⌥0"), ("代码块", "⌘⇧K"), ("表格", "⌘⇧T"), ("公式块", "⌘⇧M")]),
+    ("格式", &[("加粗", "⌘B"), ("斜体", "⌘I"), ("下划线", "⌘U"), ("删除线", "Alt+Shift+5"), ("分隔线", "Ctrl+Shift+H"), ("行内代码", "⌘⇧C"), ("链接", "⌘K"), ("标题 1–6 / 正文", "Ctrl+1–6 / Ctrl+0"), ("清除样式", r"Ctrl+\"), ("代码块", "⌘⇧K"), ("表格", "⌘⇧T"), ("公式块", "⌘⇧M")]),
     ("编辑", &[("撤销 / 重做", "⌘Z / ⌘⇧Z"), ("列表缩进 / 反缩进", "Tab / ⇧Tab"), ("按词移动", "⌥← / ⌥→"), ("行首 / 行尾", "⌘← / ⌘→"), ("文首 / 文末", "⌘↑ / ⌘↓"), ("表情面板", "⌃⌘Space")]),
 ];

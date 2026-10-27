@@ -205,13 +205,8 @@ fn remove_selected(changes: &mut Changes, span: &InlineSpan, range: &Range<usize
     }
 }
 
-pub fn selected(
-    parsed: &ParsedWindow,
-    selection: DocumentSelection,
-    format: Option<InlineFormat>,
-) -> Result<EditResult, ControlError> {
-    let base = parsed.identity.from_byte;
-    let selected = local_range(&parsed.source, base, selection.range())?;
+fn selection_regions(parsed: &ParsedWindow, selection: DocumentSelection, format: Option<InlineFormat>) -> Result<Vec<Range<usize>>, ControlError> {
+    let selected = local_range(&parsed.source, parsed.identity.from_byte, selection.range())?;
     let mut regions = blocks(parsed, &selected);
     if regions.iter().any(|range| {
         parsed.inline.iter().any(|span| {
@@ -270,29 +265,57 @@ pub fn selected(
             }
         }
     }
-    let all_formatted = format.is_some_and(|format| {
-        regions.iter().all(|range| {
-            let mut has_content = false;
-            let covered = parsed.source[range.clone()]
-                .char_indices()
-                .all(|(offset, _)| {
-                    let at = range.start + offset;
-                    if parsed
-                        .inline
-                        .iter()
-                        .any(|s| s.open.contains(&at) || s.close.contains(&at))
-                    {
-                        return true;
-                    }
-                    has_content = true;
-                    parsed
-                        .inline
-                        .iter()
-                        .any(|s| s.format == format && s.content.contains(&at))
-                });
-            has_content && covered
-        })
-    });
+    Ok(regions)
+}
+
+fn merge_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    ranges.retain(|range| !range.is_empty());
+    ranges.sort_by_key(|range| (range.start, range.end));
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for range in ranges {
+        if let Some(previous) = merged.last_mut() {
+            if range.start <= previous.end {
+                previous.end = previous.end.max(range.end);
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    merged
+}
+
+fn regions_formatted(parsed: &ParsedWindow, regions: &[Range<usize>], format: InlineFormat) -> bool {
+    let markers = merge_ranges(parsed.inline.iter().flat_map(|span| [span.open.clone(), span.close.clone()]).collect());
+    let formatted = merge_ranges(parsed.inline.iter().filter(|span| span.format == format).map(|span| span.content.clone()).collect());
+    let contains = |ranges: &[Range<usize>], at: usize| {
+        let index = ranges.partition_point(|range| range.end <= at);
+        ranges.get(index).is_some_and(|range| range.start <= at && at < range.end)
+    };
+    regions.iter().all(|range| {
+        let mut has_content = false;
+        let covered = parsed.source[range.clone()].char_indices().all(|(offset, _)| {
+            let at = range.start + offset;
+            if contains(&markers, at) { return true; }
+            has_content = true;
+            contains(&formatted, at)
+        });
+        has_content && covered
+    })
+}
+
+pub(crate) fn selection_formatted(parsed: &ParsedWindow, selection: DocumentSelection, format: InlineFormat) -> Result<Option<bool>, ControlError> {
+    let regions = selection_regions(parsed, selection, Some(format))?;
+    Ok((!regions.is_empty()).then(|| regions_formatted(parsed, &regions, format)))
+}
+
+pub fn selected(parsed: &ParsedWindow, selection: DocumentSelection, format: Option<InlineFormat>) -> Result<EditResult, ControlError> {
+    selected_with_toggle(parsed, selection, format, None)
+}
+
+pub(crate) fn selected_with_toggle(parsed: &ParsedWindow, selection: DocumentSelection, format: Option<InlineFormat>, remove: Option<bool>) -> Result<EditResult, ControlError> {
+    let base = parsed.identity.from_byte;
+    let regions = selection_regions(parsed, selection, format)?;
+    let all_formatted = format.is_some_and(|format| remove.unwrap_or_else(|| regions_formatted(parsed, &regions, format)));
     let mut changes = Changes::default();
     for range in regions {
         if format.is_none() || all_formatted {

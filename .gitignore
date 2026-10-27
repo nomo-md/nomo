@@ -1,48 +1,20 @@
-# Dependencies
-node_modules/
-
-# Build output
-dist/
-build/
-.svelte-kit/
-.vite/
-.tauri/
-src-tauri/target/
-src-tauri/gen
-src-tauri/windows-shell-extension/bin/
-src-tauri/windows-shell-extension/obj/
-src-tauri/windows-shell-extension/obj-tests/
-.artifacts/
-
-# Local environment
+/target/
+**/target/
+/.artifacts/
+/.cache/
+/.temp/
+/.tmp/
+/.tmp-*/
+*.log
+logs/
 .env
 .env.*
 !.env.example
 *.local
-
-# Logs and caches
-*.log
-logs/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-.cache/
-.temp/
-.tmp/
-/.tmp-*/
-
-# Editor and OS files
 .idea/
 .vscode/
 !.vscode/extensions.json
 !.vscode/settings.json
 .DS_Store
 Thumbs.db
-.pnpm-store
-
-# Paraglide 由 build 前 pnpm exec paraglide-js compile 生成
-src/paraglide/
-
-# Local video production assets
 /video/

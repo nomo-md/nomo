@@ -185,6 +185,8 @@ pub struct GeometryRect {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ControlEvent {
     Submit(DocumentTransaction),
+    /// 与普通输入共用确认队列，但不生成独立撤销历史。
+    SubmitDerived(DocumentTransaction),
     SelectionChanged {
         identity: WindowIdentity,
         selection: DocumentSelection,

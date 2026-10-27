@@ -37,6 +37,7 @@ pub struct EditorControl {
     pub host: WindowHostAdapter,
     pub mode: ViewMode,
     pub base_dir: Option<PathBuf>,
+    pub(crate) workspace_hosted: bool,
     focus: FocusHandle,
     layout: Option<Rc<BlockLayout>>,
     layout_key: Option<(LayoutStamp, ViewMode, Vec<Range<usize>>, u64)>,
@@ -91,6 +92,7 @@ impl EditorControl {
             emoji_mode: false,
             emoji_requested: false,
             auxiliary_input: false,
+            workspace_hosted: false,
             last_geometry: None,
             horizontal_drag: None,
         }
@@ -205,6 +207,13 @@ impl EditorControl {
         if let Some(event) = self.host.next_submission() {
             cx.emit(event);
         }
+    }
+    pub(super) fn queue_derived(&mut self, edits: Vec<SourceEdit>, cx: &mut Context<Self>) -> Result<(), ControlError> {
+        self.host.queue_derived(edits)?;
+        self.invalidate();
+        self.submit(cx);
+        cx.notify();
+        Ok(())
     }
     fn error(&self, error: ControlError, cx: &mut Context<Self>) {
         match error {
@@ -401,6 +410,20 @@ impl EditorControl {
             selection,
         });
         cx.notify();
+    }
+    /// 宿主恢复/同步全局选区，不伪造用户选区事件或切换活动输入视图。
+    pub(crate) fn restore_selection(&mut self, selection:DocumentSelection, cx:&mut Context<Self>) {
+        self.host.selection=selection;
+        self.ensure_horizontal_caret();
+        cx.notify();
+    }
+    /// 宿主已验证目标身份后提交局部编辑；仍走同一乐观事务和会话确认队列。
+    pub(crate) fn apply_host_edit(&mut self, result:commands::EditResult, cx:&mut Context<Self>) -> Result<(),ControlError> {
+        self.prepare_unmount()?;
+        self.history_serial+=1;
+        let group=format!("{}:popover:{}",self.host.parsed.identity.window_id,self.history_serial);
+        self.host.queue_template_edit(result.edits,result.selection,&group,result.template_update)?;
+        self.invalidate();self.submit(cx);cx.notify();Ok(())
     }
     fn move_to(&mut self, at: usize, extend: bool, cx: &mut Context<Self>) {
         let at = self.host.parsed.identity.from_byte + at as u64;
@@ -653,7 +676,8 @@ impl EditorControl {
                 context,
             );
             let selected = DocumentSelection::caret(base + range.start as u64);
-            match commands::apply(&parsed, selected, intent) {
+            let command = if self.mode == ViewMode::Semantic { commands::apply_semantic(&parsed, selected, intent) } else { commands::apply(&parsed, selected, intent) };
+            match command {
                 Ok(result) => {
                     for edit in result.edits.into_iter().rev() {
                         source.replace_range(
@@ -1081,6 +1105,31 @@ impl EditorControl {
         }
         Some(at)
     }
+    /// 当前父容器已采用控件的实际布局高度时返回，用于宿主结束滚动定位。
+    pub(crate) fn measured_height(&self) -> Option<f32> {
+        if self.layout_key.as_ref()?.0.identity != self.host.parsed.identity { return None; }
+        (self.bounds.is_some_and(|bounds| (f32::from(bounds.size.height) - self.height).abs() < 0.5))
+            .then_some(self.height)
+    }
+    /// 返回当前局部布局的光标行；最终可见性还须等待父容器采用实际高度。
+    pub(crate) fn caret_line(&self, byte: u64) -> Option<(WindowIdentity, f32, f32)> {
+        let identity = &self.host.parsed.identity;
+        if self.layout_key.as_ref()?.0.identity != *identity { return None; }
+        let local = byte.checked_sub(identity.from_byte)? as usize;
+        if local > self.host.parsed.source.len() { return None; }
+        let (_, y, height) = self.layout.as_ref()?.caret_at(local)?;
+        Some((identity.clone(), y, height))
+    }
+    /// 从当前布局的屏幕位置提取完整文档字节锚点，供宿主保持阅读位置和同步双栏。
+    pub(crate) fn source_at_screen_y(&self, y: f32) -> Option<(u64, f32)> {
+        if self.layout_key.as_ref()?.0.identity != self.host.parsed.identity { return None; }
+        let bounds=self.bounds?;
+        if y<f32::from(bounds.top()) || y>=f32::from(bounds.bottom()) {return None;}
+        let layout=self.layout.as_ref()?;
+        let local=layout.source_at(0.0,y-f32::from(bounds.top()))?;
+        let (_,line_y,_)=layout.caret_at(local)?;
+        Some((self.host.parsed.identity.from_byte+local as u64,f32::from(bounds.top())+line_y))
+    }
     pub fn caret_bounds(&self, byte: u64) -> Option<(WindowIdentity, Bounds<Pixels>)> {
         if self.layout_key.as_ref()?.0.identity != self.host.parsed.identity {
             return None;
@@ -1379,10 +1428,11 @@ impl EditorControl {
         }
     }
     fn paint(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &App) {
+        let animate_theme = Theme::ui_transition_active(cx);
         let Some(layout) = &self.layout else {
             return;
         };
-        let theme = cx.global::<Theme>();
+        let theme = Theme::ui(cx);
         let base = self.host.parsed.identity.from_byte;
         let selected = self.host.selection.range();
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
@@ -1406,7 +1456,7 @@ impl EditorControl {
                         f32::from(visible.origin.y - bounds.origin.y).max(0.0)
                             ..f32::from(visible.origin.y + visible.size.height - bounds.origin.y)
                     }),
-                theme,
+                &theme,
                 cx.global::<ImageStore>(),
                 window,
                 cx,
@@ -1431,6 +1481,7 @@ impl EditorControl {
                 }
             }
         });
+        if animate_theme { window.request_animation_frame(); }
     }
 }
 
@@ -1902,10 +1953,12 @@ impl Render for EditorControl {
             }))
             .on_action(
                 cx.listener(|v, _: &crate::ui::workspace::CodeBlock, _, cx| {
-                    v.command(EditIntent::InsertBlock("```text\n\n```".into()), cx)
+                    if v.workspace_hosted {cx.propagate();return;}
+                    v.command(EditIntent::InsertCodeBlock("text".into()), cx)
                 }),
             )
             .on_action(cx.listener(|v, _: &crate::ui::workspace::Table, _, cx| {
+                if v.workspace_hosted {cx.propagate();return;}
                 v.command(
                     EditIntent::InsertBlock("| 列一 | 列二 |\n| --- | --- |\n|  |  |".into()),
                     cx,
@@ -1913,13 +1966,14 @@ impl Render for EditorControl {
             }))
             .on_action(
                 cx.listener(|v, _: &crate::ui::workspace::MathBlock, _, cx| {
-                    v.command(EditIntent::InsertBlock("$$\n\n$$".into()), cx)
+                    v.command(EditIntent::InsertMathBlock, cx)
                 }),
             )
             .on_action(cx.listener(|v, _: &crate::ui::workspace::Rule, _, cx| {
                 v.command(EditIntent::InsertBlock("---".into()), cx)
             }))
             .on_action(cx.listener(|v, _: &crate::ui::workspace::Link, _, cx| {
+                if v.workspace_hosted {cx.propagate();return;}
                 v.command(
                     EditIntent::Link {
                         label: "链接文字".into(),
@@ -1928,20 +1982,7 @@ impl Render for EditorControl {
                     cx,
                 )
             }))
-            .on_action(
-                cx.listener(|v, _: &crate::ui::workspace::ModeSemantic, _, cx| {
-                    if let Err(error) = v.set_mode(ViewMode::Semantic, cx) {
-                        v.error(error, cx);
-                    }
-                }),
-            )
-            .on_action(
-                cx.listener(|v, _: &crate::ui::workspace::ModeSource, _, cx| {
-                    if let Err(error) = v.set_mode(ViewMode::Source, cx) {
-                        v.error(error, cx);
-                    }
-                }),
-            )
+            // 模式是宿主级状态，交给 Workspace 同步标签、全部挂载窗口与滚动锚点。
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_down(
                 MouseButton::Right,

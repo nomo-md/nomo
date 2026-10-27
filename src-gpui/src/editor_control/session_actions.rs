@@ -4,14 +4,18 @@ use super::*;
 use crate::editor_control::session_window::{LoadedWindow, WindowRequest};
 use std::path::PathBuf;
 
-impl Drop for ControlDemo {
+impl Drop for DocumentHost {
     fn drop(&mut self) {
         self.request.cancel();
+        if !self.closed {
+            // 意外释放保留恢复数据；正常关闭由 Workspace 显式 close。
+            let _ = self.port.manager.detach(&self.port.owner, &self.port.document_id);
+        }
     }
 }
-impl ControlDemo {
-    fn ready_for_session_action(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.navigating || self.saving || self.close_prompt {
+impl DocumentHost {
+    pub(super) fn ready_for_session_action(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.hidden || self.closed || self.navigating || self.saving || self.close_prompt {
             return false;
         }
         if let Err(error) = self.control.read(cx).prepare_unmount() {
@@ -21,7 +25,7 @@ impl ControlDemo {
         }
         true
     }
-    fn begin_session_action(&mut self, cx: &mut Context<Self>) -> WindowRequest {
+    pub(super) fn begin_session_action(&mut self, cx: &mut Context<Self>) -> WindowRequest {
         self.pause_viewport(cx);
         self.request.cancel();
         self.request = WindowRequest::default();
@@ -31,7 +35,7 @@ impl ControlDemo {
         cx.notify();
         self.request.clone()
     }
-    fn install(
+    pub(super) fn install(
         &mut self,
         loaded: LoadedWindow,
         selection: Option<DocumentSelection>,
@@ -67,26 +71,64 @@ impl ControlDemo {
             v.select(selection.unwrap_or(DocumentSelection::caret(at)), cx);
             Ok::<_, ControlError>(())
         })?;
-        self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        self.panes[self.active_pane].scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         self.focus_pending = true;
+        self.panes[self.active_pane].reveal_selection = true;
         self.message = format!("原版窗口会话 · 索引代数 {}", loaded.index.index_generation);
         self.reset_viewport(cx);
+        self.document_changed(cx);
         Ok(())
     }
-    fn action_failed(&mut self, error: ControlError, cx: &mut Context<Self>) {
+    pub(super) fn action_failed(&mut self, error: ControlError, cx: &mut Context<Self>) {
         // 历史/全局编辑可能已提交、但后续片段尚不可提供。旧视图必须继续只读。
         let current = self.port.status().ok().map(|s| s.revision);
         self.control.update(cx, |v, _| {
             v.host
                 .set_readonly(current != Some(v.host.parsed.identity.revision))
         });
-        self.message = error.to_string();
+        self.report(error, cx);
         self.schedule_viewport(16,cx);
     }
     pub(super) fn load_at(
         &mut self,
         byte: u64,
         selection: Option<DocumentSelection>,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_at_focused(byte, selection, true, cx);
+    }
+    pub(super) fn navigate_outline_source(&mut self, byte: u64, revision: u64, cx: &mut Context<Self>) {
+        if self.status().revision != revision || !self.ready_for_session_action(cx) { return; }
+        let request = self.begin_session_action(cx);
+        let port = self.port.clone();
+        let task = cx.background_executor().spawn(async move {
+            let loaded = port.load_group(revision, byte, None, &request)?;
+            let local = usize::try_from(byte.saturating_sub(loaded.input.from_byte)).map_err(|_| ControlError::InvalidRange)?;
+            let tail = loaded.input.text.get(local..).ok_or(ControlError::InvalidRange)?;
+            let end = match tail.find(['\r', '\n']) {
+                Some(end) => end,
+                None if loaded.input.to_byte == loaded.total_bytes => tail.len(),
+                None => return Err(ControlError::NeedsContext("标题行超出当前窗口，无法安全定位行末。".into())),
+            };
+            Ok::<_, ControlError>((loaded, byte + end as u64))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |host, cx| {
+                host.navigating = false;
+                if host.status().revision != revision { host.action_failed(ControlError::Stale, cx); return; }
+                match result.and_then(|(loaded, end)| host.install(loaded, Some(DocumentSelection::caret(end)), cx)) {
+                    Ok(()) => {}, Err(error) => host.action_failed(error, cx),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+    pub(super) fn load_at_focused(
+        &mut self,
+        byte: u64,
+        selection: Option<DocumentSelection>,
+        focus: bool,
         cx: &mut Context<Self>,
     ) {
         if !self.ready_for_session_action(cx) {
@@ -103,7 +145,7 @@ impl ControlDemo {
             let _ = this.update(cx, |host, cx| {
                 host.navigating = false;
                 match result.and_then(|loaded| host.install(loaded, selection, cx)) {
-                    Ok(()) => {}
+                    Ok(()) => { host.focus_pending = focus; }
                     Err(error) => host.action_failed(error, cx),
                 }
                 cx.notify();
@@ -229,7 +271,7 @@ impl ControlDemo {
                                         });
                                         host.reset_viewport(cx);
                                         host.focus_pending = true;
-                                        host.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+                                        host.panes[host.active_pane].scroll.set_offset(gpui::point(px(0.0), px(0.0)));
                                         host.message = "真实文件已连接原版窗口会话".into();
                                 }
                             }
@@ -280,6 +322,18 @@ impl ControlDemo {
         cx: &mut Context<Self>,
     ) {
         if !self.ready_for_session_action(cx) {
+            return;
+        }
+        if self.control.read(cx).mode == ViewMode::Semantic {
+            match &intent {
+                EditIntent::ToggleInline(format) => { self.format_global_selection(selection, Some(*format), cx); return; }
+                EditIntent::ClearFormatting => { self.format_global_selection(selection, None, cx); return; }
+                _ => {}
+            }
+        }
+        if matches!(&intent, EditIntent::InsertCodeBlock(_) | EditIntent::InsertMathBlock | EditIntent::InsertDiagram(_)) {
+            let semantic = self.control.read(cx).mode == ViewMode::Semantic;
+            self.wrap_global_selection(selection, intent, semantic, cx);
             return;
         }
         let text = match intent {

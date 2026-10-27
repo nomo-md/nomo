@@ -3,7 +3,7 @@ use super::protocol::*;
 use crate::text_document::{
     MarkdownSelection,
     markdown_session::{
-        MarkdownDocumentSessionManager, MarkdownEdit, MarkdownStatus, MarkdownTransaction,
+        MarkdownDocumentSessionManager, MarkdownEdit, MarkdownStatus, MarkdownTransaction, SnapshotHandle,
     },
 };
 use std::{ops::Range, path::PathBuf};
@@ -25,6 +25,15 @@ impl NativeWindowPort {
         text: Option<String>,
     ) -> Result<Self, ControlError> {
         let manager = MarkdownDocumentSessionManager::new(root).map_err(convert_error)?;
+        Self::open_in(manager, owner, path, text)
+    }
+    /// 正式 Workspace 的所有标签共享服务及预算，只为新文档创建会话。
+    pub(crate) fn open_in(
+        manager: MarkdownDocumentSessionManager,
+        owner: String,
+        path: Option<PathBuf>,
+        text: Option<String>,
+    ) -> Result<Self, ControlError> {
         let status = manager.open(&owner, path, text).map_err(convert_error)?;
         Ok(Self {
             manager,
@@ -62,6 +71,12 @@ impl NativeWindowPort {
         })
     }
     pub fn submit(&self, transaction: DocumentTransaction) -> Result<u64, ControlError> {
+        self.submit_with_kind(transaction, false)
+    }
+    pub(crate) fn submit_derived(&self, transaction: DocumentTransaction) -> Result<u64, ControlError> {
+        self.submit_with_kind(transaction, true)
+    }
+    fn submit_with_kind(&self, transaction: DocumentTransaction, derived: bool) -> Result<u64, ControlError> {
         let selection = |s: DocumentSelection| {
             Some(MarkdownSelection {
                 anchor_byte: s.anchor_byte,
@@ -70,7 +85,7 @@ impl NativeWindowPort {
         };
         let transaction = MarkdownTransaction {
             template_update: transaction.template_update,
-            derived: false,
+            derived,
             document_id: self.document_id.clone(),
             base_revision: transaction.base_revision,
             operation_id: transaction.operation_id,
@@ -109,6 +124,31 @@ impl NativeWindowPort {
             }),
         ))
     }
+    /// 同步捕获已完成目录派生的修订，避免后台保存与后续输入交错。
+    pub(crate) fn capture_for_save(&self, revision: u64) -> Result<SnapshotHandle, ControlError> {
+        let snapshot = self.manager.capture(&self.owner, &self.document_id).map_err(convert_error)?;
+        if snapshot.revision != revision {
+            self.manager.release(&self.owner, &snapshot.snapshot_id).map_err(convert_error)?;
+            return Err(ControlError::Stale);
+        }
+        Ok(snapshot)
+    }
+    pub(crate) fn save_captured(&self, snapshot: SnapshotHandle, target: Option<PathBuf>, snapshot_before_save: bool) -> Result<u64, ControlError> {
+        let saved = (|| {
+            if let Some(path) = target {
+                if snapshot_before_save && path.exists() {
+                    crate::buffer::write_snapshot(&path).map_err(|e| ControlError::HostFailure(format!("创建保存前快照失败：{e}")))?;
+                }
+                self.manager.save(&self.owner, &snapshot.snapshot_id, path, false).map_err(convert_error)
+            } else {
+                self.manager.save_current(&self.owner, &snapshot.snapshot_id, snapshot_before_save).map_err(convert_error)
+            }
+        })();
+        let released = self.manager.release(&self.owner, &snapshot.snapshot_id).map_err(convert_error);
+        let saved = saved?;
+        released?;
+        Ok(saved.revision)
+    }
     /// 保存始终使用完整会话快照，绝不使用控件局部 source。
     pub fn save_to(&self, target: PathBuf) -> Result<u64, ControlError> {
         let snapshot = self
@@ -118,6 +158,14 @@ impl NativeWindowPort {
         let saved = self
             .manager
             .save(&self.owner, &snapshot.snapshot_id, target, false);
+        let released = self.manager.release(&self.owner, &snapshot.snapshot_id);
+        let saved = saved.map_err(convert_error)?;
+        released.map_err(convert_error)?;
+        Ok(saved.revision)
+    }
+    pub(crate) fn save_current(&self, snapshot_before_save: bool) -> Result<u64, ControlError> {
+        let snapshot = self.manager.capture(&self.owner, &self.document_id).map_err(convert_error)?;
+        let saved = self.manager.save_current(&self.owner, &snapshot.snapshot_id, snapshot_before_save);
         let released = self.manager.release(&self.owner, &snapshot.snapshot_id);
         let saved = saved.map_err(convert_error)?;
         released.map_err(convert_error)?;

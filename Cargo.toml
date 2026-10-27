@@ -1,0 +1,11 @@
+[workspace]
+members = ["src-gpui"]
+resolver = "3"
+
+[workspace.package]
+version = "0.6.2"
+
+[profile.release]
+debug = 1
+# 保留 macOS 链接器所需的符号表对齐，不使用默认 debuginfo stripping。
+strip = "none"

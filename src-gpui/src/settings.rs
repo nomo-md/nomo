@@ -62,6 +62,7 @@ pub fn default_value(key: &str) -> Value {
         "sidebarHidden" => json!(false),
         "toolbarHidden" => json!(false),
         "outlineVisible" => json!(true),
+        "outlinePanelPosition" => json!({"positioned": false}),
         "writingStatsVisible" => json!(true),
         "writingStatsMetric" => json!("words"),
         "readingTimeVisible" => json!(false),
@@ -221,10 +222,13 @@ impl Settings {
             layout::bump_generation();
         }
         if key == "themeMode" {
-            let appearance = cx.windows().first().and_then(|window| window.update(cx, |_, window, _| window.appearance()).ok());
-            if let Some(appearance) = appearance {
-                Theme::apply(appearance, cx);
-            }
+            // 窗口事件回调内窗口仍被借用，等当前事件结束后再读取系统外观。
+            cx.defer(|cx| {
+                let appearance = cx.windows().first().and_then(|window| window.update(cx, |_, window, _| window.appearance()).ok());
+                if let Some(appearance) = appearance {
+                    Theme::apply(appearance, cx);
+                }
+            });
         }
         cx.refresh_windows();
     }
@@ -279,10 +283,16 @@ impl Settings {
     }
 }
 
-/// 共享配置文件路径（与 `src-tauri/src/config/mod.rs` 的 `resolve_app_data_dir` 一致）。
+/// 沿用既有桌面版的数据目录，保留配置中尚未使用的字段。
 pub fn config_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/com.nomo.desktop/config.json"))
+    if let Some(directory) = std::env::var_os("NOMO_DATA_DIR") { return Some(PathBuf::from(directory).join("config.json")); }
+    #[cfg(target_os = "windows")]
+    let directory = PathBuf::from(std::env::var_os("APPDATA")?);
+    #[cfg(target_os = "macos")]
+    let directory = PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let directory = PathBuf::from(std::env::var_os("HOME")?).join(".local/share");
+    Some(directory.join("com.nomo.desktop/config.json"))
 }
 
 /// 本地快照目录：保存前的旧版本按文件名存放于此。
@@ -315,7 +325,6 @@ fn write_setting(key: &str, value: &Value) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let temporary = path.with_extension("json.gpui-tmp");
-    std::fs::write(&temporary, serde_json::to_vec_pretty(&config).map_err(std::io::Error::other)?)?;
-    std::fs::rename(&temporary, &path)
+    let bytes = serde_json::to_vec_pretty(&config).map_err(std::io::Error::other)?;
+    crate::file_system::write_file_atomically(&path, &bytes).map_err(std::io::Error::other)
 }

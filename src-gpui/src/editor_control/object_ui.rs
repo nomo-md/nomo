@@ -33,6 +33,28 @@ impl ObjectEditor {
 }
 
 impl EditorControl {
+    pub(crate) fn begin_inline_math(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), ControlError> {
+        if self.mode != ViewMode::Semantic { return Err(ControlError::Unsupported("请先切换到语义编辑区再插入行内公式".into())); }
+        let parsed = &self.host.parsed;
+        let range = super::super::mapping::local_range(&parsed.source, parsed.identity.from_byte, self.host.selection.range())?;
+        if parsed.nodes.iter().any(|node| node.kind == "code" && node.source.contains(&range.start))
+            || parsed.html_tables.iter().any(|table| table.source.contains(&range.start)) {
+            return Err(ControlError::Unsupported("当前代码块或表格内不能插入行内公式；原文已保留".into()));
+        }
+        self.begin_object(range, ObjectKind::InsertInlineMath, window, cx);
+        Ok(())
+    }
+    pub(crate) fn begin_inline_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), ControlError> {
+        if self.host.presentation != Presentation::Editable { return Err(ControlError::ReadOnly); }
+        let parsed = &self.host.parsed;
+        let range = super::super::mapping::local_range(&parsed.source, parsed.identity.from_byte, self.host.selection.range())?;
+        if parsed.nodes.iter().any(|node| node.kind == "code" && node.source.contains(&range.start))
+            || parsed.html_tables.iter().any(|table| table.source.contains(&range.start)) {
+            return Err(ControlError::Unsupported("当前代码块或表格内不能插入行内注释；原文已保留".into()));
+        }
+        self.begin_object(range, ObjectKind::InsertInlineComment, window, cx);
+        Ok(())
+    }
     pub(super) fn begin_object(
         &mut self,
         mut range: Range<usize>,
@@ -59,6 +81,9 @@ impl EditorControl {
                 return;
             }
         };
+        if kind == ObjectKind::InsertInlineComment && draft.text.is_empty() {
+            draft.text = crate::ui::toolbar_i18n::ToolbarLocale::current(cx).text("comment").into();
+        }
         let payload = self
             .host
             .parsed
@@ -337,6 +362,24 @@ impl EditorControl {
                         )
                 }
             })()
+        } else if confirm && object.draft.kind == ObjectKind::InsertInlineComment {
+            let value = &object.draft.text;
+            if value.contains("-->") { Err(ControlError::Unsupported("注释内容不能包含 -->".into())) }
+            else { object.draft.confirm_text(&self.host.parsed, &format!("<!-- {value} -->")) }
+        } else if confirm && object.draft.kind == ObjectKind::InsertInlineMath {
+            let value = &object.draft.text;
+            if value.trim().is_empty() || value.contains(['\r', '\n']) {
+                Err(ControlError::Unsupported("请输入非空单行公式".into()))
+            } else {
+                let mut tex = String::with_capacity(value.len());
+                let mut slashes = 0usize;
+                for ch in value.chars() {
+                    if ch == '$' && slashes % 2 == 0 { tex.push('\\'); }
+                    tex.push(ch);
+                    if ch == '\\' { slashes += 1; } else { slashes = 0; }
+                }
+                object.draft.confirm_text(&self.host.parsed, &format!("${tex}$"))
+            }
         } else if confirm {
             if let Some(payload) = &object.payload {
                 let text = if payload.text() != Some(object.draft.text.as_str()) {
@@ -388,24 +431,26 @@ impl EditorControl {
 
     pub(super) fn object_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let object = self.object.as_ref()?;
+        let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
         let theme = cx.global::<Theme>();
         let width = self
             .bounds
             .map_or(600.0, |bounds| f32::from(bounds.size.width) - 48.0);
         let (_, top) = self.popup_position(width, 500.0, false);
         let name = match object.payload.as_ref() {
-            Some(super::super::html_table::InlineAtom::Math(_)) => "公式",
-            Some(super::super::html_table::InlineAtom::Comment(_)) => "注释",
-            Some(super::super::html_table::InlineAtom::Footnote(_)) => "脚注编号",
+            Some(super::super::html_table::InlineAtom::Math(_)) => locale.text("formula"),
+            Some(super::super::html_table::InlineAtom::Comment(_)) => locale.text("comment"),
+            Some(super::super::html_table::InlineAtom::Footnote(_)) => locale.text("object_footnote"),
             _ => match object.draft.kind {
-                ObjectKind::Code => "代码",
-                ObjectKind::InlineMath | ObjectKind::BlockMath => "公式",
+                ObjectKind::Code => locale.text("object_code"),
+                ObjectKind::InlineMath | ObjectKind::InsertInlineMath | ObjectKind::BlockMath => locale.text("formula"),
+            ObjectKind::InsertInlineComment => locale.text("comment_insert"),
                 ObjectKind::Mermaid => "Mermaid",
-                ObjectKind::Image => "图片",
-                ObjectKind::Link => "链接",
-                ObjectKind::Details => "折叠块",
+                ObjectKind::Image => locale.text("object_image"),
+                ObjectKind::Link => locale.text("object_link"),
+                ObjectKind::Details => locale.text("object_details"),
                 ObjectKind::Html => "HTML",
-                ObjectKind::TableSize => "表格行列数量（依次输入行数、列数）",
+                ObjectKind::TableSize => locale.text("object_table"),
             },
         };
         let mut input = div()
@@ -414,11 +459,11 @@ impl EditorControl {
             .overflow_y_scroll();
         if let Some(form) = &object.image {
             for (label, field) in [
-                "图片地址",
-                "替代文字",
-                "标题",
-                "宽度（像素，留空为原尺寸）",
-                "对齐（left / center / right）",
+                locale.text("image_src"),
+                locale.text("image_alt"),
+                locale.text("image_title"),
+                locale.text("image_width"),
+                locale.text("image_align"),
             ]
             .into_iter()
             .zip(&form.fields)
@@ -443,7 +488,7 @@ impl EditorControl {
                 .shadow_lg()
                 .p_4()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(format!("编辑{name}"))
+                .child(locale.text("edit_object").replace("{name}", name))
                 .child(input)
                 .child(
                     div()
@@ -456,7 +501,7 @@ impl EditorControl {
                                 .px_3()
                                 .py_1()
                                 .cursor_pointer()
-                                .child("确认")
+                                .child(locale.text("confirm"))
                                 .on_click(cx.listener(|view, _, window, cx| {
                                     view.finish_object(true, window, cx)
                                 })),
@@ -467,7 +512,7 @@ impl EditorControl {
                                 .px_3()
                                 .py_1()
                                 .cursor_pointer()
-                                .child("取消")
+                                .child(locale.text("cancel"))
                                 .on_click(cx.listener(|view, _, window, cx| {
                                     view.finish_object(false, window, cx)
                                 })),

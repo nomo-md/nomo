@@ -1,7 +1,14 @@
+pub mod chrome;
 pub mod components;
+pub mod editor_popovers;
+pub mod emoji_picker;
 pub mod file_tree;
 pub mod icon_assets;
+pub mod motion;
 pub mod settings_schema;
 pub mod settings_window;
 pub mod text_field;
+pub(crate) mod toolbar_i18n;
+pub mod window_chrome;
 pub mod workspace;
+pub mod workspace_surface;

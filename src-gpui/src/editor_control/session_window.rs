@@ -28,7 +28,7 @@ pub fn policy() -> &'static ViewportPolicy {
     static POLICY: std::sync::OnceLock<ViewportPolicy> = std::sync::OnceLock::new();
     POLICY.get_or_init(|| {
         serde_json::from_str(include_str!(
-            "../../../src/lib/markdown-document/viewportPolicy.json"
+            "../../resources/viewportPolicy.json"
         ))
         .expect("shared viewport policy")
     })
@@ -57,8 +57,9 @@ impl WindowRequest {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
-    fn check(&self) -> Result<(), ControlError> {
-        if self.cancelled.load(Ordering::Acquire) {
+    pub(crate) fn is_cancelled(&self) -> bool { self.cancelled.load(Ordering::Acquire) }
+    pub(crate) fn check(&self) -> Result<(), ControlError> {
+        if self.is_cancelled() {
             Err(ControlError::Stale)
         } else {
             Ok(())
@@ -97,7 +98,7 @@ impl NativeWindowPort {
         if self.status()?.revision != revision { return Err(ControlError::Stale); }
         super::viewport_model::groups(blocks, retained)
     }
-    fn ready_index(
+    pub(crate) fn ready_index(
         &self,
         revision: u64,
         request: &WindowRequest,

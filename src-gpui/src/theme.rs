@@ -1,8 +1,9 @@
-//! 颜色与排版令牌。浅色值取自 Web 版默认主题（`src/app/services/themeRegistry.ts` 运行时生效的 CSS 变量），
-//! 暗色为原型自定的近似值。主题作为 GPUI 全局状态保存，切换后整窗重绘。
+//! 颜色与排版令牌，保留既有原生版的明暗配色。主题作为 GPUI 全局状态保存，切换后整窗重绘。
 
 use crate::settings::{Settings, ThemeMode};
+use crate::ui::motion::{self, MotionPreference};
 use gpui::{App, Font, FontFallbacks, FontStyle, FontWeight, Global, Hsla, WindowAppearance, rgb, rgba};
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct Theme {
@@ -14,6 +15,9 @@ pub struct Theme {
     pub heading: Hsla,
     pub muted: Hsla,
     pub border: Hsla,
+    pub workspace_edge: Hsla,
+    pub workspace_shadow_near: Hsla,
+    pub workspace_shadow_soft: Hsla,
     pub hover: Hsla,
     pub accent: Hsla,
     pub accent_strong: Hsla,
@@ -71,6 +75,9 @@ impl Theme {
             heading: c(0x171a1f),
             muted: c(0x68707a),
             border: c(0xdfe3e8),
+            workspace_edge: c(0xdfe3e8).opacity(0.76),
+            workspace_shadow_near: c(0x16202c).alpha(0.045),
+            workspace_shadow_soft: c(0x16202c).alpha(0.10),
             hover: c(0xedf1f2),
             accent: c(0x2f7d6f),
             accent_strong: c(0x174e45),
@@ -118,6 +125,9 @@ impl Theme {
             heading: c(0xeef1f4),
             muted: c(0x8b949e),
             border: c(0x30363d),
+            workspace_edge: c(0x30363d).opacity(0.9),
+            workspace_shadow_near: c(0x000000).alpha(0.16),
+            workspace_shadow_soft: c(0x000000).alpha(0.22),
             hover: c(0x2a3037),
             accent: c(0x4fb3a0),
             accent_strong: c(0x8fd6c7),
@@ -171,14 +181,82 @@ impl Theme {
         if cx.try_global::<Theme>().is_some_and(|theme| theme.dark == dark) {
             return;
         }
-        cx.set_global(if dark { Theme::dark() } else { Theme::light() });
+        let target = if dark { Theme::dark() } else { Theme::light() };
+        let from = if cx.try_global::<Theme>().is_some() { Theme::ui(cx) } else { target.clone() };
+        cx.set_global(target.clone());
+        if cx.try_global::<UiThemeTransition>().is_some() {
+            let reduced = cx.try_global::<MotionPreference>().is_some_and(|preference| preference.reduced);
+            cx.set_global(UiThemeTransition { from, target, started: (!reduced).then(Instant::now) });
+        }
         cx.refresh_windows();
+    }
+
+    /// 首个窗口的初始主题直接生效，之后的主题切换才启动过渡。
+    pub fn arm_ui_transition(cx: &mut App) {
+        if cx.try_global::<UiThemeTransition>().is_none() {
+            let theme = cx.global::<Theme>().clone();
+            cx.set_global(UiThemeTransition { from: theme.clone(), target: theme, started: None });
+        }
+    }
+
+    pub fn ui_transition_active(cx: &App) -> bool {
+        !cx.try_global::<MotionPreference>().is_some_and(|preference| preference.reduced)
+            && cx.try_global::<UiThemeTransition>().and_then(|transition| transition.started)
+                .is_some_and(|started| started.elapsed() < Duration::from_millis(160))
+    }
+
+    pub fn finish_ui_transition(cx: &mut App) {
+        if cx.try_global::<UiThemeTransition>().is_some() {
+            let target = cx.global::<Theme>().clone();
+            cx.set_global(UiThemeTransition { from: target.clone(), target, started: None });
+        }
+    }
+
+    /// 外壳颜色使用短暂插值；编辑器文档布局继续读取稳定的目标主题。
+    pub fn ui(cx: &App) -> Theme {
+        let target = cx.global::<Theme>();
+        let Some(transition) = cx.try_global::<UiThemeTransition>() else { return target.clone(); };
+        let Some(started) = transition.started else { return target.clone(); };
+        if transition.target.dark != target.dark
+            || cx.try_global::<MotionPreference>().is_some_and(|preference| preference.reduced) {
+            return target.clone();
+        }
+        let elapsed = started.elapsed().as_secs_f32();
+        if elapsed >= 0.16 { return target.clone(); }
+        let background = motion::ease((elapsed / 0.16).min(1.0));
+        let foreground = motion::ease((elapsed / 0.12).min(1.0));
+        let mut result = transition.target.clone();
+        macro_rules! interpolate {
+            ($progress:expr; $($field:ident),+ $(,)?) => {
+                $(result.$field = motion::color(transition.from.$field, transition.target.$field, $progress);)+
+            };
+        }
+        interpolate!(background; app_bg, rail_bg, surface, border, workspace_edge, hover, sidebar_active, selection,
+            code_bg, code_border, inline_code_bg, table_border, table_header_bg, search_match,
+            search_current, mark_bg, scrollbar, workspace_shadow_near, workspace_shadow_soft);
+        interpolate!(foreground; fg, heading, muted, accent, accent_strong, on_accent, caret, link,
+            quote_border, quote_fg, code_fg, code_keyword, code_string, code_number, code_comment,
+            code_punct, inline_code_fg, marker, callout_note, callout_tip, callout_important,
+            callout_warning, callout_caution);
+        for index in 0..result.palette_fg.len() {
+            result.palette_fg[index] = motion::color(transition.from.palette_fg[index], transition.target.palette_fg[index], foreground);
+            result.palette_bg[index] = motion::color(transition.from.palette_bg[index], transition.target.palette_bg[index], background);
+        }
+        result
     }
 }
 
 impl Global for Theme {}
 
-/// 字体族。正文用苹方（其拉丁字形完整，且各字重齐全，汉字粗体才能生效）；代码用 Menlo，汉字回退到苹方。
+/// 固定保存一次过渡的起止颜色；无定时器，窗口销毁时不持有视图或文档。
+struct UiThemeTransition {
+    from: Theme,
+    target: Theme,
+    started: Option<Instant>,
+}
+impl Global for UiThemeTransition {}
+
+/// 字体族。正文与等宽字体按平台选择，等宽字体缺少的汉字回退到正文。
 ///
 /// 正文若以系统 UI 字体为主、苹方为回退，GPUI 0.2.2 的回退只按字族名匹配，汉字会丢失粗体字重。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -196,24 +274,37 @@ pub fn set_font_overrides(document: &str, mono: &str) {
     }
 }
 
-/// 正文与等宽字体名：设置覆盖优先，其次环境变量 `NOMO_TEXT_FONT`（便于对照渲染），默认苹方与 Menlo。
+/// 当前平台的界面字体；正文设置覆盖不影响界面默认字体。
+pub fn ui_font_family() -> &'static str {
+    if cfg!(target_os = "macos") { ".SystemUIFont" }
+    else if cfg!(target_os = "windows") { "Segoe UI" }
+    else { "DejaVu Sans" }
+}
+
+fn default_fonts() -> (&'static str, &'static str) {
+    if cfg!(target_os = "macos") { ("PingFang SC", "Menlo") }
+    else if cfg!(target_os = "windows") { ("Microsoft YaHei", "Consolas") }
+    else { ("Noto Sans CJK SC", "DejaVu Sans Mono") }
+}
+
 fn font_names() -> (gpui::SharedString, gpui::SharedString) {
     let (document, mono) = FONT_OVERRIDES.read().map(|names| names.clone()).unwrap_or_default();
-    let document = if document.is_empty() { std::env::var("NOMO_TEXT_FONT").unwrap_or_else(|_| "PingFang SC".into()) } else { document };
-    let mono = if mono.is_empty() { "Menlo".to_string() } else { mono };
+    let (default_document, default_mono) = default_fonts();
+    let document = if document.is_empty() { std::env::var("NOMO_TEXT_FONT").unwrap_or_else(|_| default_document.into()) } else { document };
+    let mono = if mono.is_empty() { default_mono.to_string() } else { mono };
     (document.into(), mono.into())
 }
 
 pub fn font_for(family: Family, bold: bool, italic: bool) -> Font {
     let (document, mono) = font_names();
     let (name, fallback) = match family {
-        Family::Text => (document, gpui::SharedString::from(".SystemUIFont")),
+        Family::Text => (document, gpui::SharedString::from(ui_font_family())),
         Family::Mono => (mono, document),
     };
     Font {
         family: name,
         features: Default::default(),
-        fallbacks: Some(FontFallbacks::from_fonts(vec![fallback.to_string(), "PingFang SC".into()])),
+        fallbacks: Some(FontFallbacks::from_fonts(vec![fallback.to_string(), default_fonts().0.into()])),
         weight: if bold { FontWeight::BOLD } else { FontWeight::NORMAL },
         style: if italic { FontStyle::Italic } else { FontStyle::Normal },
     }

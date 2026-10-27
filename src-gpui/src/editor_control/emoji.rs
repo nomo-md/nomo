@@ -128,19 +128,18 @@ impl EmojiCatalog {
         Ok(catalog)
     }
     pub fn search(&self, text: &str, limit: usize) -> Vec<&EmojiEntry> {
+        self.search_indices(text, None, limit).into_iter().map(|index| &self.entries[index]).collect()
+    }
+    /// 返回有界索引，不复制词库正文；分组和关键字复用补全的排序规则。
+    pub fn search_indices(&self, text: &str, group: Option<u8>, limit: usize) -> Vec<usize> {
         let query = normalize(text);
         let words: Vec<_> = query.split_whitespace().collect();
         let mut matches = Vec::new();
-        for entry in &self.entries {
-            if !words.iter().all(|word| {
+        for (index, entry) in self.entries.iter().enumerate() {
+            if group.is_some_and(|group| group != entry.group) || !words.iter().all(|word| {
                 entry.unicode == *word || entry.terms.iter().any(|term| term.contains(word))
-            }) {
-                continue;
-            }
-            let score = if query.is_empty()
-                || entry.unicode == query
-                || entry.shortcodes.contains(&query)
-            {
+            }) { continue; }
+            let score = if query.is_empty() || entry.unicode == query || entry.shortcodes.contains(&query) {
                 0
             } else if entry.terms.contains(&query) {
                 1
@@ -148,17 +147,11 @@ impl EmojiCatalog {
                 2
             } else if entry.terms.iter().any(|term| term.starts_with(&query)) {
                 3
-            } else {
-                4
-            };
-            matches.push((score, entry));
+            } else { 4 };
+            matches.push((score, entry.order, index));
         }
-        matches.sort_by_key(|(score, entry)| (*score, entry.order));
-        matches
-            .into_iter()
-            .take(limit)
-            .map(|(_, entry)| entry)
-            .collect()
+        matches.sort_by_key(|(score, order, _)| (*score, *order));
+        matches.into_iter().take(limit).map(|(_, _, index)| index).collect()
     }
     pub fn estimated_bytes(&self) -> usize {
         self.version.len()

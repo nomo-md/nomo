@@ -8,7 +8,7 @@ pub struct ResidentLease { registry:Registry, id:u64 }
 fn limits()->Cost {
     static LIMITS:OnceLock<Cost>=OnceLock::new();
     *LIMITS.get_or_init(|| {
-        let data:serde_json::Value=serde_json::from_str(include_str!("../../../src/lib/markdown-document/windowingLimits.json")).expect("shared limits");
+        let data:serde_json::Value=serde_json::from_str(include_str!("../../resources/windowingLimits.json")).expect("shared limits");
         Cost { views:data["resident"]["views"].as_u64().unwrap() as usize, source:data["resident"]["sourceBytes"].as_u64().unwrap() as usize, layout:64*1024*1024 }
     })
 }

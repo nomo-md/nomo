@@ -6,6 +6,8 @@ use std::ops::Range;
 pub enum ObjectKind {
     Code,
     InlineMath,
+    InsertInlineMath,
+    InsertInlineComment,
     BlockMath,
     Mermaid,
     Image,

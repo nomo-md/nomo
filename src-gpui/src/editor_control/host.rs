@@ -43,6 +43,12 @@ impl WindowHostAdapter {
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
+    /// 全文长度来自会话；只叠加尚未确认事务的字节增量，不读取或复制全文。
+    pub(crate) fn projected_document_length(&self, committed_length: u64) -> u64 {
+        let delta: i128 = self.pending.iter().flat_map(|transaction| &transaction.edits)
+            .map(|edit| edit.inserted_text.len() as i128 - (edit.to_byte - edit.from_byte) as i128).sum();
+        (committed_length as i128 + delta).max(0) as u64
+    }
     pub fn pending_bytes(&self) -> usize {
         self.pending
             .iter()
@@ -236,6 +242,93 @@ impl WindowHostAdapter {
         self.layout = None;
         Ok(())
     }
+    /// 目录补丁与用户输入共用队列；只更新当前窗口内的文本，其余位置仅映射坐标。
+    pub(crate) fn queue_derived(&mut self, edits: Vec<SourceEdit>) -> Result<(), ControlError> {
+        if self.pending_count() != 0 || self.failure.is_some() || self.readonly
+            || self.interaction.protected()
+            || !matches!(self.presentation, Presentation::Editable | Presentation::Suspended)
+        {
+            return Err(ControlError::Busy);
+        }
+        if edits.is_empty() { return Ok(()); }
+        let size: usize = edits.iter().map(|edit| edit.inserted_text.len() + std::mem::size_of::<SourceEdit>()).sum();
+        if size > 4 * 1024 * 1024 { return Err(ControlError::NeedsContext("目录更新超过 4 MiB 编辑预算".into())); }
+        let base = self.parsed.identity.from_byte;
+        let end = self.parsed.identity.to_byte;
+        let selection = self.selection.range();
+        let mut last_end = 0;
+        let mut local = Vec::new();
+        let mut before_delta = 0_i128;
+        for (index, edit) in edits.iter().enumerate() {
+            if edit.inserted_text.len() > crate::text_document::MAX_SEMANTIC_BYTES {
+                return Err(ControlError::NeedsContext("目录超过单个语义结构块预算".into()));
+            }
+            if edit.from_byte > edit.to_byte || (index > 0 && edit.from_byte < last_end) {
+                return Err(ControlError::InvalidRange);
+            }
+            last_end = edit.to_byte;
+            let touches_selection = if selection.is_empty() {
+                edit.from_byte <= selection.start && selection.start <= edit.to_byte
+            } else {
+                edit.from_byte < selection.end && selection.start < edit.to_byte
+            };
+            if touches_selection { return Err(ControlError::Busy); }
+            if edit.to_byte <= base {
+                before_delta += edit.inserted_text.len() as i128 - (edit.to_byte - edit.from_byte) as i128;
+            } else if edit.from_byte >= end {
+                continue;
+            } else if edit.from_byte >= base && edit.to_byte <= end {
+                local.push((edit, local_range(&self.parsed.source, base, edit.from_byte..edit.to_byte)?));
+            } else {
+                return Err(ControlError::NeedsContext("目录跨越当前窗口边界，稍后再更新".into()));
+            }
+        }
+        let new_base = u64::try_from(base as i128 + before_delta).map_err(|_| ControlError::InvalidRange)?;
+        let mut next = self.parsed.source.to_string();
+        for (edit, range) in local.into_iter().rev() { next.replace_range(range, &edit.inserted_text); }
+        if next.len() > 1024 * 1024 { return Err(ControlError::NeedsContext("目录更新后的当前窗口超过 1 MiB 预算".into())); }
+        let after = super::commands::map_selection(self.selection, &edits);
+        // 全局选区的活动端也可能位于屏外；仅校验原本属于当前窗口的端点。
+        if self.selection.head_byte >= base && self.selection.head_byte <= end {
+            let head = after.head_byte.checked_sub(new_base).and_then(|at| usize::try_from(at).ok()).ok_or(ControlError::InvalidRange)?;
+            if head > next.len() || !next.is_char_boundary(head) { return Err(ControlError::InvalidRange); }
+        }
+        let mut context = self.parsed.context.clone();
+        crate::markdown_templates::map_templates(
+            &mut context.inline_templates,
+            edits.iter().rev().map(|e| (e.from_byte, e.to_byte, e.inserted_text.len() as u64)),
+            false,
+        );
+        crate::markdown_templates::canonicalize(&mut context.inline_templates);
+        if !crate::markdown_templates::valid_set(&context.inline_templates)
+            || context.inline_templates.iter().any(|template| !template.valid_in(&next, new_base))
+        { return Err(ControlError::InvalidRange); }
+        self.interaction.details_open = std::mem::take(&mut self.interaction.details_open).into_iter()
+            .filter(|(at, _)| !edits.iter().any(|edit| edit.from_byte <= *at && *at < edit.to_byte))
+            .map(|(at, value)| (super::commands::map_selection(DocumentSelection::caret(at), &edits).head_byte, value)).collect();
+        self.interaction.horizontal_offsets = std::mem::take(&mut self.interaction.horizontal_offsets).into_iter()
+            .filter(|(at, _)| !edits.iter().any(|edit| edit.from_byte < *at && *at < edit.to_byte))
+            .map(|(at, value)| (super::commands::map_selection(DocumentSelection::caret(at), &edits).head_byte, value)).collect();
+        self.serial += 1;
+        self.pending.push_back(DocumentTransaction {
+            template_update: None,
+            base_revision: self.committed_revision,
+            operation_id: format!("{}:{}:{}", self.parsed.identity.window_id, self.parsed.identity.view_generation, self.serial),
+            history_group_id: "automatic-toc".into(),
+            edits,
+            selection_before: self.selection,
+            selection_after: after,
+        });
+        self.selection = after;
+        let mut identity = self.parsed.identity.clone();
+        identity.projection_generation += 1;
+        identity.from_byte = new_base;
+        identity.to_byte = new_base + next.len() as u64;
+        self.parsed = Arc::new(ParsedWindow::from_source_with_context(identity, Arc::from(next), context));
+        self.prune_view_state();
+        self.layout = None;
+        Ok(())
+    }
     /// 仅发送队首。失败重试返回同一 operationId，沿用原版幂等契约。
     pub fn next_submission(&mut self) -> Option<ControlEvent> {
         if self.submitted || self.failure.is_some() {
@@ -244,7 +337,11 @@ impl WindowHostAdapter {
         let front = self.pending.front_mut()?;
         front.base_revision = self.committed_revision;
         self.submitted = true;
-        Some(ControlEvent::Submit(front.clone()))
+        Some(if front.history_group_id == "automatic-toc" {
+            ControlEvent::SubmitDerived(front.clone())
+        } else {
+            ControlEvent::Submit(front.clone())
+        })
     }
     pub fn acknowledge(&mut self, operation_id: &str, revision: u64) -> Result<(), ControlError> {
         if self.last_ack.as_deref() == Some(operation_id) {

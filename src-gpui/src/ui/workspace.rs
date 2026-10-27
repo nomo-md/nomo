@@ -1,72 +1,253 @@
 //! 窗口根视图：标题栏标签、侧栏文件树、工具栏、编辑区（语义 / 源码 / 分栏）、大纲浮卡、搜索面板与状态栏。
 //!
-//! 每个标签持有一个 `Buffer` 和两个视图（语义、源码）。单栏模式只渲染当前模式的视图，
-//! 另一个视图不参与布局与绘制；分栏时两侧共享 Buffer，滚动通过行号互相同步。
+//! 每个标签持有一个窗口化 DocumentHost；完整正文、历史与保存归共享文档会话服务。
 
-use crate::buffer::{Buffer, BufferEvent};
-use crate::editor::{EditorView, ViewEvent, ViewMode};
-use crate::markdown::blocks::Heading;
+use crate::editor::ViewMode;
+use crate::editor_control::{document_host::{DocumentHost, DocumentEvent, EditTarget, OutlineHeading as Heading}, native_port::NativeWindowPort, session_window::WindowRequest};
+use crate::text_document::markdown_session::MarkdownDocumentSessionManager;
 use crate::settings::{EditorMode, Settings, StatsMetric};
 use crate::theme::Theme;
-use crate::ui::components::{ButtonKind, IconName, button, floating_card, icon, icon_button, segment, segmented, slider, small_icon_button, tooltip, vertical_divider};
+use crate::ui::components::{ButtonKind, IconName, button, floating_card, icon, slider, small_icon_button, tooltip};
 use crate::ui::file_tree::FileTree;
+use crate::editor_control::{link_edit::LinkDraft, protocol::ControlError};
+use crate::ui::editor_popovers::{EditorPopover, EditorPopoverEvent, EditorPopoverKind};
+use crate::ui::emoji_picker::{EmojiPicker, EmojiPickerEvent};
 use crate::ui::text_field::{FieldEvent, TextField};
+use crate::ui::chrome::{Chrome, ChromeState, ChromeEvent, ChromeCapability, ChromeCommand};
+use crate::ui::workspace_surface::{TAB_RAIL_HEIGHT, WorkspaceSurface};
+use crate::ui::motion::{self, MotionPreference, ScalarMotion};
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, PathPromptOptions, PromptLevel, Render, ScrollStrategy, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, UniformListScrollHandle, Window, actions, div, prelude::*, px,
-    uniform_list,
+    Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, PathPromptOptions, PromptLevel, Render, ScrollHandle, ScrollStrategy,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Transformation, UniformListScrollHandle, Window,
+    actions, div, ease_in_out, prelude::*, px, radians, uniform_list,
 };
 use std::path::{Path, PathBuf};
+use std::cell::Cell;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+mod explorer;
+mod explorer_actions;
+mod explorer_ui;
+mod explorer_search;
+mod outline;
+mod toolbar;
+use explorer::ExplorerState;
 
 actions!(
     workspace,
     [
-        NewFile, OpenFile, OpenFolder, Save, SaveAs, CloseTab, NextTab, PrevTab, Find, FindReplace, FindNext,
+        NewFile, NewWindow, OpenFile, OpenFolder, Save, SaveAs, CloseTab, NextTab, PrevTab, Find, FindReplace, FindNext,
         FindPrev, ToggleSource, ModeSemantic, ModeSource, ModeSplit, ToggleOutline, ToggleSidebar, ToggleToolbar,
         ToggleTheme, FollowSystemTheme, ToggleTypography, Underline, Highlight, ZoomIn, ZoomOut, ZoomReset, Bold, Italic, Strike, InlineCode, Link,
-        Heading1, Heading2, Heading3, Paragraph, Quote, BulletList, OrderedList, TaskList, CodeBlock, Table,
+        Heading1, Heading2, Heading3, Heading4, Heading5, Heading6, ClearFormatting, Paragraph, Quote, BulletList, OrderedList, TaskList, CodeBlock, Table,
         MathBlock, Rule, OpenSettings, Quit
     ]
 );
 
 pub(crate) struct Tab {
-    pub(crate) buffer: Entity<Buffer>,
-    pub(crate) semantic: Entity<EditorView>,
-    pub(crate) source: Entity<EditorView>,
+    document: Entity<DocumentHost>,
     pub(crate) mode: EditorMode,
-    /// 主视图顶部所在源码行，用于大纲高亮当前标题。
-    top_line: f64,
-    /// 自动保存的延迟任务；再次编辑时被替换（即取消上一次），保证只在停止输入后保存。
+    preview: bool,
+    opened_at: Instant,
+    dirty: bool,
+    dirty_animation_started: Option<Instant>,
+    hover: ScalarMotion,
+    close_hover: ScalarMotion,
+    active_color: ScalarMotion,
+    hidden_hover: ScalarMotion,
     autosave: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
-impl Tab {
-    pub(crate) fn primary(&self) -> &Entity<EditorView> {
-        match self.mode {
-            EditorMode::Source => &self.source,
-            _ => &self.semantic,
-        }
+struct PendingSave {
+    document: Entity<DocumentHost>,
+    path: PathBuf,
+    follow_current: bool,
+    close_after: bool,
+}
+
+struct OpeningDocument {
+    id: u64,
+    path: Option<PathBuf>,
+    request: WindowRequest,
+    preview: bool,
+}
+
+const TREE_ROW_HEIGHT: f32 = 30.0;
+const TREE_SELECTION_DURATION: Duration = Duration::from_millis(180);
+const TREE_CHEVRON_DURATION: Duration = Duration::from_millis(200);
+
+#[derive(Clone, PartialEq, Eq)]
+struct TreeSelection {
+    path: PathBuf,
+    index: usize,
+    depth: usize,
+}
+
+impl TreeSelection {
+    fn position(&self) -> (f32, f32) {
+        (32.0 + self.depth as f32 * 12.0, self.index as f32 * TREE_ROW_HEIGHT + 8.0)
     }
 }
+
+#[derive(Clone)]
+struct TreeSelectionAnimation {
+    id: usize,
+    started: Instant,
+    from: (f32, f32),
+    to: (f32, f32),
+}
+
+fn tree_selection_ease(progress: f32) -> f32 {
+    1.0 - (1.0 - progress).powi(3)
+}
+
+impl TreeSelectionAnimation {
+    fn position(&self) -> (f32, f32) {
+        let progress = (self.started.elapsed().as_secs_f32() / TREE_SELECTION_DURATION.as_secs_f32()).min(1.0);
+        let progress = tree_selection_ease(progress);
+        (
+            self.from.0 + (self.to.0 - self.from.0) * progress,
+            self.from.1 + (self.to.1 - self.from.1) * progress,
+        )
+    }
+}
+
+fn tree_selection_marker(index: usize, depth: usize, animation: Option<&TreeSelectionAnimation>, color: gpui::Hsla) -> AnyElement {
+    let target = (32.0 + depth as f32 * 12.0, 8.0);
+    let marker = div().absolute().w(px(2.0)).h(px(14.0)).rounded_full().bg(color).opacity(0.88);
+    if let Some(animation) = animation.filter(|animation| animation.started.elapsed() < TREE_SELECTION_DURATION) {
+        let from = (animation.from.0, animation.from.1 - index as f32 * TREE_ROW_HEIGHT);
+        let id = animation.id;
+        marker.with_animation(
+            ("tree-selection", id),
+            Animation::new(TREE_SELECTION_DURATION).with_easing(tree_selection_ease),
+            move |marker, progress| marker
+                .left(px(from.0 + (target.0 - from.0) * progress))
+                .top(px(from.1 + (target.1 - from.1) * progress)),
+        ).into_any_element()
+    } else {
+        marker.left(px(target.0)).top(px(target.1)).into_any_element()
+    }
+}
+
+#[derive(Clone)]
+struct TreeChevronAnimation {
+    path: PathBuf,
+    id: usize,
+    started: Instant,
+    from: f32,
+    to: f32,
+}
+
+impl TreeChevronAnimation {
+    fn rotation(&self) -> f32 {
+        let progress = (self.started.elapsed().as_secs_f32() / TREE_CHEVRON_DURATION.as_secs_f32()).min(1.0);
+        self.from + (self.to - self.from) * ease_in_out(progress)
+    }
+}
+
+fn tree_chevron(expanded: bool, path: Option<&Path>, animation: Option<&TreeChevronAnimation>, color: gpui::Hsla) -> AnyElement {
+    let target = if expanded { 0.0 } else { -std::f32::consts::FRAC_PI_2 };
+    let arrow = icon(IconName::ChevronDown, 12.0, color);
+    if let Some(animation) = animation.filter(|animation| {
+        path.is_some_and(|path| path == animation.path) && animation.started.elapsed() < TREE_CHEVRON_DURATION
+    }) {
+        let (id, from, to) = (animation.id, animation.from, animation.to);
+        arrow.with_animation(
+            ("tree-chevron", id),
+            Animation::new(TREE_CHEVRON_DURATION).with_easing(ease_in_out),
+            move |arrow, progress| arrow.with_transformation(Transformation::rotate(radians(from + (to - from) * progress))),
+        ).into_any_element()
+    } else {
+        arrow.with_transformation(Transformation::rotate(radians(target))).into_any_element()
+    }
+}
+
+#[derive(Clone)]
+struct DocumentServices(MarkdownDocumentSessionManager);
+impl gpui::Global for DocumentServices {}
 
 pub(crate) struct SearchPanel {
     pub(crate) query: Entity<TextField>,
     pub(crate) replacement: Entity<TextField>,
     show_replace: bool,
     case_sensitive: bool,
+    whole_word: bool,
+    backwards: bool,
+    wrap_around: bool,
     _subscriptions: Vec<Subscription>,
+}
+
+/// 浮层只保留窗口身份/选区和弱文档引用；丢弃时释放输入框及订阅。
+struct PendingPopover {
+    document: gpui::WeakEntity<DocumentHost>,
+    target: EditTarget,
+    link: Option<LinkDraft>,
+    view: Entity<EditorPopover>,
+    position: gpui::Point<gpui::Pixels>,
+    _subscription: Subscription,
+}
+
+struct PendingEmoji {
+    document: gpui::WeakEntity<DocumentHost>,
+    target: EditTarget,
+    view: Entity<EmojiPicker>,
+    position: gpui::Point<gpui::Pixels>,
+    _subscription: Subscription,
 }
 
 pub struct Workspace {
     focus: FocusHandle,
+    chrome: Entity<Chrome>,
+    _chrome_subscription: Subscription,
+    _motion_activation: Subscription,
+    _motion_observer: Subscription,
+    #[cfg(target_os = "linux")]
+    motion_query: Option<Task<()>>,
+    services: Option<MarkdownDocumentSessionManager>,
+    owner: String,
+    opening: Vec<OpeningDocument>,
+    pending_saves: Vec<PendingSave>,
+    pending_tree_click: Option<Task<()>>,
+    deferred_open: Option<(PathBuf, bool)>,
+    tree_animation: Option<TreeChevronAnimation>,
+    tree_animation_id: usize,
+    tree_selection: Option<TreeSelection>,
+    tree_selection_animation: Option<TreeSelectionAnimation>,
+    tree_selection_animation_id: usize,
+    close_prompt: bool,
+    closing_window: bool,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
+    tab_scroll: ScrollHandle,
+    toolbar_scroll: ScrollHandle,
+    toolbar_trigger_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    toolbar_popup_anchors: [Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>; 5],
+    toolbar_popup: Option<toolbar::ToolbarPopup>,
+    toolbar_popup_focus: FocusHandle,
+    toolbar_target: Option<bool>,
+    toolbar_motion: Option<(Instant, usize, f32, f32, Duration)>,
+    toolbar_motion_id: usize,
+    toolbar_motion_task: Option<Task<()>>,
+    toolbar_mode_target: Option<f32>,
+    toolbar_mode_motion: Option<(Instant, usize, f32, f32)>,
+    toolbar_mode_motion_id: usize,
+    split_guide_visible: bool,
+    tab_overflow: Rc<Cell<bool>>,
+    tab_menu_open: bool,
+    tab_menu_button_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    tab_action_hover: ScalarMotion,
+    surface: WorkspaceSurface,
     tree: Option<FileTree>,
+    explorer: ExplorerState,
     pub(crate) search: Option<SearchPanel>,
+    popover: Option<PendingPopover>,
+    emoji_picker: Option<PendingEmoji>,
     outline_scroll: UniformListScrollHandle,
+    outline_ui: outline::OutlineUi,
     tree_scroll: UniformListScrollHandle,
     notice: Option<SharedString>,
     /// 工具栏内容宽度滑杆是否正在拖动。
@@ -81,281 +262,497 @@ impl Focusable for Workspace {
 
 impl Workspace {
     pub fn new(paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // 一个应用共享索引/搜索/统计服务；进程目录避免第二实例清理活动缓存。
+        let service = if let Some(service)=cx.try_global::<DocumentServices>() {Ok(service.0.clone())} else {
+            let root = crate::settings::config_path().and_then(|p|p.parent().map(|p|p.join("gpui-sessions")))
+                .unwrap_or_else(||std::env::temp_dir().join("nomo-gpui-sessions"))
+                .join(format!("{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()));
+            MarkdownDocumentSessionManager::new(root).map(|manager| {cx.set_global(DocumentServices(manager.clone()));manager})
+        };
+        let service_error=service.as_ref().err().map(|e|format!("无法初始化文档会话：{e}").into());
+        let this=cx.entity().downgrade();
+        window.on_window_should_close(cx,move |window,cx| this.update(cx,|workspace,cx| workspace.request_close_window(window,cx)).unwrap_or(true));
+        let chrome=cx.new(Chrome::new);
+        let chrome_subscription=cx.subscribe_in(&chrome,window,|workspace,_,event,window,cx|workspace.chrome_event(event,window,cx));
+        let motion_activation = cx.observe_window_activation(window, |workspace, window, cx| {
+            if window.is_window_active() { workspace.refresh_system_motion(cx); }
+        });
+        let motion_observer = cx.observe_global::<MotionPreference>(|workspace, cx| {
+            let reduced = cx.global::<MotionPreference>().reduced;
+            workspace.set_motion_preference(reduced);
+            cx.notify();
+        });
+        Theme::arm_ui_transition(cx);
         let mut workspace = Self {
             focus: cx.focus_handle(),
+            chrome,
+            _chrome_subscription: chrome_subscription,
+            _motion_activation: motion_activation,
+            _motion_observer: motion_observer,
+            #[cfg(target_os = "linux")]
+            motion_query: None,
+            services: service.ok(),
+            owner: format!("workspace-{:?}",cx.entity_id()),
+            opening: Vec::new(), pending_saves: Vec::new(), pending_tree_click: None, deferred_open: None,
+            tree_animation: None, tree_animation_id: 0,
+            tree_selection: None, tree_selection_animation: None, tree_selection_animation_id: 0,
+            close_prompt:false, closing_window:false,
             tabs: Vec::new(),
             active: 0,
+            tab_scroll: ScrollHandle::new(),
+            toolbar_scroll: ScrollHandle::new(),
+            toolbar_trigger_bounds: Rc::new(Cell::new(None)),
+            toolbar_popup_anchors: std::array::from_fn(|_| Rc::new(Cell::new(None))),
+            toolbar_popup: None,
+            toolbar_popup_focus: cx.focus_handle(),
+            toolbar_target: None,
+            toolbar_motion: None,
+            toolbar_motion_id: 0,
+            toolbar_motion_task: None,
+            toolbar_mode_target: None,
+            toolbar_mode_motion: None,
+            toolbar_mode_motion_id: 0,
+            split_guide_visible: false,
+            tab_overflow: Rc::new(Cell::new(false)),
+            tab_menu_open: false,
+            tab_menu_button_bounds: Rc::new(Cell::new(None)),
+            tab_action_hover: ScalarMotion::default(),
+            surface: WorkspaceSurface::default(),
             tree: None,
+            explorer: ExplorerState::default(),
             search: None,
+            popover: None,
+            emoji_picker: None,
             outline_scroll: UniformListScrollHandle::new(),
+            outline_ui: outline::OutlineUi::new(window, cx),
             tree_scroll: UniformListScrollHandle::new(),
-            notice: None,
+            notice: service_error,
             width_dragging: false,
         };
+        workspace.refresh_system_motion(cx);
+        workspace.init_tree_search(window, cx);
         for path in paths {
             workspace.open_path(&path, window, cx);
         }
+        window.focus(&workspace.focus);
         workspace
+    }
+
+    fn set_motion_preference(&mut self, reduced: bool) {
+        self.explorer.reduce_motion = reduced;
+        self.outline_ui.set_reduced_motion(reduced);
+        self.surface.set_reduced_motion(reduced);
+        self.tab_action_hover.retime(reduced, Duration::from_millis(150));
+        for tab in &mut self.tabs {
+            tab.hover.retime(reduced, Duration::from_millis(150));
+            tab.close_hover.retime(reduced, Duration::from_millis(150));
+            tab.active_color.retime(reduced, Duration::from_millis(150));
+            tab.hidden_hover.retime(reduced, Duration::from_millis(120));
+        }
+        if reduced {
+            self.tree_animation = None;
+            self.tree_selection_animation = None;
+            self.explorer.scroll_animation = None;
+        }
+    }
+
+    fn apply_system_motion(&mut self, reduced: bool, cx: &mut Context<Self>) {
+        self.set_motion_preference(reduced);
+        if reduced { Theme::finish_ui_transition(cx); }
+        if cx.global::<MotionPreference>().reduced != reduced {
+            cx.set_global(MotionPreference { reduced });
+        }
+        cx.notify();
+    }
+
+    fn refresh_system_motion(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "windows")]
+        self.apply_system_motion(explorer::system_reduce_motion(), cx);
+        #[cfg(target_os = "macos")]
+        self.apply_system_motion(motion::macos_reduce_motion(), cx);
+        #[cfg(target_os = "linux")]
+        {
+            let query = cx.background_executor().spawn(motion::linux_reduce_motion());
+            self.motion_query = Some(cx.spawn(async move |workspace, cx| {
+                let result = query.await;
+                let _ = workspace.update(cx, |workspace, cx| match result {
+                    Ok(reduced) => workspace.apply_system_motion(reduced, cx),
+                    Err(error) => eprintln!("{error}"),
+                });
+            }));
+        }
     }
 
     pub(crate) fn tab(&self) -> Option<&Tab> {
         self.tabs.get(self.active)
     }
 
-    fn buffer(&self) -> Option<Entity<Buffer>> {
-        self.tab().map(|tab| tab.buffer.clone())
+    fn document(&self) -> Option<Entity<DocumentHost>> { self.tab().map(|tab|tab.document.clone()) }
+
+    pub fn open_path(&mut self,path:&Path,window:&mut Window,cx:&mut Context<Self>) {
+        self.pending_tree_click.take();
+        self.deferred_open=None;
+        self.open_path_with_preview(path,false,window,cx);
     }
 
-    // ---- 标签 ----
+    fn cancel_preview_opens(&self, except: Option<&Path>) {
+        for opening in &self.opening {
+            if opening.preview && opening.path.as_deref() != except {
+                opening.request.cancel();
+            }
+        }
+    }
 
-    pub fn open_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_path_with_preview(&mut self,path:&Path,preview:bool,window:&mut Window,cx:&mut Context<Self>) {
+        if self.explorer.mutating.iter().any(|busy| path.starts_with(busy)) {self.notice=Some("文件操作正在进行，请稍后打开。".into());cx.notify();return;}
         if path.is_dir() {
-            self.tree = Some(FileTree::new(path.to_path_buf()));
+            self.cancel_preview_opens(None);
+            let root=path.canonicalize().unwrap_or_else(|_|path.to_path_buf());
+            self.replace_tree(root,cx);
             cx.notify();
             return;
         }
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        if let Some(index) = self.tabs.iter().position(|tab| tab.buffer.read(cx).path.as_deref() == Some(canonical.as_path())) {
-            self.activate(index, window, cx);
+        let path=path.canonicalize().unwrap_or_else(|_|path.to_path_buf());
+        if self.explorer.mutating.iter().any(|busy| path.starts_with(busy)) {self.notice=Some("文件操作正在进行，请稍后打开。".into());cx.notify();return;}
+        let preview=preview && cx.global::<Settings>().bool("filePreviewEnabled");
+        self.cancel_preview_opens(Some(&path));
+        if let Some(index)=self.tabs.iter().position(|tab|tab.document.read(cx).path().as_ref()==Some(&path)) {
+            if !preview {self.tabs[index].preview=false;}
+            self.activate(index,window,cx);
             return;
         }
-        match Buffer::open(&canonical) {
-            Ok(buffer) => {
-                if self.tree.is_none() {
-                    if let Some(parent) = canonical.parent() {
-                        self.tree = Some(FileTree::new(parent.to_path_buf()));
-                    }
-                }
-                if let Some(reason) = &buffer.read_only {
-                    self.notice = Some(reason.clone().into());
-                }
-                self.add_tab(buffer, window, cx);
-            }
-            Err(error) => self.notice = Some(format!("无法打开 {}：{error}", canonical.display()).into()),
-        }
-        cx.notify();
-    }
-
-    fn add_tab(&mut self, buffer: Buffer, window: &mut Window, cx: &mut Context<Self>) {
-        let buffer = cx.new(|_| buffer);
-        let semantic = cx.new(|cx| EditorView::new(buffer.clone(), ViewMode::Semantic, window, cx));
-        let source = cx.new(|cx| EditorView::new(buffer.clone(), ViewMode::Source, window, cx));
-        let mode = cx.global::<Settings>().default_mode;
-        let subscriptions = vec![
-            cx.subscribe(&semantic, |workspace, view, event, cx| workspace.on_view_event(view, event, cx)),
-            cx.subscribe(&source, |workspace, view, event, cx| workspace.on_view_event(view, event, cx)),
-            cx.subscribe_in(&buffer, window, |workspace, buffer, event, window, cx| {
-                if matches!(event, BufferEvent::Edited) {
-                    workspace.schedule_autosave(buffer.clone(), window, cx);
-                }
-                if matches!(event, BufferEvent::Saved | BufferEvent::Edited | BufferEvent::SearchUpdated) {
-                    cx.notify();
-                }
-            }),
-            cx.observe(&buffer, |_, _, cx| cx.notify()),
-        ];
-        buffer.update(cx, |buffer, cx| buffer.ensure_stats(cx));
-        self.tabs.push(Tab { buffer, semantic, source, mode, top_line: 0.0, autosave: None, _subscriptions: subscriptions });
-        let index = self.tabs.len() - 1;
-        self.activate(index, window, cx);
-    }
-
-    fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.active = index.min(self.tabs.len().saturating_sub(1));
-        self.apply_mode(window, cx);
-        if let Some(tab) = self.tab() {
-            let title = tab.buffer.read(cx).title();
-            window.set_window_title(&format!("{title} — Nomo"));
-            let primary = tab.primary().clone();
-            window.focus(&primary.focus_handle(cx));
-        }
-        if let Some(search) = &self.search {
-            let query = search.query.read(cx).content.clone();
-            let case = search.case_sensitive;
-            if let Some(buffer) = self.buffer() {
-                buffer.update(cx, |buffer, cx| buffer.set_search(query, case, cx));
-            }
-        }
-        cx.notify();
-    }
-
-    fn on_view_event(&mut self, view: Entity<EditorView>, event: &ViewEvent, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get_mut(self.active) else { return };
-        match event {
-            ViewEvent::Scrolled(line) => {
-                if view == *tab.primary() || tab.mode == EditorMode::Split {
-                    tab.top_line = *line;
-                }
-                // 分栏：用户滚动的一侧带动另一侧。
-                if tab.mode == EditorMode::Split {
-                    let other = if view == tab.semantic { tab.source.clone() } else { tab.semantic.clone() };
-                    let line = *line;
-                    other.update(cx, |other, cx| other.scroll_to_line(line, cx));
-                }
-                cx.notify();
-            }
-            ViewEvent::Focused => cx.notify(),
-        }
-    }
-
-    pub(crate) fn set_mode(&mut self, mode: EditorMode, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get_mut(self.active) else { return };
-        if tab.mode == mode {
+        if let Some(opening)=self.opening.iter_mut().find(|opening|opening.path.as_ref()==Some(&path) && opening.request.check().is_ok()) {
+            if !preview {opening.preview=false;}
             return;
         }
-        let top = tab.primary().read(cx).top_line(cx);
-        tab.mode = mode;
-        let (semantic, source) = (tab.semantic.clone(), tab.source.clone());
-        semantic.update(cx, |view, cx| view.scroll_to_line(top, cx));
-        source.update(cx, |view, cx| view.scroll_to_line(top, cx));
-        self.apply_mode(window, cx);
-        let primary = self.tabs[self.active].primary().clone();
-        window.focus(&primary.focus_handle(cx));
-        cx.notify();
-    }
-
-    fn apply_mode(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tab() else { return };
-        let split = tab.mode == EditorMode::Split;
-        for view in [tab.semantic.clone(), tab.source.clone()] {
-            view.update(cx, |view, cx| {
-                view.split = split;
-                cx.notify();
-            });
-        }
-    }
-
-    fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get(index) else { return };
-        let buffer = tab.buffer.clone();
-        if buffer.read(cx).is_dirty() {
-            let title = buffer.read(cx).title();
-            let answer = window.prompt(PromptLevel::Warning, &format!("是否保存对“{title}”的修改？"), Some("不保存将丢失这些修改。"), &["保存", "不保存", "取消"], cx);
-            cx.spawn_in(window, async move |this, cx| {
-                let Ok(choice) = answer.await else { return };
-                this.update_in(cx, |workspace, window, cx| match choice {
-                    0 => {
-                        if workspace.save_buffer(&buffer, false, window, cx) {
-                            workspace.remove_tab(&buffer, window, cx);
-                        }
-                    }
-                    1 => workspace.remove_tab(&buffer, window, cx),
-                    _ => {}
-                })
-                .ok();
-            })
-            .detach();
+        // 同一路径的过期请求必须先释放会话，才能重新打开。
+        if self.opening.iter().any(|opening|opening.path.as_ref()==Some(&path)) {
+            self.deferred_open=Some((path,preview));
             return;
         }
-        self.remove_tab(&buffer, window, cx);
+        self.open_document(Some(path),preview,window,cx);
     }
 
-    fn remove_tab(&mut self, buffer: &Entity<Buffer>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(index) = self.tabs.iter().position(|tab| tab.buffer == *buffer) else { return };
-        self.tabs.remove(index);
-        if self.active >= self.tabs.len() {
-            self.active = self.tabs.len().saturating_sub(1);
-        }
-        if self.tabs.is_empty() {
-            window.set_window_title("Nomo");
-            window.focus(&self.focus);
-            cx.notify();
+    fn open_tree_file(&mut self,path:PathBuf,click_count:usize,window:&mut Window,cx:&mut Context<Self>) {
+        self.pending_tree_click.take();
+        self.deferred_open=None;
+        let path=path.canonicalize().unwrap_or(path);
+        self.cancel_preview_opens(Some(&path));
+        if click_count>=2 {
+            self.open_path_with_preview(&path,false,window,cx);
         } else {
-            self.activate(self.active, window, cx);
+            self.pending_tree_click=Some(cx.spawn_in(window,async move |this,cx| {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                let _=this.update_in(cx,|workspace,window,cx|workspace.open_path_with_preview(&path,true,window,cx));
+            }));
         }
     }
 
-    // ---- 文件 ----
+    fn sync_tree_selection(&mut self, animate: bool, cx: &App) {
+        let next = self.tab().and_then(|tab| tab.document.read(cx).path()).and_then(|path| {
+            let rows = self.tree.as_ref()?.rows();
+            let insertion = self.tree_create_insertion(&rows);
+            rows.iter().enumerate()
+                .find(|(_, row)| !row.entry.is_dir && (row.entry.path == path || row.entry.resolved_path.as_ref() == Some(&path)))
+                .map(|(index, row)| {
+                    let index = index + 1 + usize::from(insertion.is_some_and(|insert| insert <= index + 1));
+                    TreeSelection { path, index, depth: row.depth }
+                })
+        });
+        let changed = self.tree_selection != next;
+        if animate && !changed { return; }
 
-    fn prompt_open(&mut self, directories: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(PathPromptOptions { files: !directories, directories, multiple: !directories, prompt: Some("打开".into()) });
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = receiver.await else { return };
-            this.update_in(cx, |workspace, window, cx| {
-                for path in paths {
-                    workspace.open_path(&path, window, cx);
+        let previous = self.tree_selection.take();
+        let previous_animation = self.tree_selection_animation.take();
+        let (offset, height) = {
+            let scroll = self.tree_scroll.0.borrow();
+            (f32::from(scroll.base_handle.offset().y), f32::from(scroll.base_handle.bounds().size.height))
+        };
+        let visible = |index: usize| {
+            let top = index as f32 * TREE_ROW_HEIGHT + offset;
+            height > 0.0 && top < height && top + TREE_ROW_HEIGHT > 0.0
+        };
+
+        if animate && changed {
+            if let (Some(previous), Some(next)) = (&previous, &next) {
+                if !self.explorer.reduce_motion && visible(previous.index) && visible(next.index) {
+                    let from = previous_animation.as_ref()
+                        .filter(|animation| animation.started.elapsed() < TREE_SELECTION_DURATION)
+                        .map(TreeSelectionAnimation::position)
+                        .unwrap_or_else(|| previous.position());
+                    self.tree_selection_animation_id = self.tree_selection_animation_id.wrapping_add(1);
+                    self.tree_selection_animation = Some(TreeSelectionAnimation {
+                        id: self.tree_selection_animation_id,
+                        started: Instant::now(),
+                        from,
+                        to: next.position(),
+                    });
                 }
-            })
-            .ok();
-        })
-        .detach();
+            }
+            if let Some(next) = &next {
+                if height > 0.0 { self.tree_scroll.scroll_to_item(next.index, ScrollStrategy::Top); }
+            }
+        }
+        self.tree_selection = next;
     }
 
-    /// 保存；无路径或 `save_as` 时弹出保存面板。返回是否已同步完成保存。
-    fn save_buffer(&mut self, buffer: &Entity<Buffer>, save_as: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let path = buffer.read(cx).path.clone();
-        match path.filter(|_| !save_as) {
-            Some(path) => {
-                let snapshot = cx.global::<Settings>().snapshot_before_save;
-                let result = buffer.update(cx, |buffer, cx| buffer.save_to(path, snapshot, cx));
+    fn animate_tree_chevron(&mut self,path:PathBuf,expanded:bool) {
+        if self.explorer.reduce_motion { self.tree_animation=None; return; }
+        let from=self.tree_animation.as_ref()
+            .filter(|animation|animation.path==path && animation.started.elapsed()<TREE_CHEVRON_DURATION)
+            .map(TreeChevronAnimation::rotation)
+            .unwrap_or(if expanded {-std::f32::consts::FRAC_PI_2} else {0.0});
+        let to=if expanded {0.0} else {-std::f32::consts::FRAC_PI_2};
+        self.tree_animation_id=self.tree_animation_id.wrapping_add(1);
+        self.tree_animation=Some(TreeChevronAnimation {path,id:self.tree_animation_id,started:Instant::now(),from,to});
+    }
+
+    fn open_document(&mut self,path:Option<PathBuf>,preview:bool,window:&mut Window,cx:&mut Context<Self>) {
+        let Some(manager)=self.services.clone() else {return;};
+        if let Some(current)=self.document() {if let Err(e)=current.read(cx).ready(cx) {self.notice=Some(e.to_string().into());cx.notify();return;}}
+        let request=WindowRequest::default();
+        // 查询服务按 owner 取消任务；每文档独立 owner 防止后台标签误取消活动文档。
+        static NEXT_DOCUMENT: std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
+        let id=NEXT_DOCUMENT.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+        let owner=format!("{}:document-{}",self.owner,id);
+        self.opening.push(OpeningDocument {id,path:path.clone(),request:request.clone(),preview});
+        let requested=path.clone();
+        self.notice=Some("正在打开文档…".into());
+        let task=cx.background_executor().spawn(async move {
+            request.check()?;
+            let port=NativeWindowPort::open_in(manager,owner,path.clone(),path.is_none().then(String::new))?;
+            let loaded=port.status().and_then(|status|port.load_group(status.revision,0,None,&request));
+            Ok::<_,ControlError>((port,loaded))
+        });
+        cx.spawn_in(window,async move |this,cx| {
+            let (result,cleanup)=match task.await {
+                Ok((port,Ok(loaded)))=>(Ok((port.clone(),loaded)),Some(port)),
+                Ok((port,Err(error)))=>(Err(error),Some(port)),
+                Err(error)=>(Err(error),None),
+            };
+            let completed_path=requested.clone();
+            let accepted=this.update_in(cx,|workspace,window,cx| {
+                let Some(opening)=workspace.opening.iter().find(|opening|opening.id==id) else {return false;};
+                if opening.request.check().is_err() {return false;}
+                let preview=opening.preview && cx.global::<Settings>().bool("filePreviewEnabled");
                 match result {
-                    Ok(()) => {
-                        self.notice = None;
+                    Ok((port,loaded))=> {
+                        let mode=cx.global::<Settings>().default_mode;
+                        let status=match port.status(){Ok(status)=>status,Err(e)=>{workspace.notice=Some(e.to_string().into());return false;}};
+                        let adapter=match crate::editor_control::host::WindowHostAdapter::new(loaded.input,"workspace-window",0,loaded.context) {
+                            Ok(adapter)=>adapter,Err(e)=>{workspace.notice=Some(e.to_string().into());return false;}
+                        };
+                        let document=cx.new(|cx|DocumentHost::workspace(port,adapter,status,if mode==EditorMode::Source {ViewMode::Source}else{ViewMode::Semantic},cx));
+                        if mode==EditorMode::Split {if let Err(e)=document.update(cx,|host,cx|host.change_mode(mode,cx)) {workspace.notice=Some(e.to_string().into());return false;}}
+                        let subscriptions=vec![
+                            cx.subscribe_in(&document,window,|workspace,document,event,window,cx| {
+                                match event {
+                                    DocumentEvent::Changed=>{
+                                        if document.read(cx).is_dirty(cx) {
+                                            if let Some(tab)=workspace.tabs.iter_mut().find(|tab|tab.document==*document) {tab.preview=false;}
+                                        }
+                                        workspace.schedule_autosave(document.clone(),window,cx);
+                                    }
+                                    DocumentEvent::Failure(message)=>workspace.notice=Some(message.clone().into()),
+                                    DocumentEvent::TocSettled(warning)=>{
+                                        if let Some(warning)=warning {
+                                            let locale=crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
+                                            workspace.notice=Some(format!("{}: {warning}",locale.text("toc_warning")).into());
+                                        }
+                                        if let Some(index)=workspace.pending_saves.iter().position(|pending| pending.document==*document) {
+                                            let pending=workspace.pending_saves.remove(index);
+                                            if warning.is_some() && document.read(cx).has_failed_input(cx) {
+                                                let locale=crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
+                                                workspace.notice=Some(format!("{}: {}",locale.text("save_blocked"),warning.as_deref().unwrap_or("")).into());
+                                                workspace.closing_window=false;
+                                            } else {
+                                                workspace.save_path(pending.document,pending.path,pending.follow_current,pending.close_after,window,cx);
+                                            }
+                                        }
+                                    },
+                                    DocumentEvent::Status|DocumentEvent::ToolbarState=>{},
+                                }
+                                cx.notify();
+                            }),
+                            cx.observe(&document,|_,_,cx|cx.notify()),
+                        ];
+                        let _=document.update(cx,|host,cx|host.set_active(false,cx));
+                        if workspace.tree.is_none() {if let Some(parent)=document.read(cx).path().as_ref().or(requested.as_ref()).and_then(|p|p.parent()){workspace.replace_tree(parent.to_path_buf(),cx);}}
+                        if preview {for tab in &mut workspace.tabs {tab.preview=false;}}
+                        let dirty=document.read(cx).is_dirty(cx);
+                        workspace.tabs.push(Tab {document,mode,preview,opened_at:Instant::now(),dirty,dirty_animation_started:dirty.then(Instant::now),hover:ScalarMotion::default(),close_hover:ScalarMotion::default(),active_color:ScalarMotion::default(),hidden_hover:ScalarMotion::default(),autosave:None,_subscriptions:subscriptions});
+                        workspace.activate(workspace.tabs.len()-1,window,cx);
                         true
                     }
-                    Err(error) => {
-                        self.notice = Some(format!("保存失败：{error}").into());
-                        cx.notify();
-                        false
+                    Err(e)=>{workspace.notice=Some(format!("打开失败：{e}").into());cx.notify();false}
+                }
+            }).unwrap_or(false);
+            let cleanup_error=if !accepted {
+                let _=this.update_in(cx,|workspace,_,_| {
+                    if let Some(opening)=workspace.opening.iter().find(|opening|opening.id==id) {opening.request.cancel();}
+                });
+                if let Some(port)=cleanup {cx.background_executor().spawn(async move {port.close(false)}).await.err()} else {None}
+            } else {None};
+            let _=this.update_in(cx,|workspace,window,cx| {
+                let mut completed_path=completed_path.clone();
+                if let Some(index)=workspace.opening.iter().position(|opening|opening.id==id) {
+                    completed_path=workspace.opening[index].path.clone().or(completed_path);
+                    workspace.opening.remove(index);
+                }
+                let retry=completed_path.as_ref().is_some_and(|completed|workspace.deferred_open.as_ref().is_some_and(|(path,_)|path==completed));
+                if let Some(error)=cleanup_error {
+                    if retry {workspace.deferred_open=None;}
+                    workspace.notice=Some(format!("清理未完成的文档会话失败：{error}").into());
+                    cx.notify();
+                } else if retry {
+                    if let Some((path,preview))=workspace.deferred_open.take() {
+                        workspace.open_path_with_preview(&path,preview,window,cx);
                     }
                 }
-            }
-            None => {
-                let directory = buffer.read(cx).base_dir().or_else(|| self.tree.as_ref().map(|tree| tree.root.clone())).or_else(dirs_home).unwrap_or_else(|| PathBuf::from("/"));
-                let name = buffer.read(cx).title();
-                let receiver = cx.prompt_for_new_path(&directory, Some(&name));
-                let buffer = buffer.clone();
-                cx.spawn_in(window, async move |this, cx| {
-                    let Ok(Ok(Some(path))) = receiver.await else { return };
-                    this.update_in(cx, |workspace, window, cx| {
-                        let snapshot = cx.global::<Settings>().snapshot_before_save;
-                        let result = buffer.update(cx, |buffer, cx| buffer.save_to(path, snapshot, cx));
-                        if let Err(error) = result {
-                            workspace.notice = Some(format!("保存失败：{error}").into());
-                        } else {
-                            let title = buffer.read(cx).title();
-                            window.set_window_title(&format!("{title} — Nomo"));
-                            if let Some(tree) = &mut workspace.tree {
-                                tree.refresh();
-                            }
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-                })
-                .detach();
-                false
-            }
-        }
+            });
+        }).detach();
+        cx.notify();
     }
 
-    /// 设置“自动保存”开启且文件已有路径时，停止输入一段时间后保存；未命名文档不自动弹出保存面板。
-    fn schedule_autosave(&mut self, buffer: Entity<Buffer>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(delay) = cx.global::<Settings>().autosave else { return };
-        if buffer.read(cx).path.is_none() || buffer.read(cx).read_only.is_some() {
+    fn activate(&mut self,index:usize,window:&mut Window,cx:&mut Context<Self>) {
+        if index>=self.tabs.len() {return;}
+        if index!=self.active {
+            if let Some(current)=self.document() {if let Err(e)=current.update(cx,|host,cx|host.set_active(false,cx)) {self.notice=Some(e.to_string().into());cx.notify();return;}}
+        }
+        let document=self.tabs[index].document.clone();
+        if let Err(e)=document.update(cx,|host,cx|host.set_active(true,cx)) {self.notice=Some(e.to_string().into());cx.notify();return;}
+        self.popover=None;
+        self.toolbar_popup=None;
+        self.emoji_picker=None;
+        self.active=index;
+        self.tab_menu_open=false;
+        self.tab_scroll.scroll_to_item(index);
+        self.sync_tree_selection(true,cx);
+        window.set_window_title(&format!("{} — Nomo",document.read(cx).title()));
+        window.focus(&document.focus_handle(cx));
+        self.notice=None;
+        self.run_search(cx);
+        cx.notify();
+    }
+    pub(crate) fn set_mode(&mut self,mode:EditorMode,window:&mut Window,cx:&mut Context<Self>) {
+        let Some(document)=self.document() else{return;};
+        match document.update(cx,|host,cx|host.change_mode(mode,cx)) {
+            Ok(())=>{self.popover=None;self.toolbar_popup=None;self.emoji_picker=None;self.tabs[self.active].mode=mode;
+                let preference=match mode { EditorMode::Semantic=>"semantic", EditorMode::Source=>"source", EditorMode::Split=>"split" };
+                Settings::set(cx, "editorMode", serde_json::json!(preference));
+                window.focus(&document.focus_handle(cx));}
+            Err(e)=>self.notice=Some(e.to_string().into()),
+        }
+        cx.notify();
+    }
+    fn close_tab(&mut self,index:usize,window:&mut Window,cx:&mut Context<Self>) {
+        if self.close_prompt {return;}
+        let Some(tab)=self.tabs.get(index) else{return;};
+        let document=tab.document.clone();
+        if let Err(e)=document.read(cx).ready(cx) {self.notice=Some(e.to_string().into());self.closing_window=false;cx.notify();return;}
+        if !document.read(cx).is_dirty(cx) {self.remove_tab(&document,false,window,cx);return;}
+        self.close_prompt=true;
+        let response=window.prompt(PromptLevel::Warning,&format!("是否保存对“{}”的修改？",document.read(cx).title()),Some("不保存将丢失这些修改。"),&["保存","不保存","取消"],cx);
+        cx.spawn_in(window,async move |this,cx| {
+            let choice=response.await.ok();
+            let _=this.update_in(cx,|workspace,window,cx| {
+                workspace.close_prompt=false;
+                match choice {
+                    Some(0)=>workspace.save_document(&document,false,true,window,cx),
+                    Some(1)=>workspace.remove_tab(&document,true,window,cx),
+                    _=>{workspace.closing_window=false;}
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+    fn remove_tab(&mut self,document:&Entity<DocumentHost>,discard:bool,window:&mut Window,cx:&mut Context<Self>) {
+        let Some(index)=self.tabs.iter().position(|tab|tab.document==*document) else{return;};
+        if let Err(e)=document.update(cx,|host,cx|host.close_document(discard,cx)) {self.notice=Some(e.to_string().into());self.closing_window=false;cx.notify();return;}
+        if self.popover.as_ref().and_then(|p|p.document.upgrade()).as_ref()==Some(document) {self.popover=None;}
+        self.pending_saves.retain(|pending| &pending.document != document);
+        self.tabs.remove(index);
+        if index<self.active {self.active-=1;}
+        self.active=self.active.min(self.tabs.len().saturating_sub(1));
+        if self.tabs.is_empty() {self.sync_tree_selection(false,cx);window.set_window_title("Nomo");window.focus(&self.focus);if self.closing_window {window.remove_window();}}
+        else {self.activate(self.active,window,cx);if self.closing_window {self.close_tab(self.active,window,cx);}}
+        cx.notify();
+    }
+    pub(crate) fn request_close_window(&mut self,window:&mut Window,cx:&mut Context<Self>)->bool {
+        if !self.opening.is_empty() {self.notice=Some("文档仍在打开，请稍后关闭".into());cx.notify();return false;}
+        if self.tabs.is_empty() {return true;}
+        if !self.closing_window {self.closing_window=true;self.close_tab(self.active,window,cx);}
+        false
+    }
+    fn prompt_open(&mut self,directories:bool,window:&mut Window,cx:&mut Context<Self>) {
+        let response=cx.prompt_for_paths(PathPromptOptions {files:!directories,directories,multiple:!directories,prompt:Some("打开".into())});
+        cx.spawn_in(window,async move |this,cx| {
+            if let Ok(Ok(Some(paths)))=response.await {let _=this.update_in(cx,|workspace,window,cx| {for path in paths {workspace.open_path(&path,window,cx);}});}
+        }).detach();
+    }
+    fn save_document(&mut self,document:&Entity<DocumentHost>,save_as:bool,close_after:bool,window:&mut Window,cx:&mut Context<Self>) {
+        let existing=document.read(cx).path();
+        if !save_as {if let Some(path)=existing.clone() {self.save_path(document.clone(),path,true,close_after,window,cx);return;}}
+        let directory=existing.as_ref().and_then(|p|p.parent()).map(PathBuf::from).unwrap_or_else(||std::env::current_dir().unwrap_or_default());
+        let filename=if existing.is_some(){document.read(cx).title()}else{"未命名.md".into()};
+        let response=cx.prompt_for_new_path(&directory,Some(&filename));
+        let document=document.clone();
+        cx.spawn_in(window,async move |this,cx| {
+            let path=response.await.ok().and_then(Result::ok).flatten();
+            let _=this.update_in(cx,|workspace,window,cx| {
+                if let Some(path)=path {workspace.save_path(document,path,false,close_after,window,cx);}else{workspace.closing_window=false;}
+            });
+        }).detach();
+    }
+    fn save_path(&mut self,document:Entity<DocumentHost>,path:PathBuf,follow_current:bool,close_after:bool,window:&mut Window,cx:&mut Context<Self>) {
+        if !self.tabs.iter().any(|tab|tab.document==document) {return;}
+        if !document.update(cx,|host,cx|host.toc_ready_for_save(cx)) {
+            if let Some(pending)=self.pending_saves.iter_mut().find(|pending|pending.document==document) {
+                pending.close_after |= close_after;
+            } else {
+                self.pending_saves.push(PendingSave {document,path,follow_current,close_after});
+            }
             return;
         }
-        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.buffer == buffer) else { return };
-        let target = buffer.clone();
-        tab.autosave = Some(cx.spawn_in(window, async move |this, cx| {
+        let (port, captured)=match document.update(cx,|host,cx|host.begin_save(cx)) {Ok(value)=>value,Err(e)=>{self.notice=Some(e.to_string().into());self.closing_window=false;cx.notify();return;}};
+        let snapshot=cx.global::<Settings>().snapshot_before_save;
+        let task=cx.background_executor().spawn(async move {
+            port.save_captured(captured, if follow_current { None } else { Some(path) }, snapshot)
+        });
+        cx.spawn_in(window,async move |this,cx| {
+            let result=task.await;
+            let _=this.update_in(cx,|workspace,window,cx| {
+                let success=document.update(cx,|host,cx|host.finish_save(result,cx));
+                if success {
+                    workspace.refresh_tree(cx);
+                    workspace.sync_tree_selection(false,cx);
+                    if workspace.document().as_ref()==Some(&document) {window.set_window_title(&format!("{} — Nomo",document.read(cx).title()));}
+                    if close_after {if document.read(cx).is_dirty(cx) {workspace.closing_window=false;workspace.notice=Some("保存期间有新修改，文档保持打开".into());}else{workspace.remove_tab(&document,false,window,cx);}}
+                }else{workspace.closing_window=false;}
+                cx.notify();
+            });
+        }).detach();
+    }
+    fn schedule_autosave(&mut self,document:Entity<DocumentHost>,window:&mut Window,cx:&mut Context<Self>) {
+        let Some(delay)=cx.global::<Settings>().autosave else{return;};
+        if document.read(cx).path().is_none() {return;}
+        let Some(tab)=self.tabs.iter_mut().find(|tab|tab.document==document) else{return;};
+        tab.autosave=Some(cx.spawn_in(window,async move |this,cx| {
             cx.background_executor().timer(delay).await;
-            this.update_in(cx, |workspace, window, cx| {
-                if target.read(cx).is_dirty() {
-                    workspace.save_buffer(&target, false, window, cx);
-                }
-            })
-            .ok();
+            let _=this.update_in(cx,|workspace,window,cx| {if document.read(cx).is_dirty(cx){workspace.save_document(&document,false,false,window,cx);}});
         }));
     }
 
     // ---- 搜索 ----
 
     pub(crate) fn open_search(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(buffer) = self.buffer() else { return };
-        let selected = buffer.read(cx).selected_text();
+        self.popover=None;
+        let Some(buffer) = self.document() else { return };
+        let selected = buffer.read(cx).selected_text(cx);
         if self.search.is_none() {
-            let query = cx.new(|cx| TextField::new("查找", cx));
-            let replacement = cx.new(|cx| TextField::new("替换为", cx));
+            let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
+            let query = cx.new(|cx| TextField::new(locale.text("find"), cx));
+            let replacement = cx.new(|cx| TextField::new(locale.text("replace_with"), cx));
             let subscriptions = vec![
                 cx.subscribe_in(&query, window, |workspace, _, event, window, cx| workspace.on_query_event(event, window, cx)),
                 cx.subscribe_in(&replacement, window, |workspace, _, event, window, cx| match event {
@@ -364,7 +761,7 @@ impl Workspace {
                     FieldEvent::Changed => {}
                 }),
             ];
-            self.search = Some(SearchPanel { query, replacement, show_replace: replace, case_sensitive: false, _subscriptions: subscriptions });
+            self.search = Some(SearchPanel { query, replacement, show_replace: replace, case_sensitive: false, whole_word: false, backwards: false, wrap_around: true, _subscriptions: subscriptions });
         }
         let search = self.search.as_mut().expect("created");
         search.show_replace |= replace;
@@ -382,52 +779,40 @@ impl Workspace {
     fn on_query_event(&mut self, event: &FieldEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             FieldEvent::Changed => self.run_search(cx),
-            FieldEvent::Submit { backwards } => self.step_match(!backwards, window, cx),
+            FieldEvent::Submit { backwards } => { let reverse=self.search.as_ref().is_some_and(|search| search.backwards); self.step_match(!(*backwards ^ reverse), window, cx); },
             FieldEvent::Cancel => self.close_search(window, cx),
         }
     }
 
     fn run_search(&mut self, cx: &mut Context<Self>) {
-        let (Some(search), Some(buffer)) = (&self.search, self.buffer()) else { return };
+        let (Some(search), Some(buffer)) = (&self.search, self.document()) else { return };
         let query = search.query.read(cx).content.clone();
         let case = search.case_sensitive;
-        buffer.update(cx, |buffer, cx| buffer.set_search(query, case, cx));
+        let whole_word = search.whole_word;
+        buffer.update(cx, |buffer, cx| buffer.set_search(query, case, whole_word, cx));
     }
 
     pub(crate) fn step_match(&mut self, forward: bool, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tab() else { return };
-        let buffer = tab.buffer.clone();
-        let views = [tab.semantic.clone(), tab.source.clone()];
-        let found = buffer.update(cx, |buffer, cx| buffer.step_match(forward, cx));
-        if let Some(range) = found {
-            let line = buffer.read(cx).doc.line_of_offset(range.start);
-            for view in views {
-                view.update(cx, |view, cx| view.scroll_to_line((line as f64 - 4.0).max(0.0), cx));
-            }
-        }
+        let wrap = self.search.as_ref().is_none_or(|search| search.wrap_around);
+        if let Some(document)=self.document() { document.update(cx,|host,cx|host.step_match(forward,wrap,cx)); }
     }
-
-    fn replace_one(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(search), Some(buffer)) = (&self.search, self.buffer()) else { return };
-        let replacement = search.replacement.read(cx).content.clone();
-        buffer.update(cx, |buffer, cx| buffer.replace_current(&replacement, cx));
-        self.step_match(true, window, cx);
+    fn replace_one(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let (Some(search),Some(document))=(&self.search,self.document()) else {return;};
+        let replacement=search.replacement.read(cx).content.clone();
+        document.update(cx,|host,cx|host.replace_current(&replacement,cx));
     }
-
     pub(crate) fn replace_all(&mut self, cx: &mut Context<Self>) {
-        let (Some(search), Some(buffer)) = (&self.search, self.buffer()) else { return };
-        let replacement = search.replacement.read(cx).content.clone();
-        let count = buffer.update(cx, |buffer, cx| buffer.replace_all(&replacement, cx));
-        self.notice = Some(format!("已替换 {count} 处").into());
-        cx.notify();
+        let (Some(search),Some(document))=(&self.search,self.document()) else {return;};
+        let replacement=search.replacement.read(cx).content.clone();
+        document.update(cx,|host,cx|host.replace_all(replacement,cx));
     }
 
     pub(crate) fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search = None;
         if let Some(tab) = self.tab() {
-            let buffer = tab.buffer.clone();
-            let primary = tab.primary().clone();
-            buffer.update(cx, |buffer, cx| buffer.set_search(String::new(), false, cx));
+            let buffer = tab.document.clone();
+            let primary = tab.document.clone();
+            buffer.update(cx, |buffer, cx| buffer.set_search(String::new(), false, false, cx));
             window.focus(&primary.focus_handle(cx));
         }
         cx.notify();
@@ -435,30 +820,12 @@ impl Workspace {
 
     // ---- 大纲 ----
 
-    pub(crate) fn jump_to_heading(&mut self, heading: &Heading, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get_mut(self.active) else { return };
-        let line = heading.line;
-        tab.top_line = line as f64;
-        let buffer = tab.buffer.clone();
-        let views = [tab.semantic.clone(), tab.source.clone()];
-        let primary = tab.primary().clone();
-        buffer.update(cx, |buffer, cx| {
-            let start = buffer.doc.line_range(line).start;
-            buffer.set_selection(start, start, cx);
-        });
-        for view in views {
-            view.update(cx, |view, cx| view.scroll_to_line(line as f64, cx));
-        }
-        window.focus(&primary.focus_handle(cx));
-        cx.notify();
-    }
-
     // ---- 格式命令 ----
 
-    fn with_buffer(&mut self, window: &mut Window, cx: &mut Context<Self>, update: impl FnOnce(&mut Buffer, &mut Context<Buffer>)) {
+    fn with_document(&mut self, window: &mut Window, cx: &mut Context<Self>, update: impl FnOnce(&mut DocumentHost, &mut Context<DocumentHost>)) {
         let Some(tab) = self.tab() else { return };
-        let buffer = tab.buffer.clone();
-        let primary = tab.primary().clone();
+        let buffer = tab.document.clone();
+        let primary = tab.document.clone();
         buffer.update(cx, update);
         window.focus(&primary.focus_handle(cx));
     }
@@ -470,385 +837,427 @@ impl Workspace {
         Settings::set(cx, "zoomPercent", serde_json::json!((next * 100.0).round() as i64));
     }
 
+    fn open_inline_math(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(document) = self.document() else { return; };
+        let target = match document.read(cx).edit_target(cx) { Ok(target) => target, Err(error) => { self.notice=Some(error.to_string().into());cx.notify();return; } };
+        if let Err(error) = document.update(cx, |host, cx| host.begin_inline_math(&target, window, cx)) { self.notice=Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).error(&error).into());cx.notify(); }
+    }
+
+    fn open_inline_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(document) = self.document() else { return; };
+        if let Err(error) = document.update(cx, |host, cx| host.begin_inline_comment(window, cx)) {
+            self.notice = Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).error(&error).into()); cx.notify();
+        }
+    }
+
+    fn open_emoji_picker(&mut self, position: gpui::Point<gpui::Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.emoji_picker.is_some() { self.emoji_picker = None; if let Some(document)=self.document() { window.focus(&document.focus_handle(cx)); } cx.notify(); return; }
+        let Some(document) = self.document() else { return; };
+        let target = match document.read(cx).edit_target(cx) {
+            Ok(target) => target,
+            Err(error) => { self.notice = Some(error.to_string().into()); cx.notify(); return; }
+        };
+        let anchor = self.toolbar_popup_anchors[toolbar::EMOJI_ANCHOR].get();
+        self.toolbar_trigger_bounds.set(anchor);
+        let trigger_bounds = self.toolbar_trigger_bounds.clone();
+        let view = cx.new(|cx| EmojiPicker::new(trigger_bounds, cx));
+        let subscription = cx.subscribe_in(&view, window, |workspace, view, event, window, cx| {
+            let Some(pending) = workspace.emoji_picker.as_ref().filter(|pending| pending.view == *view) else { return; };
+            let document = pending.document.upgrade();
+            let current = document.is_some() && document == workspace.document();
+            if let EmojiPickerEvent::Choose(value) = event {
+                let result = if current {
+                    document.as_ref().unwrap().update(cx, |host, cx| host.command_at_target(&pending.target, crate::editor_control::commands::EditIntent::Replace(value.clone()), cx))
+                } else { Err(ControlError::Stale) };
+                if let Err(error) = result { workspace.notice = Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).error(&error).into()); }
+            }
+            workspace.emoji_picker = None;
+            if current { if let Some(document) = document { window.focus(&document.focus_handle(cx)); } }
+            cx.notify();
+        });
+        self.popover = None; self.toolbar_popup = None;
+        window.focus(&view.focus_handle(cx));
+        let position = anchor.map_or(gpui::point(position.x - px(16.0), position.y + px(18.0)),
+            |bounds| gpui::point(bounds.left(), bounds.bottom() + px(6.0)));
+        self.emoji_picker = Some(PendingEmoji { document: document.downgrade(), target, view, position, _subscription: subscription });
+        cx.notify();
+    }
+
+    fn open_editor_popover(&mut self,kind:EditorPopoverKind,window:&mut Window,cx:&mut Context<Self>) {
+        self.open_editor_popover_at(kind, None, window, cx);
+    }
+    fn open_editor_popover_at(&mut self,kind:EditorPopoverKind,toolbar_position:Option<gpui::Point<gpui::Pixels>>,window:&mut Window,cx:&mut Context<Self>) {
+        if toolbar_position.is_some() && self.popover.as_ref().is_some_and(|pending| pending.view.read(cx).kind() == kind) {
+            self.popover = None;
+            if let Some(document) = self.document() { window.focus(&document.focus_handle(cx)); }
+            cx.notify();
+            return;
+        }
+        let Some(document)=self.document() else{return;};
+        let draft=if kind==EditorPopoverKind::Link {
+            document.read(cx).link_draft(cx).map(|(target,link)|(target,Some(link)))
+        }else {document.read(cx).edit_target(cx).map(|target|(target,None))};
+        let (target,link)=match draft {Ok(value)=>value,Err(error)=>{self.notice=Some(error.to_string().into());cx.notify();return;}};
+        let width=if kind==EditorPopoverKind::Link {392.0}else{236.0};
+        let viewport=window.viewport_size();
+        let anchor=document.read(cx).selection_anchor(cx);
+        let x=anchor.map_or(px(24.0),|bounds|bounds.left()).min((viewport.width-px(width+12.0)).max(px(12.0))).max(px(12.0));
+        let y=anchor.map_or(px(116.0),|bounds| {
+            if bounds.bottom()+px(160.0)>viewport.height { (bounds.top()-px(160.0)).max(px(12.0)) }else{bounds.bottom()+px(10.0)}
+        });
+        let table_anchor = toolbar_position.filter(|_| kind == EditorPopoverKind::Table)
+            .and_then(|_| self.toolbar_popup_anchors[toolbar::TABLE_ANCHOR].get());
+        let (x,y)=toolbar_position.filter(|_| kind == EditorPopoverKind::Table).map_or((x,y), |position| {
+            table_anchor.map_or((position.x-px(16.0), position.y+px(18.0)), |bounds| (bounds.left(), bounds.bottom()+px(8.0)))
+        });
+        self.toolbar_trigger_bounds.set(table_anchor);
+        let trigger_bounds = self.toolbar_trigger_bounds.clone();
+        let view=cx.new(|cx| {
+            let mut view=match &link {
+                Some(draft)=>EditorPopover::new_link(draft.text.clone(),draft.href.clone(),draft.active,cx),
+                None=>EditorPopover::new_table(cx),
+            };
+            view.set_trigger_bounds(trigger_bounds);
+            view
+        });
+        let subscription=cx.subscribe_in(&view,window,|workspace,view,event,window,cx|workspace.editor_popover_event(&view,event,window,cx));
+        window.focus(&view.focus_handle(cx));
+        self.toolbar_popup=None; self.emoji_picker=None;
+        self.popover=Some(PendingPopover {document:document.downgrade(),target,link,view,position:gpui::point(x,y),_subscription:subscription});
+        self.notice=None;
+        cx.notify();
+    }
+    fn editor_popover_event(&mut self,view:&Entity<EditorPopover>,event:&EditorPopoverEvent,window:&mut Window,cx:&mut Context<Self>) {
+        let Some(pending)=self.popover.as_ref().filter(|pending|pending.view==*view) else{return;};
+        let document=pending.document.upgrade();
+        let is_current=document.is_some() && document==self.document();
+        if matches!(event,EditorPopoverEvent::Dismiss) {
+            self.popover=None;
+            if is_current {if let Some(document)=document {window.focus(&document.focus_handle(cx));}}
+            cx.notify();return;
+        }
+        let result=if !is_current {Err(ControlError::Stale)}else if let Some(document)=document.as_ref() {
+            document.update(cx,|host,cx|match event {
+                EditorPopoverEvent::ApplyLink{text,href}=>pending.link.as_ref().ok_or(ControlError::InvalidRange).and_then(|draft|host.apply_link(&pending.target,draft,text,Some(href),cx)),
+                EditorPopoverEvent::RemoveLink=>pending.link.as_ref().ok_or(ControlError::InvalidRange).and_then(|draft|host.apply_link(&pending.target,draft,&draft.text,None,cx)),
+                EditorPopoverEvent::InsertTable{rows,columns}=>host.insert_table(&pending.target,*rows,*columns,cx),
+                EditorPopoverEvent::Dismiss=>Ok(()),
+            })
+        }else{Err(ControlError::Stale)};
+        match result {
+            Ok(())=>{self.popover=None;if let Some(document)=document {window.focus(&document.focus_handle(cx));}},
+            Err(error)=>view.update(cx,|view,cx|view.set_error(Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).error(&error).into()),cx)),
+        }
+        cx.notify();
+    }
+
     // ---- 渲染 ----
 
-    fn render_titlebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn chrome_event(&mut self, event:&ChromeEvent, window:&mut Window, cx:&mut Context<Self>) {
+        match event {
+            ChromeEvent::CloseWindow|ChromeEvent::Quit=>{if self.request_close_window(window,cx){window.remove_window();}},
+            ChromeEvent::NewWindow=>crate::open_workspace(Vec::new(),cx),
+            ChromeEvent::Command(ChromeCommand::Heading(level))=>self.with_document(window,cx,|host,cx|host.set_heading(*level,cx)),
+            ChromeEvent::Command(ChromeCommand::ClearFormatting)=>self.with_document(window,cx,|host,cx|host.command(crate::editor_control::commands::EditIntent::ClearFormatting,cx)),
+            ChromeEvent::Command(ChromeCommand::MathInline)=>self.open_inline_math(window,cx),
+            ChromeEvent::Command(ChromeCommand::InlineComment)=>self.open_inline_comment(window,cx),
+            ChromeEvent::Command(ChromeCommand::Callout)=>self.with_document(window,cx,|host,cx|host.insert_block("> [!NOTE]\n> ",12,cx)),
+            ChromeEvent::Command(ChromeCommand::Details)=>self.with_document(window,cx,|host,cx|host.command(crate::editor_control::commands::EditIntent::InsertDetails,cx)),
+            ChromeEvent::Command(ChromeCommand::Footnote)=>self.with_document(window,cx,|host,cx|host.insert_footnote(cx)),
+            ChromeEvent::Command(ChromeCommand::Toc)=>self.with_document(window,cx,|host,cx|host.insert_toc(cx)),
+            ChromeEvent::Command(ChromeCommand::Diagram(kind))=>{let template=toolbar::diagram_template(*kind);self.with_document(window,cx,|host,cx|host.command(crate::editor_control::commands::EditIntent::InsertDiagram(template.into()),cx));},
+            ChromeEvent::LinkPicker=>self.open_editor_popover(EditorPopoverKind::Link,window,cx),
+            ChromeEvent::TablePicker=>self.open_editor_popover(EditorPopoverKind::Table,window,cx),
+            ChromeEvent::ResetOutlinePosition=>self.reset_outline_position(cx),
+            ChromeEvent::Unavailable(_)=>{self.notice=Some("此功能尚未提供".into());cx.notify();},
+            _=>{self.notice=Some("此功能尚未接入原生页面".into());cx.notify();},
+        }
+    }
+    fn render_hidden_tabs(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.tab_menu_open {
+            for tab in &mut self.tabs { tab.hidden_hover.reset(); }
+            return None;
+        }
+        let button_bounds = self.tab_menu_button_bounds.get()?;
+        let viewport = self.tab_scroll.bounds();
+        let offset = self.tab_scroll.offset().x;
+        let reduced = self.explorer.reduce_motion;
+        let rows: Vec<AnyElement> = self.tabs.iter().enumerate().filter_map(|(index, tab)| {
+            let bounds = self.tab_scroll.bounds_for_item(index)?;
+            if bounds.left() + offset >= viewport.left() && bounds.right() + offset <= viewport.right() { return None; }
+            let document = tab.document.read(cx);
+            let title = document.title();
+            let dirty = document.is_dirty(cx);
+            let tab_id = tab.document.entity_id();
+            let hover = tab.hidden_hover.value();
+            let active = index == self.active;
+            let row = div().id(("hidden-tab", index)).h(px(30.0)).px(px(8.0)).flex().flex_none()
+                .items_center().gap(px(8.0)).rounded(px(5.0)).cursor_pointer()
+                .text_color(if active { theme.heading } else { motion::color(theme.muted, theme.fg, hover) })
+                .bg(gpui::Hsla::from(gpui::rgba(0x80808014)).opacity(hover))
+                .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
+                .child(icon(IconName::FileText, 13.0, theme.accent))
+                .child(div().flex_1().min_w(px(0.0)).truncate()
+                    .when(tab.preview, |el| el.italic().opacity(0.85)).child(title))
+                .children(dirty.then(|| div().size(px(6.0)).rounded_full().bg(theme.accent)))
+                .on_hover(cx.listener(move |workspace, hovered: &bool, _, cx| {
+                    let reduced = workspace.explorer.reduce_motion;
+                    if let Some(tab) = workspace.tabs.iter_mut().find(|tab| tab.document.entity_id() == tab_id) {
+                        tab.hidden_hover.set(*hovered, reduced, Duration::from_millis(120));
+                        cx.notify();
+                    }
+                }))
+                .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    workspace.activate(index, window, cx);
+                }));
+            Some(row.into_any_element())
+        }).collect();
+        let trigger_bounds = self.tab_menu_button_bounds.clone();
+        let menu = div().id("hidden-tabs-menu").w(px(240.0)).max_h(px(320.0)).p(px(4.0))
+            .flex().flex_col().overflow_y_scroll().rounded(px(8.0)).bg(theme.surface)
+            .border_1().border_color(theme.border).shadow_lg().occlude()
+            .on_mouse_down_out(cx.listener(move |workspace, event: &gpui::MouseDownEvent, _, cx| {
+                if !trigger_bounds.get().is_some_and(|bounds| bounds.contains(&event.position)) {
+                    workspace.tab_menu_open = false;
+                    cx.notify();
+                }
+            }))
+            .children(rows);
+        let menu = if reduced {
+            menu.with_animation("hidden-tabs-enter", Animation::new(Duration::from_millis(90)).with_easing(tree_selection_ease),
+                |menu, progress| menu.opacity(0.78 + 0.22 * progress)).into_any_element()
+        } else {
+            menu.with_animation("hidden-tabs-enter", Animation::new(Duration::from_millis(180)).with_easing(tree_selection_ease),
+                |menu, progress| menu.relative().top(px((1.0-progress)*-3.0)).opacity(progress)).into_any_element()
+        };
+        Some(gpui::deferred(gpui::anchored().anchor(gpui::Corner::TopRight)
+            .position(gpui::point(button_bounds.right(), button_bounds.bottom() + px(4.0)))
+            .snap_to_window_with_margin(px(8.0)).child(menu)).with_priority(5).into_any_element())
+    }
+
+    fn render_tabs(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let tab_count = self.tabs.len();
+        let reduced = self.explorer.reduce_motion;
+        let surface = self.surface.clone();
+        let tab_scroll = self.tab_scroll.clone();
+        if tab_count == 0 { surface.clear(); }
         let tabs: Vec<AnyElement> = self
             .tabs
-            .iter()
+            .iter_mut()
             .enumerate()
             .map(|(index, tab)| {
-                let buffer = tab.buffer.read(cx);
+                let buffer = tab.document.read(cx);
                 let active = index == self.active;
                 let title = buffer.title();
-                let dirty = buffer.is_dirty();
-                let close: AnyElement = if dirty {
-                    // 未保存：显示圆点，悬停时显示关闭图标（与 Web 版标签一致）。
-                    div()
-                        .id(("close", index))
-                        .group("tab-close")
-                        .size(px(18.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.0))
-                        .hover(|style| style.bg(theme.hover))
-                        .child(div().size(px(7.0)).rounded_full().bg(theme.accent))
-                        .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
-                            cx.stop_propagation();
-                            workspace.close_tab(index, window, cx);
-                        }))
-                        .into_any_element()
-                } else {
-                    small_icon_button(("close", index), IconName::Close, false, theme)
-                        .size(px(18.0))
-                        .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
-                            cx.stop_propagation();
-                            workspace.close_tab(index, window, cx);
-                        }))
-                        .into_any_element()
-                };
-                div()
+                let dirty = buffer.is_dirty(cx);
+                if tab.dirty != dirty {
+                    tab.dirty = dirty;
+                    tab.dirty_animation_started = dirty.then(Instant::now);
+                }
+                let enter_duration = Duration::from_millis(if reduced { 90 } else { 180 });
+                let animate = tab.opened_at.elapsed() < enter_duration;
+                let tab_id = tab.document.entity_id();
+                let hover = tab.hover.value();
+                let close_hover = tab.close_hover.value();
+                let active_color = tab.active_color.value();
+                let tab_text = motion::color(motion::color(theme.muted, theme.fg, hover), theme.heading, active_color);
+                let tab_icon = motion::color(theme.muted, theme.accent, active_color);
+                let dirty_indicator = dirty.then(|| {
+                    let dot = div().size(px(6.0)).flex_none().rounded_full().bg(theme.accent);
+                    let duration = Duration::from_millis(if reduced { 80 } else { 120 });
+                    if tab.dirty_animation_started.is_some_and(|started| started.elapsed() < duration) {
+                        dot.with_animation(("tab-dirty", tab_id), Animation::new(duration).with_easing(tree_selection_ease),
+                            move |dot, progress| dot.opacity(if reduced { 0.78 + 0.22 * progress } else { progress })).into_any_element()
+                    } else { dot.into_any_element() }
+                });
+                let close = div().id(("close", index)).size(px(14.0)).flex().flex_none()
+                    .items_center().justify_center().rounded_full().cursor_pointer()
+                    .bg(gpui::Hsla::from(gpui::rgba(0x80808033)).opacity(close_hover))
+                    .child(icon(IconName::Close, 12.0, motion::color(theme.muted, theme.palette_fg[0], close_hover)))
+                    .opacity(if active { 1.0 } else { hover })
+                    .on_hover(cx.listener(move |workspace, hovered: &bool, _, cx| {
+                        let reduced = workspace.explorer.reduce_motion;
+                        if let Some(tab) = workspace.tabs.iter_mut().find(|tab| tab.document.entity_id() == tab_id) {
+                            tab.close_hover.set(*hovered, reduced, Duration::from_millis(150));
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        workspace.close_tab(index, window, cx);
+                    }));
+                let tab_element = div()
                     .id(("tab", index))
+                    .relative()
                     .flex()
+                    .flex_none()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(8.0))
+                    .min_w(px(120.0))
+                    .max_w(px(180.0))
                     .h(px(30.0))
-                    .pl(px(10.0))
-                    .pr(px(6.0))
-                    .mt(px(8.0))
-                    .rounded_t(px(10.0))
+                    .px(px(12.0))
+                    .rounded_t(px(12.0))
                     .text_size(px(13.0))
-                    .when(active, |el| el.bg(theme.surface).text_color(theme.fg).border_1().border_b_0().border_color(theme.border))
-                    .when(!active, |el| el.text_color(theme.muted).hover(|style| style.bg(theme.hover)))
-                    .child(icon(IconName::FileText, 14.0, if active { theme.accent } else { theme.muted }))
-                    .child(div().max_w(px(180.0)).overflow_hidden().whitespace_nowrap().child(title))
+                    .cursor_pointer()
+                    .text_color(tab_text)
+                    .bg(gpui::Hsla::from(gpui::rgba(0x8080800f)).opacity(hover * (1.0 - active_color)))
+                    .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
+                    .children(active.then(|| surface.tab_marker(tab_id, index, tab_count, tab_scroll.clone())))
+                    .child(icon(IconName::FileText, 14.0, tab_icon))
+                    .child(div().flex_1().min_w(px(0.0)).truncate()
+                        .when(tab.preview, |el| el.italic().opacity(0.85)).child(title))
+                    .children(dirty_indicator)
                     .child(close)
-                    .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| workspace.activate(index, window, cx)))
-                    .into_any_element()
+                    .on_hover(cx.listener(move |workspace, hovered: &bool, _, cx| {
+                        let reduced = workspace.explorer.reduce_motion;
+                        if let Some(tab) = workspace.tabs.iter_mut().find(|tab| tab.document.entity_id() == tab_id) {
+                            tab.hover.set(*hovered, reduced, Duration::from_millis(150));
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |workspace, event: &ClickEvent, window, cx| {
+                        workspace.pending_tree_click.take();
+                        workspace.deferred_open=None;
+                        workspace.cancel_preview_opens(None);
+                        if event.click_count()>=2 {
+                            if let Some(tab)=workspace.tabs.get_mut(index) {tab.preview=false;}
+                        }
+                        workspace.activate(index, window, cx);
+                    }));
+                if animate {
+                    tab_element.with_animation(
+                        ("tab-enter", tab_id),
+                        Animation::new(enter_duration).with_easing(tree_selection_ease),
+                        move |tab, progress| if reduced { tab.opacity(0.78 + 0.22 * progress) }
+                            else { tab.relative().top(px((1.0-progress)*5.0)).opacity(progress) },
+                    ).into_any_element()
+                } else {
+                    tab_element.into_any_element()
+                }
             })
             .collect();
+        let overflow = self.tab_overflow.get();
+        let hidden_tabs = self.render_hidden_tabs(theme, cx);
+        let overflow_state = self.tab_overflow.clone();
+        let measured_scroll = self.tab_scroll.clone();
+        let weak_workspace = cx.entity().downgrade();
+        let button_bounds = self.tab_menu_button_bounds.clone();
+        let overflow_marker = gpui::canvas(
+            move |bounds, _, _| button_bounds.set(Some(bounds)),
+            |_, _, _, _| {},
+        ).absolute().top_0().left_0().size_full();
+        let action_hover = self.tab_action_hover.value();
+        let action_button = |id, name| div().id(id).size(px(28.0)).flex().flex_none()
+            .items_center().justify_center().rounded(px(5.0)).cursor_pointer()
+            .bg(gpui::Hsla::from(gpui::rgba(0x8080801a)).opacity(action_hover))
+            .child(icon(name, 14.0, motion::color(theme.muted, theme.fg, action_hover)))
+            .on_hover(cx.listener(|workspace, hovered: &bool, _, cx| {
+                workspace.tab_action_hover.set(*hovered, workspace.explorer.reduce_motion, Duration::from_millis(150));
+                cx.notify();
+            }));
+        let action = if overflow {
+            action_button("tab-overflow", IconName::ChevronDown)
+                .relative().child(overflow_marker).children(hidden_tabs)
+                .tooltip(tooltip("显示隐藏的标签"))
+                .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                    workspace.tab_menu_open = !workspace.tab_menu_open;
+                    cx.notify();
+                })).into_any_element()
+        } else {
+            action_button("new-tab", IconName::Plus)
+                .tooltip(tooltip("新建 ⌘N"))
+                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| workspace.new_file(window, cx)))
+                .into_any_element()
+        };
         div()
-            .id("titlebar")
-            .h(px(38.0))
+            .id("tabs")
+            .h(px(TAB_RAIL_HEIGHT))
             .w_full()
             .flex()
             .flex_none()
             .items_end()
-            .bg(theme.rail_bg)
-            .pl(px(84.0))
-            .gap(px(2.0))
-            .on_mouse_down(MouseButton::Left, |event, window, _| {
-                if event.click_count == 2 {
-                    window.titlebar_double_click();
-                } else {
-                    window.start_window_move();
-                }
-            })
-            .children(tabs)
+            .pl(px(18.0))
             .child(
-                small_icon_button("new-tab", IconName::Plus, false, theme)
-                    .mb(px(5.0))
-                    .size(px(24.0))
-                    .tooltip(tooltip("新建 ⌘N"))
-                    .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| workspace.new_file(window, cx))),
+                div().on_children_prepainted(move |_, window, _| {
+                    let overflow = measured_scroll.max_offset().width > px(0.0);
+                    if overflow_state.replace(overflow) != overflow {
+                        let weak_workspace = weak_workspace.clone();
+                        window.on_next_frame(move |_, cx| {
+                            let _ = weak_workspace.update(cx, |workspace, cx| {
+                                workspace.tab_action_hover.reset();
+                                if !workspace.tab_overflow.get() { workspace.tab_menu_open = false; }
+                                cx.notify();
+                            });
+                        });
+                    }
+                })
+                    .id("tab-scroll")
+                    .min_w(px(0.0))
+                    .h_full()
+                    .flex()
+                    .items_end()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.tab_scroll)
+                    .children(tabs),
             )
+            .child(div().ml(px(4.0)).mb(px(2.0)).size(px(28.0)).flex().flex_none()
+                .items_center().justify_center().child(action))
+    }
+
+    fn toggle_toolbar(&mut self, cx: &mut Context<Self>) {
+        if cx.global::<Settings>().show_toolbar { self.popover = None; self.toolbar_popup = None; self.emoji_picker = None; self.width_dragging = false; }
+        Settings::toggle(cx, "toolbarHidden");
+        cx.notify();
     }
 
     fn new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_tab(Buffer::new(Vec::new(), None), window, cx);
-    }
-
-    fn render_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_path = self.tab().and_then(|tab| tab.buffer.read(cx).path.clone());
-        let (root_name, rows) = match &self.tree {
-            Some(tree) => (tree.root_name(), tree.rows().to_vec()),
-            None => ("当前文件夹".to_string(), Vec::new()),
-        };
-        let theme = theme.clone();
-        let count = rows.len();
-        let rows = Rc::new(rows);
-        div()
-            .w(px(232.0))
-            .h_full()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .bg(theme.rail_bg)
-            .text_size(px(13.0))
-            .child(
-                div()
-                    .id("tree-root")
-                    .mx(px(6.0))
-                    .px(px(8.0))
-                    .h(px(30.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .rounded(px(6.0))
-                    .text_color(theme.heading)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .hover(|style| style.bg(theme.hover))
-                    .tooltip(tooltip("打开文件夹 ⌘⇧O"))
-                    .child(icon(IconName::ChevronDown, 14.0, theme.muted))
-                    .child(icon(IconName::FolderOpen, 15.0, theme.muted))
-                    .child(div().overflow_hidden().whitespace_nowrap().child(root_name))
-                    .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| workspace.prompt_open(true, window, cx))),
-            )
-            .child(
-                uniform_list("file-tree", count, {
-                    let theme = theme.clone();
-                    cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
-                        range
-                            .map(|index| {
-                                let row = rows[index].clone();
-                                let active = active_path.as_deref() == Some(row.entry.path.as_path());
-                                let path = row.entry.path.clone();
-                                let is_dir = row.entry.is_dir;
-                                let chevron: AnyElement = if is_dir {
-                                    icon(if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight }, 13.0, theme.muted).into_any_element()
-                                } else {
-                                    div().w(px(13.0)).flex_none().into_any_element()
-                                };
-                                let kind = match (is_dir, row.expanded) {
-                                    (true, true) => IconName::FolderOpen,
-                                    (true, false) => IconName::Folder,
-                                    _ => IconName::FileText,
-                                };
-                                div()
-                                    .id(("tree", index))
-                                    .h(px(28.0))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .pl(px(8.0 + row.depth as f32 * 14.0))
-                                    .pr(px(8.0))
-                                    .mx(px(6.0))
-                                    .rounded(px(6.0))
-                                    .text_color(if active { theme.accent_strong } else { theme.fg })
-                                    .when(active, |el| el.bg(theme.sidebar_active).font_weight(FontWeight::SEMIBOLD))
-                                    .when(!active, |el| el.hover(|style| style.bg(theme.hover)))
-                                    .child(chevron)
-                                    .child(icon(kind, 15.0, if is_dir { theme.muted } else if active { theme.accent } else { theme.muted }))
-                                    .child(div().overflow_hidden().whitespace_nowrap().child(row.entry.name.clone()))
-                                    .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
-                                        if is_dir {
-                                            if let Some(tree) = &mut workspace.tree {
-                                                tree.toggle(&path);
-                                            }
-                                            cx.notify();
-                                        } else {
-                                            workspace.open_path(&path, window, cx);
-                                        }
-                                    }))
-                            })
-                            .collect()
-                    })
-                })
-                .track_scroll(self.tree_scroll.clone())
-                .flex_1(),
-            )
-    }
-
-    fn render_toolbar(&mut self, theme: &Theme, mode: EditorMode, cx: &mut Context<Self>) -> impl IntoElement {
-        let settings = cx.global::<Settings>().clone();
-        type Action = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
-        let tool = |id: &'static str, name: IconName, tip: &'static str, active: bool, action: Action, cx: &mut Context<Self>| {
-            icon_button(id, name, active, theme)
-                .tooltip(tooltip(tip))
-                .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| action(workspace, window, cx)))
-                .into_any_element()
-        };
-        let left: Vec<AnyElement> = vec![
-            tool("h1", IconName::Heading1, "一级标题 ⌘⌥1", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.set_heading(1, cx)), cx),
-            tool("h2", IconName::Heading2, "二级标题 ⌘⌥2", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.set_heading(2, cx)), cx),
-            tool("h3", IconName::Heading3, "三级标题 ⌘⌥3", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.set_heading(3, cx)), cx),
-            vertical_divider(theme).into_any_element(),
-            tool("bold", IconName::Bold, "加粗 ⌘B", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.wrap_selection("**", "**", cx)), cx),
-            tool("italic", IconName::Italic, "斜体 ⌘I", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.wrap_selection("*", "*", cx)), cx),
-            tool("strike", IconName::Strikethrough, "删除线 ⌘⇧X", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.wrap_selection("~~", "~~", cx)), cx),
-            tool("underline", IconName::Underline, "下划线 ⌘U", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.wrap_selection("<u>", "</u>", cx)), cx),
-            tool("highlight", IconName::Highlighter, "高亮 ⌘⇧H", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.wrap_selection("<mark>", "</mark>", cx)), cx),
-            tool("code", IconName::CodeXml, "行内代码 ⌘⇧C", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.wrap_selection("`", "`", cx)), cx),
-            tool("link", IconName::Link, "链接 ⌘K", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.wrap_selection("[", "](https://)", cx)), cx),
-            vertical_divider(theme).into_any_element(),
-            tool("quote", IconName::Quote, "引用", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.toggle_line_prefix("> ", cx)), cx),
-            tool("callout", IconName::Info, "提示块", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.insert_block("> [!NOTE]\n> ", 12, cx)), cx),
-            tool("ul", IconName::List, "无序列表", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.toggle_line_prefix("- ", cx)), cx),
-            tool("ol", IconName::ListOrdered, "有序列表", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.toggle_line_prefix("1. ", cx)), cx),
-            tool("task", IconName::SquareCheck, "任务列表", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.toggle_line_prefix("- [ ] ", cx)), cx),
-            vertical_divider(theme).into_any_element(),
-            tool("codeblock", IconName::Braces, "代码块 ⌘⇧K", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| insert_code_block(b, cx)), cx),
-            tool("table", IconName::Table, "表格 ⌘⇧T", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.insert_block(TABLE_TEMPLATE, 2, cx)), cx),
-            tool("math", IconName::Sigma, "公式块 ⌘⇧M", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.insert_block("$$\n\n$$", 3, cx)), cx),
-            tool("rule", IconName::Minus, "分隔线", false, |w, win, cx| w.with_buffer(win, cx, |b, cx| b.insert_block("---", 3, cx)), cx),
-        ];
-        let mode_segment = |id: &'static str, name: IconName, label: &'static str, tip: &'static str, target: EditorMode, cx: &mut Context<Self>| {
-            segment(id, name, label, mode == target, theme)
-                .tooltip(tooltip(tip))
-                .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| workspace.set_mode(target, window, cx)))
-        };
-        // 内容宽度滑杆（Web 版工具栏同款，45%–90%）：拖动中只改内存，松手写入设置。
-        let width_percent = (settings.content_width_percent * 100.0).round();
-        let entity = cx.entity().downgrade();
-        let on_width = std::rc::Rc::new(move |fraction: f32, dragging: bool, _: &mut Window, cx: &mut App| {
-            let percent = (45.0 + 45.0 * fraction).round() as i64;
-            Settings::set_with(cx, "contentWidthPercent", serde_json::json!(percent), !dragging);
-            entity.update(cx, |workspace, cx| {
-                workspace.width_dragging = dragging;
-                cx.notify();
-            })
-            .ok();
-        });
-        let width_control = div()
-            .id("content-width")
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .tooltip(tooltip("内容宽度"))
-            .child(icon(IconName::Columns, 14.0, theme.muted))
-            .child(slider("content-width-slider", (width_percent - 45.0) / 45.0, self.width_dragging, 72.0, theme, on_width))
-            .child(div().w(px(32.0)).text_size(px(12.0)).text_color(theme.muted).child(format!("{width_percent:.0}%")))
-            .into_any_element();
-        let right: Vec<AnyElement> = vec![
-            tool("search", IconName::Search, "查找 ⌘F", self.search.is_some(), |w, win, cx| w.open_search(false, win, cx), cx),
-            tool("kp", IconName::Pilcrow, "精细排版（Knuth–Plass 两端对齐）", settings.typography, |_, _, cx| Settings::toggle(cx, "typographyEnabled"), cx),
-            width_control,
-            vertical_divider(theme).into_any_element(),
-            segmented(theme)
-                .child(mode_segment("mode-semantic", IconName::BookOpenText, "语义", "语义模式 ⌘1", EditorMode::Semantic, cx))
-                .child(mode_segment("mode-source", IconName::CodeXml, "源码", "源码模式 ⌘2 / ⌘E", EditorMode::Source, cx))
-                .child(mode_segment("mode-split", IconName::Columns, "分栏", "分栏模式 ⌘3", EditorMode::Split, cx))
-                .into_any_element(),
-            tool("outline", IconName::ListTree, "文档大纲 ⌘⌥O", settings.show_outline, |_, _, cx| Settings::toggle(cx, "outlineVisible"), cx),
-            tool("theme", if theme.dark { IconName::Sun } else { IconName::Moon }, "切换深色 / 浅色 ⌘⇧L", false, |_, _, cx| Theme::toggle(cx), cx),
-            tool("settings", IconName::Settings, "设置 ⌘,", false, |_, _, cx| crate::ui::settings_window::open(cx), cx),
-        ];
-        div()
-            .h(px(42.0))
-            .w_full()
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px(px(12.0))
-            .border_b_1()
-            .border_color(theme.border)
-            .child(div().flex().items_center().gap(px(2.0)).overflow_hidden().children(left))
-            .child(div().flex().flex_none().items_center().gap(px(4.0)).children(right))
-    }
-
-    fn render_outline(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !cx.global::<Settings>().show_outline {
-            return None;
-        }
-        let tab = self.tab()?;
-        let buffer = tab.buffer.clone();
-        let top_line = tab.top_line;
-        let all = buffer.update(cx, |buffer, _| buffer.outline());
-        // 设置“大纲默认展开层级”：只列出相对最高级标题不超过该层数的标题。
-        let top_level = all.iter().map(|heading| heading.level).min().unwrap_or(1);
-        let depth = cx.global::<Settings>().outline_level;
-        let headings: Rc<Vec<Heading>> = Rc::new(all.iter().filter(|heading| heading.level < top_level + depth).cloned().collect());
-        let current = headings.partition_point(|heading| heading.line as f64 <= top_line + 0.5).saturating_sub(1);
-        let count = headings.len();
-        let theme = theme.clone();
-        let min_level = headings.iter().map(|heading| heading.level).min().unwrap_or(1);
-        let list_height = (count as f32 * 28.0).clamp(28.0, 420.0);
-        let body: AnyElement = if count == 0 {
-            div().px(px(14.0)).pb(px(12.0)).text_color(theme.muted).text_size(px(12.0)).child("当前文档还没有标题").into_any_element()
-        } else {
-            let headings_list = headings.clone();
-            uniform_list("outline", count, {
-                let theme = theme.clone();
-                cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
-                    range
-                        .map(|index| {
-                            let heading = headings_list[index].clone();
-                            let active = index == current;
-                            div()
-                                .id(("outline", index))
-                                .h(px(28.0))
-                                .flex()
-                                .items_center()
-                                .pl(px(10.0 + (heading.level.saturating_sub(min_level)) as f32 * 14.0))
-                                .pr(px(8.0))
-                                .mx(px(6.0))
-                                .rounded(px(6.0))
-                                .text_size(px(12.5))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_color(if active { theme.accent_strong } else if heading.level <= min_level { theme.fg } else { theme.muted })
-                                .when(active, |el| el.bg(theme.sidebar_active).font_weight(FontWeight::SEMIBOLD))
-                                .when(!active, |el| el.hover(|style| style.bg(theme.hover)))
-                                .child(if heading.text.is_empty() { "（空标题）".to_string() } else { heading.text.clone() })
-                                .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| workspace.jump_to_heading(&heading, window, cx)))
-                        })
-                        .collect()
-                })
-            })
-            .track_scroll(self.outline_scroll.clone())
-            .h(px(list_height))
-            .into_any_element()
-        };
-        if count > 0 {
-            self.outline_scroll.scroll_to_item(current, ScrollStrategy::Center);
-        }
-        Some(
-            floating_card("outline-card", &theme)
-                .top(px(14.0))
-                .right(px(22.0))
-                .w(px(236.0))
-                .pt(px(12.0))
-                .pb(px(6.0))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .px(px(14.0))
-                        .pb(px(8.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(theme.heading)
-                        .child(icon(IconName::ListTree, 14.0, theme.muted))
-                        .child("文档大纲")
-                        .child(div().text_color(theme.muted).font_weight(FontWeight::NORMAL).child(count.to_string())),
-                )
-                .child(body)
-                .into_any_element(),
-        )
+        self.pending_tree_click.take();
+        self.deferred_open=None;
+        self.cancel_preview_opens(None);
+        self.open_document(None,false,window,cx);
     }
 
     fn render_search(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let search = self.search.as_ref()?;
-        let buffer = self.buffer()?;
-        let state = &buffer.read(cx).search;
+        let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
+        search.query.update(cx, |field, cx| field.set_placeholder(locale.text("find"), cx));
+        search.replacement.update(cx, |field, cx| field.set_placeholder(locale.text("replace_with"), cx));
+        let buffer = self.document()?;
+        let state = buffer.read(cx).search();
         let status = if state.pending {
             "…".to_string()
-        } else if state.matches.is_empty() {
-            if search.query.read(cx).content.is_empty() { String::new() } else { "无结果".into() }
+        } else if let Some(error) = &state.error {
+            error.clone()
+        } else if state.total == 0 {
+            if search.query.read(cx).content.is_empty() { String::new() } else { locale.text("no_results").into() }
         } else {
-            format!("{}/{}{}", state.current.map_or(0, |index| index + 1), state.matches.len(), if state.truncated { "+" } else { "" })
+            format!("{}/{}", state.current.map_or(0, |index| index + 1), state.total)
         };
         let case = search.case_sensitive;
+        let whole_word = search.whole_word;
+        let backwards = search.backwards;
+        let wrap_around = search.wrap_around;
         let show_replace = search.show_replace;
+        let available_width = self.outline_ui.bounds.get().map_or(900.0, |bounds| f32::from(bounds.size.width));
+        let panel_width = (available_width - 24.0).clamp(240.0, 400.0);
+        let panel_right = if available_width >= 700.0 { 272.0 } else { 12.0 };
         let replace_row = show_replace.then(|| {
             div()
                 .flex()
                 .items_center()
                 .gap(px(4.0))
                 .child(search.replacement.clone())
-                .child(small_icon_button("replace-one", IconName::Replace, false, theme).tooltip(tooltip("替换当前")).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.replace_one(window, cx))))
-                .child(small_icon_button("replace-all", IconName::ReplaceAll, false, theme).tooltip(tooltip("全部替换")).on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.replace_all(cx))))
+                .child(small_icon_button("replace-one", IconName::Replace, false, theme).tooltip(tooltip(locale.text("replace_current"))).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.replace_one(window, cx))))
+                .child(small_icon_button("replace-all", IconName::ReplaceAll, false, theme).tooltip(tooltip(locale.text("replace_all"))).on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.replace_all(cx))))
                 .child(div().w(px(22.0)))
         });
         Some(
             floating_card("search-panel", theme)
                 .top(px(10.0))
-                .right(px(272.0))
-                .w(px(400.0))
+                .right(px(panel_right))
+                .w(px(panel_width))
                 .p(px(8.0))
                 .flex()
                 .flex_col()
@@ -862,24 +1271,31 @@ impl Workspace {
                         .child(icon(IconName::Search, 14.0, theme.muted))
                         .child(search.query.clone())
                         .child(div().min_w(px(52.0)).text_size(px(12.0)).text_color(theme.muted).child(status))
-                        .child(small_icon_button("case", IconName::CaseSensitive, case, theme).tooltip(tooltip("区分大小写")).on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
+                        .child(small_icon_button("case", IconName::CaseSensitive, case, theme).tooltip(tooltip(locale.text("match_case"))).on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
                             if let Some(search) = &mut w.search {
                                 search.case_sensitive = !search.case_sensitive;
                             }
                             w.run_search(cx);
                             cx.notify();
                         })))
-                        .child(small_icon_button("prev", IconName::ArrowUp, false, theme).tooltip(tooltip("上一个 ⇧⏎")).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.step_match(false, window, cx))))
-                        .child(small_icon_button("next", IconName::ArrowDown, false, theme).tooltip(tooltip("下一个 ⏎")).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.step_match(true, window, cx))))
-                        .child(small_icon_button("toggle-replace", IconName::Replace, show_replace, theme).tooltip(tooltip("替换 ⌘⌥F")).on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
+                        .child(small_icon_button("prev", IconName::ArrowUp, false, theme).tooltip(tooltip(format!("{} ⇧⏎", locale.text("previous")))).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.step_match(false, window, cx))))
+                        .child(small_icon_button("next", IconName::ArrowDown, false, theme).tooltip(tooltip(format!("{} ⏎", locale.text("next")))).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.step_match(true, window, cx))))
+                        .child(small_icon_button("toggle-replace", IconName::Replace, show_replace, theme).tooltip(tooltip(locale.tooltip("replace", "⌘⌥F"))).on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
                             if let Some(search) = &mut w.search {
                                 search.show_replace = !search.show_replace;
                             }
                             cx.notify();
                         })))
-                        .child(small_icon_button("close-search", IconName::Close, false, theme).tooltip(tooltip("关闭 Esc")).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.close_search(window, cx)))),
+                        .child(small_icon_button("close-search", IconName::Close, false, theme).tooltip(tooltip(format!("{} Esc", locale.text("close")))).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.close_search(window, cx)))),
                 )
                 .children(replace_row)
+                .child(div().flex().items_center().gap(px(12.0)).text_size(px(12.0)).text_color(theme.muted)
+                    .child(div().id("search-backwards").tab_index(0).cursor_pointer().child(format!("{} {}", if backwards { "☑" } else { "☐" }, locale.text("reverse")))
+                        .on_click(cx.listener(|w, _, _, cx| { if let Some(search)=&mut w.search { search.backwards=!search.backwards; } cx.notify(); })))
+                    .child(div().id("search-whole-word").tab_index(0).cursor_pointer().child(format!("{} {}", if whole_word { "☑" } else { "☐" }, locale.text("whole_word")))
+                        .on_click(cx.listener(|w, _, _, cx| { if let Some(search)=&mut w.search { search.whole_word=!search.whole_word; } w.run_search(cx); cx.notify(); })))
+                    .child(div().id("search-wrap").tab_index(0).cursor_pointer().child(format!("{} {}", if wrap_around { "☑" } else { "☐" }, locale.text("wrap")))
+                        .on_click(cx.listener(|w, _, _, cx| { if let Some(search)=&mut w.search { search.wrap_around=!search.wrap_around; } cx.notify(); }))))
                 .into_any_element(),
         )
     }
@@ -888,11 +1304,11 @@ impl Workspace {
         let settings = cx.global::<Settings>().clone();
         let (left, line_col, words, mode_label) = match self.tab() {
             Some(tab) => {
-                let buffer = tab.buffer.read(cx);
-                let (line, col) = buffer.cursor_line_col();
-                let words = match buffer.stats {
+                let buffer = tab.document.read(cx);
+                let position = buffer.selection(cx).head_byte;
+                let words = match buffer.stats() {
                     None => "统计中…".to_string(),
-                    Some((_, stats)) => {
+                    Some(stats) => {
                         let mut parts = Vec::new();
                         if settings.stats_visible {
                             parts.push(match settings.stats_metric {
@@ -909,13 +1325,13 @@ impl Workspace {
                         parts.join(" · ")
                     }
                 };
-                let path = buffer.path.as_ref().map_or("未保存的新文档".to_string(), |path| path.display().to_string());
+                let path = buffer.path().as_ref().map_or("未保存的新文档".to_string(), |path| path.display().to_string());
                 let mode = match tab.mode {
                     EditorMode::Semantic => "语义",
                     EditorMode::Source => "源码",
                     EditorMode::Split => "分栏",
                 };
-                (path, format!("第 {line} 行，第 {col} 列"), words, mode)
+                (path, format!("位置 {position}"), words, mode)
             }
             None => (String::new(), String::new(), String::new(), ""),
         };
@@ -942,7 +1358,7 @@ impl Workspace {
                     .child(line_col)
                     .child(words)
                     .child(mode_label)
-                    .child("UTF-8")
+                    .child(self.document().map(|doc|format!("{:?}",doc.read(cx).status().encoding)).unwrap_or_default())
                     .child(small_icon_button("zoom-out", IconName::ZoomOut, false, theme).tooltip(tooltip("缩小 ⌘-")).on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.zoom(-0.1, cx))))
                     .child(div().px(px(6.0)).h(px(20.0)).flex().items_center().rounded(px(5.0)).border_1().border_color(theme.border).child(format!("{:.0}%", settings.zoom * 100.0)))
                     .child(small_icon_button("zoom-in", IconName::ZoomIn, false, theme).tooltip(tooltip("放大 ⌘=")).on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.zoom(0.1, cx)))),
@@ -960,6 +1376,7 @@ impl Workspace {
             .child(div().size(px(44.0)).rounded(px(10.0)).bg(theme.hover).flex().items_center().justify_center().child(icon(IconName::FileText, 20.0, theme.accent_strong)))
             .child(div().text_size(px(17.0)).font_weight(FontWeight::BOLD).text_color(theme.heading).child("未打开文档"))
             .child(div().text_size(px(13.0)).text_color(theme.muted).child("从左侧选择 Markdown 文件，或新建一个文档开始编辑。"))
+            .children(self.notice.clone().map(|notice|div().max_w(px(560.0)).text_size(px(13.0)).text_color(theme.fg).child(notice)))
             .child(
                 div()
                     .flex()
@@ -972,14 +1389,12 @@ impl Workspace {
     }
 }
 
-const TABLE_TEMPLATE: &str = "| 列 1 | 列 2 | 列 3 |\n| --- | --- | --- |\n|  |  |  |";
+
 
 /// 插入代码块，语言取设置“默认代码块语言”。
-fn insert_code_block(buffer: &mut Buffer, cx: &mut Context<Buffer>) {
+fn insert_code_block(buffer: &mut DocumentHost, cx: &mut Context<DocumentHost>) {
     let language = cx.global::<Settings>().default_code_language.clone();
-    let block = format!("```{language}\n\n```");
-    let caret = language.len() + 4;
-    buffer.insert_block(&block, caret, cx);
+    buffer.command(crate::editor_control::commands::EditIntent::InsertCodeBlock(language), cx);
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -987,46 +1402,80 @@ fn dirs_home() -> Option<PathBuf> {
 }
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.global::<Theme>().clone();
+        let reduced = self.explorer.reduce_motion;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            tab.active_color.set(index == self.active, reduced, Duration::from_millis(150));
+        }
+        let animate_ui = Theme::ui_transition_active(cx) || self.tab_action_hover.running()
+            || self.tabs.iter().any(|tab| tab.hover.running() || tab.close_hover.running()
+                || tab.active_color.running() || tab.hidden_hover.running());
+        let theme = Theme::ui(cx);
         let settings = cx.global::<Settings>().clone();
-        let ui_font = Some(settings.string("uiFontFamily")).filter(|name| !name.trim().is_empty()).unwrap_or_else(|| ".SystemUIFont".into());
+        let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
+        let ui_font = Some(settings.string("uiFontFamily")).filter(|name| !name.trim().is_empty()).unwrap_or_else(|| crate::theme::ui_font_family().into());
         let mode = self.tab().map(|tab| tab.mode);
-        let titlebar = self.render_titlebar(&theme, cx).into_any_element();
-        let sidebar = settings.show_sidebar.then(|| self.render_sidebar(&theme, cx).into_any_element());
+        if mode.is_none() { self.outline_ui.clear_document(); }
+        let status=self.document().map(|document|document.read(cx).status().clone());
+        self.chrome.update(cx,|chrome,cx|chrome.set_state(ChromeState {
+            has_document:status.is_some(), can_undo:status.as_ref().is_some_and(|s|s.can_undo),
+            can_redo:status.as_ref().is_some_and(|s|s.can_redo),mode:mode.unwrap_or(EditorMode::Semantic),
+            sidebar_visible:settings.show_sidebar, toolbar_visible:settings.show_toolbar,
+            outline_visible:settings.show_outline,split_available:true,
+            toolbar_shortcut:"Ctrl + Shift + B".into(),
+            capabilities:vec![ChromeCapability::NewWindow,ChromeCapability::HeadingLevels,ChromeCapability::ClearFormatting,ChromeCapability::LinkPicker,ChromeCapability::TablePicker,ChromeCapability::MathInline,ChromeCapability::Callout,ChromeCapability::Details,ChromeCapability::InlineComment,ChromeCapability::Diagrams,ChromeCapability::Footnote,ChromeCapability::Toc,ChromeCapability::UnavailableNotice,ChromeCapability::ResetOutlinePosition],
+            ..Default::default()
+        },cx));
+        let tabs = self.render_tabs(&theme, cx).into_any_element();
+        let sidebar = self.render_sidebar_animated(settings.show_sidebar, &theme, window, cx);
         let main: AnyElement = match mode {
             None => self.render_empty(&theme, cx).into_any_element(),
             Some(mode) => {
-                let toolbar = settings.show_toolbar.then(|| self.render_toolbar(&theme, mode, cx).into_any_element());
+                let toolbar = self.render_toolbar_animated(settings.show_toolbar, &theme, mode, cx);
                 let tab = self.tab().expect("active tab");
-                let editors: AnyElement = match mode {
-                    EditorMode::Semantic => div().size_full().child(tab.semantic.clone()).into_any_element(),
-                    EditorMode::Source => div().size_full().child(tab.source.clone()).into_any_element(),
-                    EditorMode::Split => {
-                        // 设置“双栏排列”：默认左语义右源码，可切换为左源码右语义。
-                        let (left, right) = if settings.split_source_first { (tab.source.clone(), tab.semantic.clone()) } else { (tab.semantic.clone(), tab.source.clone()) };
-                        div()
-                            .size_full()
-                            .flex()
-                            .child(div().flex_1().h_full().child(left))
-                            .child(div().w(px(1.0)).h_full().bg(theme.border))
-                            .child(div().flex_1().h_full().child(right))
-                            .into_any_element()
+                let editors=div().size_full().child(tab.document.clone()).into_any_element();
+                let outline = self.render_outline_panel(&theme, window, cx);
+                let measured = self.outline_ui.bounds.clone();
+                let weak = cx.entity().downgrade();
+                let outline_measure = gpui::canvas(move |bounds, window, _| {
+                    if measured.replace(Some(bounds)) != Some(bounds) {
+                        let weak = weak.clone();
+                        window.on_next_frame(move |_, cx| { let _ = weak.update(cx, |_, cx| cx.notify()); });
                     }
-                };
-                let outline = if mode == EditorMode::Split { None } else { self.render_outline(&theme, cx) };
+                }, |_, _, _, _| {}).absolute().top_0().left_0().size_full();
                 let search = self.render_search(&theme, cx);
+                let split_guide = (mode == EditorMode::Split && self.split_guide_visible).then(|| {
+                    gpui::canvas(|_, _, _| (), |bounds, _, window, _| {
+                        let origin = bounds.origin + gpui::point(px(0.0), px(f32::from(bounds.size.height) * 0.3));
+                        window.paint_quad(gpui::fill(gpui::Bounds::new(origin, gpui::size(bounds.size.width, px(1.0))), gpui::rgba(0xef4444b8)));
+                    }).absolute().size_full()
+                });
+                let reveal_toolbar = (!settings.show_toolbar && self.toolbar_motion.is_none()).then(|| {
+                    div().id("reveal-toolbar").absolute().top_0().right(px(16.0)).w(px(32.0)).h(px(18.0))
+                        .flex().items_center().justify_center().rounded_b(px(4.0)).border_1()
+                        .border_color(theme.border).bg(theme.rail_bg).cursor_pointer()
+                        .hover(|style| style.bg(theme.hover))
+                        .tooltip(tooltip(locale.tooltip("show-toolbar", "⌘⇧B")))
+                        .child(icon(IconName::ChevronDown, 15.0, theme.muted))
+                        .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| workspace.toggle_toolbar(cx)))
+                });
                 let status = self.render_status(&theme, cx).into_any_element();
                 div()
                     .size_full()
                     .flex()
                     .flex_col()
                     .children(toolbar)
-                    .child(div().relative().flex_1().min_h(px(0.0)).child(editors).children(outline).children(search))
+                    .child(div().relative().flex_1().min_h(px(0.0)).child(outline_measure).child(editors).children(outline).children(search).children(split_guide).children(reveal_toolbar))
                     .child(status)
                     .into_any_element()
             }
         };
-        let _ = window;
+        let popover=self.popover.as_ref().map(|pending|gpui::deferred(gpui::anchored()
+            .position(pending.position).snap_to_window_with_margin(px(12.0)).child(pending.view.clone())).with_priority(4));
+        let toolbar_popup = self.render_toolbar_popup(&theme, cx);
+        let emoji_picker = self.emoji_picker.as_ref().map(|pending| gpui::deferred(gpui::anchored()
+            .position(pending.position).snap_to_window_with_margin(px(12.0)).child(pending.view.clone())).with_priority(5));
+        let outline_menu = self.render_outline_menu(&theme, cx);
+        let outline_drag_preview = self.render_outline_drag_preview(&theme);
         div()
             .id("workspace")
             .key_context("Workspace")
@@ -1037,17 +1486,20 @@ impl Render for Workspace {
             .bg(theme.rail_bg)
             .text_color(theme.fg)
             .font_family(ui_font)
+            .on_mouse_move(cx.listener(|workspace, event: &gpui::MouseMoveEvent, _, cx| workspace.outline_mouse_move(event, cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|workspace, _, window, cx| workspace.outline_mouse_up(window, cx)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|workspace, event: &gpui::MouseUpEvent, window, cx| workspace.outline_mouse_up_out(event, window, cx)))
             .on_action(cx.listener(|w, _: &NewFile, window, cx| w.new_file(window, cx)))
             .on_action(cx.listener(|w, _: &OpenFile, window, cx| w.prompt_open(false, window, cx)))
             .on_action(cx.listener(|w, _: &OpenFolder, window, cx| w.prompt_open(true, window, cx)))
             .on_action(cx.listener(|w, _: &Save, window, cx| {
-                if let Some(buffer) = w.buffer() {
-                    w.save_buffer(&buffer, false, window, cx);
+                if let Some(buffer) = w.document() {
+                    w.save_document(&buffer,false,false,window,cx);
                 }
             }))
             .on_action(cx.listener(|w, _: &SaveAs, window, cx| {
-                if let Some(buffer) = w.buffer() {
-                    w.save_buffer(&buffer, true, window, cx);
+                if let Some(buffer) = w.document() {
+                    w.save_document(&buffer,true,false,window,cx);
                 }
             }))
             .on_action(cx.listener(|w, _: &CloseTab, window, cx| {
@@ -1079,33 +1531,46 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &ModeSplit, window, cx| w.set_mode(EditorMode::Split, window, cx)))
             .on_action(cx.listener(|_, _: &ToggleOutline, _, cx| Settings::toggle(cx, "outlineVisible")))
             .on_action(cx.listener(|_, _: &ToggleSidebar, _, cx| Settings::toggle(cx, "sidebarHidden")))
-            .on_action(cx.listener(|_, _: &ToggleToolbar, _, cx| Settings::toggle(cx, "toolbarHidden")))
+            .on_action(cx.listener(|w, _: &ToggleToolbar, _, cx| w.toggle_toolbar(cx)))
             .on_action(cx.listener(|_, _: &ToggleTheme, _, cx| Theme::toggle(cx)))
             .on_action(cx.listener(|_, _: &FollowSystemTheme, _, cx| Settings::set(cx, "themeMode", serde_json::json!("system"))))
-            .on_action(cx.listener(|w, _: &Underline, window, cx| w.with_buffer(window, cx, |b, cx| b.wrap_selection("<u>", "</u>", cx))))
-            .on_action(cx.listener(|w, _: &Highlight, window, cx| w.with_buffer(window, cx, |b, cx| b.wrap_selection("<mark>", "</mark>", cx))))
+            .on_action(cx.listener(|w, _: &Underline, window, cx| w.with_document(window, cx, |b, cx| b.wrap_selection("<u>", "</u>", cx))))
+            .on_action(cx.listener(|w, _: &Highlight, window, cx| w.with_document(window, cx, |b, cx| b.wrap_selection("<mark>", "</mark>", cx))))
             .on_action(cx.listener(|_, _: &ToggleTypography, _, cx| Settings::toggle(cx, "typographyEnabled")))
             .on_action(cx.listener(|w, _: &ZoomIn, _, cx| w.zoom(0.1, cx)))
             .on_action(cx.listener(|w, _: &ZoomOut, _, cx| w.zoom(-0.1, cx)))
             .on_action(cx.listener(|w, _: &ZoomReset, _, cx| w.zoom(0.0, cx)))
-            .on_action(cx.listener(|w, _: &Bold, window, cx| w.with_buffer(window, cx, |b, cx| b.wrap_selection("**", "**", cx))))
-            .on_action(cx.listener(|w, _: &Italic, window, cx| w.with_buffer(window, cx, |b, cx| b.wrap_selection("*", "*", cx))))
-            .on_action(cx.listener(|w, _: &Strike, window, cx| w.with_buffer(window, cx, |b, cx| b.wrap_selection("~~", "~~", cx))))
-            .on_action(cx.listener(|w, _: &InlineCode, window, cx| w.with_buffer(window, cx, |b, cx| b.wrap_selection("`", "`", cx))))
-            .on_action(cx.listener(|w, _: &Link, window, cx| w.with_buffer(window, cx, |b, cx| b.wrap_selection("[", "](https://)", cx))))
-            .on_action(cx.listener(|w, _: &Heading1, window, cx| w.with_buffer(window, cx, |b, cx| b.set_heading(1, cx))))
-            .on_action(cx.listener(|w, _: &Heading2, window, cx| w.with_buffer(window, cx, |b, cx| b.set_heading(2, cx))))
-            .on_action(cx.listener(|w, _: &Heading3, window, cx| w.with_buffer(window, cx, |b, cx| b.set_heading(3, cx))))
-            .on_action(cx.listener(|w, _: &Paragraph, window, cx| w.with_buffer(window, cx, |b, cx| b.set_heading(0, cx))))
-            .on_action(cx.listener(|w, _: &Quote, window, cx| w.with_buffer(window, cx, |b, cx| b.toggle_line_prefix("> ", cx))))
-            .on_action(cx.listener(|w, _: &BulletList, window, cx| w.with_buffer(window, cx, |b, cx| b.toggle_line_prefix("- ", cx))))
-            .on_action(cx.listener(|w, _: &OrderedList, window, cx| w.with_buffer(window, cx, |b, cx| b.toggle_line_prefix("1. ", cx))))
-            .on_action(cx.listener(|w, _: &TaskList, window, cx| w.with_buffer(window, cx, |b, cx| b.toggle_line_prefix("- [ ] ", cx))))
-            .on_action(cx.listener(|w, _: &CodeBlock, window, cx| w.with_buffer(window, cx, |b, cx| insert_code_block(b, cx))))
-            .on_action(cx.listener(|w, _: &Table, window, cx| w.with_buffer(window, cx, |b, cx| b.insert_block(TABLE_TEMPLATE, 2, cx))))
-            .on_action(cx.listener(|w, _: &MathBlock, window, cx| w.with_buffer(window, cx, |b, cx| b.insert_block("$$\n\n$$", 3, cx))))
-            .on_action(cx.listener(|w, _: &Rule, window, cx| w.with_buffer(window, cx, |b, cx| b.insert_block("---", 3, cx))))
-            .child(titlebar)
+            .on_action(cx.listener(|w, _: &Bold, window, cx| w.with_document(window, cx, |b, cx| b.wrap_selection("**", "**", cx))))
+            .on_action(cx.listener(|w, _: &Italic, window, cx| w.with_document(window, cx, |b, cx| b.wrap_selection("*", "*", cx))))
+            .on_action(cx.listener(|w, _: &Strike, window, cx| w.with_document(window, cx, |b, cx| b.wrap_selection("~~", "~~", cx))))
+            .on_action(cx.listener(|w, _: &InlineCode, window, cx| w.with_document(window, cx, |b, cx| b.wrap_selection("`", "`", cx))))
+            .on_action(cx.listener(|w, _: &Link, window, cx| w.open_editor_popover(EditorPopoverKind::Link,window,cx)))
+            .on_action(cx.listener(|w, _: &Heading1, window, cx| w.with_document(window, cx, |b, cx| b.set_heading(1, cx))))
+            .on_action(cx.listener(|w, _: &Heading2, window, cx| w.with_document(window, cx, |b, cx| b.set_heading(2, cx))))
+            .on_action(cx.listener(|w, _: &Heading3, window, cx| w.with_document(window, cx, |b, cx| b.set_heading(3, cx))))
+            .on_action(cx.listener(|w, _: &Heading4, window, cx| w.with_document(window, cx, |b, cx| b.set_heading(4, cx))))
+            .on_action(cx.listener(|w, _: &Heading5, window, cx| w.with_document(window, cx, |b, cx| b.set_heading(5, cx))))
+            .on_action(cx.listener(|w, _: &Heading6, window, cx| w.with_document(window, cx, |b, cx| b.set_heading(6, cx))))
+            .on_action(cx.listener(|w, _: &ClearFormatting, window, cx| w.with_document(window,cx,|b,cx|b.command(crate::editor_control::commands::EditIntent::ClearFormatting,cx))))
+            .on_action(cx.listener(|_, _: &NewWindow, _, cx|crate::open_workspace(Vec::new(),cx)))
+            .on_action(cx.listener(|w, _: &Paragraph, window, cx| w.with_document(window, cx, |b, cx| b.set_heading(0, cx))))
+            .on_action(cx.listener(|w, _: &Quote, window, cx| w.with_document(window, cx, |b, cx| b.toggle_line_prefix("> ", cx))))
+            .on_action(cx.listener(|w, _: &BulletList, window, cx| w.with_document(window, cx, |b, cx| b.toggle_line_prefix("- ", cx))))
+            .on_action(cx.listener(|w, _: &OrderedList, window, cx| w.with_document(window, cx, |b, cx| b.toggle_line_prefix("1. ", cx))))
+            .on_action(cx.listener(|w, _: &TaskList, window, cx| w.with_document(window, cx, |b, cx| b.toggle_line_prefix("- [ ] ", cx))))
+            .on_action(cx.listener(|w, _: &CodeBlock, window, cx| w.with_document(window, cx, |b, cx| insert_code_block(b, cx))))
+            .on_action(cx.listener(|w, _: &Table, window, cx| w.open_editor_popover(EditorPopoverKind::Table,window,cx)))
+            .on_action(cx.listener(|w, _: &MathBlock, window, cx| w.with_document(window, cx, |b, cx| b.command(crate::editor_control::commands::EditIntent::InsertMathBlock, cx))))
+            .on_action(cx.listener(|w, _: &Rule, window, cx| w.with_document(window, cx, |b, cx| b.insert_block("---", 3, cx))))
+            .on_action(cx.listener(|w, _: &crate::editor::Undo, _, cx| {if let Some(doc)=w.document(){doc.update(cx,|h,cx|h.undo_redo(false,cx));}}))
+            .on_action(cx.listener(|w, _: &crate::editor::Redo, _, cx| {if let Some(doc)=w.document(){doc.update(cx,|h,cx|h.undo_redo(true,cx));}}))
+            .on_action(cx.listener(|w, _: &Quit, window, cx| {if w.request_close_window(window,cx){window.remove_window();}}))
+            .child(self.chrome.clone())
+            .children(popover)
+            .children(toolbar_popup)
+            .children(emoji_picker)
+            .children(outline_menu)
+            .children(outline_drag_preview)
             .child(
                 div()
                     .flex_1()
@@ -1114,16 +1579,26 @@ impl Render for Workspace {
                     .children(sidebar)
                     .child(
                         div()
+                            .relative()
                             .flex_1()
                             .min_w(px(0.0))
+                            .min_h(px(0.0))
                             .h_full()
-                            .bg(theme.surface)
-                            .border_t_1()
-                            .border_l_1()
-                            .border_color(theme.border)
-                            .rounded_tl(px(12.0))
-                            .overflow_hidden()
-                            .child(main),
+                            .flex()
+                            .flex_col()
+                            .child(self.surface.background(theme.clone(), animate_ui))
+                            .child(tabs)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .min_w(px(0.0))
+                                    .bg(theme.surface)
+                                    .rounded_tl(px(12.0))
+                                    .overflow_hidden()
+                                    .child(main),
+                            )
+                            .child(self.surface.outline(theme)),
                     ),
             )
     }
@@ -1133,45 +1608,59 @@ pub fn bind_keys(cx: &mut App) {
     use gpui::KeyBinding;
     let context = Some("Workspace");
     cx.bind_keys([
-        KeyBinding::new("cmd-n", NewFile, context),
-        KeyBinding::new("cmd-o", OpenFile, context),
-        KeyBinding::new("cmd-shift-o", OpenFolder, context),
-        KeyBinding::new("cmd-s", Save, context),
-        KeyBinding::new("cmd-shift-s", SaveAs, context),
-        KeyBinding::new("cmd-w", CloseTab, context),
+        KeyBinding::new("secondary-n", NewFile, context),
+        KeyBinding::new("secondary-shift-n", NewWindow, context),
+        KeyBinding::new("secondary-o", OpenFile, context),
+        KeyBinding::new("secondary-shift-o", OpenFolder, context),
+        KeyBinding::new("secondary-s", Save, context),
+        KeyBinding::new("secondary-shift-s", SaveAs, context),
+        KeyBinding::new("secondary-w", CloseTab, context),
         KeyBinding::new("ctrl-tab", NextTab, context),
         KeyBinding::new("ctrl-shift-tab", PrevTab, context),
-        KeyBinding::new("cmd-f", Find, context),
-        KeyBinding::new("cmd-alt-f", FindReplace, context),
-        KeyBinding::new("cmd-g", FindNext, context),
-        KeyBinding::new("cmd-shift-g", FindPrev, context),
-        KeyBinding::new("cmd-e", ToggleSource, context),
-        KeyBinding::new("cmd-1", ModeSemantic, context),
-        KeyBinding::new("cmd-2", ModeSource, context),
-        KeyBinding::new("cmd-3", ModeSplit, context),
-        KeyBinding::new("cmd-alt-o", ToggleOutline, context),
-        KeyBinding::new("cmd-alt-s", ToggleSidebar, context),
-        KeyBinding::new("cmd-shift-b", ToggleToolbar, context),
-        KeyBinding::new("cmd-shift-l", ToggleTheme, context),
-        KeyBinding::new("cmd-=", ZoomIn, context),
-        KeyBinding::new("cmd-+", ZoomIn, context),
-        KeyBinding::new("cmd--", ZoomOut, context),
-        KeyBinding::new("cmd-0", ZoomReset, context),
-        KeyBinding::new("cmd-b", Bold, context),
-        KeyBinding::new("cmd-i", Italic, context),
-        KeyBinding::new("cmd-shift-x", Strike, context),
-        KeyBinding::new("cmd-u", Underline, context),
-        KeyBinding::new("cmd-shift-h", Highlight, context),
-        KeyBinding::new("cmd-shift-c", InlineCode, context),
-        KeyBinding::new("cmd-k", Link, context),
-        KeyBinding::new("cmd-alt-1", Heading1, context),
-        KeyBinding::new("cmd-alt-2", Heading2, context),
-        KeyBinding::new("cmd-alt-3", Heading3, context),
-        KeyBinding::new("cmd-alt-0", Paragraph, context),
-        KeyBinding::new("cmd-shift-k", CodeBlock, context),
-        KeyBinding::new("cmd-shift-t", Table, context),
-        KeyBinding::new("cmd-shift-m", MathBlock, context),
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("secondary-f", Find, context),
+        KeyBinding::new("secondary-alt-f", FindReplace, context),
+        KeyBinding::new("secondary-g", FindNext, context),
+        KeyBinding::new("secondary-shift-g", FindPrev, context),
+        KeyBinding::new("secondary-e", ToggleSource, context),
+        KeyBinding::new("secondary-1", Heading1, context),
+        KeyBinding::new("secondary-2", Heading2, context),
+        KeyBinding::new("secondary-3", Heading3, context),
+        KeyBinding::new("secondary-4", Heading4, context),
+        KeyBinding::new("secondary-5", Heading5, context),
+        KeyBinding::new("secondary-6", Heading6, context),
+        KeyBinding::new("secondary-alt-o", ToggleOutline, context),
+        KeyBinding::new("secondary-z", crate::editor::Undo, Some("Outline")),
+        KeyBinding::new("secondary-shift-z", crate::editor::Redo, Some("Outline")),
+        KeyBinding::new("ctrl-y", crate::editor::Redo, Some("Outline")),
+        KeyBinding::new("secondary-alt-s", ToggleSidebar, context),
+        KeyBinding::new("secondary-shift-f", ToggleSidebar, context),
+        KeyBinding::new("secondary-shift-b", ToggleToolbar, context),
+        KeyBinding::new("secondary-shift-l", ToggleTheme, context),
+        KeyBinding::new("secondary-=", ZoomIn, context),
+        KeyBinding::new("secondary-+", ZoomIn, context),
+        KeyBinding::new("secondary--", ZoomOut, context),
+        KeyBinding::new("secondary-0", Paragraph, context),
+        KeyBinding::new("secondary-b", Bold, context),
+        KeyBinding::new("secondary-i", Italic, context),
+        KeyBinding::new("alt-shift-5", Strike, context),
+        KeyBinding::new("secondary-shift-x", TaskList, context),
+        KeyBinding::new("secondary-shift-q", Quote, context),
+        KeyBinding::new("secondary-shift-[", OrderedList, context),
+        KeyBinding::new("secondary-shift-]", BulletList, context),
+        KeyBinding::new("secondary-u", Underline, context),
+        KeyBinding::new("secondary-shift-h", Rule, context),
+        KeyBinding::new("secondary-`", InlineCode, context),
+        KeyBinding::new("secondary-\\", ClearFormatting, context),
+        KeyBinding::new("secondary-shift-c", InlineCode, context),
+        KeyBinding::new("secondary-k", Link, context),
+        KeyBinding::new("secondary-alt-1", Heading1, context),
+        KeyBinding::new("secondary-alt-2", Heading2, context),
+        KeyBinding::new("secondary-alt-3", Heading3, context),
+        KeyBinding::new("secondary-alt-0", Paragraph, context),
+        KeyBinding::new("secondary-shift-k", CodeBlock, context),
+        KeyBinding::new("secondary-shift-t", Table, context),
+        KeyBinding::new("secondary-shift-m", MathBlock, context),
+        KeyBinding::new("secondary-q", Quit, None),
+        KeyBinding::new("secondary-,", OpenSettings, None),
     ]);
 }

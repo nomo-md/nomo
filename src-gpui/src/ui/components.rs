@@ -12,11 +12,18 @@ use gpui::{
 };
 use std::borrow::Cow;
 
-/// 内置图标（Lucide，与 Web 版同名）。新增图标需同时加入 scripts/export_icons.mjs 并重新导出。
+/// 内置 Lucide 图标。新增 SVG 后同步维护 icon_assets.rs 的静态资源表。
 /// 部分图标为 Roadmap 中即将使用的预留项。
 #[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IconName {
+    Smile,
+    MessageSquare,
+    PanelTopClose,
+    TableOfContents,
+    ChevronUp,
+    AlignHorizontalSpaceAround,
+    ScanLine,
     Heading1,
     Heading2,
     Heading3,
@@ -42,8 +49,14 @@ pub enum IconName {
     Sun,
     Moon,
     FileText,
+    FilePlus,
     Folder,
     FolderOpen,
+    FolderPlus,
+    ChevronsUp,
+    ChevronsUpDown,
+    ChevronsDownUp,
+    RefreshCw,
     ChevronRight,
     ChevronDown,
     Plus,
@@ -54,6 +67,7 @@ pub enum IconName {
     Replace,
     ReplaceAll,
     PanelLeft,
+    PictureInPicture2,
     ZoomIn,
     ZoomOut,
     Copy,
@@ -78,6 +92,13 @@ pub enum IconName {
 impl IconName {
     pub fn path(self) -> &'static str {
         match self {
+            IconName::Smile => "icons/smile.svg",
+            IconName::MessageSquare => "icons/message-square.svg",
+            IconName::PanelTopClose => "icons/panel-top-close.svg",
+            IconName::TableOfContents => "icons/table-of-contents.svg",
+            IconName::ChevronUp => "icons/chevron-up.svg",
+            IconName::AlignHorizontalSpaceAround => "icons/align-horizontal-space-around.svg",
+            IconName::ScanLine => "icons/scan-line.svg",
             IconName::Heading1 => "icons/heading-1.svg",
             IconName::Heading2 => "icons/heading-2.svg",
             IconName::Heading3 => "icons/heading-3.svg",
@@ -103,8 +124,14 @@ impl IconName {
             IconName::Sun => "icons/sun.svg",
             IconName::Moon => "icons/moon.svg",
             IconName::FileText => "icons/file-text.svg",
+            IconName::FilePlus => "icons/file-plus.svg",
             IconName::Folder => "icons/folder.svg",
             IconName::FolderOpen => "icons/folder-open.svg",
+            IconName::FolderPlus => "icons/folder-plus.svg",
+            IconName::ChevronsUp => "icons/chevrons-up.svg",
+            IconName::ChevronsUpDown => "icons/chevrons-up-down.svg",
+            IconName::ChevronsDownUp => "icons/chevrons-down-up.svg",
+            IconName::RefreshCw => "icons/refresh-cw.svg",
             IconName::ChevronRight => "icons/chevron-right.svg",
             IconName::ChevronDown => "icons/chevron-down.svg",
             IconName::Plus => "icons/plus.svg",
@@ -115,6 +142,7 @@ impl IconName {
             IconName::Replace => "icons/replace.svg",
             IconName::ReplaceAll => "icons/replace-all.svg",
             IconName::PanelLeft => "icons/panel-left.svg",
+            IconName::PictureInPicture2 => "icons/picture-in-picture-2.svg",
             IconName::ZoomIn => "icons/zoom-in.svg",
             IconName::ZoomOut => "icons/zoom-out.svg",
             IconName::Copy => "icons/copy.svg",
@@ -263,8 +291,9 @@ pub fn floating_card(id: impl Into<ElementId>, theme: &Theme) -> Stateful<Div> {
 }
 
 /// 悬停提示：调用方用 `.tooltip(tooltip("文字"))` 挂到任意可交互元素上。
-pub fn tooltip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    move |_, cx| cx.new(|_| Tooltip { text: text.into() }).into()
+pub fn tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text = text.into();
+    move |_, cx| cx.new(|_| Tooltip { text: text.clone() }).into()
 }
 
 pub struct Tooltip {
@@ -273,8 +302,10 @@ pub struct Tooltip {
 
 impl Render for Tooltip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.global::<Theme>();
+        let animate_theme = Theme::ui_transition_active(cx);
+        let theme = Theme::ui(cx);
         div()
+            .relative().children(animate_theme.then(crate::ui::motion::theme_frame))
             .px(px(8.0))
             .py(px(4.0))
             .rounded(px(6.0))

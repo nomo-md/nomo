@@ -8,6 +8,7 @@ pub mod protocol;
 pub mod commands;
 #[cfg(feature = "editor-control-demo")]
 pub mod demo;
+pub mod document_host;
 mod dialect;
 pub mod emoji;
 pub mod host;
@@ -15,21 +16,18 @@ pub mod html_table;
 mod image_properties;
 pub mod interaction;
 mod inline_commands;
+mod semantic_selection;
+mod semantic_global;
+pub(crate) mod link_edit;
 mod list_commands;
 mod template_projection;
 pub mod menu;
-#[cfg(feature = "editor-control-demo")]
-#[path = "../../../src-tauri/src/emoji_catalog/native.rs"]
 mod native_emoji;
-#[cfg(feature = "editor-control-demo")]
 pub mod native_port;
-#[cfg(feature = "editor-control-demo")]
 pub mod session_window;
-#[cfg(feature = "editor-control-demo")]
 mod viewport_model;
-#[cfg(feature = "editor-control-demo")]
 mod resident_budget;
-#[path = "../../../src-tauri/src/text_document/structure_index/syntax.rs"]
+#[path = "../text_document/structure_index/syntax.rs"]
 pub mod nomo_syntax;
 pub mod paint;
 pub mod resources;

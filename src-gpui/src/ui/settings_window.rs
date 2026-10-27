@@ -1,6 +1,6 @@
 //! 设置窗口：左侧分区导航，右侧按 `settings_schema` 渲染分组与设置项。
 //!
-//! 每次修改立即经 `Settings::set` 生效并写回共享配置文件，没有“应用 / 取消”步骤（与 Web 版一致）。
+//! 每次修改立即经 `Settings::set` 生效并写回配置文件，没有“应用 / 取消”步骤。
 //! 窗口为单例：重复打开时激活已有窗口。文本类设置项各自持有一个 `TextField`，在首次显示时创建。
 
 use crate::settings::Settings;
@@ -8,6 +8,8 @@ use crate::theme::Theme;
 use crate::ui::components::{IconName, badge, button, ButtonKind, icon, select, select_option, slider, switch, text_segment};
 use crate::ui::settings_schema::{CATEGORIES, Control, Item, Page, SHORTCUTS, Support};
 use crate::ui::text_field::{FieldEvent, TextField};
+#[cfg(target_os = "windows")]
+use crate::ui::window_chrome::{self, CaptionAction};
 use gpui::{
     AnyElement, App, AppContext, Bounds, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, Global,
     IntoElement, ParentElement, Render, ScrollHandle, Styled, Subscription, TitlebarOptions, Window, WindowBounds,
@@ -37,6 +39,7 @@ pub fn open(cx: &mut App) {
     }
     let bounds = Bounds::centered(None, size(px(880.0), px(640.0)), cx);
     let options = WindowOptions {
+        app_id: Some("com.nomo.desktop".into()),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions { title: Some("设置".into()), appears_transparent: true, traffic_light_position: Some(point(px(14.0), px(14.0))) }),
         window_min_size: Some(size(px(720.0), px(480.0))),
@@ -49,6 +52,8 @@ pub fn open(cx: &mut App) {
 
 pub struct SettingsWindow {
     focus: FocusHandle,
+    #[cfg(target_os = "windows")]
+    caption_focus: window_chrome::CaptionFocus,
     category: usize,
     /// 当前展开的下拉选择（设置键）。
     open_select: Option<&'static str>,
@@ -69,6 +74,8 @@ impl SettingsWindow {
     fn new(cx: &mut Context<Self>) -> Self {
         Self {
             focus: cx.focus_handle(),
+            #[cfg(target_os = "windows")]
+            caption_focus: window_chrome::CaptionFocus::new(cx),
             category: 0,
             open_select: None,
             dragging: None,
@@ -226,7 +233,7 @@ impl SettingsWindow {
                             .children(note.map(|(label, _, color)| badge(label, color, theme))),
                     )
                     .child(div().text_size(px(12.0)).text_color(theme.muted).child(item.description))
-                    .children(note.map(|(_, reason, _)| div().text_size(px(12.0)).text_color(theme.muted).child(format!("GPUI 版：{reason}。设置仍会保存，供 Web 版使用。")))),
+                    .children(note.map(|(_, reason, _)| div().text_size(px(12.0)).text_color(theme.muted).child(format!("当前支持范围：{reason}。")))),
             )
             .child(div().flex_none().child(control))
             .into_any_element()
@@ -235,10 +242,12 @@ impl SettingsWindow {
     fn render_groups(&mut self, groups: &'static [crate::ui::settings_schema::Group], theme: &Theme, viewport: gpui::Size<gpui::Pixels>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         groups
             .iter()
+            .filter(|group| group.items.iter().any(|item| !matches!(item.support, Support::None(_))))
             .map(|group| {
                 let rows: Vec<AnyElement> = group
                     .items
                     .iter()
+                    .filter(|item| !matches!(item.support, Support::None(_)))
                     .enumerate()
                     .flat_map(|(index, item)| {
                         let divider = (index > 0).then(|| div().h(px(1.0)).mx(px(16.0)).bg(theme.border).into_any_element());
@@ -257,7 +266,7 @@ impl SettingsWindow {
     }
 
     fn render_shortcuts(&self, theme: &Theme) -> Vec<AnyElement> {
-        let mut sections: Vec<AnyElement> = vec![div().text_size(px(12.5)).text_color(theme.muted).child("GPUI 版暂不支持修改快捷键；下列绑定与 Web 版默认快捷键一致（Ctrl 对应 ⌘）。").into_any_element()];
+        let mut sections: Vec<AnyElement> = vec![div().text_size(px(12.5)).text_color(theme.muted).child("暂不支持修改快捷键；下列为当前绑定（macOS 上 Ctrl 对应 ⌘）。").into_any_element()];
         for (title, rows) in SHORTCUTS {
             let items: Vec<AnyElement> = rows
                 .iter()
@@ -302,9 +311,9 @@ impl SettingsWindow {
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.surface)
-                .child(div().text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme.heading).child("Nomo · GPUI"))
-                .child(div().text_size(px(13.0)).text_color(theme.muted).child(format!("版本 {} · 基于 GPUI {} 的原生 Markdown 编辑器原型", env!("CARGO_PKG_VERSION"), "0.2.2")))
-                .child(div().text_size(px(12.5)).text_color(theme.muted).child(format!("设置文件：{config}（与 Web 桌面版共用）")))
+                .child(div().text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme.heading).child("Nomo"))
+                .child(div().text_size(px(13.0)).text_color(theme.muted).child(format!("版本 {} · 基于 GPUI {} 的原生 Markdown 编辑器", env!("CARGO_PKG_VERSION"), "0.2.2")))
+                .child(div().text_size(px(12.5)).text_color(theme.muted).child(format!("设置文件：{config}")))
                 .child(
                     div()
                         .mt(px(8.0))
@@ -329,12 +338,17 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.global::<Theme>().clone();
+        let animate_theme = Theme::ui_transition_active(cx);
+        let theme = Theme::ui(cx);
         let viewport = window.viewport_size();
         let category = &CATEGORIES[self.category];
         let nav: Vec<AnyElement> = CATEGORIES
             .iter()
             .enumerate()
+            .filter(|(_, entry)| match &entry.page {
+                Page::Groups(groups) => groups.iter().any(|group| group.items.iter().any(|item| !matches!(item.support, Support::None(_)))),
+                _ => true,
+            })
             .map(|(index, entry)| {
                 let active = index == self.category;
                 div()
@@ -366,14 +380,38 @@ impl Render for SettingsWindow {
             Page::Shortcuts => self.render_shortcuts(&theme),
             Page::About => self.render_about(&theme, cx),
         };
-        div()
+        let mut nav_drag = div().id("settings-nav-drag-area").relative().h(px(46.0)).flex_none();
+        #[cfg(target_os = "windows")]
+        { nav_drag = nav_drag.child(window_chrome::drag_surface("settings-nav-drag")); }
+        #[cfg(not(target_os = "windows"))]
+        { nav_drag = nav_drag.on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.start_window_move()); }
+
+        #[cfg(target_os = "windows")]
+        let header = div().id("settings-header").relative().h(px(42.0)).flex_none().flex().items_center()
+            .pl(px(16.0)).border_b_1().border_color(theme.border)
+            .child(window_chrome::drag_surface("settings-header-drag"))
+            .child(div().flex_1().min_w(px(0.0)).text_size(px(16.0)).font_weight(FontWeight::BOLD)
+                .text_color(theme.heading).child(category.title))
+            .child(window_chrome::caption_controls(&theme, window, &self.caption_focus, |action, window, _| match action {
+                CaptionAction::Minimize => window.minimize_window(),
+                CaptionAction::Maximize => window_chrome::toggle_maximize(window),
+                CaptionAction::Close => window.remove_window(),
+            }));
+        #[cfg(not(target_os = "windows"))]
+        let header = div().h(px(56.0)).flex_none().flex().items_end().px(px(28.0)).pb(px(10.0))
+            .text_size(px(18.0)).font_weight(FontWeight::BOLD).text_color(theme.heading)
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.start_window_move())
+            .child(category.title);
+
+        let mut root = div()
             .id("settings")
+            .relative().children(animate_theme.then(crate::ui::motion::theme_frame))
             .track_focus(&self.focus)
             .size_full()
             .flex()
             .bg(theme.surface)
             .text_color(theme.fg)
-            .font_family(".SystemUIFont")
+            .font_family(crate::theme::ui_font_family())
             .child(
                 div()
                     .w(px(200.0))
@@ -386,8 +424,7 @@ impl Render for SettingsWindow {
                     .bg(theme.rail_bg)
                     .border_r_1()
                     .border_color(theme.border)
-                    // 只有顶部空白条（红绿灯所在行）用于拖动窗口，避免拖动吞掉分区按钮的点击。
-                    .child(div().h(px(46.0)).flex_none().on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.start_window_move()))
+                    .child(nav_drag)
                     .children(nav),
             )
             .child(
@@ -397,20 +434,7 @@ impl Render for SettingsWindow {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .child(
-                        div()
-                            .h(px(56.0))
-                            .flex_none()
-                            .flex()
-                            .items_end()
-                            .px(px(28.0))
-                            .pb(px(10.0))
-                            .text_size(px(18.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(theme.heading)
-                            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.start_window_move())
-                            .child(category.title),
-                    )
+                    .child(header)
                     .child(
                         div()
                             .id("settings-content")
@@ -422,6 +446,11 @@ impl Render for SettingsWindow {
                             .pb(px(28.0))
                             .child(div().flex().flex_col().gap(px(22.0)).pt(px(6.0)).children(content)),
                     ),
-            )
+            );
+        #[cfg(target_os = "windows")]
+        if !window.is_maximized() && !window.is_fullscreen() {
+            root = root.child(window_chrome::top_resize_guard(window));
+        }
+        root
     }
 }

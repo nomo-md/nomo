@@ -1,82 +1,32 @@
-<p align="center">
-  <img src="./src-tauri/icons/128x128.png" alt="Nomo icon" width="60">
-</p>
+# Nomo
 
-<h1 align="center">Nomo</h1>
+[简体中文](README.md) · [Releases](https://github.com/nomo-md/nomo/releases) · [Build and release](docs/native-build.md)
 
-<p align="center">
-  <a href="https://github.com/nomo-md/nomo/releases/latest">
-    <img src="https://img.shields.io/github/v/release/nomo-md/nomo?label=release" alt="GitHub Release">
-  </a>
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey" alt="Available for macOS and Windows">
-  <a href="./LICENSE">
-    <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="AGPL-3.0-or-later">
-  </a>
-</p>
+A local-first native Markdown editor built with Rust and GPUI. Builds and packaging no longer require Node.js, npm, pnpm, Vite or Tauri.
 
-<p align="center">
-  <a href="./README.md">简体中文</a>
-  ·
-  <a href="./README.en.md"><strong>English</strong></a>
-</p>
+The default Workspace now uses the windowed EditorControl with one document session and history per tab. Normal startup, new files and opened files require no development flags. Semantic, source and shared-session split modes are connected; split editing, the menu chrome and reading-position synchronization still require desktop acceptance. Page parity and complete interaction verification are tracked in [ROADMAP](src-gpui/ROADMAP.md).
 
-<p align="center">
-  <strong>A local-first Markdown editor that keeps writing simple.</strong>
-</p>
-
-<p align="center">
-  <img src="./assets/nomo-editor-en.gif" alt="Nomo writing demo in English" width="800">
-</p>
-
-## Download and Install
-
-Get the latest version from [GitHub Releases](https://github.com/nomo-md/nomo/releases/latest).
-
-| Platform | Requirements | Installation |
-| :--- | :--- | :--- |
-| Windows | Windows 10 / 11, x64 | `.exe` installer / `.zip` portable |
-| macOS | macOS 12.0+, Apple Silicon | `.dmg` / Homebrew |
-
-On macOS, you can also install with Homebrew:
-
-```bash
-brew tap nomo-md/nomo https://github.com/nomo-md/nomo
-brew install --cask nomo
-```
-
-Upgrade with `brew upgrade --cask nomo`.
-
-SmartScreen or Gatekeeper may prompt on first launch; download from this project's Releases.
-
-## Features
-
-- **Markdown editing**: Live preview, source and split modes, with `/` for quick insertion.
-- **Rich content**: Tables, syntax highlighting, math formulas and Mermaid diagrams.
-- **File management**: Type to locate files in the explorer, work in multiple tabs and edit large TXT / JSON files in segments.
-- **Save and restore**: Optional autosave and local Markdown snapshots, plus workspace and reading position restoration.
-- **Comfortable writing**: Light and dark themes, [custom color themes and fonts](docs/custom-themes.md) (guide in Chinese), optional fine typography and an always-on-top Markdown mini window.
-- **Export and preview**: Export HTML / PDF / Word (.docx), with editable Word text and tables, formulas and diagrams as images, and Quick Look previews on macOS.
-
-See [release notes](https://github.com/nomo-md/nomo/releases) for version changes.
+**The native source has not reached feature or visual parity with previous desktop releases.** PDF/Word/HTML/image export, Quick Look, MSIX and Shell extensions are currently unavailable. External file monitoring, tray integration, full workspace restoration, custom shortcuts and localization remain incomplete. Existing releases remain available; this migration does not publish a new version.
 
 ## Development
 
-Built with Tauri 2 + Svelte 5. Requires Node.js 22, pnpm 11.5.1 and Rust / Cargo.
+Use stable Rust and the root `Cargo.lock`. GPUI remains pinned to 0.2.2.
 
-- Windows: Visual Studio 2022 Build Tools or the full Visual Studio.
-- macOS: Xcode Command Line Tools; building the Quick Look extension requires the full Xcode.
+- Windows: MSVC C++ Build Tools and Windows SDK including `fxc.exe` and `rc.exe`. Packaging needs NSIS 3 and PowerShell 7.
+- macOS: full Xcode, Command Line Tools and Metal; packaging uses `codesign`, `hdiutil` and `jq`.
+- Linux: Clang, C/C++ tools and native font/X11/Wayland/graphics libraries. See [prerequisites](docs/native-build.md).
 
-```bash
-pnpm install
-pnpm tauri dev
+```sh
+cargo run --locked --bin nomo
+cargo run --locked --bin nomo -- /path/to/document.md
+cargo check --locked --bin nomo
+cargo build --locked --release --bin nomo
+cargo run --locked --features editor-control-demo --bin nomo -- --editor-control-demo
+cargo run --locked --features editor-control-demo --bin nomo -- --editor-control /path/to/document.md
 ```
 
-## Get Involved
+See [CLASSMAP](CLASSMAP.md), [editor-control notes](docs/gpui-editor-control.md) and [build instructions](docs/native-build.md) for ownership, entrypoints and verification.
 
-[Issues](https://github.com/nomo-md/nomo/issues) and [pull requests](https://github.com/nomo-md/nomo/pulls) are welcome; include your OS version, steps to reproduce and a sample when reporting a bug.
+The product name remains Nomo, the binary is `nomo`, and the identifier remains `com.nomo.desktop`. Existing configuration fields and platform directories are preserved; uninstalling does not remove user documents or settings.
 
-Enjoy Nomo? [Star the project](https://github.com/nomo-md/nomo) or follow [LIXianSenQwQ](https://github.com/LIXianSenQwQ). Community: [linux.do](https://linux.do/).
-
-Licensed under [AGPL-3.0-or-later](./LICENSE); contact the maintainers for separate commercial licensing. Third-party components retain their own licenses.
-
-Thanks to Tauri, Svelte, ProseMirror, CodeMirror, markdown-it, Shiki, KaTeX, Mermaid and other open-source projects.
+Licensed under [AGPL-3.0-or-later](LICENSE). Lucide icons retain their [ISC license](src-gpui/assets/icons/LICENSE); dependencies retain their licenses. Historical notes are in [docs/archive](docs/archive/README.md).

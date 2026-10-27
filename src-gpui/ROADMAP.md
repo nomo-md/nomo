@@ -1,175 +1,103 @@
-# Nomo GPUI 分支 Roadmap
+# Nomo 原生页面与 EditorControl 接入 Roadmap
 
-本文档规划 `src-gpui`（GPUI + Rust 原生版）的功能演进，目标有两个：
+## 当前 Goal 与证据边界
 
-1. 与 Web 版 Nomo 的核心编辑体验保持高度一致，包括标题、文字、列表、表格、分栏、高亮、引用、代码块的显示与交互细节。
-2. 覆盖飞书文档的大部分功能，依赖云端的功能除外。
+- 目标：在 `gpui-editor` 当前未提交迁移成果上，将已有窗口化 `EditorControl` 接入默认 Workspace，并复刻主分支正式页面及对应功能。普通启动、新建、打开均使用正式入口；第一批闭环完成后继续页面及交互对齐。
+- 固定对照：`origin/master` 的 `339fb932db064508af4e471a0fda8f44468d0157`。2026-10-26 已通过 `git ls-remote --symref origin HEAD refs/heads/master` 核实远端默认分支为 `master`，本地引用与远端相同。本轮始终以此 commit 为基准。
+- 起始工作分支：`gpui-editor`，HEAD `98e9376e9a186177784d3e8fca973cd6321b0524`。已有原生迁移、大量旧前端删除和未跟踪文件均为本轮前的用户成果，禁止覆盖或还原。
+- 2026-10-26 起始源码核查：`main.rs` 默认启动 `Workspace`；`workspace.rs` 每个 Tab 持有 `Buffer + semantic EditorView + source EditorView`；`EditorControl` 的真实文件宿主为 feature 下的 `demo.rs`。这是本轮核查事实，不能据旧文档把“尚未接入”排除在目标之外。
+- 正文、历史、全局修订及坐标由唯一文档会话管理；控件仅接收窗口片段。必须复用连续窗口、视口调度、预取、回收、字节预算、取消及过期结果门禁；不引入完整 Buffer 镜像或全文解析渲染。
+- 主代理统一负责 Workspace、文档状态和编辑器接入；子任务仅修改明确授权的独立文件。无自动提交、推送、合并、PR、发布或安装。
+- 状态分为：**待实现、已实现未验证、构建通过、行为验证通过、视觉对照通过、阻塞**。状态只针对所述子项；构建与局部验证不等于整行或整个 Goal 完成。历史 `docs/archive` 不作为当前验收证据。
 
-## 原则
+## 页面与交互对照清单
 
-- **Markdown 文件是唯一事实源。** 所有功能必须能落到 `.md` 文件中，并且先满足下面两条兼容性要求，再考虑表现力：
-  - **与 Web 版互通**：写法与 Web 版的序列化约定一致（`src/lib/editor-core/markdownSerialization.ts`、`html/htmlPolicy.ts`）。
-  - **在通用渲染器中可读**：在 GitHub、Obsidian、Typora 中至少能退化为可读的内容。
-- **扩展语法优先级**：GFM 标准语法 → Web 版已有约定（`{align=… width=…}`、`<p align>`、`data-colwidth`）→ 带 `class` 的 HTML 白名单标签。
-  - Web 版 HTML 白名单只保留 `class`、`id`、`href`、`title` 四个属性，`style` 会被丢弃，所以新的样式扩展一律用 `class` 表达。
-- **不做依赖云端的功能**：多人协作、分享权限、@人、提醒、云端 AI、翻译、多维表格等。
-- **对 GPUI 缺失的能力，先封装基础组件再写功能**，不在业务代码里重复拼装 div。
+下表基准路径均属于固定 master commit，通过 `git show <commit>:<path>` 读取；当前入口相对仓库根目录。基准源码证据不等于已运行参考版或完成视觉验收。
 
-### 状态标记
+| 区域 | 固定主分支入口与关键行为 | 当前 GPUI 入口 | 起始差距、依赖与验收方式 | 状态 |
+|---|---|---|---|---|
+| 默认入口与文档会话 | `src/app/App.svelte`、`components/AppShell.svelte`：新建、打开、恢复后进入同一正式外壳 | `src-gpui/src/main.rs`、`ui/workspace.rs`；控件宿主 `editor_control/document_host.rs`、`native_port.rs`、`session_window.rs` | 正式页仍使用旧 Buffer；将宿主业务能力与开发界面拆开后复用。验收普通启动、命令行/系统打开、新建与多文件打开均进入窗口化控件，无开发参数 | 基础行为验证通过；恢复/系统打开待验 |
+| 标题栏与菜单 | `components/AppTitleBar.svelte`、`WindowsCaptionControls.svelte`；`styles/app-responsive.css:75`：独立 42px 标题栏，Windows 应用内菜单与窗口按钮，侧栏、主题、mini、更新入口；macOS 留 88px 红绿灯区 | `ui/chrome.rs`、`ui/workspace.rs::render_tabs`、`main.rs::set_menus/open_workspace` | 当前 38px 标签条充当标题栏且无条件左留 84px，未复刻 Windows 应用内菜单/窗口按钮。需分离标题栏与标签栏；逐项核对菜单实际动作、快捷键、禁用项、拖动/双击/右键及最小窗口菜单边界 | 构建通过；部分菜单待接，行为/视觉待验 |
+| 标签栏 | `components/DocumentTabs.svelte`、`styles/app-chrome.css:231`：位于编辑区上方；30px 标签、普通宽 120–180px、12px 上圆角、14px 字；脏点、悬停关闭、预览斜体、溢出菜单、批量关闭、复制路径/定位、拖动 | `ui/workspace.rs::render_tabs/activate/close_tab` | 基本切换/关闭已有但未接新会话；条带层级、尺寸、脏点悬停、溢出/预览/右键/拖动缺失。验收长文件名、20 标签、未保存关闭、取消关闭、切换后历史/选区/阅读位置 | 基础切换/关闭行为通过；其余待实现/验证 |
+| 空白及启动加载 | `components/EmptyWorkspace.svelte`、`RecentOpenPopover.svelte`、`AppShell.svelte`；56px 图标底板、20px 标题、18px 内容间距、三按钮及最近记录；恢复中有加载状态 | `ui/workspace.rs::render_empty/new` | 当前有三操作按钮但为 44px 底板/17px 标题；缺最近记录、失效路径移除和工作区恢复状态。验收无文件启动、关闭最后标签、恢复失败和最近文件/文件夹 | 待实现 |
+| 文件侧栏 | `components/ExplorerSidebar.svelte`、`styles/app-layout.css`：可拖宽、虚拟列表、预览/固定、快速搜索、文件管理和刷新 | `ui/file_tree.rs`、`ui/workspace/explorer*.rs` | 已接根目录同区滚动、滚动条、层级与标识动效、悬停和菜单、键盘搜索、后台按需扫描与 5 秒刷新；缓存有字节预算，超限和读取失败明确提示。打开的文档及所在目录重命名时同步会话路径；删除仍需先关闭。Windows、macOS、Linux 接入系统文件剪贴板，超长名称显示省略号。需在实际桌面验证滚动、输入法、文件操作、动效和大目录性能 | 已实现；实机待验 |
+| 工具栏 | `components/EditorToolbar.svelte`、`styles/app-chrome.css:582`：44px 高、5px 16px 内边距、4px 间距；格式激活态、表格尺寸选择、链接编辑、公式/图表菜单、脚注/目录/emoji、搜索、宽度、三模式/对齐线、大纲、收起 | `ui/workspace.rs::render_toolbar`、`editor_control/commands.rs`、`inline_commands.rs`、`menu.rs` | 当前 42px、动作被 overflow_hidden 裁剪、格式态固定 false，多项直接拼文本；需复用控件命令与正确活动视图。补上下标、批注/details、图表/脚注/目录/emoji 等入口及选择器；窄窗动作可横滚，宽度控制按 820px 容器阈值折叠 | 基础命令/宽度构建通过；其余待实现/验证 |
+| 编辑区与模式 | `components/EditorWorkspace.svelte`、`MarkdownSourceEditor.svelte`、`FrontMatterCard.svelte`、`styles/editor-document.css`：语义/源码/双栏、正文宽度、滚动/选区同步、front matter、活动对象交互 | `ui/workspace.rs::set_mode`、`editor_control/window_panes.rs`；`editor_control/view.rs`、`source_view.rs`、`viewport_ui.rs`、对象/表格模块 | 默认编辑区未用控件。必须同会话同历史，按需创建视图，模式转换保持全局坐标和滚动锚；补配置应用和 front matter 等未接宿主能力。验收窗口边界编辑、跨窗口选择、IME、长文档远跳/连续滚动、双栏双向编辑/撤销/保存 | 构建通过；单栏基础行为通过，双栏/视觉待验 |
+| 文档大纲 | `components/EditorWorkspace.svelte`、`styles/editor-outline.css:1`、`services/outlineInteractionController.ts`：220px 浮卡、默认 top 168px、14px padding、层级展开/批量折叠、活动标题、卡片拖动及重置、章节拖动重排 | `ui/workspace.rs::render_outline/jump_to_heading`；会话 `text_document/structure_index` | 当前 236px 固定浮卡、28px 行、只按默认层级过滤；无卡片拖动、独立折叠与章节重排。改用完整文档索引/全局跳转，避免当前片段大纲。验收远距离标题、无标题、空标题、滚动高亮、拖动后正文及历史一致 | 600节索引/跳转行为通过；其余待实现/验证 |
+| 搜索替换 | `components/SearchReplacePanel.svelte`、`services/searchReplace.ts`：可拖动且持久定位的 520px 面板，区分大小写/全词/反向/循环、统计、替换当前/全部、忙碌/只读/无结果状态 | `ui/workspace.rs::open_search/run_search/step_match/replace_one/replace_all/render_search`；会话 `text_document/markdown_search` | 当前 400px 固定浮卡且只有大小写选项；需接会话全局搜索及结果导航，不局限窗口片段。验收跨窗口命中、替换后选区/历史、取消过期请求、切标签不误写、最小窗口面板可达 | 查询/远跳行为通过；替换/视觉待验 |
+| 状态统计与缩放 | `components/StatusBar.svelte`、`styles/editor-outline.css:250`：编辑区右下浮动控件，right 16px/bottom 14px；写作指标菜单、阅读时间、80–160% 缩放弹层、Markdown 检查状态/问题列表/跳转 | `ui/workspace.rs::render_status`、`text_document/writing_stats`、`ui/settings_schema.rs` | 当前全宽 28px 底栏，展示路径/行列/模式/固定 UTF-8/缩放按钮；缺对应浮动外观、指标菜单、检查器。必须统计完整文档或完整选区，区分 pending/error；编码不可硬编码假报。校验中英文/选区/多窗口语料及错误重试 | 全文统计构建通过；其余待实现/验证 |
+| 设置窗口 | `components/SettingsWindow.svelte`：8 分区、212px 导航、即时生效；字体校验/建议、主题预览与导入导出、自定义快捷键、文件与窗口、图片策略、检查/插入等 | `ui/settings_window.rs`、`ui/settings_schema.rs`、`settings.rs`、`theme.rs` | 当前 200px 导航并新增独立快捷键页；多个 Support::None 项及整类被隐藏、主题仅默认、语言仅中文。逐项接控件/宿主后恢复基准设置与真实支持范围；不能将旧“隐藏未支持项”视为复刻完成。验收即时应用、持久化、旧 JSON 未知键保留、无效值及重开 | 待实现 |
+| 页面弹窗/面板 | `components/UnsavedConfirmDialog.svelte`（392px，保存/放弃/取消）、`ExternalChangeDialog.svelte`（560px，重载/覆盖/另存/忽略及删除状态）、`FolderOpenDialog.svelte`（420px，当前/新窗口）、`CloseWindowBehaviorDialog.svelte`、`ConfirmDialog.svelte`、`LinkQuickEditor.svelte`、`EmojiPicker.svelte`、更新系列组件 | 目前 Workspace 使用原生 prompt；控件 `menu.rs`、`image_properties.rs`、`object_ui.rs` 有局部弹层 | 未保存行为需接唯一会话；外部变更、打开策略、托盘关闭策略、链接/emoji 等界面与状态缺失或只在开发控件。验收取消/失败不丢数据、异步结果仍对应原文档；权限相关系统操作仅核对能力与隔离数据，不实际修改机器设置 | 待实现 |
+| 对比、窗口及文件相关操作 | `components/ComparisonWorkspace.svelte`、`ComparisonPane.svelte`、`App.svelte::createComparison/resizeComparison`；标签组合成两个文档对比、20–80% 拖动分隔、交换/解除；新窗口、窗口间标签、mini/置顶；`services/exportService.ts` 和 `wordExportService.ts` 真正执行 HTML/PDF/Word 导出 | 当前 Workspace 无对应对比/mini/多窗口管理/导出入口 | 主分支确有功能，不能沿旧 Roadmap 的“另行设计/暂下线”遗漏。与“同一文档源码/语义双栏”分开登记；依赖会话、窗口生命周期、原生导出实现。验收各窗活动文档隔离、关闭/保存、对比交换及导出完整正文与资源 | 待实现 |
+| 主题、字体与响应式 | `styles/theme.css`、`app-responsive.css`、`services/themeRegistry.ts`：UI 14/13/12px、控件 28/34/38px、圆角 4/8/12px；Windows 正文 Segoe UI/Microsoft YaHei、等宽 Cascadia Code/JetBrains Mono/Consolas；多配色与深浅色 | `theme.rs`、`settings.rs`、`ui/components.rs`、全部 render 函数 | 当前单一自有配色、正文默认 Microsoft YaHei、等宽 Consolas，不能假定视觉一致。需固定同主题/字体/窗口/DPI 截图比较；大纲窄容器行为、菜单避边、弹层最大高、工具栏横滚都需逐项对齐。透明/模糊等平台差异先调查代价与实际效果再决策 | 待实现 |
 
-| 标记 | 含义 |
-| --- | --- |
-| ✅ | 已完成 |
-| 🟡 | 部分完成，差异见说明 |
-| ⚡ | 本轮新增的快速项 |
-| ⏳ | 计划中（P0 / P1 / P2 表示优先级） |
-| ⛔ | 不做：依赖云端，或与 Markdown 不兼容 |
+主分支存在明确占位的菜单项（例如 `AppTitleBar.svelte` 中 `comingSoon(...)` 的段落前后插入、部分图片/行内公式入口），应复刻其真实禁用/提示行为并与可执行入口区分，不将它们描述成主分支已有完成的功能。图表、导出、对比等上表项目已找到实际回调或服务实现，不能按占位处理。
 
-## 一、与 Web 版一致性（核心块与交互）
+## 第一批闭环验收
 
-| 能力 | GPUI 现状 | 与 Web 版的差距及计划 |
-| --- | --- | --- |
-| 编辑模型 | 🟡 块级实时预览：光标所在块展开为源码 | **最大差距。** Web 版基于 ProseMirror，所见即所得逐字编辑。<br>⏳ P0：先让段落、标题、列表项支持“隐藏标记的原位编辑”（光标进入时只显示当前行内标记），再逐步扩展到引用和表格单元格。 |
-| 标题 H1–H6 | ✅ 字号、外边距对齐 Web 计算样式；大纲联动 | ⏳ P1：标题折叠（飞书同款）只作为视图状态，不写入文件。 |
-| 行内样式 | ✅ 粗体、斜体、删除线、行内代码、链接<br>⚡ 下划线 `<u>`、高亮 `<mark>`、`<sub>` / `<sup>` | 中文没有斜体字形（Web 端由浏览器合成倾斜，GPUI 0.2.2 不支持字形变换），⏳ P2 评估自绘倾斜。<br>`H~2~O`、`x^2^` 写法 pulldown-cmark 不识别，需改用 HTML 标签。 |
-| 列表 | ✅ 无序、有序、任务、多级嵌套；回车续写；空项回车退出；Tab / ⇧Tab 调整层级；点击复选框切换 | ⏳ P1：有序列表自动重新编号；拖拽排序见“块操作”。 |
-| 表格 | ✅ 渲染：对齐方式、表头、行内样式；宽表格可向右延伸 | ⏳ P0：单元格内编辑、Tab 跳格、增删行列、列对齐切换（对齐 Web 版 table controls）。<br>⏳ P1：拖拽调整列宽（写入 `data-colwidth`，与 Web 一致）、横向滚动。<br>⏳ P2：HTML 合并单元格表格（Web 版 `data-nomo-table`）的渲染。 |
-| 分栏模式 | ✅ 左语义、右源码，按源码行双向同步滚动 | ⏳ P1：Web 版的 30% 参考线插值、光标安全区、滚动主栏接管（`markdownScrollSync.ts`）。 |
-| 高亮 | ✅ `<mark>`<br>⚡ 7 色文字色与背景色（`nomo-fg-*` / `nomo-bg-*` class，兼容 style 写法），深浅色主题自适应 | ⏳ P0：工具栏颜色选择器（依赖 Popover 组件）。<br>⏳ Web 版需补上这些 class 的 CSS，才能双向一致。 |
-| 引用、提示块 | ✅ 多层引用；GitHub 五种提示块，配色与 Web 一致 | ⏳ P1：Obsidian 式自定义标题 `> [!tip] 标题`；可折叠提示块。 |
-| 代码块 | ✅ 语言标签、轻量语法高亮<br>⚡ 复制按钮 | ⏳ P1：行号（对应 Web 版设置项）、语言选择、Tab 缩进、tree-sitter 高亮（与 Shiki 观感对齐）。 |
-| 公式 | ⚡ 纯 Rust 渲染：latex-rust（TeX 规则排版，STIX Two Math）→ SVG → resvg 位图；行内公式按基线嵌入正文，块级公式居中；后台渲染、LRU 缓存（128 MiB），浅色与深色自动换色 | 已知限制：`\text{}` 中的中文因 STIX 无汉字而失败（显示源码与原因），⏳ P1 拆分文本段改用正文字体；超高矩阵的可伸缩括号偏短（latex-rust 局限）；超宽公式最小缩到 0.6 倍，再超出部分被裁剪，⏳ P2 横向滚动；表格单元格内的行内公式仍显示源码。 |
-| Mermaid | ⚡ 纯 Rust 渲染：merman（对齐 Mermaid 12.1.0，Zed 同款后端）的 resvg 兼容管线，文字用冬青黑体真实测量；浅色用 default 主题、深色用 dark 主题 | 冬青黑体在首次渲染图表时加载并常驻约 23 MiB（苹方 78 MiB 超出 merman 的常驻上限）。⏳ P2：主题色与 Nomo 配色对齐、点击放大查看。 |
-| 图片 | ✅ 本地图片异步解码、尺寸上限、LRU 缓存<br>⚡ `{align= width=}`、`<p align><img width>` | ⏳ P1：拖拽调整尺寸、远程图片、粘贴或拖入图片自动保存到 `assets/`。 |
-| 脚注、HTML、Front Matter、折叠块 | ✅ 脚注引用与定义、行内及块级 HTML、YAML 卡片、`<details>` 标题行<br>⚡ 隐藏 `<!-- toc -->` 标记 | ⏳ P1：`<details>` 真正折叠；目录块按标题自动生成。 |
-| 搜索替换 | ✅ 后台全文搜索、区分大小写、逐个替换与全部替换（全部替换合并为一个撤销步骤） | ⏳ P2：正则表达式、仅在选区内替换。 |
-| 大纲、字数、缩放、主题 | ✅ 大纲浮卡跟随滚动高亮当前标题；字数在后台统计；缩放 60%–200%<br>⚡ 主题跟随系统深浅色自动切换 | ⏳ P1：自定义主题（读取 Web 版 `custom-themes` JSON）。 |
-| 精细排版（KP） | ✅ 段落两端对齐、避头尾（工具栏 ¶ 按钮开关） | ⏳ P2：英文断词、悬挂标点、标点挤压。 |
-| 输入法 | ✅ 组字、候选框定位、组字中撤销合并 | ⏳ P1：Windows 端验证。 |
-| 设置页 | ⚡ 独立设置窗口（⌘,），分区与文案对齐 Web 版；读写共享配置 `com.nomo.desktop/config.json`，与 Web 桌面版互通 | 已生效：默认模式、双栏排列、自动保存及延迟、保存前快照、精细排版、字号、行高、内容宽度、代码块行号与缩进、行内代码渲染、复制时保留语法、明暗模式、界面 / 正文 / 代码字体、缩放与 ⌘ 滚轮缩放、统计类型、阅读时间、大纲显示与层级、默认代码语言。<br>标注“暂未支持”（值仍保存，供 Web 版使用）：界面语言（仅简体中文）、配色主题、快捷插入、Markdown 检查、打开 / 关闭窗口行为、外部变更、预览标签、图片导入、图表类型、开发者选项、更新检查、自定义快捷键。 |
-| 无障碍 | ⛔ 当前为空 | ⏳ P1：接入 AccessKit。GPUI 0.2.2 不为自绘元素提供读屏支持。 |
+| 验收项 | 必须留下的证据 | 状态 |
+|---|---|---|
+| 无开发参数启动正式页面 | 默认构建命令、构建版本、启动 PID、隔离配置及窗口截图；中央实际为 EditorControl | 行为验证通过（run-01/02）；本轮新壳待复验 |
+| 新建、打开及多标签 | 新建空会话；任务文件打开成功/错误；同一路径复用；切换不新建独立正文或历史 | 基础行为验证通过；新双栏待复验 |
+| 编辑、保存、另存为与重开 | 任务文档实机输入，完整文件内容与编码/换行核对，重开一致，保存失败明确反馈且不清脏 | 已列短文档路径通过；失败/双栏待验 |
+| 未保存状态与关闭确认 | 编辑/撤销/保存后的脏标识；保存/放弃/取消，保存对话框取消；非活动标签关闭仍作用原文档 | 取消/保存关闭行为通过；其余待验 |
+| 撤销重做、焦点、选区、阅读位置 | 输入、格式化、跨窗口编辑可撤销/重做；标签切换后恢复；工具栏操作不丢选区 | 单栏已列场景通过；跨窗/双栏待验 |
+| 全文语义与窗口边界 | 长文档全选/复制/删除/替换、远跳、跨片段事务；完整正文仅在会话，控件载入范围和资源仍有界 | 600节远跳/末尾保存通过；其余待验 |
+| 源码/语义/双栏与中文 IME | 同会话一致修订；模式往返后内容/选区/历史/滚动一致；组合中切换/滚动不损坏事务 | 构建通过；双栏/真实IME待验 |
+| 生命周期与资源 | 隐藏标签暂停加载/渲染；关闭释放窗口/订阅/任务；取消或过期结果不回写关闭页；无 Buffer 镜像 | 构建通过；资源基准及完整释放待验 |
+| 当前工具链验证 | 默认 cargo check/release build，保留 feature 的对应检查/构建，按风险定向既有测试；记录原有失败 | 构建通过；定向既有测试通过（详见记录） |
 
-## 二、飞书文档功能覆盖
+## 后续验收与保留事项
 
-### 文本与基础块
+- 按上表逐区执行“核对差距 → 实现 → 验证 → 修复 → 记录”；每区同时验证外观、事件目标和错误状态。代码与默认/开发构建入口必须同步更新直接相关文档，旧入口描述随实际代码变化更新。
+- 实机使用任务专用文档及隔离配置，启动前记录已有进程/端口；只管理本任务启动的进程。记录参考版与 GPUI 版本、窗口尺寸、DPI、主题、截图和产物位置。
+- 性能按仓库基准：同 Release/GPUI/主题/窗口/DPI/固定媒体，空白、纯文本、四标签、复杂文档各三轮；20 次切换和打开关闭，区分预热与持续增长。私有驻留、私有提交、原生分配、GPU 分别报告；未测项目不计通过。
+- 外部文件变更、工作区恢复、多窗口、托盘、国际化、快捷键、图片及复杂块均按主分支页面入口追踪；当前缺口不因隐藏设置而消失。
+- 保留三平台构建、打包、输入法、文件打开/保存、升级/卸载及系统预览后续工作；不得恢复旧前端/WebView。系统预览、安装/发布和机器级集成如需新权限另行明确，不自动执行。
+- 全部目标有对应构建、行为及视觉证据后才能完成 Goal。局部完成、构建通过、单次性能数字或遇到阻塞均不代表整体完成。
 
-| 飞书功能 | 依赖云端 | Markdown 落地方案 | 状态 |
-| --- | --- | --- | --- |
-| 正文、标题 1–3 | 否 | 标准语法 | ✅ |
-| 标题 4–9 | 否 | Markdown 只有 6 级。7–9 级没有通用写法，强行扩展会破坏兼容 | 4–6 级 ✅，7–9 级 ⛔ |
-| 加粗、斜体、删除线、下划线、行内代码、链接 | 否 | 标准语法，下划线用 `<u>` | ✅ |
-| 文字颜色、背景色 | 否 | `<span class="nomo-fg-red nomo-bg-yellow">`，7 色与飞书一致 | ⚡ 渲染已完成；选色器 ⏳ P0 |
-| 对齐（左 / 中 / 右） | 否 | `<p align="center">`（与 Web 版图片对齐写法统一） | ⏳ P2 |
-| 缩进 | 否 | Markdown 没有段落缩进语义 | ⛔（列表层级缩进已支持） |
-| 分割线 | 否 | `---` | ✅ |
-| 待办 | 否 | `- [ ]` | ✅ |
-| 引用 | 否 | `>` | ✅ |
-| 高亮块（Callout，带 emoji 和底色） | 否 | 五种语义用 GitHub alerts；自定义 emoji 和标题用 Obsidian 写法 `> [!tip] 🎉 标题` | 🟡 五种语义 ✅；自定义 ⏳ P1 |
-| 分栏（2–5 栏栅格） | 否 | `<div class="nomo-columns">` 包裹多个 `<div class="nomo-column">`，栏内是普通 Markdown（前后留空行）。其他渲染器中退化为顺序内容 | ⏳ P1（需要块索引支持跨块分组） |
-| 表格 | 否 | GFM 表格；列宽 `data-colwidth`；合并单元格降级为 HTML 表格（Web 版已有约定） | 🟡 见上文表格行 |
-| 代码块 | 否 | 围栏代码 | ✅ |
-| 公式 | 否 | `$…$`、`$$…$$` | 🟡 渲染引擎 ⏳ P1 |
-| 目录 | 否 | `<!-- toc -->` 标记（Web 版约定） | 🟡 ⏳ P1 |
-| 折叠标题、折叠列表 | 否 | 视图状态，不写文件 | ⏳ P1 |
-| emoji | 否 | Unicode 原样写入 | ✅（⌃⌘Space 打开系统表情面板）；`:emoji:` 快捷补全 ⏳ P2 |
+## 本轮实现与验证记录
 
-### 媒体与图表
+- 2026-10-26：完成固定主分支页面与交互的只读源码对照，建立以上待实现清单；未启动应用、未截图、未运行构建或测试，不据此报告行为/视觉通过。后续实现记录由主代理追加。
 
-| 飞书功能 | 依赖云端 | Markdown 落地方案 | 状态 |
-| --- | --- | --- | --- |
-| 图片：大小、对齐 | 否 | `![]()` 加 `{align= width=}` | ✅ 显示；拖拽调整 ⏳ P1 |
-| 图片描述（图注） | 否 | 图片 title：`![alt](src "说明")`，渲染为图注 | ⏳ P2 |
-| 视频、音频 | 否 | `<video src>` / `<audio src>`（本地文件） | ⏳ P2（GPUI 无媒体播放，需原生视图嵌入） |
-| 文件附件 | 否 | 普通链接指向本地文件，渲染为附件卡片 | ⏳ P2 |
-| 流程图、时序图、思维导图 | 否 | Mermaid（含 mindmap） | ⏳ P1 |
-| 画板 | 部分 | 嵌入本地 Excalidraw 或 SVG 文件 | ⏳ P2 |
-| 链接卡片预览 | 联网，但不依赖云端账户 | 普通链接；预览结果只缓存在本地 | ⏳ P2 |
-| 多维表格、电子表格嵌入 | 是 | — | ⛔ |
+### 2026-10-26 默认入口接入检查点
 
-### 交互
+- **构建通过**：默认 Workspace 已改为 `Tab → DocumentHost → EditorControl`，开发入口共用宿主；普通启动、新建和打开不再创建 Buffer/EditorView。单应用共享会话管理器，每文档独立 owner；全文/历史由会话保存，窗口、预取、资源预算和取消沿用原实现。
+- **已实现，部分行为验证通过**：文件打开/新建、异步保存/另存为、保存前快照、关闭确认、标签切换、撤销重做、自动保存、全局分页搜索/替换、索引大纲与全文统计已连接。自动保存、替换、长文档及失败路径尚待专项验证，不能视为全部通过。
+- **行为验证通过（短文档）**：无开发参数启动；首页 Ctrl+N；打开任务文件；输入/保存/重开字节一致；撤销重做及保存点脏状态；切标签保留历史/光标；源码快捷键与工具栏状态一致；搜索跳转后继续输入查询不误改正文；取消关闭保留内容；保存后关闭原标签。输入 Unicode 中文只证明文本输入，不等于真实 IME。
+- 实机产物：`.artifacts/workspace-goal/run-01/`（PID 14184，已正常退出）、`run-02/`（PID 6844，启动记录和日志）；隔离配置 `.artifacts/workspace-goal/profile/`，只使用 `fixtures/`。截图 `run-02/source-mode.png`。保存文件 `fixtures/new-editor.md` 与隔离配置下保存前快照已逐字核对。运行截图尚未与固定 master 参考版比较。
+- **构建通过**：默认 `cargo check --locked --bin nomo`、feature `cargo check --locked --features editor-control-demo --all-targets`、两种 Release build 均通过；最后构建为默认版本。现有定向测试 `editor_control` 65 通过/3 ignored，`text_document::markdown_session` 36 通过；未新增或修改测试。日志见 `.artifacts/workspace-goal/{latest-check,feature-check,control-tests,session-tests,feature-build,release-build}.log`。保留已有警告，ignored 不计通过。
+- 修复实机发现：首页焦点无法 Ctrl+N、模式动作被子控件截获导致状态不一致、搜索导航抢走查询焦点。修复审查发现：后台查询过期回写、跨文档统计取消串扰、隐藏页查询缓存驻留、挂起事务重试入口、全选长度忽略尚未确认修改。
+- **待实现/未验证**：同会话双栏目前明确提示未接通；真实 IME、窗口边界、长文档资源/连续滚动、全文复杂命令、超大单结构/native_region、4 MiB 大纲分页、内容宽度/设置应用及主分支视觉逐区对齐。当前无性能收益或泄漏结论，三轮/20 次基准未执行。阶段一与整个 Goal 均未完成。
+- 下一步：长文档实机定位与边界修复；调查双栏共享事务和有界视口方案；准备固定主分支隔离参考构建。表格保留起始差距，当前进展以本节明确子项证据为准。
 
-| 飞书功能 | 状态 | 说明 |
-| --- | --- | --- |
-| Markdown 快捷输入（`#`、`-`、`>`、```` ``` ````） | ✅ | 源码即文本，块级实时预览天然支持 |
-| 斜杠命令 `/` | ⏳ P0 | 依赖 Popover 和列表组件；插入项复用工具栏命令 |
-| 选中文字后的悬浮工具栏 | ⏳ P0 | 依赖 Popover 组件；位置取选区几何 |
-| 块手柄（⋮⋮）：拖拽排序、转换块类型、复制、删除 | ⏳ P1 | 基于顶层块索引，块移动只是源码区间交换 |
-| 右键菜单 | ⏳ P1 | GPUI 有 `deferred` + `anchored` 原语，需封装 ContextMenu |
-| 链接 ⌘ 点击打开、站内锚点跳转 | ⏳ P1 | `#标题` 锚点按 Web 版 slug 规则匹配 |
-| 粘贴富文本或 HTML 自动转 Markdown | ⏳ P1 | 可复用 `src-tauri` 中已有的转换能力 |
-| 撤销 / 重做、查找替换 | ✅ | |
+### 2026-10-26 长文档与参考构建进行中
 
-### 视图与文件
+- 任务语料 `fixtures/long-window.md`：600 节、原始 288247 字节，SHA256 `01D5EB93E1542E5156F9C24FA93AE6D483677504B42DCBD110835FBC6567DCEE`。搜索能定位完整文档末尾，全文统计和600项大纲正常返回；末尾修改保存后288260字节与原文加“ 末尾追加”逐字一致。
+- **仍在修复，未通过整体验收**：远距离导航及输入/撤销后的滚动位置在布局/结构刷新之间存在回跳。已采集 `run-03/far-jump-before.png`、`run-07/far-jump-after.png`、`run-09/long-edit-stable.png`；中间版本某些操作通过，但后续路径复现，因此不能用这些截图宣布问题全部解决。当前正在核对 GPUI prepaint、clamp、邻窗加载与定位意图结束的时序。
+- 固定 master 参考版已成功隔离构建并由主代理核对产物哈希；目录 `.artifacts/workspace-goal/reference/`。页面与业务源保持固定commit，构建隔离仅调整局部Tauri路径、identifier、禁用自动更新。pnpm frozen/前端及Tauri Release通过，详见 `reference/BUILD-RECORD.md`。
+- 参考版 PID 11576 已用任务 alpha.md 启动；主页面截图 `reference/logs/alpha-reference.png`，离线更新说明截图 `update-notes.png`。参考尺寸1180×760，当前GPUI1280×820，尚不计同尺寸视觉通过。未安装/发布，未触碰真实文档。
+- 双栏只读方案：一个DocumentHost拥有唯一会话，内部两个按需pane共享事务协调，各自有界Viewport/ScrollHandle/高度树；operation_id须包含pane身份，ack须作用于捕获的源Entity；滚动按共同正文锚点映射。仍待实现，不能用两个独立DocumentHost替代。
 
-| 飞书功能 | 状态 | 说明 |
-| --- | --- | --- |
-| 目录大纲 | ✅ | |
-| 标准 / 宽屏页面宽度 | ✅ | 工具栏与设置页的内容宽度滑杆（45%–90%），与 Web 版一致 |
-| 专注模式、全屏 | ⏳ P2 | |
-| 字数统计 | ✅ | |
-| 导出 PDF / Word / HTML / 图片 | ⏳ P1 | 优先复用 `src-tauri` 的导出逻辑（Rust，可共享） |
-| 导入 Word / HTML | ⏳ P2 | |
-| 历史版本 | ⏳ P2 | 本地快照，对应 Web 版的 `createSnapshotBeforeSave` |
-| 评论 | ⏳ P2 | 只做本地注释，Web 版已有注释块和 `data-comment`；多人评论 ⛔ |
-| 多人协作、分享权限、@人、日期提醒、AI、翻译 | ⛔ | 依赖云端 |
+### 2026-10-26 长文档定位修复复验
 
-## 三、GPUI 基础组件封装
+- **行为验证通过（所列场景）**：`run-12` 在600节语料上完成首屏搜索末尾、末尾追加、异步结构刷新、撤销、重做、保存；命中/光标始终回到第600节末尾，没有再停到第566节。随后手动向上滚到第593—597节并等待，未被旧光标拉回。截图 `run-12/long-undo-stable.png`、`long-redo-stable.png`、`manual-scroll-stable.png`。
+- 保存结果为288270字节，与原始全文加“ 末尾追加 第二次”逐字相等；不是仅保存当前窗口。此前288260字节文件已在新进程重开并看到末尾追加。此次保存后的再次重开、全选跨窗复杂编辑、真实IME及更大语料仍待验。
+- 根因与修改：宿主此前没有光标可见性连接；相邻窗口挂载时先使用初始高度，后续真实布局及GPUI clamp会移动内容。现在在滚动容器 `on_children_prepainted` 后按实际几何校正，并等可见窗口采用测量高度、事务确认及窗口加载完成才结束定位；用户滚轮取消旧定位。结构刷新复用边界未变的已测高度。正式/开发外壳共用此逻辑。
+- 增量成本：一个定位意图布尔值、只读局部几何查询和现有有界挂载集合检查；无新正文、历史、常驻任务、依赖或独立高度缓存。临时诊断输出已移除。仍未进行三轮/20次资源基准，不声称性能收益或泄漏结论。
+- **构建通过**：最终代码的默认check、feature all-targets check、默认/feature Release build均通过；最后构建为默认。定向 `editor_control` 测试65通过、3 ignored。最新日志 `long-check.log`、`long-feature-check.log`、`long-control-tests.log`、`long-feature-build.log`、`long-build.log`。本轮没有新增或修改测试。
+- 本次启动的旧GPUI窗口已逐个正常关闭；run-03曾有一个隐藏启动PID20512，核对精确exe路径后终止，之后改用已授权的可见验收窗口。当前保留 `run-12` PID7712（任务长文档已保存）和参考版PID11576（任务alpha.md），日志及启动记录在各自目录。
+- **下一轮继续**：同一文档语义/源码切换的阅读位置、双栏协调和窗口边界；参考版同尺寸视觉对照及标题栏/标签栏/工具栏布局。第一批基础接入已有实际运行证据，但阶段一全部边界与整体Goal仍未完成，未提交/推送。
 
-GPUI 0.2.2 只提供 `div`、`svg`、`img`、`uniform_list`、`anchored` 等原语，没有现成的业务组件。统一封装在 `src/ui/components.rs` 中。
+### 2026-10-27 同会话双栏与标题栏接入检查点
 
-| 组件 | 状态 | 说明 |
-| --- | --- | --- |
-| Icon（Lucide，与 Web 版同名，单色随主题着色） | ⚡ | `scripts/export_icons.mjs` 从 `@lucide/svelte` 导出 SVG 并内嵌进二进制 |
-| IconButton / SmallIconButton | ⚡ | 悬停、激活态；配合 `tooltip()` |
-| Button（主要 / 次要 / 幽灵） | ⚡ | 可带前置图标 |
-| Segmented（分段切换） | ⚡ | 用于模式切换 |
-| Tooltip | ⚡ | |
-| FloatingCard | ⚡ | 大纲、搜索面板共用的浮层外观 |
-| VerticalDivider | ⚡ | |
-| TextField（单行输入，支持输入法组字） | ✅ | 修正了 gpui 官方示例的组字越界问题 |
-| Popover / Dropdown / ContextMenu | ⏳ P0 | 斜杠命令、悬浮工具栏、颜色选择器、右键菜单都依赖它 |
-| ColorPicker（7 色文字 / 背景） | ⏳ P0 | 依赖 Popover |
-| Dialog / Toast | ⏳ P1 | 目前用系统 prompt 和状态栏提示代替 |
-| Switch / Slider / Select / TextSegment / Badge | ⚡ | 设置页与工具栏使用；滑杆拖动期间在窗口级监听指针，松手才写入配置；下拉用遮罩处理点击外部关闭 |
-| 可拖动滚动条 | 🟡 | 编辑区已支持拖动；面板滚动条 ⏳ |
-
-## 四、平台问题与绕行记录
-
-| 问题 | 影响 | 处理 | 移除条件 |
-| --- | --- | --- | --- |
-| gpui 0.2.2 `WindowTextSystem::layout_line` 合并相邻 run 时字体比较恒为真 | 同色的粗体或等宽片段被并入前一字体，粗体、行内代码失效 | 相邻 run 交替使用两个肉眼无差的颜色，强制切分（`layout.rs`） | 升级到修复该比较的 gpui 版本 |
-| gpui 官方 `examples/input.rs` 组字选区计算 | 删空组字后重输会越界崩溃 | 编辑器和输入框都改为相对组字起点计算 | — |
-| 自绘元素没有无障碍树 | 读屏读不到正文 | 计划接入 AccessKit | — |
-| 等宽字体缺字时 CoreText 级联回退到苹方，gpui 按 PostScript 名复用已加载的苹方光栅化 | 字形 ID 与字形表不匹配，源码模式汉字乱码 | 排版时把 Menlo 不含的字符显式切给正文字体（`layout.rs` 的 `mono_covers`） | — |
-| Mermaid 默认的 HTML 标签（`foreignObject`）resvg 不支持；默认的估算测量与实际字宽不一致 | 流程图文字丢失、类图文字被截断 | 使用 merman 的 `SvgPipeline::resvg_safe()`，并用冬青黑体做真实字体测量（`embeds.rs`） | — |
-| PingFang SC 是系统资源字体 | 已确认 gpui 能解析，600 字重可用 | 正文以 PingFang SC 为主字体 | — |
-| pulldown-cmark 0.13.5 上下标规则 | `H~2~O` 不识别为下标 | 文档建议用 `<sub>` / `<sup>` | 解析器更新后复核 |
-
-## 五、本轮完成的快速项（⚡）
-
-- Lucide 图标移植：48 个图标，与 Web 版同名；工具栏、标签、侧栏、搜索面板、状态栏、空白页全部换成图标。
-- 主题跟随系统深浅色自动切换；手动切换后固定为所选模式，“视图 › 主题跟随系统”可恢复。
-- 基础组件封装（见第三节），工具栏、搜索面板、侧栏都已改用这些组件。
-- 文字颜色、背景色 7 色渲染（`nomo-fg-*` / `nomo-bg-*` class，兼容 style 和 `<font color>`）。
-- 行内 `<u>`、`<mark>`、`<sub>`、`<sup>`、`<b>`、`<i>`、`<s>`、`<br>` 按样式渲染。
-- 工具栏新增下划线（⌘U）、高亮（⌘⇧H）、提示块按钮。
-- 图片 `{align= width=}` 与 `<p align><img width>` 两种写法的尺寸和对齐。
-- 代码块复制按钮；隐藏 `<!-- toc -->` 标记；`<details>` 显示为标题行。
-- ⌃⌘Space 打开系统表情面板。
-- 设置页移植（见第一节“设置页”行）与工具栏内容宽度滑杆。
-- 源码模式等宽字体中的汉字显式改用正文字体，修复 CoreText 回退字形与 gpui 光栅字体不一致导致的乱码。
-
-## 六、建议推进顺序
-
-1. **P0 编辑体验**
-   - Popover 组件 → 斜杠命令、悬浮工具栏、颜色选择器。
-   - 表格单元格编辑与增删行列。
-   - 段落、标题、列表的原位编辑（缩小与 Web 版的编辑模型差距）。
-2. **P1 内容完整度**
-   - 公式与 Mermaid 离屏渲染。
-   - 图片拖拽调整与粘贴保存。
-   - 分栏布局块、自定义提示块、标题折叠、块手柄。
-   - 导出、右键菜单、分栏滚动同步细节、AccessKit。
-3. **P2 增强**
-   - 视频音频、附件卡片、链接预览、历史版本、本地注释。
-   - 专注模式、KP 排版完善、正则搜索。
+- **构建通过，实机未验证**：DocumentHost 新增按需 Pane。双栏各自使用原有连续窗口、预取、回收、滚动及高度树；共享唯一 NativeWindowPort、完整正文、修订和历史。普通工具栏/快捷键/默认模式设置可以进入双栏，不再以提示拒绝。
+- 输入始终由一个控件负责，跨栏/跨窗口移交检查未确认事务、IME、对象草稿与修订。Submit 回执捕获提交 Entity；新栏窗口 ID 唯一；后续窗口请求核对 Pane ID、generation、目标 Entity/WindowIdentity 与文档修订。新选择、点击或滚轮取消旧阅读跟随，防止异步回包覆盖新输入位置。
+- **已实现，实机未验证**：完整文档字节锚点的模式阅读位置恢复/双栏滚动同步；非活动栏延迟刷新；8px 分隔条、25–75% 比例、方向键/Shift/Home/End；遵循左右顺序配置；单栏内容宽度配置真正作用编辑区，双栏宽度控制不可改变配置。离开双栏 detach 另一栏并释放请求/预算；隐藏标签暂停两栏。
+- 审查修复：空文档无结构组也执行输入控件移交；首尾阅读锚点按实际可滚范围完成，不反复 notify；活动栏光标可见性不受跨栏 IME 暂停门禁影响；宿主恢复选区不再伪造用户 SelectionChanged；加载失败显示重试，避免无界自动重载。
+- **构建通过，行为/视觉未验证**：独立42px标题栏、Windows菜单/窗口按钮、拖动/双击/右键菜单、菜单键盘导航与焦点恢复；标签条另起一行。既有文件/编辑/查看/基础格式动作、新窗口、1–6级标题/清除格式已接线；关闭继续走 Workspace 保存确认。最近记录、导出、选择器、额外块命令、Mini/更新等未接能力保持显式禁用并继续列为待实现，不能把菜单可见算功能完成。
+- 已对齐已支持菜单的默认快捷键：Ctrl+1–6 设置标题、Ctrl+0 正文、Ctrl+Shift+N 新窗口、Alt+Shift+5 删除线、Ctrl+Shift+X 任务列表、Ctrl+Shift+H 分隔线及清除样式等。去掉 Ctrl+1–3 的旧模式绑定冲突，模式改用工具栏或 Ctrl+E；自定义快捷键、未支持命令及跨平台完整映射仍待补齐。此项仅构建验证。
+- 增量成本：仅在双栏时增加一套有界控件/布局/高度树与现有组元数据；两个 ResidentLease 登记到原共享源文本/布局预算，非必要预取仍受压力回收约束。每栏沿用32 MiB派生组元数据估算上限，双栏最多两份及对应标量高度树；没有新增全文 Buffer、独立历史、数据库、依赖、永久定时器，也未裁剪撤销历史。尚未运行三轮/20次性能基准，不声明性能或泄漏结论。
+- 桌面验收阻塞证据：本轮两次重新绑定并激活旧任务窗口均返回 `failed to activate captured window`；只读检查存在 LockApp 进程，已请用户方便时解锁。未绕过桌面锁定或修改系统。未启动新的验收进程，旧 run-12 PID7712 与参考 PID11576 保留；本轮新代码不借用上一版截图计通过。
+- 验证日志：`split-check.log`、`split-feature-check.log`、`split-control-tests.log`、`split-feature-build.log`、`split-build.log`；最终代码默认check、feature all-targets check、默认/feature Release均通过；控件测试65通过、3 ignored。最终产物为默认版本，冻结于 `split-candidate/nomo.exe`，SHA256及构建入口见同目录 `build-record.json`。未新增/修改测试，保留既有警告。
+- 下一步：桌面恢复后先验证空文档双栏从两边输入、双向编辑/统一撤销重做/保存重开、600节远跳与连续滚动、双栏/单栏/标签往返和真实IME；同时按固定参考版复验新标题栏及菜单，继续标签/工具栏/侧栏等区域。未提交/推送，整体 Goal 保持进行中。

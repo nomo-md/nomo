@@ -101,7 +101,12 @@ pub fn commands() -> Vec<MenuEntry> {
         result.push(MenuEntry {
             label: label.into(),
             keywords,
-            intent: EditIntent::InsertBlock(template.into()),
+            intent: match keywords {
+                "code block" => EditIntent::InsertCodeBlock("text".into()),
+                "math formula" => EditIntent::InsertMathBlock,
+                "details summary" => EditIntent::InsertDetails,
+                _ => EditIntent::InsertBlock(template.into()),
+            },
         });
     }
     result

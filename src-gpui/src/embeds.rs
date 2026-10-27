@@ -221,8 +221,21 @@ fn mermaid_engine(dark: bool) -> merman::Engine {
 
 /// Mermaid 文字使用的字体：冬青黑体（含 W3/W6 字重，23 MB，位于常规系统字体目录）。
 /// 苹方 PingFang.ttc 有 78 MB，超出 merman 默认的 64 MB 常驻上限，且常驻代价过高。
+#[cfg(target_os = "macos")]
 const MERMAID_FONT_FAMILY: &str = "Hiragino Sans GB";
-const MERMAID_FONT_FILE: &str = "/System/Library/Fonts/Hiragino Sans GB.ttc";
+#[cfg(target_os = "windows")]
+const MERMAID_FONT_FAMILY: &str = "Microsoft YaHei";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const MERMAID_FONT_FAMILY: &str = "Noto Sans CJK SC";
+
+fn mermaid_font_file() -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    { "/System/Library/Fonts/Hiragino Sans GB.ttc".into() }
+    #[cfg(target_os = "windows")]
+    { std::path::PathBuf::from(std::env::var_os("WINDIR").unwrap_or_else(|| "C:/Windows".into())).join("Fonts/msyh.ttc") }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    { "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc".into() }
+}
 
 /// Mermaid 文本测量用的真实字体。默认的确定性测量与实际字形宽度不一致，类图等会截断文字；
 /// 改用真实字体后布局与绘制使用同一份度量。首次渲染图表时加载并常驻；字体缺失时返回 None，
@@ -231,7 +244,7 @@ fn mermaid_fonts() -> Option<merman::svg::export::NativeFontContext> {
     static CONTEXT: OnceLock<Option<merman::svg::export::NativeFontContext>> = OnceLock::new();
     CONTEXT
         .get_or_init(|| {
-            let result = merman::svg::export::NativeFontOptions::default().with_font_file(MERMAID_FONT_FILE).load(&merman::OperationControl::new());
+            let result = merman::svg::export::NativeFontOptions::default().with_font_file(mermaid_font_file()).load(&merman::OperationControl::new());
             if let Err(error) = &result {
                 eprintln!("Mermaid 字体加载失败，改用估算测量：{error}");
             }
