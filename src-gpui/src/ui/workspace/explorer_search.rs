@@ -31,7 +31,7 @@ impl Workspace {
     pub(super) fn focus_tree_search(&mut self, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_tree_search(cx);
         self.explorer.search_focused = path;
-        if let Some(field) = &self.explorer.search_field { window.focus(&field.focus_handle(cx)); }
+        if let Some(field) = &self.explorer.search_field { window.focus(&field.focus_handle(cx), cx); }
     }
 
     pub(super) fn clear_tree_search(&mut self, cx: &mut Context<Self>) {
@@ -94,7 +94,7 @@ impl Workspace {
         match event.keystroke.key.as_str() {
             "tab" => {
                 self.clear_tree_search(cx);
-                if modifiers.shift { window.focus_prev(); } else { window.focus_next(); }
+                if modifiers.shift { window.focus_prev(cx); } else { window.focus_next(cx); }
                 cx.stop_propagation();
             }
             "f2" | "delete" if self.explorer.search_query.is_empty() => {

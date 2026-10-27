@@ -308,7 +308,7 @@ impl Chrome {
     }
 
     fn open(&mut self, menu: Menu, window: &mut Window, cx: &mut Context<Self>) {
-        if self.menu.is_none() { self.restore_focus = window.focused(cx); window.focus(&self.focus); }
+        if self.menu.is_none() { self.restore_focus = window.focused(cx); window.focus(&self.focus, cx); }
         self.menu = Some(menu); self.submenu = None; self.selected = None; self.subselected = None;
         self.menu_scroll.set_offset(point(px(0.0), px(0.0))); self.context_position = None;
         cx.notify();
@@ -317,7 +317,7 @@ impl Chrome {
     pub fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None; self.submenu = None; self.selected = None; self.subselected = None;
         self.context_position = None;
-        if let Some(focus) = self.restore_focus.take() { window.focus(&focus); }
+        if let Some(focus) = self.restore_focus.take() { window.focus(&focus, cx); }
         cx.notify();
     }
 

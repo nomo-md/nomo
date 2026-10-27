@@ -140,7 +140,7 @@ impl EditorPopover {
                 if event.keystroke.key == "tab" {
                     let title_focus = text.read(cx).focus_handle(cx);
                     let next = if title_focus.is_focused(window) { href.read(cx).focus_handle(cx) } else { title_focus };
-                    window.focus(&next);
+                    window.focus(&next, cx);
                     window.dispatch_action(Box::new(FieldSelectAll), cx);
                     cx.stop_propagation();
                 }
@@ -176,13 +176,15 @@ impl EditorPopover {
     }
 
     fn button(&self, id: &'static str, name: Option<IconName>, primary: bool, theme: &Theme) -> Stateful<Div> {
-        div().id(id).w(px(32.0)).h(px(28.0)).flex_none().flex().items_center().justify_center()
+        div().id(id).group(id).w(px(32.0)).h(px(28.0)).flex_none().flex().items_center().justify_center()
             .rounded(px(4.0)).border_1().border_color(if primary { theme.accent } else { theme.border })
             .bg(if primary { theme.accent } else { theme.rail_bg })
             .text_color(if primary { theme.on_accent } else { theme.muted }).cursor_pointer()
             .hover(|style| style.border_color(theme.accent).text_color(if primary { theme.on_accent } else { theme.accent_strong }))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .children(name.map(|name| gpui::svg().path(name.path()).size(px(16.0)).flex_none()))
+            .children(name.map(|name| gpui::svg().path(name.path()).size(px(16.0)).flex_none()
+                .text_color(if primary { theme.on_accent } else { theme.muted })
+                .group_hover(id, |style| style.text_color(if primary { theme.on_accent } else { theme.accent_strong }))))
     }
 
     fn shell(&self, id: &'static str, theme: &Theme, animate_theme: bool, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -230,7 +232,7 @@ impl Render for EditorPopover {
                 self.shell("link-popover", &theme, animate_theme, cx)
                     .w(px(LINK_POPOVER_WIDTH).min((window.viewport_size().width - px(24.0)).max(px(0.0))))
                     .p(px(8.0)).gap(px(7.0)).bg(bg).border_color(border)
-                    .shadow(vec![BoxShadow { color: rgba(if theme.dark { 0x0000006b } else { 0x00000038 }).into(), offset: point(px(0.0), px(20.0)), blur_radius: px(60.0), spread_radius: px(0.0) }])
+                    .shadow(vec![BoxShadow { inset: false, color: rgba(if theme.dark { 0x0000006b } else { 0x00000038 }).into(), offset: point(px(0.0), px(20.0)), blur_radius: px(60.0), spread_radius: px(0.0) }])
                     .child(link_pointer(bg, border))
                     .child(div().flex().flex_col().gap(px(6.0)).child(div().w_full().child(text.clone())).child(url_row))
                     .children(self.error_text(&theme)).into_any_element()
@@ -259,7 +261,7 @@ impl Render for EditorPopover {
                 }
                 self.shell("table-popover", &theme, animate_theme, cx).w(px(TABLE_POPOVER_WIDTH)).p(px(10.0))
                     .bg(theme.surface).border_color(theme.border)
-                    .shadow(vec![BoxShadow { color: rgba(if theme.dark { 0x00000052 } else { 0x16202c14 }).into(), offset: point(px(0.0), px(if theme.dark { 16.0 } else { 14.0 })), blur_radius: px(if theme.dark { 44.0 } else { 34.0 }), spread_radius: px(0.0) }])
+                    .shadow(vec![BoxShadow { inset: false, color: rgba(if theme.dark { 0x00000052 } else { 0x16202c14 }).into(), offset: point(px(0.0), px(if theme.dark { 16.0 } else { 14.0 })), blur_radius: px(if theme.dark { 44.0 } else { 34.0 }), spread_radius: px(0.0) }])
                     .child(div().flex().items_center().justify_between().min_w(px(214.0)).mb(px(8.0))
                         .text_size(px(13.0)).line_height(px(19.5)).font_weight(FontWeight::BOLD).text_color(theme.muted)
                         .child(locale.text("table_title")).child(div().font_family(font_for(Family::Mono, true, false).family).text_color(theme.accent_strong)

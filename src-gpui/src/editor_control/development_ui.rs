@@ -3,7 +3,7 @@ use super::*;
 impl DocumentHost {
     pub(super) fn render_development(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let host = cx.entity().downgrade();
-        if self.focus_pending { self.focus_pending = false; window.focus(&self.control.focus_handle(cx)); }
+        if self.focus_pending { self.focus_pending = false; window.focus(&self.control.focus_handle(cx), cx); }
         if self.production {
             let title = self.port.status().ok().and_then(|s| s.path).and_then(|p| std::path::PathBuf::from(p).file_name().map(|n|n.to_string_lossy().into_owned())).unwrap_or_else(|| "未命名".into());
             window.set_window_title(&format!("{title} — Nomo 原生编辑"));
@@ -82,7 +82,7 @@ impl DocumentHost {
                         control.update(cx, |view, cx| {
                             view.command(EditIntent::ToggleInline(format), cx)
                         });
-                        window.focus(&control.focus_handle(cx));
+                        window.focus(&control.focus_handle(cx), cx);
                     }),
             );
         }
@@ -102,7 +102,7 @@ impl DocumentHost {
                         for mount in &host.panes[host.active_pane].viewport.mounts {
                             if mount.view != host.control { let _=mount.view.update(cx, |view,cx|view.set_mode(mode,cx)); }
                         }
-                        window.focus(&host.control.focus_handle(cx));
+                        window.focus(&host.control.focus_handle(cx), cx);
                     })),
             );
         }
@@ -138,7 +138,7 @@ impl DocumentHost {
                     .child("插入 / 格式")
                     .on_click(cx.listener(|v, _, window, cx| {
                         v.control.update(cx, |v, cx| v.open_menu(cx));
-                        window.focus(&v.control.focus_handle(cx));
+                        window.focus(&v.control.focus_handle(cx), cx);
                     })),
             )
             .child(
@@ -203,7 +203,7 @@ impl DocumentHost {
                         .child(label)
                         .on_click(move |_, window, cx| {
                             control.update(cx, |v, cx| v.table_command(intent, cx));
-                            window.focus(&control.focus_handle(cx));
+                            window.focus(&control.focus_handle(cx), cx);
                         }),
                 );
             }

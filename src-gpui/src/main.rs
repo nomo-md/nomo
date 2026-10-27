@@ -39,7 +39,7 @@ mod async_runtime {
         where F::Output:Send+'static { runtime().spawn(future) }
 }
 
-use gpui::{App, AppContext, Application, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, point, px, size};
+use gpui::{App, AppContext, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, point, px, size};
 use std::path::PathBuf;
 use ui::workspace::{self, Workspace};
 
@@ -49,7 +49,13 @@ fn main() {
     #[cfg(feature = "editor-control-demo")]
     let native_editor = std::env::args().any(|argument| argument == "--editor-control");
     let paths: Vec<PathBuf> = std::env::args().skip(1).filter(|argument| argument != "--editor-control-demo" && argument != "--editor-control").map(PathBuf::from).collect();
-    let application = Application::new().with_assets(ui::components::Assets);
+    #[cfg(not(windows))]
+    let application = gpui_platform::application();
+    #[cfg(windows)]
+    let application = gpui::Application::with_platform(std::rc::Rc::new(
+        gpui_windows::WindowsPlatform::new(false).expect("初始化 Windows 平台"),
+    ));
+    let application = application.with_assets(ui::components::Assets);
     // 平台可能在启动完成前送达文件 URL；只暂存尚未交给 Workspace 的路径。
     let open_state = std::rc::Rc::new(std::cell::RefCell::new((None::<gpui::AsyncApp>, Vec::<PathBuf>::new())));
     let development_entry = cfg!(feature = "editor-control-demo") && std::env::args().any(|arg| arg == "--editor-control" || arg == "--editor-control-demo");
@@ -70,9 +76,7 @@ fn main() {
                 }
             };
             if !paths.is_empty() {
-                if let Err(error) = context.update(|cx| open_paths(paths, cx)) {
-                    eprintln!("处理系统文件打开请求失败：{error}");
-                }
+                context.update(|cx| open_paths(paths, cx));
             }
         });
         application.on_reopen(|cx| open_paths(Vec::new(), cx));
@@ -100,7 +104,7 @@ fn main() {
 
         #[cfg(feature = "editor-control-demo")]
         if control_demo || native_editor {
-            cx.on_window_closed(|cx| { if cx.windows().is_empty() { cx.quit(); } }).detach();
+            cx.on_window_closed(|cx, _| { if cx.windows().is_empty() { cx.quit(); } }).detach();
             let bounds = Bounds::centered(None, size(px(1100.0), px(800.0)), cx);
             cx.open_window(WindowOptions { app_id: Some("com.nomo.desktop".into()), window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {title:Some("Nomo · 控件开发".into()),..Default::default()}),..Default::default()},
@@ -149,8 +153,8 @@ fn open_workspace(paths: Vec<PathBuf>, cx: &mut App) {
 fn set_menus(cx: &mut App) {
     use workspace::*;
     cx.set_menus(vec![
-        Menu { name: "Nomo".into(), items: vec![MenuItem::action("设置…", OpenSettings), MenuItem::separator(), MenuItem::action("退出 Nomo", Quit)] },
-        Menu {
+        Menu { disabled: false, name: "Nomo".into(), items: vec![MenuItem::action("设置…", OpenSettings), MenuItem::separator(), MenuItem::action("退出 Nomo", Quit)] },
+        Menu { disabled: false,
             name: "文件".into(),
             items: vec![
                 MenuItem::action("新建", NewFile),
@@ -163,7 +167,7 @@ fn set_menus(cx: &mut App) {
                 MenuItem::action("关闭标签", CloseTab),
             ],
         },
-        Menu {
+        Menu { disabled: false,
             name: "编辑".into(),
             items: vec![
                 MenuItem::action("撤销", editor::Undo),
@@ -180,7 +184,7 @@ fn set_menus(cx: &mut App) {
                 MenuItem::action("查找上一个", FindPrev),
             ],
         },
-        Menu {
+        Menu { disabled: false,
             name: "格式".into(),
             items: vec![
                 MenuItem::action("加粗", Bold),
@@ -205,7 +209,7 @@ fn set_menus(cx: &mut App) {
                 MenuItem::action("分隔线", Rule),
             ],
         },
-        Menu {
+        Menu { disabled: false,
             name: "视图".into(),
             items: vec![
                 MenuItem::action("语义模式", ModeSemantic),

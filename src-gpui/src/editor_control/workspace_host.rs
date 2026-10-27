@@ -415,7 +415,7 @@ impl Render for DocumentHost {
         }
         if self.focus_pending && !self.hidden {
             self.focus_pending = false;
-            window.focus(&self.control.focus_handle(cx));
+            window.focus(&self.control.focus_handle(cx), cx);
         }
         let animate_theme = Theme::ui_transition_active(cx);
         let failure = self.control.read(cx).host.failure().map(str::to_string);

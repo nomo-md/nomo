@@ -43,7 +43,6 @@ pub struct EditorControl {
     layout_key: Option<(LayoutStamp, ViewMode, Vec<Range<usize>>, u64)>,
     bounds: Option<Bounds<Pixels>>,
     visible_bounds: Option<Bounds<Pixels>>,
-    marked: Option<Range<usize>>,
     composition_templates: super::template_projection::CompositionTemplates,
     preferred_x: Option<f32>,
     height: f32,
@@ -78,7 +77,6 @@ impl EditorControl {
             layout_key: None,
             bounds: None,
             visible_bounds: None,
-            marked: None,
             composition_templates: Default::default(),
             preferred_x: None,
             height: 32.0,
@@ -174,7 +172,6 @@ impl EditorControl {
         self.layout = None;
         self.layout_key = None;
         self.bounds = None;
-        self.marked = None;
         self.visible_bounds = None;
         self.last_geometry = None;
         self.horizontal_drag = None;
@@ -440,7 +437,7 @@ impl EditorControl {
         );
     }
     fn horizontal(&mut self, forward: bool, word: bool, extend: bool, cx: &mut Context<Self>) {
-        if self.marked.is_some() {
+        if self.host.interaction.marked.is_some() {
             return;
         }
         let source = &self.host.parsed.source;
@@ -746,7 +743,7 @@ impl EditorControl {
         if self.host.interaction.draft {
             return;
         }
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         if !matches!(
             self.host.presentation,
             Presentation::Editable | Presentation::ReadOnly
@@ -1461,7 +1458,7 @@ impl EditorControl {
                 window,
                 cx,
             );
-            if let Some(marked) = &self.marked {
+            if let Some(marked) = &self.host.interaction.marked {
                 for (x, y, w, h) in layout.source_rects(marked.clone()) {
                     paint_box(
                         Bounds::new(
@@ -1520,12 +1517,11 @@ impl EntityInputHandler for EditorControl {
         })
     }
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        let marked = self.marked.as_ref()?;
+        let marked = self.host.interaction.marked.as_ref()?;
         let text = &self.host.parsed.source;
         Some(utf8_to_utf16(text, marked.start)..utf8_to_utf16(text, marked.end))
     }
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.marked = None;
         self.composition_templates.clear();
         self.host.interaction.end_composition();
         self.history_serial += 1;
@@ -1642,13 +1638,13 @@ impl EditorControl {
         };
         let range = range
             .map(|range| utf16_to_utf8(source, range.start)..utf16_to_utf8(source, range.end))
-            .or(self.marked.clone())
+            .or(self.host.interaction.marked.clone())
             .unwrap_or(selected_range);
         let start = range.start;
-        if mark && self.marked.is_none() {
+        if mark && !text.is_empty() && self.host.interaction.marked.is_none() {
             self.composition_templates.begin(&self.host.parsed, &range);
         }
-        let template_update = if self.marked.as_ref() == Some(&range) {
+        let template_update = if self.host.interaction.marked.as_ref() == Some(&range) {
             self.composition_templates.cancelled(base, &range, text)
         } else {
             None
@@ -1712,27 +1708,22 @@ impl EditorControl {
             .queue_template_edit(vec![edit], after, &group, template_update)
         {
             Ok(()) => {
+                let was_composing = self.host.interaction.composing;
                 if mark {
-                    if self.marked.is_none() {
-                        self.host.interaction.begin_composition(start);
-                        cx.emit(ControlEvent::CompositionChanged {
-                            identity: self.host.parsed.identity.clone(),
-                            active: true,
-                        });
-                    }
-                    self.marked = Some(start..end);
+                    self.host.interaction.mark_text(start..end);
                     self.menu_open = false;
                     self.slash_range = None;
                 } else {
-                    self.marked = None;
-                    self.composition_templates.clear();
                     self.host.interaction.end_composition();
+                }
+                if was_composing != self.host.interaction.composing {
                     cx.emit(ControlEvent::CompositionChanged {
                         identity: self.host.parsed.identity.clone(),
-                        active: false,
+                        active: self.host.interaction.composing,
                     });
                 }
-                if !mark {
+                if !self.host.interaction.composing {
+                    self.composition_templates.clear();
                     self.update_completion(cx);
                 }
                 self.invalidate();
@@ -1784,7 +1775,7 @@ impl Render for EditorControl {
                     .child(entry.label)
                     .on_click(cx.listener(move |v, _, window, cx| {
                         v.choose_menu(entry.intent.clone(), cx);
-                        window.focus(&v.focus);
+                        window.focus(&v.focus, cx);
                     })),
             );
         }
@@ -1821,7 +1812,7 @@ impl Render for EditorControl {
                         .child(entry.label)
                         .on_click(cx.listener(move |v, _, window, cx| {
                             v.command(entry.intent.clone(), cx);
-                            window.focus(&v.focus);
+                            window.focus(&v.focus, cx);
                         })),
                 );
             }
@@ -1990,7 +1981,7 @@ impl Render for EditorControl {
                     if v.host.interaction.protected() {
                         return;
                     }
-                    window.focus(&v.focus);
+                    window.focus(&v.focus, cx);
                     if v.host.selection.range().is_empty() {
                         if let Some(at) = v.hit(event.position) {
                             v.move_to(at, false, cx);
@@ -2041,15 +2032,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("tab", Indent, context),
         KeyBinding::new("shift-tab", Outdent, context),
         KeyBinding::new("escape", Dismiss, context),
-        KeyBinding::new("secondary-a", SelectAll, context),
-        KeyBinding::new("secondary-z", Undo, context),
-        KeyBinding::new("secondary-shift-z", Redo, context),
+        crate::ui::key_binding("secondary-a", SelectAll, context, cx),
+        crate::ui::key_binding("secondary-z", Undo, context, cx),
+        crate::ui::key_binding("secondary-shift-z", Redo, context, cx),
         KeyBinding::new("ctrl-y", Redo, context),
-        KeyBinding::new("secondary-c", Copy, context),
-        KeyBinding::new("secondary-x", Cut, context),
-        KeyBinding::new("secondary-v", Paste, context),
-        KeyBinding::new("secondary-b", crate::ui::workspace::Bold, context),
-        KeyBinding::new("secondary-i", crate::ui::workspace::Italic, context),
+        crate::ui::key_binding("secondary-c", Copy, context, cx),
+        crate::ui::key_binding("secondary-x", Cut, context, cx),
+        crate::ui::key_binding("secondary-v", Paste, context, cx),
+        crate::ui::key_binding("secondary-b", crate::ui::workspace::Bold, context, cx),
+        crate::ui::key_binding("secondary-i", crate::ui::workspace::Italic, context, cx),
     ]);
 }
 struct ControlElement {

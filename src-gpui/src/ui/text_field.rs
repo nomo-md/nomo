@@ -190,7 +190,7 @@ impl TextField {
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         let offset = match (&self.last_layout, self.last_bounds) {
             (Some(layout), Some(bounds)) => layout.closest_index_for_x(event.position.x - bounds.left()),
             _ => self.content.len(),
@@ -407,7 +407,7 @@ impl Element for FieldElement {
             window.paint_quad(selection);
         }
         let line = prepaint.line.take().expect("prepaint");
-        let _ = line.paint(bounds.origin, px(20.0), window, cx);
+        let _ = line.paint(bounds.origin, px(20.0), gpui::TextAlign::Left, None, window, cx);
         if focus.is_focused(window) {
             if let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor);
@@ -428,14 +428,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("delete", FieldDelete, context),
         KeyBinding::new("left", FieldLeft, context),
         KeyBinding::new("right", FieldRight, context),
-        KeyBinding::new("secondary-a", FieldSelectAll, context),
+        crate::ui::key_binding("secondary-a", FieldSelectAll, context, cx),
         KeyBinding::new("home", FieldHome, context),
         KeyBinding::new("end", FieldEnd, context),
-        KeyBinding::new("secondary-left", FieldHome, context),
-        KeyBinding::new("secondary-right", FieldEnd, context),
-        KeyBinding::new("secondary-v", FieldPaste, context),
-        KeyBinding::new("secondary-c", FieldCopy, context),
-        KeyBinding::new("secondary-x", FieldCut, context),
+        crate::ui::key_binding("secondary-left", FieldHome, context, cx),
+        crate::ui::key_binding("secondary-right", FieldEnd, context, cx),
+        crate::ui::key_binding("secondary-v", FieldPaste, context, cx),
+        crate::ui::key_binding("secondary-c", FieldCopy, context, cx),
+        crate::ui::key_binding("secondary-x", FieldCut, context, cx),
         KeyBinding::new("enter", FieldSubmit, context),
         KeyBinding::new("shift-enter", FieldSubmitBack, context),
         KeyBinding::new("escape", FieldCancel, context),

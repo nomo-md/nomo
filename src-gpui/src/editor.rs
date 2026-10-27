@@ -1029,7 +1029,7 @@ impl EditorView {
     // ---- 鼠标 ----
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         let Some(bounds) = self.bounds else { return };
         let scrollbar_x = f32::from(bounds.origin.x + bounds.size.width) - SCROLLBAR_WIDTH - 2.0;
         if f32::from(event.position.x) >= scrollbar_x {

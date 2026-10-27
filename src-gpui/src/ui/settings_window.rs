@@ -312,7 +312,7 @@ impl SettingsWindow {
                 .border_color(theme.border)
                 .bg(theme.surface)
                 .child(div().text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme.heading).child("Nomo"))
-                .child(div().text_size(px(13.0)).text_color(theme.muted).child(format!("版本 {} · 基于 GPUI {} 的原生 Markdown 编辑器", env!("CARGO_PKG_VERSION"), "0.2.2")))
+                .child(div().text_size(px(13.0)).text_color(theme.muted).child(format!("版本 {} · 基于 GPUI {} 的原生 Markdown 编辑器", env!("CARGO_PKG_VERSION"), "gpui-pre 0.3.10")))
                 .child(div().text_size(px(12.5)).text_color(theme.muted).child(format!("设置文件：{config}")))
                 .child(
                     div()

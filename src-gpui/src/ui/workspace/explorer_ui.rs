@@ -50,12 +50,13 @@ impl Workspace {
     }
 
     fn render_explorer_sidebar(&mut self, width: f32, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let active_path = self.tab().and_then(|tab| tab.document.read(cx).path());
-        let preview_path = self.tabs.iter().find(|tab| tab.preview).and_then(|tab| tab.document.read(cx).path());
         let (root_name, root_path, root_expanded, root_loading, rows) = match &self.tree {
             Some(tree) => (tree.root_name(), Some(tree.root.clone()), tree.root_expanded(), tree.loading(&tree.root), tree.rows()),
-            None => ("当前文件夹".to_string(), None, false, false, std::sync::Arc::from([])),
+            None => return div().id("tree-viewport").relative().w(px(width)).h_full().min_h(px(0.0)).flex_none()
+                .bg(theme.rail_bg).into_any_element(),
         };
+        let active_path = self.tab().and_then(|tab| tab.document.read(cx).path());
+        let preview_path = self.tabs.iter().find(|tab| tab.preview).and_then(|tab| tab.document.read(cx).path());
         if self.tree_animation.as_ref().is_some_and(|animation| animation.started.elapsed() >= TREE_CHEVRON_DURATION) {
             self.tree_animation = None;
         }
@@ -86,13 +87,13 @@ impl Workspace {
                             tree_chevron(root_expanded, path.as_deref(), tree_animation.as_ref(), theme.accent)
                         };
                         let controls = path.as_ref().filter(|_| root_hover).map(|path| tree_controls(path, true, &theme, cx));
-                        let mut root = div().id("tree-root").mx(px(8.0)).w_full().h(px(28.0))
+                        let mut root = div().id("tree-root").relative().top(px(-4.0)).mx(px(8.0)).w_full().h(px(28.0))
                             .pl(px(12.0)).pr(px(4.0)).flex().items_center().gap(px(6.0))
-                            .rounded(px(6.0)).text_size(px(15.0)).text_color(theme.fg)
+                            .rounded(px(4.0)).text_size(px(15.0)).text_color(theme.fg)
                             .font_weight(FontWeight::SEMIBOLD).hover(|style| style.bg(theme.hover))
                             .when(search_path.as_ref() == path.as_ref() && search_path.is_some(), |el| el.bg(theme.sidebar_active))
                             .tooltip(tooltip(root_tip))
-                            .child(chevron).child(icon(IconName::FolderOpen, 14.0, theme.accent))
+                            .child(div().w(px(16.0)).flex_none().child(chevron)).child(icon(IconName::FolderOpen, 14.0, theme.accent))
                             .child(div().flex_1().min_w(px(0.0)).overflow_hidden().child(TreeLabel::new(root_name.clone(), "", theme.search_match)))
                             .children(controls)
                             .on_hover(cx.listener(move |workspace, entered, _, cx| {
@@ -175,8 +176,7 @@ impl Workspace {
                     };
                     let button = div().id(("tree", index)).w_full().h(px(28.0)).flex().items_center().gap(px(6.0))
                         .pl(px((if is_dir { 12.0 } else { 34.0 }) + row.depth as f32 * 12.0)).pr(px(4.0))
-                        .rounded(px(6.0)).cursor_pointer().text_color(if active { theme.accent_strong } else { theme.fg })
-                        .when(is_dir, |el| el.font_weight(FontWeight::MEDIUM))
+                        .rounded(px(4.0)).cursor_pointer().text_color(if active { theme.accent } else { theme.fg })
                         .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
                         .when(search_path.as_ref() == Some(&path), |el| el.bg(theme.sidebar_active))
                         .tooltip(tooltip(path_tip))
@@ -205,7 +205,7 @@ impl Workspace {
                 }).collect()
             })
         // GPUI 的 uniform_list 在内容尺寸和子项起点各计入一次 padding。
-        }).track_scroll(self.tree_scroll.clone()).pt(px(4.0)).pb(px(9.0)).min_h(px(0.0)).size_full();
+        }).track_scroll(&self.tree_scroll).pt(px(4.0)).pb(px(9.0)).min_h(px(0.0)).size_full();
 
         let handle = self.tree_scroll.0.borrow().base_handle.clone();
         let height = f32::from(handle.bounds().size.height).max(0.0);
@@ -248,8 +248,6 @@ impl Workspace {
             .child(field).when(search_visible, |el| el.child(div().px(px(5.0)).text_size(px(11.0)).text_color(theme.muted).child(search_count))));
         let resizer = div().id("tree-resizer").absolute().right(px(-3.0)).top(px(0.0)).bottom(px(0.0)).w(px(6.0))
             .flex().justify_center().cursor_col_resize()
-            .when(self.explorer.resizing, |el| el.bg(theme.accent))
-            .hover(|style| style.bg(theme.accent))
             .on_mouse_down(MouseButton::Left, cx.listener(|workspace, _, _, cx| {
                 cx.stop_propagation();
                 workspace.explorer.resizing = true;

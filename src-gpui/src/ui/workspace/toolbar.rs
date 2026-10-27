@@ -36,7 +36,7 @@ const DIAGRAMS: &[(&str, &str, &str)] = &[
 fn toolbar_button(id: &'static str, name: IconName, active: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let size = if matches!(id, "search" | "emoji" | "outline" | "split-guide") { 18.0 }
         else if id == "hide-toolbar" { 16.0 } else { 17.0 };
-    div().id(id).w(px(32.0)).h(px(28.0)).flex().flex_none().items_center().justify_center().tab_index(0)
+    div().id(id).group(id).w(px(32.0)).h(px(28.0)).flex().flex_none().items_center().justify_center().tab_index(0)
         .rounded(px(4.0)).when(matches!(id, "search" | "emoji" | "outline" | "split-guide"), |el| el.border_1().border_color(theme.border))
         .when(id == "hide-toolbar", |el| el.ml(px(2.0)).border_1().border_color(gpui::transparent_black()))
         .when(active, |el| el.bg(theme.surface.blend(theme.accent.opacity(0.10))))
@@ -46,7 +46,9 @@ fn toolbar_button(id: &'static str, name: IconName, active: bool, theme: &Theme)
             if id == "hide-toolbar" { style.border_color(theme.border) } else { style }
         })
         .focus(|style| style.border_1().border_color(theme.accent)).cursor_pointer()
-        .child(gpui::svg().path(name.path()).size(px(size)).flex_none())
+        .child(gpui::svg().path(name.path()).size(px(size)).flex_none()
+            .text_color(if active { theme.accent_strong } else { theme.muted })
+            .group_hover(id, |style| style.text_color(theme.accent_strong)))
 }
 
 fn toolbar_divider(theme: &Theme) -> gpui::Div {
@@ -78,11 +80,13 @@ fn toolbar_ease(progress: f32) -> f32 {
 }
 
 fn toolbar_mode_button(id: &'static str, name: IconName, active: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
-    div().id(id).w(px(34.0)).h(px(28.0)).flex().flex_none().items_center().justify_center().tab_index(0)
+    div().id(id).group(id).w(px(34.0)).h(px(28.0)).flex().flex_none().items_center().justify_center().tab_index(0)
         .rounded(px(4.0)).text_color(if active { theme.accent_strong } else { theme.muted })
         .when(!active, |el| el.hover(|style| style.bg(theme.hover).text_color(theme.accent_strong)))
         .focus(|style| style.border_1().border_color(theme.accent)).cursor_pointer()
-        .child(gpui::svg().path(name.path()).size(px(17.0)).flex_none())
+        .child(gpui::svg().path(name.path()).size(px(17.0)).flex_none()
+            .text_color(if active { theme.accent_strong } else { theme.muted })
+            .group_hover(id, |style| style.text_color(theme.accent_strong)))
 }
 
 pub(super) fn diagram_template(kind: crate::ui::chrome::DiagramKind) -> &'static str {
@@ -206,7 +210,7 @@ impl Workspace {
             self.toolbar_mode_motion = None;
         }
         let indicator = div().absolute().top(px(2.0)).left(px(2.0 + target)).w(px(34.0)).h(px(28.0))
-            .rounded(px(4.0)).bg(theme.surface).shadow(vec![gpui::BoxShadow {
+            .rounded(px(4.0)).bg(theme.surface).shadow(vec![gpui::BoxShadow { inset: false,
                 color: gpui::rgba(if theme.dark { 0x0000002e } else { 0x16202c14 }).into(),
                 offset: gpui::point(px(0.0), px(1.0)), blur_radius: px(4.0), spread_radius: px(0.0),
             }]);
@@ -277,11 +281,11 @@ impl Workspace {
         right.push(tool("outline", IconName::ListTree, "文档大纲 ⌘⌥O", settings.show_outline, |_, _, cx| Settings::toggle(cx, "outlineVisible"), cx));
         right.push(tool("hide-toolbar", IconName::ChevronUp, "隐藏工具栏 ⌘⇧B", false, |w, _, cx| w.toggle_toolbar(cx), cx));
         let scroll_offset = self.toolbar_scroll.offset().x;
-        let scroll_max = self.toolbar_scroll.max_offset().width;
+        let scroll_max = self.toolbar_scroll.max_offset().x;
         let shadow = |left: bool| {
             div().absolute().top_0().h_full().w(px(1.0)).bg(theme.fg.opacity(0.08))
                 .when(left, |el| el.left_0()).when(!left, |el| el.right_0())
-                .shadow(vec![gpui::BoxShadow { color: theme.fg.opacity(0.14), offset: gpui::point(px(0.0), px(0.0)), blur_radius: px(12.0), spread_radius: px(0.0) }])
+                .shadow(vec![gpui::BoxShadow { inset: false, color: theme.fg.opacity(0.14), offset: gpui::point(px(0.0), px(0.0)), blur_radius: px(12.0), spread_radius: px(0.0) }])
         };
         let show_left = scroll_offset < px(-1.0);
         let show_right = -scroll_offset + px(1.0) < scroll_max;
@@ -302,7 +306,7 @@ impl Workspace {
                     .on_scroll_wheel(cx.listener(|w, event: &gpui::ScrollWheelEvent, _, cx| {
                         let delta = event.delta.pixel_delta(px(32.0));
                         if f32::from(delta.x).abs() < 0.01 && f32::from(delta.y).abs() > 0.01 {
-                            let max = w.toolbar_scroll.max_offset().width.max(px(0.0));
+                            let max = w.toolbar_scroll.max_offset().x.max(px(0.0));
                             if max > px(0.0) {
                                 let current = w.toolbar_scroll.offset();
                                 let next = (current.x + delta.y).clamp(-max, px(0.0));
@@ -321,7 +325,7 @@ impl Workspace {
     fn open_toolbar_popup(&mut self, kind: ToolbarPopupKind, position: gpui::Point<gpui::Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         if self.toolbar_popup.as_ref().is_some_and(|popup| popup.kind == kind) {
             self.toolbar_popup = None;
-            if let Some(document) = self.document() { window.focus(&document.focus_handle(cx)); }
+            if let Some(document) = self.document() { window.focus(&document.focus_handle(cx), cx); }
             cx.notify();
             return;
         }
@@ -345,7 +349,7 @@ impl Workspace {
             gpui::point(left, bounds.bottom() + px(8.0))
         });
         self.toolbar_popup = Some(ToolbarPopup { kind, position, document, target, selected, keyboard_selection: false });
-        window.focus(&self.toolbar_popup_focus);
+        window.focus(&self.toolbar_popup_focus, cx);
         cx.notify();
     }
 
@@ -365,7 +369,7 @@ impl Workspace {
             _ => Err(ControlError::InvalidRange),
         };
         if let Err(error) = result { self.notice = Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).error(&error).into()); restore = true; }
-        if restore { window.focus(&document.focus_handle(cx)); }
+        if restore { window.focus(&document.focus_handle(cx), cx); }
         cx.notify();
     }
 
@@ -382,7 +386,7 @@ impl Workspace {
             .p(px(if kind == ToolbarPopupKind::Width { 10.0 } else { 6.0 }))
             .flex().flex_col().gap(px(if kind == ToolbarPopupKind::Width { 10.0 } else { 0.0 }))
             .rounded(px(8.0)).border_1().border_color(theme.border).bg(theme.surface)
-            .shadow(vec![gpui::BoxShadow {
+            .shadow(vec![gpui::BoxShadow { inset: false,
                 color: gpui::rgba(if theme.dark { 0x00000052 } else { 0x16202c14 }).into(),
                 offset: gpui::point(px(0.0), px(if theme.dark { 16.0 } else { 14.0 })),
                 blur_radius: px(if theme.dark { 44.0 } else { 34.0 }), spread_radius: px(0.0),
@@ -395,7 +399,7 @@ impl Workspace {
             }))
             .on_key_down(cx.listener(move |w, event: &gpui::KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
-                    "escape" => { w.toolbar_popup = None; w.width_dragging = false; if let Some(document)=w.document() { window.focus(&document.focus_handle(cx)); } cx.notify(); }
+                    "escape" => { w.toolbar_popup = None; w.width_dragging = false; if let Some(document)=w.document() { window.focus(&document.focus_handle(cx), cx); } cx.notify(); }
                     "up" | "down" if kind != ToolbarPopupKind::Width => {
                         if let Some(popup) = &mut w.toolbar_popup {
                             let count = if kind == ToolbarPopupKind::Math { 2 } else { DIAGRAMS.len() };

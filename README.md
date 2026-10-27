@@ -10,7 +10,7 @@
 
 ## 开发
 
-需要 stable Rust；依赖锁定在根 `Cargo.lock`，GPUI 保持 0.2.2。
+需要 stable Rust；依赖锁定在根 `Cargo.lock`，使用 `gpui-pre` 与 `gpui-pre-platform` 0.3.10，未引入 GPUI Kit。
 
 - Windows：MSVC C++ Build Tools、Windows SDK（含 `fxc.exe`、`rc.exe`）；打包需要 NSIS 3 和 PowerShell 7。
 - macOS：完整 Xcode、Command Line Tools 和 Metal 编译工具；打包使用系统 `codesign`、`hdiutil` 及 `jq`。

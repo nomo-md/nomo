@@ -389,10 +389,10 @@ impl Workspace {
                                 workspace.outline_ui.selected = index;
                                 if let Some(doc) = workspace.document() { doc.update(cx, |host, cx| host.reveal_outline_heading(goto_heading.byte, revision, cx)); }
                             }))
-                            .on_mouse_down(MouseButton::Left, cx.listener(move |workspace, event: &gpui::MouseDownEvent, window, _cx| {
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |workspace, event: &gpui::MouseDownEvent, window, cx| {
                                 if !workspace.outline_ui.showing { return; }
                                 workspace.outline_ui.keyboard_focus_visible = false;
-                                window.focus(&workspace.outline_ui.focus);
+                                window.focus(&workspace.outline_ui.focus, cx);
                                 workspace.outline_ui.drag_generation += 1;
                                 workspace.outline_ui.section_drag = Some(SectionDrag { start:event.position, pointer:event.position, source:drag_heading.clone(), target:None,
                                     placement:crate::text_document::markdown_session::OutlinePlacement::Before, revision, moving:false, valid:false, generation:workspace.outline_ui.drag_generation });
@@ -410,7 +410,7 @@ impl Workspace {
                             .into_any_element()
                     }).collect()
                 })
-            }).track_scroll(self.outline_scroll.clone()).w_full().h(px(list_height))
+            }).track_scroll(&self.outline_scroll).w_full().h(px(list_height))
                 .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()));
             div().w_full().px(px(OUTLINE_PADDING)).child(div().relative().w_full().h(px(list_height)).overflow_hidden()
                 .child(list).children(ghosts)).into_any_element()
@@ -434,7 +434,7 @@ impl Workspace {
             .on_mouse_down(MouseButton::Left, cx.listener(move |workspace, event: &gpui::MouseDownEvent, window, cx| {
                 if !workspace.outline_ui.showing { return; }
                 workspace.outline_ui.keyboard_focus_visible = false;
-                cx.stop_propagation(); window.focus(&workspace.outline_ui.focus); let origin = workspace.outline_position(window, cx, height);
+                cx.stop_propagation(); window.focus(&workspace.outline_ui.focus, cx); let origin = workspace.outline_position(window, cx, height);
                 workspace.outline_ui.panel_drag = Some(PanelDrag { start: event.position, origin, current: origin, moved: false });
             }));
         let notice = if let Some(error) = snapshot.error.clone() {
@@ -443,9 +443,9 @@ impl Workspace {
                     .on_click(cx.listener(|workspace, _, _, cx| { if let Some(doc) = workspace.document() { doc.update(cx, |host, cx| host.retry_outline(cx)); } }))))
         } else { snapshot.incomplete.then(|| div().px(px(14.0)).pb(px(6.0)).text_size(px(11.0)).text_color(theme.muted).child("部分结构尚未识别")) };
         let shadows = vec![
-            gpui::BoxShadow { color: gpui::rgba(if theme.dark { 0x00000033 } else { 0x16202c0f }).into(),
+            gpui::BoxShadow { inset: false, color: gpui::rgba(if theme.dark { 0x00000033 } else { 0x16202c0f }).into(),
                 offset: gpui::point(px(0.0), px(0.0)), blur_radius: px(24.0), spread_radius: px(0.0) },
-            gpui::BoxShadow { color: gpui::rgba(if theme.dark { 0x00000029 } else { 0x16202c0d }).into(),
+            gpui::BoxShadow { inset: false, color: gpui::rgba(if theme.dark { 0x00000029 } else { 0x16202c0d }).into(),
                 offset: gpui::point(px(0.0), px(6.0)), blur_radius: px(16.0), spread_radius: px(0.0) },
         ];
         Some(div().id("outline-card").key_context("Outline").absolute().left(px(left)).top(px(top)).w(px(220.0)).rounded(px(8.0))
@@ -527,7 +527,7 @@ impl Workspace {
         if !bounds.contains(&pointer) {return false;}
         let y=f32::from(pointer.y-bounds.origin.y); let height=f32::from(bounds.size.height); let edge=36.0;
         let delta=if y<edge {-(edge-y)/edge*12.0} else if y>height-edge {(y-(height-edge))/edge*12.0} else {return false;};
-        let old=scroll.offset(); let max=scroll.max_offset().height.max(px(0.0));
+        let old=scroll.offset(); let max=scroll.max_offset().y.max(px(0.0));
         let next=(old.y-px(delta)).clamp(-max,px(0.0));
         if f32::from(next-old.y).abs()<0.5 {return false;}
         scroll.set_offset(gpui::point(old.x,next));

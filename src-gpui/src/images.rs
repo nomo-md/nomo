@@ -57,7 +57,13 @@ impl ImageStore {
         self.entries.contains_key(path)
     }
 
-    fn insert(&mut self, path: PathBuf, decoded: Option<(Arc<RenderImage>, u32, u32, usize)>) {
+    /// 返回已淘汰位图，由调用方同时释放各窗口的 GPU atlas 条目。
+    fn insert(&mut self, path: PathBuf, decoded: Option<(Arc<RenderImage>, u32, u32, usize)>) -> Vec<Arc<RenderImage>> {
+        let mut retired = Vec::new();
+        if let Some(Entry::Ready { image, bytes, .. }) = self.entries.remove(&path) {
+            self.bytes -= bytes;
+            retired.push(image);
+        }
         self.clock.set(self.clock.get() + 1);
         match decoded {
             Some((image, width, height, bytes)) => {
@@ -73,8 +79,9 @@ impl ImageStore {
                         })
                         .min_by_key(|(_, used)| *used);
                     let Some((path, _)) = oldest else { break };
-                    if let Some(Entry::Ready { bytes, .. }) = self.entries.remove(&path) {
+                    if let Some(Entry::Ready { image, bytes, .. }) = self.entries.remove(&path) {
                         self.bytes -= bytes;
+                        retired.push(image);
                     }
                 }
             }
@@ -83,6 +90,7 @@ impl ImageStore {
             }
         }
         self.generation += 1;
+        retired
     }
 }
 
@@ -99,10 +107,11 @@ pub fn request(paths: Vec<PathBuf>, cx: &mut App) {
         cx.spawn(async move |cx| {
             let decoded = task.await;
             cx.update(|cx| {
-                cx.global_mut::<ImageStore>().insert(path, decoded);
+                let retired = cx.global_mut::<ImageStore>().insert(path, decoded);
+                // 此处在 App 任务中，所有窗口都在 App 内，可完整移除纹理。
+                for image in retired { cx.drop_image(image, None); }
                 cx.refresh_windows();
-            })
-            .ok();
+            });
         })
         .detach();
     }
@@ -125,4 +134,50 @@ fn decode(path: &Path) -> Option<(Arc<RenderImage>, u32, u32, usize)> {
     let bytes = buffer.len();
     let render = RenderImage::new(vec![Frame::new(buffer)]);
     Some((Arc::new(render), width, height, bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bitmap() -> Arc<RenderImage> {
+        Arc::new(RenderImage::new(vec![Frame::new(image::RgbaImage::new(1, 1))]))
+    }
+
+    #[test]
+    fn cache_eviction_returns_only_lru_texture_and_allows_reload() {
+        let mut store = ImageStore::default();
+        let images = [bitmap(), bitmap(), bitmap()];
+        let bytes = MAX_CACHE_BYTES / 2;
+        assert!(store.insert("a".into(), Some((images[0].clone(), 1, 1, bytes))).is_empty());
+        assert!(store.insert("b".into(), Some((images[1].clone(), 1, 1, bytes))).is_empty());
+        store.image(Path::new("a"));
+        let retired = store.insert("c".into(), Some((images[2].clone(), 1, 1, bytes)));
+        assert_eq!(retired.len(), 1);
+        assert!(Arc::ptr_eq(&retired[0], &images[1]));
+        assert!(!store.is_pending_or_known(Path::new("b")));
+        assert!(store.image(Path::new("a")).is_some());
+        assert_eq!(store.bytes, MAX_CACHE_BYTES);
+        let retired = store.insert("b".into(), Some((images[1].clone(), 1, 1, bytes)));
+        assert_eq!(retired.len(), 1);
+        assert!(store.image(Path::new("b")).is_some());
+        assert_eq!(store.bytes, MAX_CACHE_BYTES);
+    }
+
+    #[test]
+    fn cache_eviction_replacement_and_failure_release_old_texture_once() {
+        let mut store = ImageStore::default();
+        let old = bitmap();
+        let new = bitmap();
+        store.insert("a".into(), Some((old.clone(), 1, 1, 4)));
+        let retired = store.insert("a".into(), Some((new.clone(), 1, 1, 4)));
+        assert_eq!(retired.len(), 1);
+        assert!(Arc::ptr_eq(&retired[0], &old));
+        assert_eq!(store.bytes, 4);
+        let retired = store.insert("a".into(), None);
+        assert_eq!(retired.len(), 1);
+        assert!(Arc::ptr_eq(&retired[0], &new));
+        assert_eq!(store.bytes, 0);
+        assert!(store.insert("a".into(), None).is_empty());
+    }
 }

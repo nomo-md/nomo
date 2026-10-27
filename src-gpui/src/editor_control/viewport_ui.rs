@@ -170,7 +170,7 @@ impl DocumentHost {
     pub(super) fn pane_height(&mut self, pane: usize, view: &Entity<EditorControl>, stamp: &LayoutStamp, height: f32, cx: &mut Context<Self>) {
         if stamp.identity != view.read(cx).host.parsed.identity || !height.is_finite() || height<1.0 { return; }
         if let Some(mount)=self.panes[pane].viewport.mounts.iter_mut().find(|m| &m.view==view) { mount.height=height; }
-        if let Some(index)=self.panes[pane].viewport.groups.iter().position(|g| g.from==stamp.identity.from_byte && g.to==stamp.identity.to_byte) {
+        if let Some(index)=self.panes[pane].viewport.groups.iter().position(|g| g.matches_mount(&stamp.identity, *view == self.panes[pane].control)) {
             let old_bottom=self.panes[pane].viewport.heights.top(index+1);
             let delta=self.panes[pane].viewport.heights.update(index,height);
             let top=-f32::from(self.panes[pane].scroll.offset().y);
@@ -221,7 +221,7 @@ impl DocumentHost {
         candidates.sort_by_key(|&i| if i>=visible_first && i<=visible_last { (0, i.abs_diff(visible_first)) } else { (1,i.abs_diff(visible_first)) });
         for index in candidates {
             let group=self.panes[pane].viewport.groups[index].clone();
-            if !group.semantic || self.panes[pane].viewport.failed.contains(&group.id) || self.panes[pane].viewport.mounts.iter().any(|m| {let id=&m.view.read(cx).host.parsed.identity;id.from_byte==group.from && id.to_byte==group.to}) { continue; }
+            if !group.semantic || self.panes[pane].viewport.failed.contains(&group.id) || self.panes[pane].viewport.mounts.iter().any(|m| group.matches_mount(&m.view.read(cx).host.parsed.identity, m.view == control)) { continue; }
             let required=index>=visible_first && index<=visible_last;
             if !required {
                 if scrolling || self.panes[pane].control.read(cx).prepare_unmount().is_err() { self.schedule_pane(pane, 300,cx); return; }
@@ -331,7 +331,7 @@ impl DocumentHost {
         let mut mounts:Vec<_>=self.panes[pane].viewport.mounts.iter().filter_map(|mount| {
             let id=&mount.view.read(cx).host.parsed.identity;
             let index=self.panes[pane].viewport.groups.binary_search_by_key(&id.from_byte,|g|g.from).ok()?;
-            (self.panes[pane].viewport.groups[index].to==id.to_byte).then_some((index,mount))
+            self.panes[pane].viewport.groups[index].matches_mount(id, mount.view == self.panes[pane].control).then_some((index,mount))
         }).collect();
         mounts.sort_by_key(|(index,_)|*index);
         let mut bottom=0.0;
@@ -350,7 +350,7 @@ impl DocumentHost {
     fn pane_mount(&self, view:Entity<EditorControl>, cx:&Context<Self>) -> gpui::AnyElement {
         div().child(view.clone()).capture_any_mouse_down(cx.listener(move |host,event:&gpui::MouseDownEvent,window,cx| {
             if event.button==gpui::MouseButton::Left && !host.promote(&view,cx) {
-                window.focus(&host.control.focus_handle(cx));cx.stop_propagation();
+                window.focus(&host.control.focus_handle(cx), cx);cx.stop_propagation();
             }
         })).into_any_element()
     }

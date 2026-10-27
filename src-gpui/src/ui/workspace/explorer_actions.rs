@@ -137,7 +137,7 @@ impl Workspace {
             let row = tree.rows().iter().position(|row| row.entry.path == path).map_or(0, |i| i + 1);
             self.tree_scroll.scroll_to_item(row + usize::from(!matches!(kind, EditKind::Rename)), ScrollStrategy::Bottom);
         }
-        window.focus(&focus);
+        window.focus(&focus, cx);
         cx.notify();
     }
 

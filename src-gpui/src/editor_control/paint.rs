@@ -93,6 +93,7 @@ pub fn paint_block(
                 let _ = window.paint_svg(
                     bounds,
                     icon.path().into(),
+                    None,
                     TransformationMatrix::unit(),
                     theme.muted,
                     cx,
@@ -138,7 +139,7 @@ pub fn paint_block(
                     if let Some(image) = image {
                         let bounds =
                             Bounds::new(origin + point(px(x + ox), px(y + oy)), size(px(w), px(h)));
-                        let _ = window.paint_image(bounds, Corners::default(), image, 0, false);
+                        let _ = window.paint_image(bounds, bounds, Corners::default(), image, 0, false);
                     }
                 }
             }
@@ -151,7 +152,7 @@ pub fn paint_block(
                 let bounds = Bounds::new(origin + point(px(*x), px(*y)), size(px(*w), px(*h)));
                 match embeds.image(*key) {
                     Some(image) => {
-                        let _ = window.paint_image(bounds, Corners::default(), image, 0, false);
+                        let _ = window.paint_image(bounds, bounds, Corners::default(), image, 0, false);
                     }
                     None => paint_box(bounds, theme.code_bg, 6.0, None, window),
                 }
@@ -165,7 +166,7 @@ pub fn paint_block(
                 let bounds = Bounds::new(origin + point(px(*x), px(*y)), size(px(*w), px(*h)));
                 match store.image(path) {
                     Some(image) => {
-                        let _ = window.paint_image(bounds, Corners::all(px(6.0)), image, 0, false);
+                        let _ = window.paint_image(bounds, bounds, Corners::all(px(6.0)), image, 0, false);
                     }
                     None => paint_box(bounds, theme.code_bg, 6.0, None, window),
                 }
@@ -184,6 +185,7 @@ pub fn paint_block(
                 let _ = window.paint_svg(
                     bounds,
                     IconName::Copy.path().into(),
+                    None,
                     TransformationMatrix::unit(),
                     theme.muted,
                     cx,

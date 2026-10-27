@@ -249,7 +249,7 @@ impl EditorControl {
         window.focus(&image.as_ref().map_or_else(
             || child.focus_handle(cx),
             |form| form.fields[0].focus_handle(cx),
-        ));
+        ), cx);
         self.object = Some(ObjectEditor {
             draft,
             child_bytes: child.read(cx).estimated_bytes(),
@@ -421,7 +421,7 @@ impl EditorControl {
         self.object = None;
         self.invalidate();
         self.submit(cx);
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         cx.emit(ControlEvent::DraftChanged {
             identity: self.host.parsed.identity.clone(),
             active: false,

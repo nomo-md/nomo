@@ -117,7 +117,7 @@ impl Render for EmojiPicker {
                         cells
                     }).collect()
                 })
-            }).h(px(240.0)).track_scroll(self.scroll.clone());
+            }).h(px(240.0)).track_scroll(&self.scroll);
             body = body.child(list);
             if let Some((label, shortcode)) = footer {
                 body = body.child(div().mt(px(2.0)).min_h(px(36.0)).flex().flex_col().gap(px(3.0))
@@ -131,7 +131,7 @@ impl Render for EmojiPicker {
             .max_h((window.viewport_size().height - px(16.0)).max(px(0.0))).overflow_hidden()
             .p(px(12.0)).flex().flex_col().gap(px(8.0))
             .rounded(px(12.0)).border_1().border_color(theme.border).bg(theme.surface)
-            .shadow(vec![gpui::BoxShadow { color: theme.fg.opacity(0.12), offset: gpui::point(px(0.0), px(8.0)), blur_radius: px(28.0), spread_radius: px(0.0) }]).occlude()
+            .shadow(vec![gpui::BoxShadow { inset: false, color: theme.fg.opacity(0.12), offset: gpui::point(px(0.0), px(8.0)), blur_radius: px(28.0), spread_radius: px(0.0) }]).occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(cx.listener(|picker, event: &gpui::MouseDownEvent, _, cx| {
                 if !picker.trigger_bounds.get().is_some_and(|bounds| bounds.contains(&event.position)) {

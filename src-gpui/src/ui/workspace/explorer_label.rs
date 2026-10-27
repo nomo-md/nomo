@@ -49,6 +49,11 @@ impl Element for TreeLabel {
 
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, style: &mut TextStyle, window: &mut Window, cx: &mut App) -> Self::PrepaintState {
         if bounds.size.width <= px(0.0) { return None; }
+        // 旧版 Windows 界面字体栈：Segoe UI 的中文字符回退到微软雅黑。
+        if cfg!(target_os = "windows") && style.font_family.as_ref() == "Segoe UI" && style.font_fallbacks.is_none() {
+            static FALLBACKS: std::sync::OnceLock<gpui::FontFallbacks> = std::sync::OnceLock::new();
+            style.font_fallbacks = Some(FALLBACKS.get_or_init(|| gpui::FontFallbacks::from_fonts(vec!["Microsoft YaHei".into()])).clone());
+        }
         let mut runs: Vec<TextRun> = Vec::new();
         if let Some(range) = &self.matched {
             if range.start > 0 { runs.push(style.to_run(range.start)); }
@@ -57,7 +62,7 @@ impl Element for TreeLabel {
         } else { runs.push(style.to_run(self.text.len())); }
         let font_size = style.font_size.to_pixels(window.rem_size());
         let mut wrapper = cx.text_system().line_wrapper(style.font(), font_size);
-        let text = wrapper.truncate_line(self.text.clone(), bounds.size.width, "…", &mut runs);
+        let (text, runs) = wrapper.truncate_line(self.text.clone(), bounds.size.width, "…", &runs, gpui::TruncateFrom::End);
         let line = window.text_system().shape_line(text, font_size, &runs, None);
         let height = style.line_height_in_pixels(window.rem_size());
         let origin = point(bounds.left(), bounds.top() + (bounds.size.height - height) / 2.0);
@@ -66,8 +71,8 @@ impl Element for TreeLabel {
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut TextStyle, prepared: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
         if let Some((line, origin, height)) = prepared.take() {
-            let _ = line.paint_background(origin, height, window, cx);
-            let _ = line.paint(origin, height, window, cx);
+            let _ = line.paint_background(origin, height, gpui::TextAlign::Left, None, window, cx);
+            let _ = line.paint(origin, height, gpui::TextAlign::Left, None, window, cx);
         }
     }
 }

@@ -15,7 +15,7 @@ path = "src/main.rs"
 editor-control-demo = []
 
 [dependencies]
-gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
+gpui = { package = "gpui-pre", version = "=0.3.10", default-features = false }
 # 保持既有 Markdown 解析版本和语义。
 pulldown-cmark = { version = "=0.13.5", default-features = false }
 unicode-segmentation = "1.13"
@@ -30,7 +30,7 @@ latex-rust = "=3.0.1"
 # Mermaid：纯 Rust 的解析、布局与 SVG 渲染（对齐 Mermaid 12.1.0，Zed 同款后端）。
 merman = { version = "=0.9.2", features = ["native-fonts"] }
 # 与 gpui 传递依赖的版本一致，用于把 SVG 栅格化为位图。
-resvg = "=0.45.1"
+resvg = "=0.46.0"
 encoding_rs = { version = "0.8" }
 sha2 = { version = "0.10" }
 # 与已有传递依赖共用系统语言探测，避免逐平台维护语言判断。
@@ -43,6 +43,9 @@ unicode-properties = { version = "0.1" }
 html-escape = "=0.2.15"
 web_atoms = { version = "0.2" }
 
+[target.'cfg(not(windows))'.dependencies]
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", default-features = false, features = ["font-kit", "wayland", "x11"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 arboard = { version = "=3.6.1", default-features = false }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSWorkspace", "NSAccessibility"] }
@@ -52,6 +55,8 @@ arboard = { version = "=3.6.1", default-features = false, features = ["wayland-d
 ashpd = { version = "=0.11.1", default-features = false, features = ["async-std"] }
 
 [target.'cfg(windows)'.dependencies]
+# platform 0.3.10 在 Windows 强制嵌入自己的 manifest；直接构造后端以保留 Nomo 的 DPI/版本资源。
+gpui_windows = { package = "gpui-pre-windows", version = "=0.3.10", default-features = false }
 raw-window-handle = "=0.6.2"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
 

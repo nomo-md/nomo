@@ -101,7 +101,7 @@ impl DocumentHost {
             this.update(cx, |view, cx| view.request_close(window, cx))
                 .unwrap_or(true)
         });
-        window.focus(&control.focus_handle(cx));
+        window.focus(&control.focus_handle(cx), cx);
         Self {
             metadata: workspace_host::Metadata::new(status.clone()),
             queries: Default::default(),

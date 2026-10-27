@@ -334,7 +334,7 @@ impl Workspace {
         for path in paths {
             workspace.open_path(&path, window, cx);
         }
-        window.focus(&workspace.focus);
+        window.focus(&workspace.focus, cx);
         workspace
     }
 
@@ -629,7 +629,7 @@ impl Workspace {
         self.tab_scroll.scroll_to_item(index);
         self.sync_tree_selection(true,cx);
         window.set_window_title(&format!("{} — Nomo",document.read(cx).title()));
-        window.focus(&document.focus_handle(cx));
+        window.focus(&document.focus_handle(cx), cx);
         self.notice=None;
         self.run_search(cx);
         cx.notify();
@@ -640,7 +640,7 @@ impl Workspace {
             Ok(())=>{self.popover=None;self.toolbar_popup=None;self.emoji_picker=None;self.tabs[self.active].mode=mode;
                 let preference=match mode { EditorMode::Semantic=>"semantic", EditorMode::Source=>"source", EditorMode::Split=>"split" };
                 Settings::set(cx, "editorMode", serde_json::json!(preference));
-                window.focus(&document.focus_handle(cx));}
+                window.focus(&document.focus_handle(cx), cx);}
             Err(e)=>self.notice=Some(e.to_string().into()),
         }
         cx.notify();
@@ -674,7 +674,7 @@ impl Workspace {
         self.tabs.remove(index);
         if index<self.active {self.active-=1;}
         self.active=self.active.min(self.tabs.len().saturating_sub(1));
-        if self.tabs.is_empty() {self.sync_tree_selection(false,cx);window.set_window_title("Nomo");window.focus(&self.focus);if self.closing_window {window.remove_window();}}
+        if self.tabs.is_empty() {self.sync_tree_selection(false,cx);window.set_window_title("Nomo");window.focus(&self.focus, cx);if self.closing_window {window.remove_window();}}
         else {self.activate(self.active,window,cx);if self.closing_window {self.close_tab(self.active,window,cx);}}
         cx.notify();
     }
@@ -772,7 +772,7 @@ impl Workspace {
             let text = query.read(cx).content.clone();
             query.update(cx, |field, cx| field.set_text(&text, cx));
         }
-        window.focus(&query.focus_handle(cx));
+        window.focus(&query.focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -813,7 +813,7 @@ impl Workspace {
             let buffer = tab.document.clone();
             let primary = tab.document.clone();
             buffer.update(cx, |buffer, cx| buffer.set_search(String::new(), false, false, cx));
-            window.focus(&primary.focus_handle(cx));
+            window.focus(&primary.focus_handle(cx), cx);
         }
         cx.notify();
     }
@@ -827,7 +827,7 @@ impl Workspace {
         let buffer = tab.document.clone();
         let primary = tab.document.clone();
         buffer.update(cx, update);
-        window.focus(&primary.focus_handle(cx));
+        window.focus(&primary.focus_handle(cx), cx);
     }
 
     pub(crate) fn zoom(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -851,7 +851,7 @@ impl Workspace {
     }
 
     fn open_emoji_picker(&mut self, position: gpui::Point<gpui::Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.emoji_picker.is_some() { self.emoji_picker = None; if let Some(document)=self.document() { window.focus(&document.focus_handle(cx)); } cx.notify(); return; }
+        if self.emoji_picker.is_some() { self.emoji_picker = None; if let Some(document)=self.document() { window.focus(&document.focus_handle(cx), cx); } cx.notify(); return; }
         let Some(document) = self.document() else { return; };
         let target = match document.read(cx).edit_target(cx) {
             Ok(target) => target,
@@ -872,11 +872,11 @@ impl Workspace {
                 if let Err(error) = result { workspace.notice = Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).error(&error).into()); }
             }
             workspace.emoji_picker = None;
-            if current { if let Some(document) = document { window.focus(&document.focus_handle(cx)); } }
+            if current { if let Some(document) = document { window.focus(&document.focus_handle(cx), cx); } }
             cx.notify();
         });
         self.popover = None; self.toolbar_popup = None;
-        window.focus(&view.focus_handle(cx));
+        window.focus(&view.focus_handle(cx), cx);
         let position = anchor.map_or(gpui::point(position.x - px(16.0), position.y + px(18.0)),
             |bounds| gpui::point(bounds.left(), bounds.bottom() + px(6.0)));
         self.emoji_picker = Some(PendingEmoji { document: document.downgrade(), target, view, position, _subscription: subscription });
@@ -889,7 +889,7 @@ impl Workspace {
     fn open_editor_popover_at(&mut self,kind:EditorPopoverKind,toolbar_position:Option<gpui::Point<gpui::Pixels>>,window:&mut Window,cx:&mut Context<Self>) {
         if toolbar_position.is_some() && self.popover.as_ref().is_some_and(|pending| pending.view.read(cx).kind() == kind) {
             self.popover = None;
-            if let Some(document) = self.document() { window.focus(&document.focus_handle(cx)); }
+            if let Some(document) = self.document() { window.focus(&document.focus_handle(cx), cx); }
             cx.notify();
             return;
         }
@@ -921,7 +921,7 @@ impl Workspace {
             view
         });
         let subscription=cx.subscribe_in(&view,window,|workspace,view,event,window,cx|workspace.editor_popover_event(&view,event,window,cx));
-        window.focus(&view.focus_handle(cx));
+        window.focus(&view.focus_handle(cx), cx);
         self.toolbar_popup=None; self.emoji_picker=None;
         self.popover=Some(PendingPopover {document:document.downgrade(),target,link,view,position:gpui::point(x,y),_subscription:subscription});
         self.notice=None;
@@ -933,7 +933,7 @@ impl Workspace {
         let is_current=document.is_some() && document==self.document();
         if matches!(event,EditorPopoverEvent::Dismiss) {
             self.popover=None;
-            if is_current {if let Some(document)=document {window.focus(&document.focus_handle(cx));}}
+            if is_current {if let Some(document)=document {window.focus(&document.focus_handle(cx), cx);}}
             cx.notify();return;
         }
         let result=if !is_current {Err(ControlError::Stale)}else if let Some(document)=document.as_ref() {
@@ -945,7 +945,7 @@ impl Workspace {
             })
         }else{Err(ControlError::Stale)};
         match result {
-            Ok(())=>{self.popover=None;if let Some(document)=document {window.focus(&document.focus_handle(cx));}},
+            Ok(())=>{self.popover=None;if let Some(document)=document {window.focus(&document.focus_handle(cx), cx);}},
             Err(error)=>view.update(cx,|view,cx|view.set_error(Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).error(&error).into()),cx)),
         }
         cx.notify();
@@ -1031,7 +1031,7 @@ impl Workspace {
             menu.with_animation("hidden-tabs-enter", Animation::new(Duration::from_millis(180)).with_easing(tree_selection_ease),
                 |menu, progress| menu.relative().top(px((1.0-progress)*-3.0)).opacity(progress)).into_any_element()
         };
-        Some(gpui::deferred(gpui::anchored().anchor(gpui::Corner::TopRight)
+        Some(gpui::deferred(gpui::anchored().anchor(gpui::Anchor::TopRight)
             .position(gpui::point(button_bounds.right(), button_bounds.bottom() + px(4.0)))
             .snap_to_window_with_margin(px(8.0)).child(menu)).with_priority(5).into_any_element())
     }
@@ -1181,7 +1181,7 @@ impl Workspace {
             .pl(px(18.0))
             .child(
                 div().on_children_prepainted(move |_, window, _| {
-                    let overflow = measured_scroll.max_offset().width > px(0.0);
+                    let overflow = measured_scroll.max_offset().x > px(0.0);
                     if overflow_state.replace(overflow) != overflow {
                         let weak_workspace = weak_workspace.clone();
                         window.on_next_frame(move |_, cx| {
@@ -1608,59 +1608,59 @@ pub fn bind_keys(cx: &mut App) {
     use gpui::KeyBinding;
     let context = Some("Workspace");
     cx.bind_keys([
-        KeyBinding::new("secondary-n", NewFile, context),
-        KeyBinding::new("secondary-shift-n", NewWindow, context),
-        KeyBinding::new("secondary-o", OpenFile, context),
-        KeyBinding::new("secondary-shift-o", OpenFolder, context),
-        KeyBinding::new("secondary-s", Save, context),
-        KeyBinding::new("secondary-shift-s", SaveAs, context),
-        KeyBinding::new("secondary-w", CloseTab, context),
+        crate::ui::key_binding("secondary-n", NewFile, context, cx),
+        crate::ui::key_binding("secondary-shift-n", NewWindow, context, cx),
+        crate::ui::key_binding("secondary-o", OpenFile, context, cx),
+        crate::ui::key_binding("secondary-shift-o", OpenFolder, context, cx),
+        crate::ui::key_binding("secondary-s", Save, context, cx),
+        crate::ui::key_binding("secondary-shift-s", SaveAs, context, cx),
+        crate::ui::key_binding("secondary-w", CloseTab, context, cx),
         KeyBinding::new("ctrl-tab", NextTab, context),
         KeyBinding::new("ctrl-shift-tab", PrevTab, context),
-        KeyBinding::new("secondary-f", Find, context),
-        KeyBinding::new("secondary-alt-f", FindReplace, context),
-        KeyBinding::new("secondary-g", FindNext, context),
-        KeyBinding::new("secondary-shift-g", FindPrev, context),
-        KeyBinding::new("secondary-e", ToggleSource, context),
-        KeyBinding::new("secondary-1", Heading1, context),
-        KeyBinding::new("secondary-2", Heading2, context),
-        KeyBinding::new("secondary-3", Heading3, context),
-        KeyBinding::new("secondary-4", Heading4, context),
-        KeyBinding::new("secondary-5", Heading5, context),
-        KeyBinding::new("secondary-6", Heading6, context),
-        KeyBinding::new("secondary-alt-o", ToggleOutline, context),
-        KeyBinding::new("secondary-z", crate::editor::Undo, Some("Outline")),
-        KeyBinding::new("secondary-shift-z", crate::editor::Redo, Some("Outline")),
+        crate::ui::key_binding("secondary-f", Find, context, cx),
+        crate::ui::key_binding("secondary-alt-f", FindReplace, context, cx),
+        crate::ui::key_binding("secondary-g", FindNext, context, cx),
+        crate::ui::key_binding("secondary-shift-g", FindPrev, context, cx),
+        crate::ui::key_binding("secondary-e", ToggleSource, context, cx),
+        crate::ui::key_binding("secondary-1", Heading1, context, cx),
+        crate::ui::key_binding("secondary-2", Heading2, context, cx),
+        crate::ui::key_binding("secondary-3", Heading3, context, cx),
+        crate::ui::key_binding("secondary-4", Heading4, context, cx),
+        crate::ui::key_binding("secondary-5", Heading5, context, cx),
+        crate::ui::key_binding("secondary-6", Heading6, context, cx),
+        crate::ui::key_binding("secondary-alt-o", ToggleOutline, context, cx),
+        crate::ui::key_binding("secondary-z", crate::editor::Undo, Some("Outline"), cx),
+        crate::ui::key_binding("secondary-shift-z", crate::editor::Redo, Some("Outline"), cx),
         KeyBinding::new("ctrl-y", crate::editor::Redo, Some("Outline")),
-        KeyBinding::new("secondary-alt-s", ToggleSidebar, context),
-        KeyBinding::new("secondary-shift-f", ToggleSidebar, context),
-        KeyBinding::new("secondary-shift-b", ToggleToolbar, context),
-        KeyBinding::new("secondary-shift-l", ToggleTheme, context),
-        KeyBinding::new("secondary-=", ZoomIn, context),
-        KeyBinding::new("secondary-+", ZoomIn, context),
-        KeyBinding::new("secondary--", ZoomOut, context),
-        KeyBinding::new("secondary-0", Paragraph, context),
-        KeyBinding::new("secondary-b", Bold, context),
-        KeyBinding::new("secondary-i", Italic, context),
+        crate::ui::key_binding("secondary-alt-s", ToggleSidebar, context, cx),
+        crate::ui::key_binding("secondary-shift-f", ToggleSidebar, context, cx),
+        crate::ui::key_binding("secondary-shift-b", ToggleToolbar, context, cx),
+        crate::ui::key_binding("secondary-shift-l", ToggleTheme, context, cx),
+        crate::ui::key_binding("secondary-=", ZoomIn, context, cx),
+        crate::ui::key_binding("secondary-+", ZoomIn, context, cx),
+        crate::ui::key_binding("secondary--", ZoomOut, context, cx),
+        crate::ui::key_binding("secondary-0", Paragraph, context, cx),
+        crate::ui::key_binding("secondary-b", Bold, context, cx),
+        crate::ui::key_binding("secondary-i", Italic, context, cx),
         KeyBinding::new("alt-shift-5", Strike, context),
-        KeyBinding::new("secondary-shift-x", TaskList, context),
-        KeyBinding::new("secondary-shift-q", Quote, context),
-        KeyBinding::new("secondary-shift-[", OrderedList, context),
-        KeyBinding::new("secondary-shift-]", BulletList, context),
-        KeyBinding::new("secondary-u", Underline, context),
-        KeyBinding::new("secondary-shift-h", Rule, context),
-        KeyBinding::new("secondary-`", InlineCode, context),
-        KeyBinding::new("secondary-\\", ClearFormatting, context),
-        KeyBinding::new("secondary-shift-c", InlineCode, context),
-        KeyBinding::new("secondary-k", Link, context),
-        KeyBinding::new("secondary-alt-1", Heading1, context),
-        KeyBinding::new("secondary-alt-2", Heading2, context),
-        KeyBinding::new("secondary-alt-3", Heading3, context),
-        KeyBinding::new("secondary-alt-0", Paragraph, context),
-        KeyBinding::new("secondary-shift-k", CodeBlock, context),
-        KeyBinding::new("secondary-shift-t", Table, context),
-        KeyBinding::new("secondary-shift-m", MathBlock, context),
-        KeyBinding::new("secondary-q", Quit, None),
-        KeyBinding::new("secondary-,", OpenSettings, None),
+        crate::ui::key_binding("secondary-shift-x", TaskList, context, cx),
+        crate::ui::key_binding("secondary-shift-q", Quote, context, cx),
+        crate::ui::key_binding("secondary-shift-[", OrderedList, context, cx),
+        crate::ui::key_binding("secondary-shift-]", BulletList, context, cx),
+        crate::ui::key_binding("secondary-u", Underline, context, cx),
+        crate::ui::key_binding("secondary-shift-h", Rule, context, cx),
+        crate::ui::key_binding("secondary-`", InlineCode, context, cx),
+        crate::ui::key_binding("secondary-\\", ClearFormatting, context, cx),
+        crate::ui::key_binding("secondary-shift-c", InlineCode, context, cx),
+        crate::ui::key_binding("secondary-k", Link, context, cx),
+        crate::ui::key_binding("secondary-alt-1", Heading1, context, cx),
+        crate::ui::key_binding("secondary-alt-2", Heading2, context, cx),
+        crate::ui::key_binding("secondary-alt-3", Heading3, context, cx),
+        crate::ui::key_binding("secondary-alt-0", Paragraph, context, cx),
+        crate::ui::key_binding("secondary-shift-k", CodeBlock, context, cx),
+        crate::ui::key_binding("secondary-shift-t", Table, context, cx),
+        crate::ui::key_binding("secondary-shift-m", MathBlock, context, cx),
+        crate::ui::key_binding("secondary-q", Quit, None, cx),
+        crate::ui::key_binding("secondary-,", OpenSettings, None, cx),
     ]);
 }

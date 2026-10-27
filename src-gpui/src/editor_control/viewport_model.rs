@@ -28,6 +28,11 @@ pub struct Group {
 }
 impl Group {
     pub fn contains(&self, byte: u64) -> bool { self.from <= byte && byte < self.to }
+    /// 活动控件先应用局部输入，组边界随后才收到事务确认；期间必须保持挂载。
+    /// 只读邻窗仍须完整匹配边界，不能把过期正文当作当前内容显示。
+    pub fn matches_mount(&self, identity: &WindowIdentity, active: bool) -> bool {
+        self.from == identity.from_byte && (active || self.to == identity.to_byte)
+    }
 }
 
 /// 与 MarkdownStableGroups 相同的 32 KiB / 64 块封口规则。
@@ -146,6 +151,45 @@ impl ScrollDemand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ime_mount_survives_pending_edits_partial_ack_and_deletion() {
+        use crate::editor_control::host::WindowHostAdapter;
+        let mut host = WindowHostAdapter::new(DocumentWindow {
+            document_id: "ime".into(), revision: 1, from_byte: 100, to_byte: 106,
+            text: "你好".into(), inline_templates: Vec::new(),
+        }, "input", 0, WindowContext::Complete).unwrap();
+        host.mark_layout_ready(LayoutStamp {
+            identity: host.parsed.identity.clone(), width: 600.0,
+            font_generation: 0, resource_generation: 0, zoom: 1.0,
+        }, 24.0).unwrap();
+        let mut group = Group { id: "g".into(), from: 100, to: 106, estimate: 24.0, semantic: true, blocks: 1 };
+        host.queue_edit(vec![SourceEdit { from_byte: 106, to_byte: 106, inserted_text: "n".into() }],
+            DocumentSelection::caret(107), "typing").unwrap();
+        let Some(ControlEvent::Submit(first)) = host.next_submission() else { panic!("first input") };
+        host.queue_edit(vec![SourceEdit { from_byte: 106, to_byte: 107, inserted_text: "ni".into() }],
+            DocumentSelection::caret(108), "typing").unwrap();
+        assert!(group.matches_mount(&host.parsed.identity, true));
+        assert!(!group.matches_mount(&host.parsed.identity, false));
+
+        // 第一笔确认时第二笔仍未确认，活动窗口继续使用自己的乐观边界。
+        host.acknowledge(&first.operation_id, 2).unwrap();
+        group.to = 107;
+        assert!(group.matches_mount(&host.parsed.identity, true));
+        assert!(!group.matches_mount(&host.parsed.identity, false));
+        let Some(ControlEvent::Submit(second)) = host.next_submission() else { panic!("second input") };
+        host.acknowledge(&second.operation_id, 3).unwrap();
+        group.to = 108;
+        assert!(group.matches_mount(&host.parsed.identity, false));
+
+        host.queue_edit(vec![SourceEdit { from_byte: 100, to_byte: 108, inserted_text: String::new() }],
+            DocumentSelection::caret(100), "delete").unwrap();
+        assert_eq!(&*host.parsed.source, "");
+        assert!(group.matches_mount(&host.parsed.identity, true));
+        assert!(!group.matches_mount(&host.parsed.identity, false));
+        let mut other = host.parsed.identity.clone();
+        other.from_byte = 99;
+        assert!(!group.matches_mount(&other, true));
+    }
     #[test]
     fn original_grouping_retains_edit_window_without_overlaps() {
         let blocks = || (0..200).map(|i| BlockSummary { id: i.to_string(), from_byte: i*8, to_byte: (i+1)*8, from_line:i*2,to_line:i*2+2, mode:"semantic".into(), kind:"paragraph".into(), semantic_complete:true,layout_units:1 });

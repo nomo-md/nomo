@@ -105,7 +105,13 @@ impl EmbedStore {
         }
     }
 
-    fn insert(&mut self, key: u64, result: Result<(EmbedInfo, RenderImage, usize), String>) {
+    /// CPU 缓存和窗口 atlas 必须一起淘汰，避免公式／图表纹理持续累积。
+    fn insert(&mut self, key: u64, result: Result<(EmbedInfo, RenderImage, usize), String>) -> Vec<Arc<RenderImage>> {
+        let mut retired = Vec::new();
+        if let Some(Entry::Ready { image, bytes, .. }) = self.entries.remove(&key) {
+            self.bytes -= bytes;
+            retired.push(image);
+        }
         self.clock.set(self.clock.get() + 1);
         match result {
             Ok((info, image, bytes)) => {
@@ -122,8 +128,9 @@ impl EmbedStore {
                         .min_by_key(|(_, used)| *used);
                     let Some((oldest, _)) = oldest else { break };
                     // 淘汰后删除条目本身：下次可见时重新渲染，而不是停留在“渲染中”。
-                    if let Some(Entry::Ready { bytes, .. }) = self.entries.remove(&oldest) {
+                    if let Some(Entry::Ready { image, bytes, .. }) = self.entries.remove(&oldest) {
                         self.bytes -= bytes;
+                        retired.push(image);
                     }
                 }
             }
@@ -132,6 +139,7 @@ impl EmbedStore {
             }
         }
         self.generation += 1;
+        retired
     }
 }
 
@@ -148,10 +156,10 @@ pub fn request(specs: Vec<EmbedSpec>, cx: &mut App) {
         cx.spawn(async move |cx| {
             let result = task.await;
             cx.update(|cx| {
-                cx.global_mut::<EmbedStore>().insert(key, result);
+                let retired = cx.global_mut::<EmbedStore>().insert(key, result);
+                for image in retired { cx.drop_image(image, None); }
                 cx.refresh_windows();
-            })
-            .ok();
+            });
         })
         .detach();
     }
@@ -325,6 +333,26 @@ fn rasterize(svg: &str, scale: f32, mermaid_text: bool) -> Result<(RenderImage, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_eviction_returns_embed_texture_and_preserves_budget() {
+        let mut store = EmbedStore::default();
+        let decoded = || Ok((EmbedInfo { width: 1.0, height: 1.0, depth: 0.0 },
+            RenderImage::new(vec![Frame::new(RgbaImage::new(1, 1))]), MAX_CACHE_BYTES / 2));
+        assert!(store.insert(1, decoded()).is_empty());
+        assert!(store.insert(2, decoded()).is_empty());
+        let oldest = store.image(1).unwrap();
+        store.image(2);
+        let retired = store.insert(3, decoded());
+        assert_eq!(retired.len(), 1);
+        assert!(Arc::ptr_eq(&retired[0], &oldest));
+        assert!(store.state(1).is_none());
+        assert_eq!(store.bytes, MAX_CACHE_BYTES);
+        assert_eq!(store.insert(2, Err("failed".into())).len(), 1);
+        assert_eq!(store.bytes, MAX_CACHE_BYTES / 2);
+        assert!(store.insert(2, decoded()).is_empty());
+        assert_eq!(store.bytes, MAX_CACHE_BYTES);
+    }
 
     #[test]
     fn renders_display_math_with_depth() {

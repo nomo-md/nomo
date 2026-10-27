@@ -226,7 +226,7 @@ impl DocumentHost {
             let delta=f32::from(caret.origin.y-bounds.origin.y)-f32::from(bounds.size.height)*anchor.fraction;
             let old=self.panes[pane].scroll.offset();
             // 使用本次 prepaint 后的真实可滚范围；首尾无法满足参考线时在边界结束。
-            let max=self.panes[pane].scroll.max_offset().height.max(px(0.0));
+            let max=self.panes[pane].scroll.max_offset().y.max(px(0.0));
             let target=(old.y-px(delta)).clamp(-max,px(0.0));
             if f32::from(target-old.y).abs()>0.5 {
                 self.panes[pane].scroll.set_offset(gpui::point(old.x,target));
@@ -318,7 +318,7 @@ impl DocumentHost {
                 cx.stop_propagation();
                 if host.control.read(cx).prepare_unmount().is_err() {return;}
                 for pane in 0..host.panes.len() {host.panes[pane].reading_restore=host.reading_anchor(pane,cx);}
-                host.split_dragging=true;window.focus(&host.split_focus);
+                host.split_dragging=true;window.focus(&host.split_focus, cx);
             }))
             .on_key_down(cx.listener(|host,event:&gpui::KeyDownEvent,_,cx| {
                 let step=if event.keystroke.modifiers.shift {0.1}else{0.02};
