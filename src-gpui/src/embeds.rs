@@ -189,7 +189,7 @@ fn math_font() -> Result<&'static latex_rust::MathFont, String> {
 }
 
 /// 公式转 SVG，并返回基线以下部分占总高度的比例。
-fn math_svg(source: &str, display: bool, color: [u8; 3]) -> Result<(String, f32), String> {
+pub(crate) fn math_svg(source: &str, display: bool, color: [u8; 3]) -> Result<(String, f32), String> {
     let font = math_font()?;
     let ast = latex_rust::parse(source.trim()).map_err(|error| format!("公式解析失败：{error}"))?;
     let style = if display { latex_rust::MathStyle::Display } else { latex_rust::MathStyle::Text };
@@ -262,12 +262,21 @@ fn mermaid_fonts() -> Option<merman::svg::export::NativeFontContext> {
 }
 
 fn mermaid_svg(source: &str, dark: bool) -> Result<String, String> {
+    mermaid_svg_controlled(source, dark, merman::OperationControl::new())
+}
+
+/// 页首预览给图表单独设置时间预算；超时使用占位，不拖住后续文件。
+pub(crate) fn thumbnail_mermaid(source: &str, dark: bool) -> Result<String, String> {
+    mermaid_svg_controlled(source, dark, merman::OperationControl::new().with_deadline(std::time::Duration::from_millis(150)))
+}
+
+fn mermaid_svg_controlled(source: &str, dark: bool, control: merman::OperationControl) -> Result<String, String> {
     use merman::svg::SvgPipeline;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let request = merman::RenderRequest::svg(
         source,
-        merman::OperationControl::new(),
+        control,
         merman::SvgRequest {
             environment: match mermaid_fonts() {
                 Some(fonts) => merman::SvgEnvironment::deterministic().with_native_font_context(fonts).map_err(|error| format!("字体加载失败：{error}"))?,
@@ -287,7 +296,7 @@ fn mermaid_svg(source: &str, dark: bool) -> Result<String, String> {
 }
 
 /// SVG 文本渲染所需字体库：系统字体（含冬青黑体），无衬线回退设为冬青黑体，与测量一致。
-fn font_database() -> Arc<resvg::usvg::fontdb::Database> {
+pub(crate) fn font_database() -> Arc<resvg::usvg::fontdb::Database> {
     static DATABASE: OnceLock<Arc<resvg::usvg::fontdb::Database>> = OnceLock::new();
     DATABASE
         .get_or_init(|| {

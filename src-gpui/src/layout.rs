@@ -12,6 +12,7 @@ use std::hash::{Hash, Hasher};
 use unicode_segmentation::UnicodeSegmentation;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::{collections::HashMap, rc::{Rc, Weak}};
 
 /// 布局代数：字体、代码行号等影响排版但不在段落规格内的设置变化时递增，使所有布局缓存键失效。
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -115,6 +116,8 @@ pub enum InlineAsset {
 pub struct InlineObject {
     pub at: usize,
     pub width: f32,
+    /// 图片百分比以最终段落／单元格宽度为基准；塑形前解析，不进入缓存状态。
+    pub width_percent: Option<f32>,
     pub ascent: f32,
     pub descent: f32,
     pub key: InlineAsset,
@@ -199,9 +202,11 @@ pub struct VisualLine {
 }
 
 pub struct TextLayout {
+    cache_key: u64,
     pub text: String,
     glyphs: Vec<Glyph>,
     natural_width: f32,
+    max_width: f32,
     pub lines: Vec<VisualLine>,
     pub line_height: f32,
     font_size: f32,
@@ -211,15 +216,33 @@ pub struct TextLayout {
 }
 
 impl TextLayout {
+    /// 对象点击返回占位符起点，而不是用于光标的最近左右边界。
+    pub fn object_at_point(&self, x: f32, y: f32) -> Option<usize> {
+        self.objects.iter().find_map(|object| {
+            let row = self.lines.partition_point(|line| line.end <= object.at);
+            let line = self.lines.get(row)?;
+            if object.at < line.start { return None; }
+            let left = self.x_in_line(line, object.at);
+            let baseline = row as f32 * self.line_height + self.baseline;
+            (x >= left && x <= left + object.width && y >= baseline - object.ascent && y <= baseline + object.descent)
+                .then_some(object.at)
+        })
+    }
+
     /// 行内对象的绘制矩形（相对段落左上角）：(key, x, y, 宽, 高)，按基线对齐。
     pub fn object_rects(&self) -> Vec<(&InlineAsset, f32, f32, f32, f32)> {
+        self.object_rects_clipped(f32::NEG_INFINITY..f32::INFINITY)
+    }
+    pub fn object_rects_clipped(&self, clip: Range<f32>) -> Vec<(&InlineAsset, f32, f32, f32, f32)> {
         self.objects
             .iter()
             .filter_map(|object| {
-                let line_index = self.lines.iter().position(|line| object.at >= line.start && object.at < line.end)?;
-                let line = &self.lines[line_index];
+                let line_index = self.lines.partition_point(|line| line.end <= object.at);
+                let line = self.lines.get(line_index)?;
+                if object.at < line.start { return None; }
                 let x = self.x_in_line(line, object.at);
                 let baseline = line_index as f32 * self.line_height + self.baseline;
+                if baseline - object.ascent > clip.end || baseline + object.descent < clip.start { return None; }
                 Some((&object.key, x, baseline - object.ascent, object.width, object.ascent + object.descent))
             })
             .collect()
@@ -240,10 +263,7 @@ impl TextLayout {
 
     /// 最宽视觉行的宽度，用于表格列宽和行内元素对齐。
     pub fn max_line_width(&self) -> f32 {
-        self.lines
-            .iter()
-            .map(|line| self.x_in_line(line, line.end))
-            .fold(0.0, f32::max)
+        self.max_width
     }
 
     fn shaped_x(&self, byte: usize) -> f32 {
@@ -263,10 +283,7 @@ impl TextLayout {
     }
 
     pub fn line_for_offset(&self, offset: usize) -> usize {
-        self.lines
-            .iter()
-            .position(|line| offset <= line.end)
-            .unwrap_or(self.lines.len().saturating_sub(1))
+        self.lines.partition_point(|line| line.end < offset).min(self.lines.len().saturating_sub(1))
     }
 
     /// 光标所在视觉行与横坐标（相对段落左上角）。
@@ -297,8 +314,12 @@ impl TextLayout {
 
     /// 区间在各视觉行上的覆盖：(行号, x0, x1)。
     pub fn range_rects(&self, range: Range<usize>) -> Vec<(usize, f32, f32)> {
+        self.range_rects_in(range, 0..self.lines.len())
+    }
+    pub fn range_rects_in(&self, range: Range<usize>, rows: Range<usize>) -> Vec<(usize, f32, f32)> {
         let mut rects = Vec::new();
-        for (index, line) in self.lines.iter().enumerate() {
+        for index in rows.start.min(self.lines.len())..rows.end.min(self.lines.len()) {
+            let line = &self.lines[index];
             let start = range.start.max(line.start);
             let end = range.end.min(line.end);
             if start < end {
@@ -395,6 +416,22 @@ impl TextLayout {
     }
 }
 
+/// 只索引上一帧仍被显示列表持有的段落；弱引用不会延长正文或旧布局的生命周期。
+#[derive(Default)]
+pub struct TextLayoutReuse { entries: HashMap<u64, Weak<TextLayout>> }
+impl TextLayoutReuse {
+    pub fn remember(&mut self, layout: &Rc<TextLayout>) {
+        if self.entries.len() < 1024 { self.entries.insert(layout.cache_key, Rc::downgrade(layout)); }
+    }
+    pub fn layout(&mut self, spec: &ParaSpec, width: f32, window: &Window) -> Rc<TextLayout> {
+        let key = spec.cache_key(width);
+        if let Some(layout) = self.entries.get(&key).and_then(Weak::upgrade) { return layout; }
+        let layout = Rc::new(layout_text(spec, width, window));
+        self.remember(&layout);
+        layout
+    }
+}
+
 /// Menlo 覆盖的字符范围（拉丁、希腊、西里尔、通用标点与制表符等，均在 CJK 部首区之前）。
 fn mono_covers(ch: char) -> bool {
     (ch as u32) < 0x2E80
@@ -486,9 +523,11 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
     let line_height = spec.line_height.max(ascent + descent);
     let baseline = ((line_height - (ascent + descent)) / 2.0).max(0.0) + ascent;
     let mut layout = TextLayout {
+        cache_key: spec.cache_key(width),
         text: spec.text.clone(),
         glyphs,
         natural_width,
+        max_width: 0.0,
         lines: Vec::new(),
         line_height,
         font_size: spec.font_size,
@@ -498,6 +537,13 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
     };
     let space_width = spec.font_size * 0.28;
     let mut items = kp::build_items(&layout.text, spec.font_size, space_width, |byte| layout.shaped_x(byte));
+    // 行尾及纯空白段落中的实字符必须占位，不能作为断行时可丢弃或伸缩的胶。
+    for item in items.iter_mut().rev() {
+        if item.from == item.to || !layout.text[item.from..item.to].bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
+            break;
+        }
+        item.kind = ItemKind::Box;
+    }
     split_oversized_boxes(&mut items, &layout, width);
     let lines = match spec.wrap {
         Wrap::KnuthPlass => kp::break_lines(&items, width),
@@ -507,6 +553,7 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
     if layout.lines.is_empty() {
         layout.lines.push(VisualLine { start: 0, end: 0, origin_x: 0.0, glues: Vec::new() });
     }
+    layout.max_width = layout.lines.iter().map(|line| layout.x_in_line(line, line.end)).fold(0.0, f32::max);
     layout
 }
 

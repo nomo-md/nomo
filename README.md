@@ -4,7 +4,9 @@
 
 本地优先的原生 Markdown 编辑器，使用 Rust + GPUI。编译和打包不需要 Node.js、npm、pnpm、Vite 或 Tauri。
 
-当前默认 Workspace 已接入窗口化 EditorControl，标签正文、历史和保存由文档会话管理；普通启动、新建和打开无需开发参数。现有文件树、工具栏、搜索替换与统计正在逐项对齐主分支。语义／源码和同会话双栏均已接入；双栏、菜单外壳与阅读位置同步尚待实机验收。完整状态与未验证项见[开发记录](docs/gpui-editor-control.md)和[Roadmap](src-gpui/ROADMAP.md)。
+从软件图标启动默认进入文档主页：左侧显示本地文件夹入口和最近文件，右侧按需显示文件页首缩略图。双击文件仍直接打开编辑页；编辑时可用标签栏主页按钮返回，保留当前标签和未保存内容。主页界面与交互尚待实机验收。
+
+当前默认 Workspace 已接入窗口化 NomoMark，标签正文、历史和保存由文档会话管理；普通启动、新建和打开无需开发参数。现有文件树、工具栏、搜索替换与统计正在逐项对齐主分支。语义／源码和同会话双栏均已接入；双栏、菜单外壳与阅读位置同步尚待实机验收。完整状态与未验证项见[开发记录](docs/nomo-mark.md)和[Roadmap](src-gpui/ROADMAP.md)。
 
 **当前源码尚未达到历史桌面版的功能与视觉等价水平。** 导出 PDF／Word／HTML／图片、系统 Quick Look、MSIX 商店包和 Shell 扩展暂时下线；外部文件监听、托盘、完整工作区恢复、自定义快捷键和多语言等仍未完成。历史正式版继续从 Releases 获取，原生收敛本身不会发布新版。
 
@@ -23,11 +25,11 @@ cargo check --locked --bin nomo
 cargo build --locked --release --bin nomo
 ```
 
-开发控件：
+NomoMark 开发入口：
 
 ```sh
-cargo run --locked --features editor-control-demo --bin nomo -- --editor-control-demo
-cargo run --locked --features editor-control-demo --bin nomo -- --editor-control /path/to/document.md
+cargo run --locked --features nomo-mark-demo --bin nomo -- --nomo-mark-demo
+cargo run --locked --features nomo-mark-demo --bin nomo -- --nomo-mark /path/to/document.md
 ```
 
 验证命令、六类发行资产和实机待验项目见[构建与发布](docs/native-build.md)。应用结构见 [CLASSMAP](CLASSMAP.md)，后续工作见 [Roadmap](src-gpui/ROADMAP.md)。

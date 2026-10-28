@@ -19,7 +19,7 @@
 - 相关优化前后各执行三轮相同流程，观察稳定占用、峰值、输入响应和标签／模式切换延迟；重复切换及打开关闭各 20 轮，区分预热缓存与持续增长。
 - 怀疑引用保留时，检查 Entity、Arc、订阅与回调引用链，区分缓存预热、活动任务和已经关闭视图的残留。
 - 生命周期调整须覆盖当前入口已支持的撤销重做、选区与阅读位置、中文输入法、新建焦点、双栏、标签、图片和保存。未支持或未完成的实机项明确标记。
-- 代码变更按影响运行 `cargo check --locked --bin nomo`、`cargo build --locked --release --bin nomo` 和定向既有测试。开发控件另加 `--features editor-control-demo`；测试入口为 `cargo test --locked --release --features editor-control-demo --bin nomo <过滤条件>`。仅修改文档时检查内容和差异即可。
+- 代码变更按影响运行 `cargo check --locked --bin nomo`、`cargo build --locked --release --bin nomo` 和定向既有测试。NomoMark 开发入口另加 `--features nomo-mark-demo`；测试入口为 `cargo test --locked --release --features nomo-mark-demo --bin nomo <过滤条件>`。仅修改文档时检查内容和差异即可。
 
 ## 原生项目边界
 

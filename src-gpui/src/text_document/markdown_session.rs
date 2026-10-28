@@ -5,6 +5,10 @@ mod outline_move;
 pub(crate) use outline_move::{OutlineMove, OutlinePlacement};
 mod toc;
 mod rename;
+mod external;
+mod recovery;
+pub(crate) use external::ExternalChange;
+pub(crate) use recovery::{RecoveryCandidate, SessionLease};
 #[cfg(test)]
 mod templates;
 use super::{
@@ -975,7 +979,7 @@ impl MarkdownDocumentSessionManager {
         target: PathBuf,
         overwrite_external: bool,
     ) -> TextDocumentResult<MarkdownStatus> {
-        self.save_impl(owner, snapshot_id, Some(target), overwrite_external, false)
+        self.save_impl(owner, snapshot_id, Some(target), overwrite_external, false, None)
     }
 
     /// 普通保存在线程获得路径锁后再解析当前路径，以便与文件树重命名并发。
@@ -985,7 +989,7 @@ impl MarkdownDocumentSessionManager {
         snapshot_id: &str,
         snapshot_before_save: bool,
     ) -> TextDocumentResult<MarkdownStatus> {
-        self.save_impl(owner, snapshot_id, None, false, snapshot_before_save)
+        self.save_impl(owner, snapshot_id, None, false, snapshot_before_save, None)
     }
 
     fn save_impl(
@@ -995,6 +999,7 @@ impl MarkdownDocumentSessionManager {
         target: Option<PathBuf>,
         overwrite_external: bool,
         snapshot_before_save: bool,
+        external: Option<&ExternalChange>,
     ) -> TextDocumentResult<MarkdownStatus> {
         let _path_operation = lock(&self.path_operations)?;
         let snapshot = lock(&self.snapshots)?
@@ -1049,6 +1054,7 @@ impl MarkdownDocumentSessionManager {
             }
         };
         let verify = || -> TextDocumentResult<()> {
+            if let Some(change) = external { change.verify(&target)?; }
             if let Some(expected) = &expected {
                 if !overwrite_external
                     && BaselineIdentity::read(&target).ok().as_ref() != Some(expected)

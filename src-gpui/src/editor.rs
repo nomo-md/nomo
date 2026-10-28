@@ -381,6 +381,8 @@ impl EditorView {
                 wrap: ctx.wrap,
                 base_dir: ctx.base_dir.as_deref(),
                 image_size: &image_size,
+                image_failure: &|path| ctx.store.failure(path),
+                text_layouts: None,
                 wide_width,
                 code_line_numbers: ctx.code_line_numbers,
                 inline_code: ctx.inline_code,
@@ -728,7 +730,7 @@ impl EditorView {
                             }
                         }
                         Part::Block { start, end, layout, .. } => {
-                            crate::editor_control::paint::paint_block(layout, point(px(ox), px(top)), clip.clone(), theme, store, window, cx);
+                            crate::nomo_mark::paint::paint_block(layout, point(px(ox), px(top)), clip.clone(), theme, store, window, cx);
                             let first = search.matches.partition_point(|range| range.end < *start);
                             for range in search.matches[first..].iter().take_while(|range| range.start <= *end) {
                                 let rel = (range.start.saturating_sub(*start)) as usize..(range.end.min(*end) - start) as usize;

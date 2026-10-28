@@ -29,6 +29,9 @@ pub struct TextField {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     popover_style: bool,
+    settings_style: bool,
+    clear_button: bool,
+    settings_mono: bool,
     emoji_search_style: bool,
     invalid: bool,
 }
@@ -54,6 +57,9 @@ impl TextField {
             last_layout: None,
             last_bounds: None,
             popover_style: false,
+            settings_style: false,
+            clear_button: false,
+            settings_mono: false,
             emoji_search_style: false,
             invalid: false,
         }
@@ -81,6 +87,17 @@ impl TextField {
     pub fn set_popover_style(&mut self, cx:&mut Context<Self>) {
         self.popover_style=true;
         cx.notify();
+    }
+    pub fn set_settings_style(&mut self) {
+        self.popover_style = true;
+        self.settings_style = true;
+        self.set_tab_stop();
+    }
+    pub fn reserve_clear_button(&mut self) {
+        self.clear_button = true;
+    }
+    pub fn set_settings_monospace(&mut self) {
+        self.settings_mono = true;
     }
     pub fn set_emoji_search_style(&mut self, cx: &mut Context<Self>) {
         self.popover_style = true;
@@ -300,8 +317,9 @@ impl Render for TextField {
             .cursor(CursorStyle::IBeam)
             .h(px(if self.popover_style {34.0}else{26.0}))
             .px(px(if self.emoji_search_style {0.0}else if self.popover_style {10.0}else{8.0}))
+            .when(self.clear_button, |el| el.pr(px(30.0)))
             .rounded(px(if self.popover_style {4.0}else{6.0}))
-            .bg(if self.emoji_search_style {theme.rail_bg}else if self.popover_style {theme.app_bg}else{theme.surface})
+            .bg(if self.emoji_search_style {theme.rail_bg}else if self.popover_style && !self.settings_style {theme.app_bg}else{theme.surface})
             .border_1()
             .border_color(border)
             .flex()
@@ -370,7 +388,9 @@ impl Element for FieldElement {
         } else {
             (field.content.clone().into(), theme.fg)
         };
-        let font = if field.popover_style {gpui::font(crate::theme::ui_font_family())}else{font_for(Family::Text, false, false)};
+        let font = if field.settings_mono {font_for(Family::Mono, false, false)}
+            else if field.settings_style {gpui::font(window.text_style().font_family.clone())}
+            else if field.popover_style {gpui::font(crate::theme::ui_font_family())}else{font_for(Family::Text, false, false)};
         let base = TextRun { len: text.len(), font, color, background_color: None, underline: None, strikethrough: None };
         let runs = match field.marked.as_ref().filter(|_| !field.content.is_empty()) {
             Some(marked) => vec![

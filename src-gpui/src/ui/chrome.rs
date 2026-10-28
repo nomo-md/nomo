@@ -5,9 +5,10 @@
 
 use super::components::{IconName, icon, tooltip};
 use super::{window_chrome, workspace as action};
+use super::popup::{popup, reduced_motion, PopupAnchor, PopupPlacement};
 use crate::{editor, settings::EditorMode, theme::Theme};
 use gpui::{
-    Action, AnchoredPositionMode, AnyElement, App, Context, Div, EventEmitter, FocusHandle,
+    Action, App, Context, Div, EventEmitter, FocusHandle,
     Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton, Pixels, Point, Render,
     ScrollHandle, SharedString, Stateful, Window, anchored, deferred, div, point, prelude::*,
     px,
@@ -76,6 +77,7 @@ pub enum ChromeUpdateState { Available, Downloading(u8), Downloaded }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChromeState {
     pub has_document: bool,
+    pub can_show_home: bool,
     pub can_undo: bool,
     pub can_redo: bool,
     pub mode: EditorMode,
@@ -94,7 +96,7 @@ pub struct ChromeState {
 impl Default for ChromeState {
     fn default() -> Self {
         Self {
-            has_document: false, can_undo: false, can_redo: false, mode: EditorMode::Semantic,
+            has_document: false, can_show_home: false, can_undo: false, can_redo: false, mode: EditorMode::Semantic,
             sidebar_visible: true, toolbar_visible: true, outline_visible: false,
             large_document: false, split_available: true, word_export_busy: false,
             toolbar_shortcut: "".into(), recent: Vec::new(), capabilities: Vec::new(), update: None,
@@ -379,7 +381,7 @@ impl Chrome {
         cx.stop_propagation();
     }
 
-    fn menu_panel(&self, menu: Menu, nested: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn menu_panel(&self, menu: Menu, nested: bool, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = Theme::ui(cx);
         let compact = window.viewport_size().height <= px(700.0);
         let selected = if nested { self.subselected } else { self.selected };
@@ -426,12 +428,9 @@ impl Chrome {
                     .on_click(cx.listener(move |_, _, _, cx| { cx.stop_propagation(); if removable { cx.emit(ChromeEvent::RemoveRecent(path.clone())); } })));
             }
             if let Some(submenu) = submenu.filter(|value| self.submenu == Some(*value)) {
-                let parent_x = (101.0 + self.menu.unwrap_or(Menu::File).index() as f32 * 44.0).min(f32::from(window.viewport_size().width) - MENU_WIDTH - 8.0);
-                let right = parent_x + MENU_WIDTH * 2.0 + 2.0 <= f32::from(window.viewport_size().width) - 8.0;
                 let panel = self.menu_panel(submenu, true, window, cx);
-                row = row.child(deferred(anchored().position_mode(AnchoredPositionMode::Local)
-                    .position(point(px(if right { MENU_WIDTH - 16.0 + 2.0 } else { -MENU_WIDTH - 18.0 }), px(-4.0)))
-                    .snap_to_window_with_margin(px(8.0)).child(panel)).with_priority(3));
+                row = row.child(deferred(popup(("chrome-submenu-enter", submenu as usize),
+                    PopupAnchor::Parent, PopupPlacement::Right, panel, reduced_motion(cx))).with_priority(3));
             }
             rows.push(row.into_any_element());
         }
@@ -442,7 +441,7 @@ impl Chrome {
             .track_scroll(if nested { &self.submenu_scroll } else { &self.menu_scroll })
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-            .children(rows).into_any_element()
+            .children(rows)
     }
 
     fn basic_button(&self, id: &'static str, theme: &Theme) -> Stateful<Div> {
@@ -508,7 +507,8 @@ impl Render for Chrome {
                 let mut item = div().relative().flex().flex_col().child(trigger);
                 if open {
                     let panel = self.menu_panel(menu, false, window, cx);
-                    item = item.child(deferred(anchored().offset(point(px(0.0), px(4.0))).snap_to_window_with_margin(px(8.0)).child(panel)).with_priority(2));
+                    item = item.child(deferred(popup(("chrome-menu-enter", menu.index()),
+                        PopupAnchor::Parent, PopupPlacement::BelowLeft, panel, reduced_motion(cx))).with_priority(2));
                 }
                 nav = nav.child(item);
             }
@@ -532,8 +532,13 @@ impl Render for Chrome {
         if self.state.has_document {
             let mini_enabled = self.capable(ChromeCapability::Mini);
             right = right.child(self.basic_button("chrome-mini", &theme).child(icon(IconName::PictureInPicture2, 15.0, theme.fg))
-                .when(!mini_enabled, |el| el.opacity(0.45)).tooltip(tooltip(if mini_enabled { "Markdown Mini" } else { "Markdown Mini 尚未接入" }))
+                .when(!mini_enabled, |el| el.opacity(0.45)).tooltip(tooltip(if mini_enabled { "Markdown Mini (Ctrl+Alt+M)" } else if cfg!(windows) { "打开文档并退出全屏后可使用 Markdown Mini" } else { "当前平台尚未接入 Markdown Mini" }))
                 .on_click(cx.listener(move |this, _, window, cx| { if mini_enabled { this.dismiss(window, cx); cx.emit(ChromeEvent::ToggleMini); } })));
+        }
+        if self.state.can_show_home {
+            right = right.child(self.icon_button("chrome-home", IconName::Home, &theme)
+                .tooltip(tooltip(if cfg!(target_os = "macos") { "返回主页 · ⌘⇧H" } else { "返回主页 · Ctrl+Shift+H" }))
+                .on_click(cx.listener(|this, _, window, cx| { this.dismiss(window, cx); window.dispatch_action(Box::new(action::ShowHome), cx); })));
         }
         right = right.child(self.icon_button("chrome-theme", if theme.dark { IconName::Sun } else { IconName::Moon }, &theme)
                 .tooltip(tooltip("切换主题"))
@@ -561,7 +566,9 @@ impl Render for Chrome {
         }
         if let Some(position) = self.context_position.filter(|_| self.menu == Some(Menu::Window)) {
             let panel = self.menu_panel(Menu::Window, false, window, cx);
-            root = root.child(deferred(anchored().position(position).snap_to_window_with_margin(px(8.0)).child(panel)).with_priority(2));
+            root = root.child(deferred(popup("chrome-window-menu-enter",
+                PopupAnchor::Bounds(gpui::Bounds::new(position, gpui::size(px(0.0), px(0.0)))),
+                PopupPlacement::BelowLeft, panel, reduced_motion(cx))).with_priority(2));
         }
         #[cfg(target_os = "windows")]
         if !window.is_maximized() && !window.is_fullscreen() {

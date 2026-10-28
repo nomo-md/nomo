@@ -57,6 +57,11 @@ impl Default for ScalarMotion {
 }
 
 impl ScalarMotion {
+    pub fn settled(active: bool) -> Self {
+        let value = if active { 1.0 } else { 0.0 };
+        Self { from: value, target: value, ..Self::default() }
+    }
+
     pub fn set(&mut self, active: bool, reduced: bool, duration: Duration) {
         let target = if active { 1.0 } else { 0.0 };
         let duration = if reduced { duration.min(Duration::from_millis(90)) } else { duration };

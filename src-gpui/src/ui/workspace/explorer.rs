@@ -62,6 +62,23 @@ impl ExplorerState {
 }
 
 impl Workspace {
+    pub(super) fn suspend_tree(&mut self, _: &mut Context<Self>) {
+        if let Some(scan) = &self.explorer.scan { scan.cancel.store(true, Ordering::Release); }
+        self.explorer.queue.clear();
+        self.explorer.scan_again.clear();
+        self.explorer.refresh_task.take();
+        self.explorer.sidebar_motion_task.take();
+        self.explorer.scroll_hide_task.take();
+        self.explorer.search_task.take();
+        self.explorer.menu = None;
+        self.explorer.edit = None;
+        if let Some(tree) = &mut self.tree { tree.cancel_all_loads(); }
+    }
+
+    pub(super) fn resume_tree(&mut self, cx: &mut Context<Self>) {
+        if self.tree.is_some() { self.refresh_tree(cx); self.ensure_tree_refresh_task(cx); }
+    }
+
     pub(super) fn replace_tree(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.explorer.generation = self.explorer.generation.wrapping_add(1);
         // 旧扫描即使尚未从系统调用返回，也只允许它和新请求串行，避免连续切换根目录时积累后台任务。
@@ -133,6 +150,8 @@ impl Workspace {
         for path in paths {
             self.queue_tree_scan(path, true, cx);
         }
+        // 主页暂停期间可能已有目录入队；没有新增请求时，恢复可见也必须启动队列。
+        self.start_next_tree_scan(cx);
         cx.notify();
     }
 
@@ -165,7 +184,7 @@ impl Workspace {
             loop {
                 cx.background_executor().timer(Duration::from_secs(5)).await;
                 if this.update(cx, |workspace, cx| {
-                    if workspace.tree.is_some() && cx.global::<Settings>().show_sidebar {
+                    if !workspace.home_visible && workspace.tree.is_some() && cx.global::<Settings>().show_sidebar {
                         workspace.refresh_tree(cx);
                     }
                 }).is_err() { break; }
@@ -174,6 +193,7 @@ impl Workspace {
     }
 
     fn start_next_tree_scan(&mut self, cx: &mut Context<Self>) {
+        if self.home_visible { return; }
         if self.explorer.scan.is_some() { return; }
         let Some(tree) = &mut self.tree else {
             self.explorer.queue.clear();

@@ -42,6 +42,43 @@ impl Store {
         self.db().execute("UPDATE outline_views SET generation=?2,view_generation=view_generation+1,scan_byte=0,visible_count=0,complete=0 WHERE view_id=?1",params![view,generation]).map_err(sql)?;
         Ok(())
     }
+    /// 普通正文编辑只平移已生成的大纲行。标题、顺序或映射覆盖无法确认时重建投影。
+    fn advance_outline(&self, view: &str, previous: u64, generation: u64, total: u64) -> TextDocumentResult<bool> {
+        let changes = self.changes(generation, previous)?;
+        if changes["invalidateAll"] != false || changes["outlineChanged"] != false { return Ok(false); }
+        let Some(mappings) = changes["mappings"].as_array() else { return Ok(false); };
+        // 映射过碎时回退分页重建，避免在每个标题上执行大型区间匹配。
+        if mappings.len() > 16 { return Ok(false); }
+        let mut ranges = Vec::with_capacity(mappings.len());
+        for mapping in mappings {
+            let (Some(from), Some(to), Some(delta)) = (mapping["fromByte"].as_i64(), mapping["toByte"].as_i64(), mapping["byteDelta"].as_i64()) else { return Ok(false); };
+            let (Some(start), Some(end)) = (from.checked_add(delta), to.checked_add(delta)) else { return Ok(false); };
+            if from < 0 || from >= to || start < 0 || end > total as i64 { return Ok(false); }
+            ranges.push((from, to, start, end));
+        }
+        ranges.sort_unstable();
+        if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0 || pair[0].3 > pair[1].2) { return Ok(false); }
+        let mappings = changes["mappings"].to_string();
+        let db = self.db();
+        let uncovered: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM raw_headings h WHERE h.generation=?1 AND NOT EXISTS(SELECT 1 FROM json_each(?2) m WHERE h.byte>=json_extract(m.value,'$.fromByte')+json_extract(m.value,'$.byteDelta') AND h.byte<json_extract(m.value,'$.toByte')+json_extract(m.value,'$.byteDelta'))) OR EXISTS(SELECT 1 FROM outline_rows r WHERE r.view_id=?3 AND NOT EXISTS(SELECT 1 FROM json_each(?2) m WHERE r.byte>=json_extract(m.value,'$.fromByte') AND r.byte<json_extract(m.value,'$.toByte')))",
+            params![generation, mappings, view], |row| row.get(0)).map_err(sql)?;
+        if uncovered { return Ok(false); }
+        let tx = db.unchecked_transaction().map_err(sql)?;
+        db.execute("UPDATE outline_rows AS r SET byte=(SELECT r.byte+json_extract(m.value,'$.byteDelta') FROM json_each(?2) m WHERE r.byte>=json_extract(m.value,'$.fromByte') AND r.byte<json_extract(m.value,'$.toByte') LIMIT 1) WHERE r.view_id=?1", params![view, mappings]).map_err(sql)?;
+        let last: Option<(u64, u8, bool)> = db.query_row(
+            "SELECT h.byte,h.level,COALESCE(f.collapsed,h.level>=v.default_level) FROM outline_rows r JOIN outline_views v ON v.view_id=r.view_id JOIN raw_headings h ON h.generation=?2 AND h.byte=r.byte LEFT JOIN outline_folds f ON f.view_id=r.view_id AND f.heading_id=h.block_id||':'||h.heading_index WHERE r.view_id=?1 ORDER BY r.position DESC LIMIT 1",
+            params![view, generation], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional().map_err(sql)?;
+        let scan = match last {
+            Some((byte, level, true)) => db.query_row("SELECT COALESCE(MIN(byte),?4) FROM raw_headings WHERE generation=?1 AND byte>?2 AND level<=?3", params![generation,byte,level,total], |row| row.get::<_,u64>(0)).map_err(sql)?.max(byte + 1),
+            Some((byte, _, false)) => byte + 1,
+            None => 0,
+        };
+        // 可见行身份和顺序不变，保留 view_generation、折叠和分页游标。
+        db.execute("UPDATE outline_views SET generation=?2,scan_byte=?3 WHERE view_id=?1", params![view,generation,scan]).map_err(sql)?;
+        tx.commit().map_err(sql)?;
+        Ok(true)
+    }
     pub(super) fn outline_query(
         &self,
         identity: &Identity,
@@ -121,7 +158,7 @@ impl Store {
                         |r| r.get(0),
                     )
                     .map_err(sql)?;
-                if current != generation {
+                if current != generation && !self.advance_outline(&view_id, current, generation, response.total_bytes)? {
                     self.reset_outline(&view_id, generation)?;
                 }
                 let (epoch,mut scan,mut count,mut complete,level):(u64,u64,u64,bool,u8)=db.query_row("SELECT view_generation,scan_byte,visible_count,complete,default_level FROM outline_views WHERE view_id=?1",[&view_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(sql)?;

@@ -262,7 +262,11 @@ impl WritingStatsService {
             reused_blocks = reused;
             let (words, visible_chars) =
                 scan::summarize(&directory.0, body_length, reused, job.cancel.clone())?;
-            let (chars, lines) = source.raw_counts(0, source.len)?;
+            let (chars, lines) = if let Some(previous) = &previous {
+                source.incremental_raw_counts(&previous.snapshot, previous.full.chars, previous.full.lines - 1)?
+            } else {
+                source.raw_counts(0, source.len)?
+            };
             let full = DocumentStats {
                 chars,
                 words,

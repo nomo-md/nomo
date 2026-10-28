@@ -58,7 +58,7 @@ impl Workspace {
         for (index, (action, label)) in items.into_iter().enumerate() {
             let path = menu.path.clone();
             let disabled = matches!(action, TreeAction::CopyFile) && !cfg!(any(target_os = "windows", target_os = "macos", target_os = "linux"));
-            panel = panel.child(div().id(("tree-menu-item", index)).h(px(29.0)).px(px(14.0)).flex().items_center()
+            panel = panel.child(div().id(("tree-menu-item", index)).h(px(29.0)).px(px(14.0)).flex().flex_none().items_center()
                 .text_size(px(13.0)).text_color(theme.fg).when(disabled, |el| el.opacity(0.45).tooltip(tooltip("当前平台暂不支持复制文件")))
                 .when(!disabled, |el| el.cursor_pointer().hover(|style| style.bg(theme.hover)))
                 .child(label).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -69,7 +69,9 @@ impl Workspace {
                     cx.notify();
                 })));
         }
-        Some(gpui::deferred(gpui::anchored().position(menu.position).snap_to_window_with_margin(px(8.0)).child(panel)).with_priority(3).into_any_element())
+        Some(gpui::deferred(popup("tree-menu-enter",
+            PopupAnchor::Bounds(gpui::Bounds::new(menu.position, gpui::size(px(0.0), px(0.0)))),
+            PopupPlacement::BelowLeft, panel, self.explorer.reduce_motion)).with_priority(3).into_any_element())
     }
 
     pub(super) fn run_tree_action(&mut self, action: TreeAction, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -209,9 +211,10 @@ impl Workspace {
         }
         let Some(root) = self.tree.as_ref().map(|tree| tree.root.clone()) else { return; };
         let generation = self.explorer.generation();
-        let response = window.prompt(PromptLevel::Warning, &format!("确定删除“{}”？", path.display()), Some("此操作会永久删除，无法撤销。"), &["删除", "取消"], cx);
+        let display_path = display_tree_path(&path);
+        let response = dialogs::confirm_delete(Path::new(&display_path), window, cx);
         cx.spawn_in(window, async move |this, cx| {
-            if response.await.ok() != Some(0) { return; }
+            if !response.await { return; }
             let _ = this.update_in(cx, |workspace, window, cx| {
                 if workspace.explorer.generation() != generation { return; }
                 if workspace.tree_path_open(&path, cx) {
@@ -260,6 +263,7 @@ fn rename_tree_path(root: &Path, path: &Path, name: &str, manager: &MarkdownDocu
 
 fn broadcast_tree_rename(app: &mut App, paths: &[(PathBuf, PathBuf)], warning: Option<&str>) {
     if paths.is_empty() { return; }
+    crate::ui::home::library::shared(app).update(app, |library, cx| library.change(crate::ui::home::library::Change::Rename(paths.to_vec()), cx));
     for handle in app.windows().into_iter().filter_map(|handle| handle.downcast::<Workspace>()) {
         if let Err(error) = handle.update(app, |workspace, window, cx| {
             let mut changed = false;
@@ -269,7 +273,7 @@ fn broadcast_tree_rename(app: &mut App, paths: &[(PathBuf, PathBuf)], warning: O
             for opening in &mut workspace.opening {
                 if let Some(path) = &mut opening.path { remap_tree_path(path, paths); }
             }
-            if let Some((path, _)) = &mut workspace.deferred_open { remap_tree_path(path, paths); }
+            if let Some((path, _, _)) = &mut workspace.deferred_open { remap_tree_path(path, paths); }
             workspace.apply_tree_rename(paths, cx);
             if changed {
                 workspace.sync_tree_selection(false, cx);

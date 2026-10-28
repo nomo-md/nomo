@@ -681,27 +681,10 @@ fn local_structure(
     if !path.join("references").exists() {
         return Ok(None);
     }
+    let Some(change) = src.change_since(snapshot)? else { return Ok(None); };
+    let (from, old_to, new_to) = (change.from, change.old_to, change.new_to);
+    if from == old_to && from == new_to { return Ok(None); }
     let mut old = Source::snapshot(snapshot.clone(), src.cancel.clone());
-    let common = old.len.min(src.len);
-    let mut from = 0;
-    while from < common && old.byte(from)? == src.byte(from)? {
-        from += 1;
-    }
-    if from == common {
-        return Ok(None);
-    }
-    while from > 0 && src.byte(from)? & 0xc0 == 0x80 {
-        from -= 1;
-    }
-    let (mut old_to, mut new_to) = (old.len, src.len);
-    while old_to > from && new_to > from && old.byte(old_to - 1)? == src.byte(new_to - 1)? {
-        old_to -= 1;
-        new_to -= 1;
-    }
-    while new_to < src.len && src.byte(new_to)? & 0xc0 == 0x80 {
-        old_to += 1;
-        new_to += 1;
-    }
     // This fast path never has to retain text or infer syntax from an edit alone.
     for (input, end) in [(&mut old, old_to), (&mut *src, new_to)] {
         let mut p = from;

@@ -6,11 +6,14 @@
 
 mod buffer;
 mod cache;
+mod clipboard;
 mod document;
 mod editor;
-mod editor_control;
+mod nomo_mark;
+mod open_profile;
 mod embeds;
 mod images;
+mod image_import;
 mod kp;
 mod layout;
 mod markdown;
@@ -43,12 +46,29 @@ use gpui::{App, AppContext, Bounds, Menu, MenuItem, TitlebarOptions, WindowBound
 use std::path::PathBuf;
 use ui::workspace::{self, Workspace};
 
+struct QuitRequested(bool);
+impl gpui::Global for QuitRequested {}
+pub(crate) fn cancel_quit(cx:&mut App){cx.set_global(QuitRequested(false));}
+pub(crate) fn quit_workspaces(cx:&mut App){
+    cx.set_global(QuitRequested(true));
+    for handle in cx.windows().into_iter().filter_map(|window|window.downcast::<Workspace>()) {
+        let _=handle.update(cx,|workspace,window,cx|{if workspace.request_quit(window,cx){window.remove_window();}});
+    }
+    finish_quit(cx);
+}
+fn finish_quit(cx:&mut App){
+    if !cx.try_global::<QuitRequested>().is_some_and(|request|request.0)||cx.windows().iter().any(|window|window.downcast::<Workspace>().is_some()){return;}
+    cancel_quit(cx);
+    for handle in cx.windows(){let _=handle.update(cx,|_,window,_|window.remove_window());}
+    cx.quit();
+}
+
 fn main() {
-    #[cfg(feature = "editor-control-demo")]
-    let control_demo = std::env::args().any(|argument| argument == "--editor-control-demo");
-    #[cfg(feature = "editor-control-demo")]
-    let native_editor = std::env::args().any(|argument| argument == "--editor-control");
-    let paths: Vec<PathBuf> = std::env::args().skip(1).filter(|argument| argument != "--editor-control-demo" && argument != "--editor-control").map(PathBuf::from).collect();
+    #[cfg(feature = "nomo-mark-demo")]
+    let nomo_mark_demo = std::env::args().any(|argument| matches!(argument.as_str(), "--nomo-mark-demo" | "--editor-control-demo"));
+    #[cfg(feature = "nomo-mark-demo")]
+    let nomo_mark_file = std::env::args().any(|argument| matches!(argument.as_str(), "--nomo-mark" | "--editor-control"));
+    let paths: Vec<PathBuf> = std::env::args().skip(1).filter(|argument| !matches!(argument.as_str(), "--nomo-mark-demo" | "--nomo-mark" | "--editor-control-demo" | "--editor-control")).map(PathBuf::from).collect();
     #[cfg(not(windows))]
     let application = gpui_platform::application();
     #[cfg(windows)]
@@ -58,7 +78,7 @@ fn main() {
     let application = application.with_assets(ui::components::Assets);
     // 平台可能在启动完成前送达文件 URL；只暂存尚未交给 Workspace 的路径。
     let open_state = std::rc::Rc::new(std::cell::RefCell::new((None::<gpui::AsyncApp>, Vec::<PathBuf>::new())));
-    let development_entry = cfg!(feature = "editor-control-demo") && std::env::args().any(|arg| arg == "--editor-control" || arg == "--editor-control-demo");
+    let development_entry = cfg!(feature = "nomo-mark-demo") && std::env::args().any(|argument| matches!(argument.as_str(), "--nomo-mark" | "--nomo-mark-demo" | "--editor-control" | "--editor-control-demo"));
     if !development_entry {
         let state = open_state.clone();
         application.on_open_urls(move |urls| {
@@ -89,26 +109,22 @@ fn main() {
         cx.set_global(images::ImageStore::default());
         cx.set_global(embeds::EmbedStore::default());
         editor::bind_keys(cx);
-        editor_control::view::bind_keys(cx);
+        nomo_mark::view::bind_keys(cx);
         ui::text_field::bind_keys(cx);
+        ui::dialogs::init(cx);
         workspace::bind_keys(cx);
-        cx.on_action(|_: &workspace::Quit, cx| {
-            for window in cx.windows() {
-                if let Some(handle)=window.downcast::<Workspace>() {
-                    let _=handle.update(cx,|workspace,window,cx| {if workspace.request_close_window(window,cx){window.remove_window();}});
-                }
-            }
-        });
+        cx.on_action(|_: &workspace::Quit,cx|quit_workspaces(cx));
+        cx.on_window_closed(|cx,_|{ui::updates::prune_closed_windows(cx);finish_quit(cx);}).detach();
         cx.on_action(|_: &workspace::OpenSettings, cx| ui::settings_window::open(cx));
         set_menus(cx);
 
-        #[cfg(feature = "editor-control-demo")]
-        if control_demo || native_editor {
+        #[cfg(feature = "nomo-mark-demo")]
+        if nomo_mark_demo || nomo_mark_file {
             cx.on_window_closed(|cx, _| { if cx.windows().is_empty() { cx.quit(); } }).detach();
             let bounds = Bounds::centered(None, size(px(1100.0), px(800.0)), cx);
             cx.open_window(WindowOptions { app_id: Some("com.nomo.desktop".into()), window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {title:Some("Nomo · 控件开发".into()),..Default::default()}),..Default::default()},
-                |window,cx| {theme::Theme::apply(window.appearance(),cx);cx.new(|cx| if native_editor { editor_control::demo::ControlDemo::file(paths.first().cloned(), window, cx) } else { editor_control::demo::ControlDemo::new(window,cx) })}).expect("打开控件开发窗口");
+                titlebar: Some(TitlebarOptions {title:Some("NomoMark · 开发".into()),..Default::default()}),..Default::default()},
+                |window,cx| {theme::Theme::apply(window.appearance(),cx);cx.new(|cx| if nomo_mark_file { nomo_mark::demo::NomoMarkDemo::file(paths.first().cloned(), window, cx) } else { nomo_mark::demo::NomoMarkDemo::new(window,cx) })}).expect("打开 NomoMark 开发窗口");
             cx.activate(true);return;
         }
 
@@ -123,8 +139,9 @@ fn main() {
 fn open_paths(paths: Vec<PathBuf>, cx: &mut App) {
     if let Some(handle) = cx.windows().into_iter().find_map(|window| window.downcast::<Workspace>()) {
         if let Err(error) = handle.update(cx, |workspace, window, cx| {
+            if paths.is_empty() { workspace.show_home(window, cx); }
             for path in paths { workspace.open_path(&path, window, cx); }
-            window.activate_window();
+            workspace.reveal_window(window,cx);
         }) { eprintln!("打开文档窗口失败：{error}"); }
     } else {
         open_workspace(paths, cx);

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title description">
+  <title id="title">Nomo 深色图标</title>
+  <desc id="description">圆角深色底板、白色 N、蓝色光标和两条灰色正文线。</desc>
+  <rect x="16" y="16" width="224" height="224" rx="48" fill="#2b313b"/>
+  <path d="M 87.5 145 V 80.5 L 152.5 145 V 80.5" fill="none" stroke="#f8f9fb" stroke-width="17.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="178.5" y="71.5" width="6.5" height="82.5" rx="3.25" fill="#5b9bff"/>
+  <rect x="78" y="173.5" width="69" height="8.5" rx="4.25" fill="#b6bac3"/>
+  <rect x="78" y="192.5" width="49" height="8.5" rx="4.25" fill="#b6bac3"/>
+</svg>

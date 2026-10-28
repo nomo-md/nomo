@@ -74,13 +74,13 @@ jobs:
       - name: Check both native entrypoints
         run: |
           cargo check --locked --target ${{ matrix.target }} --bin nomo
-          cargo check --locked --target ${{ matrix.target }} --features editor-control-demo --all-targets
+          cargo check --locked --target ${{ matrix.target }} --features nomo-mark-demo --all-targets
       - name: Existing default editor tests
         run: cargo test --locked --release --target ${{ matrix.target }} --bin nomo
-      - name: Existing document and editor-control tests
-        run: cargo test --locked --release --target ${{ matrix.target }} --features editor-control-demo --bin nomo
+      - name: Existing document and NomoMark tests
+        run: cargo test --locked --release --target ${{ matrix.target }} --features nomo-mark-demo --bin nomo
       - name: Build developer entrypoint
-        run: cargo build --locked --release --target ${{ matrix.target }} --features editor-control-demo --bin nomo
+        run: cargo build --locked --release --target ${{ matrix.target }} --features nomo-mark-demo --bin nomo
       - name: Verify native dependencies
         shell: bash
         run: |

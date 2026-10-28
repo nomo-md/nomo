@@ -1,4 +1,4 @@
-use super::super::{chunk_reader::DocumentSnapshot, TextDocumentResult};
+use super::super::{chunk_reader::DocumentSnapshot, piece_tree::PieceSource, TextDocumentResult};
 use super::{check, invalid, CHUNK};
 use std::{
     fs::File,
@@ -9,6 +9,12 @@ use std::{
 pub(super) enum Input {
     Snapshot(DocumentSnapshot),
     File(File),
+}
+#[derive(Clone, Copy)]
+pub(super) struct SourceChange {
+    pub from: u64,
+    pub old_to: u64,
+    pub new_to: u64,
 }
 /// A single 64 KiB page. Lookahead and backwards context use this same page;
 /// arbitrary line / delimiter lengths never determine allocation size.
@@ -22,6 +28,56 @@ pub(super) struct Source {
     pub cancel: Arc<AtomicBool>,
 }
 impl Source {
+    /// 已确认事务保留了未变片段的源身份；按片段跳过前后缀，不再比较整篇正文。
+    /// 返回保守范围，撤销、重做及多处修改也走同一条路径。
+    pub fn change_since(&self, previous: &DocumentSnapshot) -> TextDocumentResult<Option<SourceChange>> {
+        let Input::Snapshot(current) = &self.input else { return Ok(None); };
+        if !Arc::ptr_eq(&previous.original, &current.original)
+            || !Arc::ptr_eq(&previous.added, &current.added) { return Ok(None); }
+        let shared = |old_at, new_at, backwards: bool| -> TextDocumentResult<u64> {
+            let (old, a) = previous.tree.piece_at(old_at).ok_or_else(|| invalid("旧统计片段缺失"))?;
+            let (new, b) = current.tree.piece_at(new_at).ok_or_else(|| invalid("当前统计片段缺失"))?;
+            let same = match (&old.source, &new.source) {
+                (PieceSource::Original { offset: x, .. }, PieceSource::Original { offset: y, .. })
+                | (PieceSource::Added { offset: x, .. }, PieceSource::Added { offset: y, .. }) => x + a == y + b,
+                _ => false,
+            };
+            Ok(if !same { 0 } else if backwards { (a + 1).min(b + 1) }
+                else { (old.len() - a).min(new.len() - b) })
+        };
+        let mut from = 0;
+        while from < previous.len().min(current.len()) {
+            check(&self.cancel)?;
+            let length = shared(from, from, false)?;
+            if length == 0 { break; }
+            from += length;
+        }
+        let (mut old_to, mut new_to) = (previous.len(), current.len());
+        while old_to > from && new_to > from {
+            check(&self.cancel)?;
+            let length = shared(old_to - 1, new_to - 1, true)?.min(old_to - from).min(new_to - from);
+            if length == 0 { break; }
+            old_to -= length;
+            new_to -= length;
+        }
+        Ok(Some(SourceChange { from, old_to, new_to }))
+    }
+
+    pub fn incremental_raw_counts(&mut self, previous: &DocumentSnapshot, chars: u64, lines: u64)
+        -> TextDocumentResult<(u64, u64)> {
+        let Some(change) = self.change_since(previous)? else { return self.raw_counts(0, self.len); };
+        let mut old = Self::snapshot(previous.clone(), self.cancel.clone());
+        let mut from = change.from;
+        // 插入/删除 LF 会改变左侧 CR 的归属，必须把这个边界一起计数。
+        if from > 0 && old.byte(from - 1)? == b'\r' { from -= 1; }
+        let removed = old.raw_counts(from, change.old_to)?;
+        let inserted = self.raw_counts(from, change.new_to)?;
+        self.read_bytes += old.read_bytes;
+        let chars = chars.checked_sub(removed.0).and_then(|value| value.checked_add(inserted.0));
+        let lines = lines.checked_sub(removed.1).and_then(|value| value.checked_add(inserted.1));
+        chars.zip(lines).ok_or_else(|| invalid("统计增量超出原计数范围"))
+    }
+
     pub fn snapshot(snapshot: DocumentSnapshot, cancel: Arc<AtomicBool>) -> Self {
         let len = snapshot.len();
         Self {

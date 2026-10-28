@@ -8,7 +8,8 @@ use super::highlight;
 use crate::embeds::{EmbedKind, EmbedState};
 use crate::layout::{ColorRole, InlineAsset, InlineObject, InlineStyle, OBJECT_CHAR, ParaSpec, TextLayout, Wrap, layout_text};
 use crate::theme::{Family, Metrics};
-use crate::editor_control::parse::ParsedWindow;
+use crate::nomo_mark::parse::ParsedWindow;
+use crate::nomo_mark::image_properties::ImageWidth;
 use gpui::Window;
 use pulldown_cmark::{Alignment, BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
@@ -24,8 +25,8 @@ pub struct MapSeg {
     pub exact: bool,
 }
 impl MapSeg {
-    fn mapping(&self)->crate::editor_control::mapping::SourceSegment{
-        crate::editor_control::mapping::SourceSegment{display:self.text.clone(),source:self.source..self.source_end,exact:self.exact}
+    fn mapping(&self)->crate::nomo_mark::mapping::SourceSegment{
+        crate::nomo_mark::mapping::SourceSegment{display:self.text.clone(),source:self.source..self.source_end,exact:self.exact}
     }
 }
 
@@ -61,6 +62,76 @@ pub struct BlockLayout {
 }
 
 impl BlockLayout {
+    pub fn object_source_at(&self, x: f32, y: f32) -> Option<usize> {
+        self.items.iter().find_map(|item| match item {
+            DisplayItem::Horizontal { x: ix, y: iy, w, h, offset, layout, .. }
+                if x >= *ix && x <= ix + w && y >= *iy && y < iy + h - 8.0 =>
+                layout.object_source_at(x - ix + offset.get(), y - iy),
+            DisplayItem::Image { x: ix, y: iy, w, h, source, .. }
+                if x >= *ix && x <= ix + w && y >= *iy && y <= iy + h => Some(source.start),
+            DisplayItem::Embed { x: ix, y: iy, w, h, source, .. }
+                if x >= *ix && x <= ix + w && y >= *iy && y <= iy + h => Some(*source),
+            DisplayItem::Text { x: ix, y: iy, layout, map } => {
+                let at = layout.object_at_point(x - ix, y - iy)?;
+                map.iter().find(|segment| segment.text.contains(&at)).map(|segment| segment.source)
+            }
+            _ => None,
+        })
+    }
+
+    pub fn horizontal_caret(&self, at: usize, unit: crate::nomo_mark::navigation::CursorUnit, forward: bool) -> Option<usize> {
+        let mut best = None;
+        let mut accept = |next| {
+            if (forward && next > at && best.is_none_or(|old| next < old)) || (!forward && next < at && best.is_none_or(|old| next > old)) { best = Some(next); }
+        };
+        for item in &self.items {
+            match item {
+                DisplayItem::Horizontal { layout, .. } => { if let Some(next) = layout.horizontal_caret(at, unit, forward) { accept(next); } }
+                DisplayItem::Image { source, .. } => accept(if forward { if at < source.start { source.start } else { source.end } } else if at > source.end { source.end } else { source.start }),
+                DisplayItem::Embed { source, .. } => accept(*source),
+                DisplayItem::Text { layout, map, .. } => {
+                    let Some(first) = map.iter().map(|segment| segment.source).min() else { continue; };
+                    let last = map.iter().map(|segment| segment.source_end).max().unwrap_or(first);
+                    if at < first { if forward { accept(first); } continue; }
+                    if at > last { if !forward { accept(last); } continue; }
+                    let Some(segment) = map.iter().min_by_key(|segment| at.abs_diff(at.clamp(segment.source, segment.source_end))) else { continue; };
+                    let offset = segment.mapping().to_display(at, at > segment.source && !segment.exact);
+                    let next = crate::nomo_mark::navigation::boundary(&layout.text, offset, unit, forward);
+                    if next != offset { if let Some(next) = map_to_source(map, next) { accept(next); } }
+                }
+                _ => {}
+            }
+        }
+        best
+    }
+
+    pub fn line_boundary(&self, at: usize, end: bool) -> Option<usize> {
+        let mut best = None;
+        let mut distance = usize::MAX;
+        for item in &self.items {
+            match item {
+                DisplayItem::Horizontal { source, layout, .. } if source.start <= at && at <= source.end => return layout.line_boundary(at, end),
+                DisplayItem::Image { source, .. } if source.start <= at && at <= source.end => return Some(if end { source.end } else { source.start }),
+                DisplayItem::Text { layout, map, .. } => {
+                    for segment in map {
+                        let delta = at.abs_diff(at.clamp(segment.source, segment.source_end));
+                        if delta >= distance { continue; }
+                        let offset = segment.mapping().to_display(at, at > segment.source && !segment.exact);
+                        let row = layout.line_for_offset(offset);
+                        let line = &layout.lines[row];
+                        if let Some(next) = map_to_source(map, if end { line.end } else { line.start }) { best = Some(next); distance = delta; }
+                    }
+                }
+                _ => {}
+            }
+        }
+        best
+    }
+    pub fn remember_text(&self, reuse: &mut crate::layout::TextLayoutReuse) {
+        for item in &self.items {
+            match item { DisplayItem::Text { layout, .. } => reuse.remember(layout), DisplayItem::Horizontal { layout, .. } => layout.remember_text(reuse), _ => {} }
+        }
+    }
     pub fn estimated_bytes(&self) -> usize {
         self.items
             .iter()
@@ -74,14 +145,14 @@ impl BlockLayout {
             .sum::<usize>() + self.items.capacity()*std::mem::size_of::<DisplayItem>()
     }
 
-    /// 块内坐标命中到块内源码偏移；落在空白处时取纵向最近的文本项。
+    /// 先匹配纵向最近的文本项，再比较横向距离，避免点击短行右侧时跳到其他段落。
     pub fn source_at(&self, x: f32, y: f32) -> Option<usize> {
-        let mut best: Option<(f32, usize)> = None;
+        let mut best: Option<((f32, f32), usize)> = None;
         for item in &self.items {
             if let DisplayItem::Horizontal{x:ix,y:iy,w,h,offset,layout,..}=item{
                 let vertical=if y<*iy{iy-y}else if y>iy+h{y-iy-h}else{0.0};
                 let horizontal=if x<*ix{ix-x}else if x>ix+w{x-ix-w}else{0.0};
-                let distance=vertical*vertical+horizontal*horizontal;
+                let distance=(vertical,horizontal);
                 if !best.is_some_and(|(current,_)|current<=distance){if let Some(source)=layout.source_at((x-ix).clamp(0.0,*w)+offset.get(),(y-iy).clamp(0.0,*h)){best=Some((distance,source));}}
                 continue;
             }
@@ -99,7 +170,7 @@ impl BlockLayout {
             let vertical = if y < *iy { iy - y } else if y > iy + height { y - iy - height } else { 0.0 };
             let right = ix + layout.max_line_width();
             let horizontal = if x < *ix { ix-x } else if x > right { x-right } else { 0.0 };
-            let distance = vertical*vertical + horizontal*horizontal;
+            let distance = (vertical, horizontal);
             if best.is_some_and(|(current, _)| current <= distance) {
                 continue;
             }
@@ -113,16 +184,24 @@ impl BlockLayout {
 
     /// 块内源码区间在各文本项上的覆盖矩形（块坐标）。
     pub fn source_rects(&self, range: Range<usize>) -> Vec<(f32, f32, f32, f32)> {
+        self.source_rects_clipped(range, f32::NEG_INFINITY..f32::INFINITY)
+    }
+    pub fn source_rects_clipped(&self, range: Range<usize>, clip: Range<f32>) -> Vec<(f32, f32, f32, f32)> {
         let mut rects = Vec::new();
+        if range.is_empty() { return rects; }
         for item in &self.items {
-            if let DisplayItem::Horizontal{x,y,w,offset,layout,..}=item{
-                for (sx,sy,sw,sh) in layout.source_rects(range.clone()) {let left=(sx-offset.get()).max(0.0);let right=(sx+sw-offset.get()).min(*w);if right>left{rects.push((x+left,y+sy,right-left,sh));}}
+            if let DisplayItem::Horizontal{x,y,w,h,offset,layout,..}=item{
+                if y + h < clip.start || *y > clip.end { continue; }
+                for (sx,sy,sw,sh) in layout.source_rects_clipped(range.clone(),(clip.start-y)..(clip.end-y)) {let left=(sx-offset.get()).max(0.0);let right=(sx+sw-offset.get()).min(*w);if right>left{rects.push((x+left,y+sy,right-left,sh));}}
                 continue;
             }
             if let DisplayItem::Image{x,y,w,h,source,..}=item{
+                if y + h < clip.start || *y > clip.end { continue; }
                 if range.start<source.end&&source.start<range.end{rects.push((*x,*y,*w,*h));}continue;
             }
             let DisplayItem::Text { x, y, layout, map } = item else { continue };
+            if y + layout.height() < clip.start || *y > clip.end { continue; }
+            let rows = (((clip.start-y)/layout.line_height).floor().max(0.0) as usize)..(((clip.end-y)/layout.line_height).ceil().max(0.0) as usize).saturating_add(1);
             for seg in map {
                 let seg_end = seg.source_end;
                 let from = range.start.max(seg.source);
@@ -135,7 +214,7 @@ impl BlockLayout {
                 } else {
                     seg.text.clone()
                 };
-                for (line, x0, x1) in layout.range_rects(text_range) {
+                for (line, x0, x1) in layout.range_rects_in(text_range,rows.clone()) {
                     rects.push((x + x0, y + line as f32 * layout.line_height, x1 - x0, layout.line_height));
                 }
             }
@@ -184,6 +263,8 @@ pub struct RenderEnv<'a> {
     pub wrap: Wrap,
     pub base_dir: Option<&'a Path>,
     pub image_size: &'a dyn Fn(&Path) -> Option<(u32, u32)>,
+    pub image_failure: &'a dyn Fn(&Path) -> Option<&'static str>,
+    pub text_layouts: Option<&'a std::cell::RefCell<crate::layout::TextLayoutReuse>>,
     /// 宽内容（表格）可用的最大宽度：从正文左缘到编辑区右缘，允许超出正文宽度。
     pub wide_width: f32,
     /// 设置“代码块行号”。
@@ -192,6 +273,21 @@ pub struct RenderEnv<'a> {
     pub inline_code: bool,
     /// 查询公式或图表的渲染状态（返回缓存键与状态）；未请求过的条目由调用方登记后台渲染，此处视为渲染中。
     pub embed: &'a dyn Fn(EmbedKind, &str) -> (u64, EmbedState),
+}
+
+impl RenderEnv<'_> {
+    fn layout(&self, spec: &ParaSpec, width: f32, window: &Window) -> Rc<TextLayout> {
+        let resolved=spec.objects.iter().any(|object|object.width_percent.is_some()).then(||{
+            let mut resolved=spec.clone();
+            for object in &mut resolved.objects {if let Some(percent)=object.width_percent.take(){
+                let next=width*percent/100.0;let ratio=next/object.width.max(f32::EPSILON);
+                object.width=next;object.ascent*=ratio;object.descent*=ratio;
+            }}
+            resolved
+        });
+        let spec=resolved.as_ref().unwrap_or(spec);
+        self.text_layouts.map_or_else(|| Rc::new(layout_text(spec, width, window)), |reuse| reuse.borrow_mut().layout(spec, width, window))
+    }
 }
 
 struct ParaBuilder {
@@ -401,14 +497,14 @@ fn palette_index(value: &str) -> Option<u8> {
 }
 
 /// 识别紧随图片的属性块 `{align=center width=360}`（Web 版图片属性写法）。
-fn parse_image_attrs(text: &str) -> Option<(Option<String>, Option<f32>)> {
+fn parse_image_attrs(text: &str) -> Option<(Option<String>, Option<ImageWidth>)> {
     let inner = text.trim().strip_prefix('{')?.strip_suffix('}')?;
     let mut align = None;
     let mut width = None;
     for part in inner.split_whitespace() {
         match part.split_once('=')? {
             ("align", value) => align = Some(value.trim_matches('"').to_string()),
-            ("width", value) => width = value.trim_matches('"').trim_end_matches("px").parse().ok(),
+            ("width", value) => width = ImageWidth::parse(value.trim_matches('"')),
             _ => return None,
         }
     }
@@ -466,7 +562,7 @@ struct PendingImage {
     url: String,
     alt: String,
     align: Option<String>,
-    width: Option<f32>,
+    width: Option<ImageWidth>,
     source:Range<usize>,
 }
 
@@ -487,7 +583,7 @@ pub fn layout_parsed(parsed: &ParsedWindow, revealed: &[Range<usize>], details_o
 }
 
 fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
-    events: impl Iterator<Item=(Event<'a>, Range<usize>)>, revealed: &[Range<usize>],context:Option<&crate::editor_control::protocol::ParseContext>,closed_details:&[usize],html_tables:&[crate::editor_control::html_table::HtmlTable]) -> BlockLayout {
+    events: impl Iterator<Item=(Event<'a>, Range<usize>)>, revealed: &[Range<usize>],context:Option<&crate::nomo_mark::protocol::ParseContext>,closed_details:&[usize],html_tables:&[crate::nomo_mark::html_table::HtmlTable]) -> BlockLayout {
     let metrics = env.metrics;
     let mut builder = Builder {
         env,
@@ -513,7 +609,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
         details:Vec::new(),closed_details:closed_details.iter().copied().collect(),
     };
     if let Some(context)=context{
-        use crate::editor_control::protocol::AncestorContainer;
+        use crate::nomo_mark::protocol::AncestorContainer;
         for ancestor in &context.ancestors{match ancestor{
             AncestorContainer::Quote=>builder.begin_quote(None),
             AncestorContainer::ListItem{number}=>{
@@ -557,7 +653,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                         match event {
                             Event::Text(chunk) => {
                                 text_start.get_or_insert(inner.start);
-                                for segment in crate::editor_control::mapping::text_segments(&chunk,&source[inner.clone()],inner.start) {
+                                for segment in crate::nomo_mark::mapping::text_segments(&chunk,&source[inner.clone()],inner.start) {
                                     text_map.push(MapSeg{text:text.len()+segment.display.start..text.len()+segment.display.end,source:segment.source.start,source_end:segment.source.end,exact:segment.exact});
                                 }
                                 text.push_str(&chunk);
@@ -591,7 +687,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                     builder.indent += metrics.list_indent();
                     builder.containers.push(Container::Item { marker_pending: true, number, depth, task: None });
                     let raw=source[range.clone()].trim_end_matches(['\r','\n']);
-                    if builder.controlled && crate::editor_control::commands::structural_prefix_len(raw)==Some(raw.len()) {
+                    if builder.controlled && crate::nomo_mark::commands::structural_prefix_len(raw)==Some(raw.len()) {
                         builder.empty_anchor(range.start+raw.len());
                     }
                 }
@@ -606,7 +702,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                 }
                 Tag::Table(alignments) => {
                     builder.flush_paragraph();
-                    let table = collect_table(&mut events, alignments, source,range);
+                    let table = collect_table(&mut events, alignments, source,range,env,context);
                     builder.table(table);
                 }
                 Tag::Emphasis => builder.inline.italic += 1,
@@ -624,7 +720,9 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                             _ => {}
                         }
                     }
-                    builder.images.push(PendingImage { url: dest_url.to_string(), alt: alt.clone(), align: None, width: None, source:range.clone() });
+                    if !context.is_some_and(|context| context.reference_target_pending(&range)) {
+                        builder.images.push(PendingImage { url: dest_url.to_string(), alt: alt.clone(), align: None, width: None, source:range.clone() });
+                    }
                     let style = InlineStyle { color: ColorRole::Link, ..Default::default() };
                     builder.para.push(&format!("［图片：{}］", if alt.is_empty() { dest_url.as_ref() } else { alt.as_str() }), style, Some((range.start, false)));
                 }
@@ -716,7 +814,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
             Event::DisplayMath(tex) => builder.display_math(&tex, range.start + 2),
             Event::InlineHtml(html) => match builder.inline.apply_html(&html) {
                 Some(true) => {}
-                Some(false) => builder.flush_paragraph_continued(),
+                Some(false) => builder.line_break(range),
                 None => {
                     builder.image_only = false;
                     let style = InlineStyle { mono: true, color: ColorRole::Muted, ..Default::default() };
@@ -736,7 +834,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                     builder.para.push(" ", builder.inline.style(builder.base), Some((range.start, false)));
                 }
             }
-            Event::HardBreak => builder.flush_paragraph_continued(),
+            Event::HardBreak => builder.line_break(range),
             Event::Rule => builder.rule(),
             Event::TaskListMarker(checked) => {
                 if let Some(Container::Item { task, .. }) = builder.containers.last_mut() {
@@ -748,7 +846,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
     }
     builder.flush_paragraph();
     if let Some(context)=context{
-        use crate::editor_control::protocol::AncestorContainer;
+        use crate::nomo_mark::protocol::AncestorContainer;
         for ancestor in context.ancestors.iter().rev(){match ancestor{
             AncestorContainer::Quote=>builder.end_quote(),
             AncestorContainer::ListItem{..}=>{builder.containers.pop();builder.indent-=metrics.list_indent();},
@@ -768,11 +866,51 @@ struct TableData {
     rows: Vec<(bool, Vec<ParaBuilder>)>,
 }
 
-fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)>, alignments: Vec<Alignment>, source:&str,range:Range<usize>) -> TableData {
+fn push_table_atom(para: &mut ParaBuilder, atom: &crate::nomo_mark::html_table::InlineAtom, range: Range<usize>, mut style: InlineStyle, env: &RenderEnv) {
+    use crate::nomo_mark::html_table::InlineAtom;
+    let mut fallback = atom.display_text();
+    let object = match atom {
+        InlineAtom::Math(tex) => {
+            let (key, state) = (env.embed)(EmbedKind::Math { display: false }, tex);
+            if let EmbedState::Ready(info) = state {
+                let scale = (14.0 * 1.55 * env.metrics.zoom * 1.3 / info.height).min(1.0);
+                Some(InlineObject { at: 0, width: info.width * scale, width_percent:None, ascent: (info.height - info.depth) * scale, descent: info.depth * scale, key: InlineAsset::Embed(key) })
+            } else { style.color = ColorRole::Accent; None }
+        }
+        InlineAtom::Image { src, width, .. } => {
+            let decoded = percent_decode(src);
+            let candidate = Path::new(&decoded);
+            let path = if candidate.is_absolute() { Some(candidate.to_path_buf()) }
+                else if !src.contains("://") && !src.starts_with("data:") { env.base_dir.map(|dir| dir.join(candidate)) }
+                else { None };
+            path.and_then(|path| {
+                let size = (env.image_size)(&path);
+                if let Some(reason) = (env.image_failure)(&path) { fallback = format!("{reason}：{fallback}"); }
+                size.map(|(w, h)| (path, w, h))
+            }).filter(|(_, w, h)| *w > 0 && *h > 0).map(|(path, w, h)| {
+                // 百分比在最终单元格宽度确定后解析；先保留非零的固有比例。
+                let display_w = match *width {Some(ImageWidth::Pixels(value))=>value*env.metrics.zoom,_=>w as f32/2.0*env.metrics.zoom};
+                let width_percent=match width {Some(ImageWidth::Percent(value))=>Some(*value),_=>None};
+                InlineObject { at: 0, width: display_w, width_percent, ascent: display_w * h as f32 / w as f32, descent: 0.0, key: InlineAsset::Image(path) }
+            })
+        }
+        InlineAtom::Comment(_) => { style.color = ColorRole::Muted; style.bg = 1; None }
+        InlineAtom::Footnote(_) => { style.color = ColorRole::Link; style.shift = 1; None }
+    };
+    if let Some(object) = object { para.push_object(object, style, range.start); }
+    else { para.push(&fallback, style, Some((range.start, false))); }
+    if let Some(map) = para.map.last_mut() { map.source_end = range.end; }
+}
+
+fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)>, alignments: Vec<Alignment>, source:&str,range:Range<usize>,env:&RenderEnv,context:Option<&crate::nomo_mark::protocol::ParseContext>) -> TableData {
+    use crate::nomo_mark::{html_table::{self, InlineAtom}, table_inline};
     let mut table = TableData { source:range,alignments, rows: Vec::new() };
     let mut in_head = false;
     let mut inline = InlineState::default();
-    for (event, range) in events.by_ref() {
+    let mut skip = None;
+    let mut cell_range: Option<Range<usize>> = None;
+    while let Some((event, range)) = events.next() {
+        let Some((event, range)) = table_inline::after_atom(source, event, range, &skip) else { continue; };
         match event {
             Event::Start(Tag::TableHead) => {
                 in_head = true;
@@ -781,12 +919,15 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
             Event::End(TagEnd::TableHead) => in_head = false,
             Event::Start(Tag::TableRow) => table.rows.push((in_head, Vec::new())),
             Event::Start(Tag::TableCell) => {
+                inline = InlineState::default();
+                cell_range = Some(range.clone());
                 if let Some((_, cells)) = table.rows.last_mut() {
                     let mut cell=ParaBuilder::new();
                     cell.map.push(MapSeg{text:0..0,source:range.start,source_end:range.start,exact:true});
                     cells.push(cell);
                 }
             }
+            Event::End(TagEnd::TableCell) => cell_range = None,
             Event::Start(Tag::Strong) => inline.bold += 1,
             Event::End(TagEnd::Strong) => inline.bold = inline.bold.saturating_sub(1),
             Event::Start(Tag::Emphasis) => inline.italic += 1,
@@ -797,9 +938,39 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
             Event::End(TagEnd::Superscript) => inline.sup=inline.sup.saturating_sub(1),
             Event::Start(Tag::Subscript) => inline.sub += 1,
             Event::End(TagEnd::Subscript) => inline.sub=inline.sub.saturating_sub(1),
-            Event::InlineHtml(html) => {inline.apply_html(&html);},
+            Event::InlineHtml(html) => {
+                if let Some(run) = html_table::atom_at(source, range.start).filter(|run| cell_range.as_ref().is_some_and(|cell| run.source.end <= cell.end)) {
+                    if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
+                        push_table_atom(cell, run.atom.as_ref().unwrap(), run.source.clone(), inline.style(InlineStyle::default()), env);
+                    }
+                    skip = Some(run.source);
+                } else {
+                    match inline.apply_html(&html) {
+                        Some(true) => {}
+                        Some(false) => {
+                            if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) { cell.push("\n", inline.style(InlineStyle::default()), Some((range.start, false))); if let Some(map)=cell.map.last_mut(){map.source_end=range.end;} }
+                        }
+                        None => {
+                            if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) { cell.push(&html, InlineStyle { mono: true, color: ColorRole::Muted, ..inline.style(InlineStyle::default()) }, Some((range.start, true))); }
+                        }
+                    }
+                }
+            },
             Event::Start(Tag::Link { .. }) => inline.link += 1,
             Event::End(TagEnd::Link) => inline.link = inline.link.saturating_sub(1),
+            Event::Start(Tag::Image { dest_url, title, .. }) => {
+                let pending = context.is_some_and(|context| context.reference_target_pending(&range));
+                let (image, range) = table_inline::image(source, events, &dest_url, &title, range);
+                let atom = InlineAtom::Image { src: image.src, alt: image.alt, width: ImageWidth::parse(&image.width) };
+                if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
+                    if pending {
+                        cell.push(&atom.display_text(), inline.style(InlineStyle::default()), Some((range.start, false)));
+                    } else {
+                        push_table_atom(cell, &atom, range.clone(), inline.style(InlineStyle::default()), env);
+                    }
+                }
+                skip = Some(range);
+            }
             Event::Text(text) => {
                 if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
                     let exact = source.get(range.clone())==Some(text.as_ref());
@@ -809,17 +980,19 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
             }
             Event::Code(code) => {
                 if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
-                    let style = InlineStyle { mono: true, code_bg: true, color: ColorRole::InlineCode, ..Default::default() };
+                    let style = InlineStyle { mono: true, code_bg: true, color: ColorRole::InlineCode, ..inline.style(InlineStyle::default()) };
                     let inner=source[range.clone()].find(code.as_ref()).map(|offset|range.start+offset);
                     cell.push(&code, style, Some((inner.unwrap_or(range.start), inner.is_some())));
                     if inner.is_none(){if let Some(map)=cell.map.last_mut(){map.source_end=range.end;}}
                 }
             }
-            Event::InlineMath(tex) => {
+            Event::InlineMath(tex) | Event::DisplayMath(tex) => {
                 if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
-                    let style = InlineStyle { mono: true, italic: true, color: ColorRole::Accent, ..Default::default() };
-                    cell.push(&tex, style, Some((range.start + 1, true)));
+                    push_table_atom(cell, &InlineAtom::Math(tex.to_string()), range, inline.style(InlineStyle::default()), env);
                 }
+            }
+            Event::FootnoteReference(id) => {
+                if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) { push_table_atom(cell, &InlineAtom::Footnote(id.to_string()), range, inline.style(InlineStyle::default()), env); }
             }
             Event::End(TagEnd::Table) => break,
             _ => {}
@@ -900,7 +1073,7 @@ impl Builder<'_> {
         let para = std::mem::replace(&mut self.para, ParaBuilder::new());
         let (spec, map) = self.spec(para);
         let width = (self.width - self.indent).max(40.0);
-        let layout = Rc::new(layout_text(&spec, width, self.window));
+        let layout = self.env.layout(&spec, width, self.window);
         self.draw_marker();
         let height = layout.height();
         self.items.push(DisplayItem::Text { x: self.indent, y: self.y, layout, map });
@@ -908,6 +1081,18 @@ impl Builder<'_> {
     }
 
     /// 硬换行：结束当前视觉段，下一段紧贴（无段距），保持同一缩进与样式。
+    fn line_break(&mut self, source: Range<usize>) {
+        if self.controlled {
+            self.image_only = false;
+            self.empty_anchor(source.start);
+        }
+        self.flush_paragraph_continued();
+        if self.controlled {
+            // 即使尚未输入文字，也保留下一行的高度、命中和光标位置。
+            self.empty_anchor(source.end);
+        }
+    }
+
     fn flush_paragraph_continued(&mut self) {
         let gap = self.pending_gap;
         self.flush_paragraph();
@@ -934,7 +1119,7 @@ impl Builder<'_> {
             self.items.push(DisplayItem::Checkbox { x, y: top, size, checked, source });
             if checked {
                 let spec = ParaSpec::plain("✓".into(), InlineStyle { bold: true, color: ColorRole::OnAccent, ..Default::default() }, Family::Text, size * 0.8, size, Wrap::Greedy);
-                let layout = Rc::new(layout_text(&spec, 100.0, self.window));
+                let layout = self.env.layout(&spec, 100.0, self.window);
                 let width = layout.max_line_width();
                 self.items.push(DisplayItem::Text { x: x + (size - width) / 2.0, y: top, layout, map: Vec::new() });
             }
@@ -945,7 +1130,7 @@ impl Builder<'_> {
             None => ["•", "◦", "▪"][*depth % 3].to_string(),
         };
         let spec = ParaSpec::plain(text, InlineStyle { color: ColorRole::Muted, ..Default::default() }, Family::Text, metrics.body_size(), line_height, Wrap::Greedy);
-        let layout = Rc::new(layout_text(&spec, 200.0, self.window));
+        let layout = self.env.layout(&spec, 200.0, self.window);
         let width = layout.max_line_width();
         let x = indent - width - 8.0 * metrics.zoom;
         self.items.push(DisplayItem::Text { x, y, layout, map: Vec::new() });
@@ -974,7 +1159,7 @@ impl Builder<'_> {
                 BlockQuoteKind::Caution => "⊘ 注意",
             };
             let spec = ParaSpec::plain(title.into(), InlineStyle { bold: true, color: role, ..Default::default() }, Family::Text, self.env.metrics.body_size() * 0.9, self.line_height, Wrap::Greedy);
-            let layout = Rc::new(layout_text(&spec, self.width, self.window));
+            let layout = self.env.layout(&spec, self.width, self.window);
             let height = layout.height();
             self.items.push(DisplayItem::Text { x: self.indent, y: self.y, layout, map: Vec::new() });
             self.y += height;
@@ -1019,7 +1204,7 @@ impl Builder<'_> {
             other => other.to_string(),
         };
         let label_spec = ParaSpec::plain(label, InlineStyle { bold: true, color: ColorRole::Muted, ..Default::default() }, Family::Text, 12.0 * metrics.zoom, header, Wrap::Greedy);
-        let label_layout = Rc::new(layout_text(&label_spec, width, self.window));
+        let label_layout = self.env.layout(&label_spec, width, self.window);
         let mut y = top + header;
         let mut lines = Vec::new();
         let mut offset = 0;
@@ -1030,7 +1215,7 @@ impl Builder<'_> {
         for (number, line) in body.split('\n').enumerate() {
             if gutter > 0.0 {
                 let label = ParaSpec::plain((number + 1).to_string(), InlineStyle { color: ColorRole::Marker, ..Default::default() }, Family::Mono, metrics.code_size(), metrics.code_line_height(), Wrap::Greedy);
-                let label = Rc::new(layout_text(&label, gutter, self.window));
+                let label = self.env.layout(&label, gutter, self.window);
                 let label_width = label.max_line_width();
                 lines.push(DisplayItem::Text { x: x + pad + gutter - label_width - 0.8 * metrics.code_size(), y, layout: label, map: Vec::new() });
             }
@@ -1044,7 +1229,7 @@ impl Builder<'_> {
                 wrap: Wrap::Greedy,
                 objects: Vec::new(),
             };
-            let layout = Rc::new(layout_text(&spec, (width - pad * 2.0 - gutter).max(40.0), self.window));
+            let layout = self.env.layout(&spec, (width - pad * 2.0 - gutter).max(40.0), self.window);
             let height = layout.height();
             let mut map:Vec<_> = text_map.iter().filter_map(|segment| {
                 let from=segment.text.start.max(offset);let to=segment.text.end.min(offset+line.len());
@@ -1074,7 +1259,7 @@ impl Builder<'_> {
             EmbedState::Ready(info) => {
                 let limit = self.line_height * 1.3;
                 let scale = if info.height > limit { limit / info.height } else { 1.0 };
-                let object = InlineObject { at: 0, width: info.width * scale, ascent: (info.height - info.depth) * scale, descent: info.depth * scale, key: InlineAsset::Embed(key) };
+                let object = InlineObject { at: 0, width: info.width * scale, width_percent:None, ascent: (info.height - info.depth) * scale, descent: info.depth * scale, key: InlineAsset::Embed(key) };
                 let style = self.inline.style(self.base);
                 self.para.push_object(object, style, source);
             }
@@ -1102,7 +1287,7 @@ impl Builder<'_> {
             return;
         }
         let spec = ParaSpec::plain(tex.trim().to_string(), InlineStyle { mono: true, italic: true, color: ColorRole::Accent, ..Default::default() }, Family::Text, metrics.body_size() * 1.05, metrics.body_line_height(), Wrap::Greedy);
-        let layout = Rc::new(layout_text(&spec, width - 32.0, self.window));
+        let layout = self.env.layout(&spec, width - 32.0, self.window);
         let text_width = layout.max_line_width();
         let note = match &state {
             EmbedState::Failed(message) => Some(Rc::new(self.note_layout(message, ColorRole::Caution, width - 32.0))),
@@ -1183,7 +1368,7 @@ impl Builder<'_> {
         let line = html.trim_end_matches('\n');
         let trimmed = line.trim();
         let lower = trimmed.to_ascii_lowercase();
-        if self.controlled&&source==0&&crate::editor_control::nomo_syntax::front_matter_end(html).is_some(){
+        if self.controlled&&source==0&&crate::nomo_mark::nomo_syntax::front_matter_end(html).is_some(){
             self.front_matter(source..source+html.len());self.gap(self.env.metrics.paragraph_gap());return;
         }
         if lower == "<details>" || lower.starts_with("<details ") || lower == "</details>" {
@@ -1226,7 +1411,7 @@ impl Builder<'_> {
             if let Some(src) = html_attr(&trimmed[at..], "src") {
                 self.flush_paragraph();
                 let alt = html_attr(&trimmed[at..], "alt").unwrap_or_default();
-                let width = html_attr(&trimmed[at..], "width").and_then(|value| value.trim_end_matches("px").parse::<f32>().ok());
+                let width = html_attr(&trimmed[at..], "width").and_then(|value| ImageWidth::parse(&value));
                 let align = html_attr(trimmed, "align").or_else(|| self.html_align.clone());
                 self.image_with(&src, &alt, width, align.as_deref(),source..source+html.len());
                 return;
@@ -1241,10 +1426,10 @@ impl Builder<'_> {
     }
 
     /// 块级图片：`max_width` 来自 width 属性（CSS 像素），`align` 为 left / center / right。
-    fn image_with(&mut self, url: &str, alt: &str, max_width: Option<f32>, align: Option<&str>, source:Range<usize>) {
+    fn image_with(&mut self, url: &str, alt: &str, max_width: Option<ImageWidth>, align: Option<&str>, source:Range<usize>) {
         self.apply_gap();
         let metrics = self.env.metrics;
-        let available = max_width.map_or(self.width - self.indent, |width| (width * metrics.zoom).min(self.width - self.indent));
+        let available = max_width.map_or(self.width - self.indent, |width| width.resolve(self.width-self.indent,metrics.zoom).min(self.width - self.indent));
         let local = !(url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:"));
         let path = self.env.base_dir.filter(|_| local).map(|dir| {
             let decoded = percent_decode(url);
@@ -1269,13 +1454,13 @@ impl Builder<'_> {
             }
             (path, _) => {
                 let note = match path {
-                    Some(_) => format!("图片未就绪：{alt}"),
+                    Some(path) => format!("{}：{alt}", (self.env.image_failure)(&path).unwrap_or("图片未就绪")),
                     None => format!("远程图片未加载：{url}"),
                 };
                 let h = 64.0 * metrics.zoom;
                 self.items.push(DisplayItem::Rect { x: self.indent, y: self.y, w: available, h, paint: Paint::CodeBg, radius: 8.0, border: Some(Paint::CodeBorder) });
                 let spec = ParaSpec::plain(note, InlineStyle { color: ColorRole::Muted, ..Default::default() }, Family::Text, metrics.body_size() * 0.85, h, Wrap::Greedy);
-                let layout = Rc::new(layout_text(&spec, available - 24.0, self.window));
+                let layout = self.env.layout(&spec, available - 24.0, self.window);
                 let length=layout.text.len();
                 self.items.push(DisplayItem::Text { x: self.indent + 12.0, y: self.y, layout,
                     map:vec![MapSeg{text:0..length,source:source.start,source_end:source.end,exact:false}] });
@@ -1288,7 +1473,7 @@ impl Builder<'_> {
     fn html_inline(&mut self,html:&str,source:usize,base:InlineStyle){
         let mut at=0;let mut inline=InlineState::default();
         while at<html.len(){
-            if let Some(tag)=crate::editor_control::nomo_syntax::html_tag(html,at){
+            if let Some(tag)=crate::nomo_mark::nomo_syntax::html_tag(html,at){
                 inline.apply_html(&html[at..tag.end]);at=tag.end;continue;
             }
             let end=html[at..].find('<').filter(|p|*p>0).map_or_else(||html.len(),|p|at+p);
@@ -1309,7 +1494,7 @@ impl Builder<'_> {
         for raw in self.source[range].trim_end_matches(['\r','\n']).split('\n') {
             let line=raw.strip_suffix('\r').unwrap_or(raw);
             let spec = ParaSpec::plain(line.to_string(), InlineStyle { color: if line.starts_with("---") || line.starts_with("...") { ColorRole::Marker } else { ColorRole::Muted }, ..Default::default() }, Family::Mono, metrics.code_size(), metrics.code_line_height(), Wrap::Greedy);
-            let layout = Rc::new(layout_text(&spec, width - pad * 2.0, self.window));
+            let layout = self.env.layout(&spec, width - pad * 2.0, self.window);
             let height = layout.height();
             texts.push(DisplayItem::Text { x: pad, y, layout, map: vec![MapSeg { text: 0..line.len(), source: offset, source_end: offset + line.len(), exact: true }] });
             y += height;
@@ -1321,8 +1506,8 @@ impl Builder<'_> {
         self.y = y;
     }
 
-    fn html_table(&mut self,table:&crate::editor_control::html_table::HtmlTable,revealed:&[Range<usize>]) {
-        use crate::editor_control::{parse::InlineFormat,table_widths::{self,CellMetrics}};
+    fn html_table(&mut self,table:&crate::nomo_mark::html_table::HtmlTable,revealed:&[Range<usize>]) {
+        use crate::nomo_mark::{parse::InlineFormat,table_widths::{self,CellMetrics}};
         self.flush_paragraph();self.apply_gap();let first_item=self.items.len();let top=self.y;
         let zoom=self.env.metrics.zoom;let font_size=14.0*zoom;let line_height=font_size*1.55;let pad_x=11.0*zoom;let pad_y=9.0*zoom;
         let mut prepared=Vec::new();let mut measures=Vec::new();
@@ -1337,31 +1522,8 @@ impl Builder<'_> {
                 let mut style=base;
                 for format in formats{match format{InlineFormat::Strong=>style.bold=true,InlineFormat::Emphasis=>style.italic=true,InlineFormat::Code=>{style.mono=true;style.code_bg=true;style.color=ColorRole::InlineCode;},InlineFormat::Strike=>style.strike=true,InlineFormat::Underline=>style.underline=true,InlineFormat::Highlight=>style.bg=1,InlineFormat::Superscript=>style.shift=1,InlineFormat::Subscript=>style.shift=-1,InlineFormat::Link=>{style.underline=true;style.color=ColorRole::Link;}}}
                 if let Some(atom) = atom {
-                    use crate::editor_control::html_table::InlineAtom;
-                    let object = match atom {
-                        InlineAtom::Math(tex) => {
-                            let (key, state) = (self.env.embed)(EmbedKind::Math { display: false }, tex);
-                            if let EmbedState::Ready(info) = state {
-                                let scale = (line_height * 1.3 / info.height).min(1.0);
-                                Some(InlineObject { at: 0, width: info.width * scale, ascent: (info.height - info.depth) * scale, descent: info.depth * scale, key: InlineAsset::Embed(key) })
-                            } else { style.color = ColorRole::Accent; None }
-                        }
-                        InlineAtom::Image { src, width, .. } => {
-                            let decoded = percent_decode(src); let candidate = Path::new(&decoded);
-                            let path = if candidate.is_absolute() { Some(candidate.to_path_buf()) } else if !src.contains("://") && !src.starts_with("data:") { self.env.base_dir.map(|dir| dir.join(candidate)) } else { None };
-                            path.and_then(|path| (self.env.image_size)(&path).map(|(w,h)| (path,w,h))).filter(|(_,w,h)| *w > 0 && *h > 0).map(|(path,w,h)| {
-                                let display_w = width.unwrap_or(w as f32 / 2.0) * zoom;
-                                InlineObject { at: 0, width: display_w, ascent: display_w * h as f32 / w as f32, descent: 0.0, key: InlineAsset::Image(path) }
-                            })
-                        }
-                        InlineAtom::Comment(_) => { style.color = ColorRole::Muted; style.bg = 1; None }
-                        InlineAtom::Footnote(_) => { style.color = ColorRole::Link; style.shift = 1; None }
-                    };
-                    if let Some(object) = object {
-                        para.push_object(object, style, range.start);
-                        if let Some(map) = para.map.last_mut() { map.source_end = range.end; }
-                        continue;
-                    }
+                    push_table_atom(&mut para, atom, range, style, self.env);
+                    continue;
                 }
                 if text.is_empty(){para.map.push(MapSeg{text:para.text.len()..para.text.len(),source:range.start,source_end:range.end,exact:true});}
                 else{let exact=self.source.get(range.clone())==Some(text.as_str());para.push(&text,style,Some((range.start,exact)));if let Some(map)=para.map.last_mut(){map.source_end=range.end;}}
@@ -1369,7 +1531,7 @@ impl Builder<'_> {
             if para.map.is_empty(){para.map.push(MapSeg{text:0..0,source:cell.content.start,source_end:cell.content.start,exact:true});}paragraphs.push(para);
             let mut natural=0.0f32;let mut specs=Vec::new();
             let mut atomic = 0.0f32;
-            for para in paragraphs{let object_height=para.objects.iter().map(|o| o.ascent+o.descent).fold(line_height,f32::max);atomic=para.objects.iter().map(|o|o.width).fold(atomic,f32::max);let spec=ParaSpec{text:para.text,spans:para.spans,base,family:Family::Text,font_size,line_height:object_height,wrap:Wrap::Greedy,objects:para.objects};natural=natural.max(layout_text(&spec,100_000.0,self.window).max_line_width());specs.push((spec,para.map));}
+            for para in paragraphs{let object_height=para.objects.iter().map(|o| o.ascent+o.descent).fold(line_height,f32::max);atomic=para.objects.iter().map(|o|o.width).fold(atomic,f32::max);let spec=ParaSpec{text:para.text,spans:para.spans,base,family:Family::Text,font_size,line_height:object_height,wrap:Wrap::Greedy,objects:para.objects};natural=natural.max(self.env.layout(&spec,100_000.0,self.window).max_line_width());specs.push((spec,para.map));}
             measures.push(CellMetrics{column:cell.column,span:cell.colspan,header:cell.header,natural,atomic,chrome:pad_x*2.0+zoom,explicit:cell.widths.iter().map(|width|*width as f32*zoom).collect()});
             prepared.push(specs);
         }
@@ -1378,7 +1540,7 @@ impl Builder<'_> {
         let mut row_heights=vec![line_height+pad_y*2.0;table.rows];let mut laid=Vec::new();
         for (cell,paragraphs) in table.cells.iter().zip(prepared){
             let width=widths[cell.column..cell.column+cell.colspan].iter().sum::<f32>();let mut height=0.0;let mut content=Vec::new();
-            for (spec,map) in paragraphs{let layout=Rc::new(layout_text(&spec,(width-pad_x*2.0).max(20.0),self.window));let offset=match cell.align.as_deref(){Some("center")=>(width-pad_x*2.0-layout.max_line_width()).max(0.0)/2.0,Some("right")=>(width-pad_x*2.0-layout.max_line_width()).max(0.0),_=>(0.0)};content.push((height,offset,layout.clone(),map));height+=layout.height();}
+            for (spec,map) in paragraphs{let layout=self.env.layout(&spec,(width-pad_x*2.0).max(20.0),self.window);let offset=match cell.align.as_deref(){Some("center")=>(width-pad_x*2.0-layout.max_line_width()).max(0.0)/2.0,Some("right")=>(width-pad_x*2.0-layout.max_line_width()).max(0.0),_=>(0.0)};content.push((height,offset,layout.clone(),map));height+=layout.height();}
             if cell.rowspan==1{row_heights[cell.row]=row_heights[cell.row].max(height+pad_y*2.0);}laid.push((height,content));
         }
         for (cell,(height,_)) in table.cells.iter().zip(&laid){let available=row_heights[cell.row..cell.row+cell.rowspan].iter().sum::<f32>();if available<height+pad_y*2.0{row_heights[cell.row+cell.rowspan-1]+=height+pad_y*2.0-available;}}
@@ -1413,9 +1575,9 @@ impl Builder<'_> {
             base: InlineStyle { bold: header, color: if header { ColorRole::Heading } else { ColorRole::Fg }, ..Default::default() },
             family: Family::Text,
             font_size,
-            line_height,
+            line_height: cell.objects.iter().map(|object| object.ascent + object.descent).fold(line_height, f32::max),
             wrap: Wrap::Greedy,
-            objects: Vec::new(),
+            objects: cell.objects.clone(),
         };
         // 列宽：按自然宽度分配；总宽超出时按比例压缩超出部分，每列保底为自身自然宽度与 120px 的较小者，
         // 保证短表头不折行。
@@ -1423,16 +1585,16 @@ impl Builder<'_> {
         let mut cell_metrics=Vec::new();
         for (header, cells) in &table.rows {
             for (column, cell) in cells.iter().enumerate() {
-                let layout = layout_text(&spec_for(cell, *header), 10_000.0, self.window);
+                let layout = self.env.layout(&spec_for(cell, *header), 10_000.0, self.window);
                 natural[column] = natural[column].max(layout.max_line_width() + pad_x * 2.0 + 2.0);
-                if self.controlled {cell_metrics.push(crate::editor_control::table_widths::CellMetrics{
-                    column,span:1,header:*header,natural:layout.max_line_width(),atomic:0.0,chrome:pad_x*2.0+metrics.zoom,explicit:Vec::new()});}
+                if self.controlled {cell_metrics.push(crate::nomo_mark::table_widths::CellMetrics{
+                    column,span:1,header:*header,natural:layout.max_line_width(),atomic:cell.objects.iter().map(|object| object.width).fold(0.0,f32::max),chrome:pad_x*2.0+metrics.zoom,explicit:Vec::new()});}
             }
         }
         let total: f32 = natural.iter().sum();
         let widths: Vec<f32> = if self.controlled {
-            let constraints=crate::editor_control::table_widths::constraints(columns,&cell_metrics,font_size);
-            crate::editor_control::table_widths::allocate(&constraints,available)
+            let constraints=crate::nomo_mark::table_widths::constraints(columns,&cell_metrics,font_size);
+            crate::nomo_mark::table_widths::allocate(&constraints,available)
         } else if total <= available {
             natural
         } else {
@@ -1453,7 +1615,7 @@ impl Builder<'_> {
             for column in 0..columns {
                 let width = widths[column];
                 if let Some(cell) = cells.get(column) {
-                    let layout = Rc::new(layout_text(&spec_for(cell, *header), (width - pad_x * 2.0).max(20.0), self.window));
+                    let layout = self.env.layout(&spec_for(cell, *header), (width - pad_x * 2.0).max(20.0), self.window);
                     row_height = row_height.max(layout.height());
                     let text_width = layout.max_line_width();
                     let offset = match table.alignments.get(column) {

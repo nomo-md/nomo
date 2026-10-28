@@ -1,7 +1,8 @@
 //! 按需加载并虚拟化显示 Emoji 词库；选择器关闭后释放目录引用和订阅。
-use crate::editor_control::{document_host::shared_emoji_catalog, emoji::EmojiCatalog};
+use crate::nomo_mark::{document_host::shared_emoji_catalog, emoji::EmojiCatalog};
 use crate::theme::Theme;
 use crate::ui::{components::{IconName, icon, tooltip}, text_field::{FieldEvent, TextField}};
+use crate::ui::popup::{popup, reduced_motion, PopupAnchor, PopupPlacement};
 use gpui::{App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, ScrollStrategy, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list};
 use std::sync::Arc;
 
@@ -9,7 +10,7 @@ pub enum EmojiPickerEvent { Choose(String), Dismiss }
 
 pub struct EmojiPicker {
     focus: FocusHandle,
-    trigger_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    popup_anchor: PopupAnchor,
     search: Entity<TextField>,
     catalog: Option<Arc<EmojiCatalog>>,
     results: Arc<Vec<usize>>,
@@ -26,7 +27,7 @@ impl Focusable for EmojiPicker {
     fn focus_handle(&self, cx: &App) -> FocusHandle { self.search.read(cx).focus_handle(cx) }
 }
 impl EmojiPicker {
-    pub fn new(trigger_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(popup_anchor: PopupAnchor, cx: &mut Context<Self>) -> Self {
         let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
         let search = cx.new(|cx| { let mut field = TextField::new(locale.text("emoji_search"), cx); field.set_emoji_search_style(cx); field });
         let subscription = cx.subscribe(&search, |picker, _, event, cx| match event {
@@ -35,7 +36,7 @@ impl EmojiPicker {
             FieldEvent::Cancel if !picker.search.read(cx).is_composing() => cx.emit(EmojiPickerEvent::Dismiss),
             _ => {},
         });
-        let mut picker = Self { focus: cx.focus_handle(), trigger_bounds, search, catalog: None, results: Arc::new(Vec::new()), group: None, selected: 0, scroll: UniformListScrollHandle::new(), error: None, loading: false, task: None, _subscription: subscription };
+        let mut picker = Self { focus: cx.focus_handle(), popup_anchor, search, catalog: None, results: Arc::new(Vec::new()), group: None, selected: 0, scroll: UniformListScrollHandle::new(), error: None, loading: false, task: None, _subscription: subscription };
         picker.load(cx);
         picker
     }
@@ -126,7 +127,7 @@ impl Render for EmojiPicker {
             }
         }
         let search_focused = self.search.read(cx).focus_handle(cx).is_focused(window);
-        div().id("emoji-picker").track_focus(&self.focus).tab_group()
+        let panel = div().id("emoji-picker").track_focus(&self.focus).tab_group()
             .w(px(352.0).min((window.viewport_size().width - px(16.0)).max(px(0.0))))
             .max_h((window.viewport_size().height - px(16.0)).max(px(0.0))).overflow_hidden()
             .p(px(12.0)).flex().flex_col().gap(px(8.0))
@@ -134,7 +135,7 @@ impl Render for EmojiPicker {
             .shadow(vec![gpui::BoxShadow { inset: false, color: theme.fg.opacity(0.12), offset: gpui::point(px(0.0), px(8.0)), blur_radius: px(28.0), spread_radius: px(0.0) }]).occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(cx.listener(|picker, event: &gpui::MouseDownEvent, _, cx| {
-                if !picker.trigger_bounds.get().is_some_and(|bounds| bounds.contains(&event.position)) {
+                if !picker.popup_anchor.contains_trigger(event.position) {
                     cx.emit(EmojiPickerEvent::Dismiss);
                 }
             }))
@@ -158,6 +159,7 @@ impl Render for EmojiPicker {
             .child(div().h(px(36.0)).px(px(8.0)).flex().items_center().gap(px(7.0)).rounded(px(4.0)).bg(theme.rail_bg)
                 .border_1().border_color(if search_focused { theme.accent } else { theme.rail_bg })
                 .child(icon(IconName::Search, 15.0, theme.muted)).child(self.search.clone()))
-            .child(groups).child(body)
+            .child(groups).child(body);
+        popup("emoji-picker-enter", self.popup_anchor.clone(), PopupPlacement::BelowLeft, panel, reduced_motion(cx))
     }
 }

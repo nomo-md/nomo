@@ -2,10 +2,11 @@
 //! 外观与网格基准：master 339fb932 的 LinkQuickEditor、EditorToolbar 和 app-chrome.css。
 
 use super::{components::{IconName, tooltip}, text_field::{FieldEvent, FieldSelectAll, TextField}};
+use super::popup::{popup, reduced_motion, PopupAnchor, PopupPlacement};
 use crate::theme::{Family, Theme, font_for, ui_font_family};
 use gpui::{
     AnyElement, App, AppContext, BoxShadow, Context, Div, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, ParentElement,
+    Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton, ParentElement,
     Render, SharedString, Stateful, Subscription, Window, div, point, prelude::*, px, rgba,
 };
 
@@ -35,7 +36,7 @@ pub struct EditorPopover {
     focus: FocusHandle,
     content: PopoverContent,
     error: Option<SharedString>,
-    trigger_bounds: Option<std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>>,
+    popup_anchor: PopupAnchor,
     /// 仅订阅本浮层拥有的输入框；丢弃浮层时一起释放，不捕获文档或宿主。
     _subscriptions: Vec<Subscription>,
 }
@@ -66,7 +67,7 @@ impl EditorPopover {
         let href_events = cx.subscribe(&href, |this, _, event, cx| this.on_field_event(event, true, cx));
         Self {
             focus: cx.focus_handle(), content: PopoverContent::Link { text, href, can_remove },
-            error: None, trigger_bounds: None, _subscriptions: vec![title_events, href_events],
+            error: None, popup_anchor: PopupAnchor::Bounds(gpui::Bounds::default()), _subscriptions: vec![title_events, href_events],
         }
     }
 
@@ -74,7 +75,7 @@ impl EditorPopover {
         Self {
             focus: cx.focus_handle(),
             content: PopoverContent::Table { rows: 3, columns: 4, keyboard_cell: None },
-            error: None, trigger_bounds: None, _subscriptions: Vec::new(),
+            error: None, popup_anchor: PopupAnchor::Bounds(gpui::Bounds::default()), _subscriptions: Vec::new(),
         }
     }
 
@@ -82,8 +83,8 @@ impl EditorPopover {
         match self.content { PopoverContent::Link { .. } => EditorPopoverKind::Link, PopoverContent::Table { .. } => EditorPopoverKind::Table }
     }
 
-    pub fn set_trigger_bounds(&mut self, bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>) {
-        self.trigger_bounds = Some(bounds);
+    pub(crate) fn set_popup_anchor(&mut self, anchor: PopupAnchor) {
+        self.popup_anchor = anchor;
     }
 
     /// 宿主创建后自行聚焦；链接的初始标题内容已全选。
@@ -196,7 +197,7 @@ impl EditorPopover {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(cx.listener(|popover, event: &gpui::MouseDownEvent, _, cx| {
-                if !popover.trigger_bounds.as_ref().and_then(|bounds| bounds.get()).is_some_and(|bounds| bounds.contains(&event.position)) {
+                if !popover.popup_anchor.contains_trigger(event.position) {
                     cx.emit(EditorPopoverEvent::Dismiss);
                 }
             }))
@@ -214,7 +215,7 @@ impl Render for EditorPopover {
         let animate_theme = Theme::ui_transition_active(cx);
         let theme = Theme::ui(cx);
         let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
-        match &self.content {
+        let panel = match &self.content {
             PopoverContent::Link { text, href, can_remove } => {
                 text.update(cx, |field, cx| field.set_placeholder(locale.text("link_text"), cx));
                 let bg = theme.surface.blend(theme.accent.opacity(0.04));
@@ -233,9 +234,8 @@ impl Render for EditorPopover {
                     .w(px(LINK_POPOVER_WIDTH).min((window.viewport_size().width - px(24.0)).max(px(0.0))))
                     .p(px(8.0)).gap(px(7.0)).bg(bg).border_color(border)
                     .shadow(vec![BoxShadow { inset: false, color: rgba(if theme.dark { 0x0000006b } else { 0x00000038 }).into(), offset: point(px(0.0), px(20.0)), blur_radius: px(60.0), spread_radius: px(0.0) }])
-                    .child(link_pointer(bg, border))
                     .child(div().flex().flex_col().gap(px(6.0)).child(div().w_full().child(text.clone())).child(url_row))
-                    .children(self.error_text(&theme)).into_any_element()
+                    .children(self.error_text(&theme))
             }
             PopoverContent::Table { rows, columns, keyboard_cell } => {
                 let (preview_rows, preview_columns, selected) = (*rows, *columns, *keyboard_cell);
@@ -266,24 +266,11 @@ impl Render for EditorPopover {
                         .text_size(px(13.0)).line_height(px(19.5)).font_weight(FontWeight::BOLD).text_color(theme.muted)
                         .child(locale.text("table_title")).child(div().font_family(font_for(Family::Mono, true, false).family).text_color(theme.accent_strong)
                             .child(format!("{preview_rows} × {preview_columns}"))))
-                    .child(grid).children(self.error_text(&theme).map(|error| div().mt(px(7.0)).child(error))).into_any_element()
+                    .child(grid).children(self.error_text(&theme).map(|error| div().mt(px(7.0)).child(error)))
             }
-        }
+        };
+        popup("editor-popover-enter", self.popup_anchor.clone(), PopupPlacement::BelowLeft, panel, reduced_motion(cx))
     }
-}
-
-fn link_pointer(bg: Hsla, border: Hsla) -> AnyElement {
-    div().absolute().left(px(16.0)).top(px(-8.0)).w(px(14.0)).h(px(14.0)).child(
-        gpui::canvas(|_, _, _| (), move |bounds, _, window, _| {
-            let at = |x: f32, y: f32| bounds.origin + point(px(x), px(y));
-            let mut fill = gpui::PathBuilder::fill();
-            fill.move_to(at(7.0, 0.0)); fill.line_to(at(14.0, 7.0)); fill.line_to(at(7.0, 14.0)); fill.line_to(at(0.0, 7.0)); fill.close();
-            if let Ok(path) = fill.build() { window.paint_path(path, bg); }
-            let mut stroke = gpui::PathBuilder::stroke(px(1.0));
-            stroke.move_to(at(0.0, 7.0)); stroke.line_to(at(7.0, 0.0)); stroke.line_to(at(14.0, 7.0));
-            if let Ok(path) = stroke.build() { window.paint_path(path, border); }
-        }).size_full()
-    ).into_any_element()
 }
 
 fn trash_icon() -> AnyElement {

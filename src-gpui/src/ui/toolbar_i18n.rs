@@ -42,8 +42,8 @@ impl ToolbarLocale {
         }
     }
 
-    pub fn error(self, error: &crate::editor_control::protocol::ControlError) -> String {
-        use crate::editor_control::protocol::ControlError;
+    pub fn error(self, error: &crate::nomo_mark::protocol::ControlError) -> String {
+        use crate::nomo_mark::protocol::ControlError;
         match error {
             ControlError::InvalidRange => self.text("error_range").into(),
             ControlError::InvalidUtf8Boundary => self.text("error_utf8").into(),

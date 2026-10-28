@@ -1,6 +1,6 @@
 //! 文档大纲浮层：界面只消费结构索引的有限页，不持有正文。
 use super::*;
-use crate::editor_control::document_host::OutlineSnapshot;
+use crate::nomo_mark::document_host::OutlineSnapshot;
 
 const OUTLINE_ROW_HEIGHT: f32 = 32.0;
 const OUTLINE_ROW_CONTENT_HEIGHT: f32 = 24.0;
@@ -64,9 +64,12 @@ struct SectionDrag {
 }
 pub(super) struct OutlineUi {
     pub bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    pub panel_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     focus: FocusHandle,
     keyboard_focus_visible: bool,
     selected: usize,
+    selected_key: Option<String>,
+    selected_revision: u64,
     panel_height: f32,
     list_height: f32,
     document_id: Option<String>,
@@ -92,7 +95,7 @@ impl OutlineUi {
         let activation = cx.observe_window_activation(window, |workspace, window, cx| {
             if !window.is_window_active() { workspace.outline_ui.panel_drag = None; workspace.outline_ui.section_drag = None; workspace.outline_ui.auto_scroll = None; workspace.outline_ui.menu = None; cx.notify(); }
         });
-        Self { bounds: Rc::new(Cell::new(None)), focus: cx.focus_handle(), keyboard_focus_visible: true, selected: 0, panel_height: 92.0, list_height: 24.0, document_id: None,
+        Self { bounds: Rc::new(Cell::new(None)), panel_bounds: None, focus: cx.focus_handle(), keyboard_focus_visible: true, selected: 0, selected_key: None, selected_revision: 0, panel_height: 92.0, list_height: 24.0, document_id: None,
             showing: false, visibility: ScalarMotion::default(), exit_snapshot: None, pending_projection: None,
             projection_motion: None, active_target: None, active_motion: None, row_hovers: Vec::new(), bulk_hover: ScalarMotion::default(),
             panel_drag: None, menu: None, section_drag: None, auto_scroll: None, suppress_click: false, drag_generation: 0, _activation: activation }
@@ -103,6 +106,17 @@ impl OutlineUi {
         self.exit_snapshot = None; self.pending_projection = None; self.projection_motion = None;
         self.active_target = None; self.active_motion = None; self.row_hovers.clear(); self.bulk_hover.reset();
         self.panel_drag = None; self.section_drag = None; self.auto_scroll = None; self.menu = None;
+    }
+
+    pub(super) fn suspend_for_mini(&mut self) {
+        // 同一文档返回时保留选中项和列表位置，只释放已隐藏面板的交互与动效。
+        self.panel_bounds = None;
+        self.visibility = ScalarMotion::settled(self.showing);
+        self.exit_snapshot = None; self.pending_projection = None; self.projection_motion = None;
+        self.active_motion = None; self.row_hovers.clear(); self.bulk_hover.reset();
+        self.panel_drag = None; self.section_drag = None; self.auto_scroll = None; self.menu = None;
+        self.suppress_click = false;
+        self.drag_generation += 1;
     }
 
     pub(super) fn set_reduced_motion(&mut self, reduced: bool) {
@@ -209,11 +223,14 @@ impl Workspace {
         (left.clamp(8.0, (width - 228.0).max(8.0)), top.clamp(8.0, (area_height - height - 8.0).max(8.0)))
     }
     pub(super) fn render_outline_panel(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.outline_ui.panel_bounds = None;
         let document = self.document()?;
         let document_id = document.read(cx).status().document_id.clone();
         if self.outline_ui.document_id.as_ref() != Some(&document_id) {
             self.outline_ui.document_id = Some(document_id);
             self.outline_ui.selected = 0;
+            self.outline_ui.selected_key = None;
+            self.outline_ui.selected_revision = 0;
             self.outline_ui.panel_drag = None;
             self.outline_ui.section_drag = None;
             self.outline_ui.auto_scroll = None;
@@ -275,7 +292,17 @@ impl Workspace {
             || self.outline_ui.bulk_hover.running() || self.outline_ui.row_hovers.iter().any(|entry| entry.motion.running()) {
             window.request_animation_frame();
         }
+        if self.outline_ui.selected_revision != snapshot.revision {
+            if let Some(index) = self.outline_ui.selected_key.as_ref().and_then(|key| snapshot.position(key)) {
+                self.outline_ui.selected = index;
+            }
+            self.outline_ui.selected_revision = snapshot.revision;
+        }
         self.outline_ui.selected = self.outline_ui.selected.min(snapshot.count.saturating_sub(1));
+        if let Some(row) = snapshot.row(self.outline_ui.selected) { self.outline_ui.selected_key = Some(row.key()); }
+        if let Some(index) = document.update(cx, |host, _| host.take_outline_scroll()) {
+            self.outline_scroll.scroll_to_item_strict(index, ScrollStrategy::Top);
+        }
         let scroll = self.outline_scroll.0.borrow().base_handle.clone();
         let top_index = scroll.logical_scroll_top().0;
         let scroll_y = f32::from(scroll.offset().y);
@@ -299,6 +326,9 @@ impl Workspace {
         let (left, mut top) = self.outline_position(window, cx, height);
         let visibility = self.outline_ui.visibility.value();
         if !reduced { top -= (1.0 - visibility) * 4.0; }
+        self.outline_ui.panel_bounds = self.outline_ui.bounds.get().map(|area| {
+            gpui::Bounds::new(area.origin + gpui::point(px(left), px(top)), gpui::size(px(220.0), px(height)))
+        });
         let active = snapshot.active_byte;
         let active_motion = self.outline_ui.active_motion.clone();
         let revision = snapshot.revision;
@@ -310,7 +340,7 @@ impl Workspace {
         let page = snapshot.clone();
         let theme = theme.clone();
         let rows: AnyElement = if count == 0 {
-            let text: String = if snapshot.error.is_some() { "大纲暂不可用".into() } else if snapshot.pending { "正在加载大纲…".into() } else if snapshot.incomplete { "结构索引不完整，无法确认标题".into() } else { "当前文档还没有标题".into() };
+            let text: String = if snapshot.error.is_some() { "大纲暂不可用".into() } else if snapshot.pending && !snapshot.complete { "正在加载大纲…".into() } else if snapshot.incomplete { "结构索引不完整，无法确认标题".into() } else { "当前文档还没有标题".into() };
             div().w_full().h(px(list_height)).px(px(OUTLINE_PADDING)).text_size(px(13.0)).text_color(theme.muted).child(text).into_any_element()
         } else {
             let ghosts: Vec<AnyElement> = animation.as_ref().map(|animation| {
@@ -387,12 +417,13 @@ impl Workspace {
                                 if !workspace.outline_ui.showing { return; }
                                 if workspace.outline_ui.suppress_click { workspace.outline_ui.suppress_click=false; return; }
                                 workspace.outline_ui.selected = index;
-                                if let Some(doc) = workspace.document() { doc.update(cx, |host, cx| host.reveal_outline_heading(goto_heading.byte, revision, cx)); }
+                                if let Some(doc) = workspace.document() { doc.update(cx, |host, cx| host.navigate_outline_entry(&goto_heading, revision, cx)); }
                             }))
                             .on_mouse_down(MouseButton::Left, cx.listener(move |workspace, event: &gpui::MouseDownEvent, window, cx| {
                                 if !workspace.outline_ui.showing { return; }
                                 workspace.outline_ui.keyboard_focus_visible = false;
                                 window.focus(&workspace.outline_ui.focus, cx);
+                                if workspace.document().is_none_or(|doc| doc.read(cx).status().revision != revision) { return; }
                                 workspace.outline_ui.drag_generation += 1;
                                 workspace.outline_ui.section_drag = Some(SectionDrag { start:event.position, pointer:event.position, source:drag_heading.clone(), target:None,
                                     placement:crate::text_document::markdown_session::OutlinePlacement::Before, revision, moving:false, valid:false, generation:workspace.outline_ui.drag_generation });
@@ -465,7 +496,7 @@ impl Workspace {
         match event.keystroke.key.as_str() {
             "up" => self.outline_ui.selected = self.outline_ui.selected.saturating_sub(1),
             "down" => self.outline_ui.selected = (self.outline_ui.selected + 1).min(state.count.saturating_sub(1)),
-            "enter" => { if let Some(row) = state.row(self.outline_ui.selected) { let row=row.clone(); doc.update(cx, |host,cx|host.reveal_outline_heading(row.byte,state.revision,cx)); } },
+            "enter" => { if let Some(row) = state.row(self.outline_ui.selected) { let row=row.clone(); doc.update(cx, |host,cx|host.navigate_outline_entry(&row,state.revision,cx)); } },
             "left" | "right" | "space" => { if let Some(row) = state.row(self.outline_ui.selected) { if row.has_children && (event.keystroke.key == "space" || row.collapsed == (event.keystroke.key == "right")) { let row=row.clone(); self.toggle_outline_heading(&row,cx); } } },
             _ => return,
         }
@@ -602,13 +633,13 @@ impl Workspace {
             .on_mouse_down_out(cx.listener(|workspace, _, _, cx| { workspace.outline_ui.menu=None; cx.notify(); }));
         for (index, (action, label)) in items.into_iter().enumerate() {
             let heading=heading.clone();
-            panel = panel.child(div().id(("outline-menu-item",index)).h(px(29.0)).px(px(14.0)).flex().items_center().cursor_pointer()
+            panel = panel.child(div().id(("outline-menu-item",index)).h(px(29.0)).px(px(14.0)).flex().flex_none().items_center().cursor_pointer()
                 .text_size(px(13.0)).text_color(theme.fg).hover(|style|style.bg(theme.hover)).child(label)
                 .on_click(cx.listener(move |workspace, _, _, cx| {
                     workspace.outline_ui.menu=None; cx.stop_propagation();
                     match action {
                         "copy" => if let Some(h)=&heading { cx.write_to_clipboard(gpui::ClipboardItem::new_string(h.text.clone())); },
-                        "jump" => if let (Some(doc),Some(h))=(workspace.document(),&heading) { doc.update(cx,|host,cx|host.reveal_outline_heading(h.byte,revision,cx)); },
+                        "jump" => if let (Some(doc),Some(h))=(workspace.document(),&heading) { doc.update(cx,|host,cx|host.navigate_outline_entry(h,revision,cx)); },
                         "fold" => if let Some(h)=&heading { if h.has_children { workspace.toggle_outline_heading(h,cx); } },
                         "expand" | "collapse" => workspace.set_outline_level_animated(if action=="expand" {6}else{1},cx),
                         "default" => { let level = cx.global::<Settings>().outline_level; workspace.set_outline_level_animated(level,cx); },
@@ -619,6 +650,8 @@ impl Workspace {
                     cx.notify();
                 })));
         }
-        Some(gpui::deferred(gpui::anchored().position(menu.position).snap_to_window_with_margin(px(8.0)).child(panel)).with_priority(3).into_any_element())
+        Some(gpui::deferred(popup("outline-menu-enter",
+            PopupAnchor::Bounds(gpui::Bounds::new(menu.position, gpui::size(px(0.0), px(0.0)))),
+            PopupPlacement::BelowLeft, panel, self.explorer.reduce_motion)).with_priority(3).into_any_element())
     }
 }

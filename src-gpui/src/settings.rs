@@ -77,10 +77,13 @@ pub fn default_value(key: &str) -> Value {
         "copyMarkdownSyntaxEnabled" => json!(true),
         "quickInsertEnabled" => json!(true),
         "quickInsertTrigger" => json!("/"),
+        "imageHandlingSettings" => crate::image_import::defaults(),
         "markdownLintEnabled" => json!(false),
         "markdownLintRuleSet" => json!("relaxed"),
         "developerMode" => json!(false),
         "softwareUpdateAutoCheckEnabled" => json!(true),
+        "nativeReleaseNotesVersion" => json!(""),
+        "softwareUpdateDismissedVersion" => json!(""),
         _ => Value::Null,
     }
 }
@@ -172,6 +175,10 @@ impl Settings {
     }
 
     pub fn value(&self, key: &str) -> Value {
+        if let Some(field)=key.strip_prefix("imageHandlingSettings.") {
+            return self.value("imageHandlingSettings").get(field).cloned()
+                .unwrap_or_else(||crate::image_import::defaults()[field].clone());
+        }
         self.values.get(key).cloned().unwrap_or_else(|| default_value(key))
     }
 
@@ -202,6 +209,18 @@ impl Settings {
 
     /// `persist` 为假时只更新内存（滑杆拖动过程中），拖动结束再以 `persist = true` 写入文件。
     pub fn set_with(cx: &mut App, key: &str, value: Value, persist: bool) {
+        if let Some(field)=key.strip_prefix("imageHandlingSettings.") {
+            let mut image=cx.global::<Settings>().value("imageHandlingSettings");
+            // 与其他版本共用配置；局部修改不能覆盖其刚写入的上传或清理字段。
+            if persist {
+                if let Some(stored)=read_config().and_then(|config|config.pointer("/app/settings/imageHandlingSettings/value_json").and_then(Value::as_str).and_then(|raw|serde_json::from_str::<Value>(raw).ok())) {
+                    if stored.is_object(){image=stored;}
+                }
+            }
+            if !image.is_object(){image=crate::image_import::defaults();}
+            image[field]=value;
+            return Self::set_with(cx,"imageHandlingSettings",image,persist);
+        }
         let settings = cx.global_mut::<Settings>();
         let changed = settings.value(key) != value;
         if !changed && !persist {
