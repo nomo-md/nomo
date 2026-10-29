@@ -49,7 +49,18 @@ impl Workspace {
         } else { Some(sidebar) }
     }
 
+    /// 文件栏 = 与主页相同的“主页”导航头 + 文件树视口；导航头不进入虚拟列表，滚动条和拖宽仍以列表边界计算。
     fn render_explorer_sidebar(&mut self, width: f32, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let tree = self.render_explorer_tree(width, theme, cx);
+        let home = crate::ui::home::nav_home_row(false, theme)
+            .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| workspace.show_home(window, cx)));
+        div().w(px(width)).h_full().min_h(px(0.0)).flex_none().flex().flex_col().bg(theme.rail_bg)
+            .child(div().w_full().flex_none().px(px(8.0)).pt(px(10.0)).pb(px(6.0)).child(home))
+            .child(div().w_full().flex_1().min_h(px(0.0)).child(tree))
+            .into_any_element()
+    }
+
+    fn render_explorer_tree(&mut self, width: f32, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let (root_name, root_path, root_expanded, root_loading, rows) = match &self.tree {
             Some(tree) => (tree.root_name(), Some(tree.root.clone()), tree.root_expanded(), tree.loading(&tree.root), tree.rows()),
             None => return div().id("tree-viewport").relative().w(px(width)).h_full().min_h(px(0.0)).flex_none()
@@ -178,7 +189,7 @@ impl Workspace {
                         .pl(px((if is_dir { 12.0 } else { 34.0 }) + row.depth as f32 * 12.0)).pr(px(4.0))
                         .rounded(px(4.0)).cursor_pointer().text_color(if active { theme.accent } else { theme.fg })
                         .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
-                        .when(search_path.as_ref() == Some(&path), |el| el.bg(theme.sidebar_active))
+                        .when(active || search_path.as_ref() == Some(&path), |el| el.bg(theme.sidebar_active))
                         .tooltip(tooltip(path_tip))
                         .hover(|style| style.bg(gpui::rgba(0x80808014)))
                         .children(chevron).child(file_icon)

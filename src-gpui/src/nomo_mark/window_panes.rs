@@ -3,6 +3,15 @@ use super::*;
 use crate::settings::{EditorMode, Settings};
 use std::{sync::atomic::{AtomicU64, Ordering}, time::{Duration, Instant}};
 
+/// 单栏且显示悬浮大纲时正文列的左边距与宽度（px）：正文避开右侧大纲卡片；
+/// `None` 表示正文按比例居中。编辑区顶部信息行用同一结果与正文左对齐。
+pub(crate) fn outline_content_column(width: f32, outline_visible: bool, width_percent: f32) -> Option<(f32, f32)> {
+    if !outline_visible || width <= 900.0 { return None; }
+    let safe = 224.0 + (width * 0.035).clamp(32.0, 160.0);
+    let content_width = (width * width_percent).min((width - safe).max(0.0));
+    Some((((width - content_width) / 2.0).min((width - safe - content_width).max(0.0)), content_width))
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct ReadingAnchor { byte: u64, fraction: f32, revision: Option<u64>, view_only: bool }
 
@@ -420,13 +429,10 @@ impl DocumentHost {
         let id=self.panes[pane].id;
         let width=f32::from(self.panes[pane].scroll.bounds().size.width);
         let settings=cx.global::<Settings>();
-        let avoid_outline=!self.mini_layout && self.panes.len()==1 && settings.show_outline && width>900.0;
-        let safe=224.0+(width*0.035).clamp(32.0,160.0);
-        let content_width=(width*settings.content_width_percent).min((width-safe).max(0.0));
-        let content_left=((width-content_width)/2.0).min((width-safe-content_width).max(0.0));
+        let avoid=outline_content_column(width,!self.mini_layout && self.panes.len()==1 && settings.show_outline,settings.content_width_percent);
         let document_body=div().children(self.pane_children(pane,cx))
-            .when(avoid_outline,|el|el.w(px(content_width)).ml(px(content_left)))
-            .when(!avoid_outline,|el|el.w(gpui::relative(if self.mini_layout || self.panes.len()==2 {1.0}else{settings.content_width_percent})).mx_auto());
+            .when_some(avoid,|el,(content_left,content_width)|el.w(px(content_width)).ml(px(content_left)))
+            .when(avoid.is_none(),|el|el.w(gpui::relative(if self.mini_layout || self.panes.len()==2 {1.0}else{settings.content_width_percent})).mx_auto());
         let zoom_host = cx.entity().downgrade();
         // GPUI 的默认滚动先于冒泡回调执行；在捕获阶段处理缩放，避免一次手势既缩放又滚动。
         // 普通命中区域不遮挡编辑器；弹层的遮挡命中区域仍优先。

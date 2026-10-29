@@ -6,11 +6,12 @@
 |---|---|---|
 | 根构建、版本、锁文件 | `Cargo.toml`、`Cargo.lock` | 单成员 workspace；唯一产品版本；根 target |
 | 启动、菜单、平台打开事件 | `src-gpui/src/main.rs` | 默认 Workspace 与 feature 开发入口；本地文件 URL 路由 |
-| 文档主页与最近记录 | `src-gpui/src/ui/home.rs`、`home/library.rs`、`home/thumbnail.rs` | 无文件启动进入主页；本地文件夹入口、最近列表、虚拟网格和有界页首缩略图；平面左右分栏，不创建编辑会话 |
+| 文档主页与最近记录 | `src-gpui/src/ui/home.rs`、`home/library.rs`、`home/thumbnail.rs` | 无文件启动进入主页；本地文件夹入口、最近列表、虚拟网格和有界页首缩略图；与编辑页共用外壳面板、侧栏宽度和主页导航行，不创建编辑会话 |
 | 默认应用外壳 | `src-gpui/src/ui/workspace.rs`、`workspace/toolbar.rs`、`workspace_surface.rs` | 多标签、连体边框与阴影、文件树、模式、工具栏、搜索、自动保存 |
 | 浮动缩放与统计 | `src-gpui/src/ui/workspace/status.rs` | 原版右下角按钮、向上弹层、四种统计、阅读时间与缩放；复用会话统计和阅读锚点，不持有正文 |
 | Markdown Mini 小窗 | `src-gpui/src/ui/workspace/mini.rs`、`ui/mini.rs`、`ui/mini/native.rs` | Windows 原地切换、置顶与几何恢复；悬停控制条独立重绘，复用当前会话和阅读锚点；返回时释放控制条与原生回调 |
 | 打开耗时采样 | `src-gpui/src/open_profile.rs`、`ui/workspace.rs`、`nomo_mark/view.rs` | 显式启用；记录会话、首窗口、首帧和语义恢复，不记录正文或路径 |
+| 帧耗时采样 | `src-gpui/src/frame_profile.rs`、`ui/workspace.rs`、`scripts/gen-perf-doc.py` | `NOMO_FRAME_PROFILE` 显式启用；有界样本、帧耗时与按键上屏的中位数／p95，固定种子百万字样本 |
 | 文件树 | `src-gpui/src/ui/file_tree.rs`、`ui/workspace/explorer.rs`、`explorer_ui.rs`、`explorer_label.rs`、`explorer_actions.rs`、`explorer_search.rs` | 目录快照预算、后台按需刷新、虚拟滚动、名称省略、交互和键盘搜索；重命名同步现有文档会话 |
 | 标题栏和应用内菜单 | `src-gpui/src/ui/chrome.rs`、`ui/window_chrome.rs` | 轻量状态摘要、焦点恢复、窗口拖动与按钮；关闭交回 Workspace 确认 |
 | NomoMark 正式文档宿主 | `src-gpui/src/nomo_mark/document_host.rs`、`workspace_host.rs` | 每标签窗口生命周期、控件事件、正式错误恢复；不持有全文 |

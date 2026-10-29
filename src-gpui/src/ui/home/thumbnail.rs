@@ -51,7 +51,7 @@ impl Palette {
         Self {
             dark: theme.dark, surface: color(theme.surface), fg: color(theme.fg),
             heading: color(theme.heading), muted: color(theme.muted), border: color(theme.border),
-            quote_bg: color(theme.sidebar_active), quote_fg: color(theme.quote_fg), quote_border: color(theme.quote_border),
+            quote_bg: color(theme.code_bg), quote_fg: color(theme.quote_fg), quote_border: color(theme.quote_border),
             code_bg: color(theme.code_bg), code_fg: color(theme.code_fg),
             table_bg: color(theme.table_header_bg), table_border: color(theme.table_border),
             link: color(theme.link), inline_code_bg: color(theme.inline_code_bg), inline_code_fg: color(theme.inline_code_fg),
@@ -219,7 +219,8 @@ fn parse(text: &str, path: &Path) -> Vec<Block> {
             else { blocks.push(Block::Text { text, heading, quote, code }); }
         } else { *pending = RichText::default(); }
     };
-    let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_MATH;
+    // 启用 GFM 以识别 `> [!TIP]` 等提示块标记，缩略图中按引用样式显示且不露出标记原文。
+    let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_MATH | Options::ENABLE_GFM;
     for event in Parser::new_ext(text, options).take(4096) {
         if blocks.len() >= 28 { break; }
         match event {

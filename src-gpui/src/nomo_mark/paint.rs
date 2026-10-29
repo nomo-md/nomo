@@ -25,10 +25,11 @@ pub fn paint_block(
             Paint::CodeBg => theme.code_bg,
             Paint::CodeBorder => theme.code_border,
             Paint::QuoteBorder => theme.quote_border,
+            Paint::CalloutBg(role) => role.resolve(theme).opacity(if theme.dark { 0.14 } else { 0.07 }),
+            Paint::CalloutBorder(role) => role.resolve(theme).opacity(if theme.dark { 0.32 } else { 0.24 }),
             Paint::TableBorder => theme.table_border,
             Paint::TableHeader => theme.table_header_bg,
             Paint::Surface => theme.surface,
-            Paint::Role(role) => role.resolve(theme),
         }
     };
     for item in &layout.items {

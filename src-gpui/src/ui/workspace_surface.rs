@@ -48,6 +48,8 @@ impl TabMotion {
 struct Geometry {
     bounds: Bounds<Pixels>,
     tab: Option<TabRect>,
+    /// 面板顶边距 bounds 顶部的高度：显示标签栏时为 `TAB_RAIL_HEIGHT`，单文档隐藏标签栏时为 0。
+    rail: f32,
 }
 
 struct Paths {
@@ -70,6 +72,8 @@ struct SurfaceState {
     // 只保留当前两条短路径和一套压缩边缘阴影；不缓存历史尺寸或文档。
     paths: Option<Paths>,
     shadow: shadow::ShadowCache,
+    /// 由工作区每帧渲染时写入；隐藏标签栏时面板上移，几何与阴影缓存随之失效重建。
+    rail_hidden: bool,
 }
 
 impl SurfaceState {
@@ -151,6 +155,17 @@ impl WorkspaceSurface {
         self.0.borrow_mut().clear();
     }
 
+    /// 单文档时隐藏标签栏：清除标签位置，使轮廓退化为普通圆角面板。
+    pub fn set_rail_hidden(&self, hidden: bool) {
+        let mut state = self.0.borrow_mut();
+        state.rail_hidden = hidden;
+        if hidden { state.clear(); }
+    }
+
+    fn rail(&self) -> f32 {
+        if self.0.borrow().rail_hidden { 0.0 } else { TAB_RAIL_HEIGHT }
+    }
+
     pub fn tab_marker(&self, id: EntityId, index: usize, count: usize, scroll: ScrollHandle) -> impl IntoElement {
         let state = self.0.clone();
         canvas(
@@ -161,21 +176,22 @@ impl WorkspaceSurface {
 
     pub fn background(&self, theme: Theme, animate_ui: bool) -> impl IntoElement {
         let state = self.0.clone();
+        let rail = self.rail();
         canvas(
             |_, _, _| (),
             move |bounds, _, window, _| {
-                if f32::from(bounds.size.width) <= 0.0 || f32::from(bounds.size.height) <= TAB_RAIL_HEIGHT {
+                if f32::from(bounds.size.width) <= 0.0 || f32::from(bounds.size.height) <= rail {
                     if animate_ui { window.request_animation_frame(); }
                     return;
                 }
                 let mut state = state.borrow_mut();
                 let running = state.update_visual(Instant::now());
-                let geometry = Geometry { bounds, tab: state.visual };
+                let geometry = Geometry { bounds, tab: state.visual, rail };
                 state.shadow.paint(geometry, &theme, window);
                 if let Some(paths) = state.paths(geometry) {
                     // 面板正文已有自己的背景；只在标签及圆角连接区域绘制轮廓填充。
                     let fill_region = Bounds::from_corners(bounds.origin, point(
-                        bounds.right(), (bounds.top() + px(TAB_RAIL_HEIGHT + OUTER_RADIUS)).min(bounds.bottom()),
+                        bounds.right(), (bounds.top() + px(rail + OUTER_RADIUS)).min(bounds.bottom()),
                     ));
                     window.with_content_mask(Some(ContentMask { bounds: fill_region }), |window| {
                         window.paint_path(paths.fill.clone(), theme.surface);
@@ -188,12 +204,13 @@ impl WorkspaceSurface {
 
     pub fn outline(&self, theme: Theme) -> impl IntoElement {
         let state = self.0.clone();
+        let rail = self.rail();
         canvas(
             |_, _, _| (),
             move |bounds, _, window, _| {
-                if f32::from(bounds.size.width) <= 0.0 || f32::from(bounds.size.height) <= TAB_RAIL_HEIGHT { return; }
+                if f32::from(bounds.size.width) <= 0.0 || f32::from(bounds.size.height) <= rail { return; }
                 let mut state = state.borrow_mut();
-                let geometry = Geometry { bounds, tab: state.visual };
+                let geometry = Geometry { bounds, tab: state.visual, rail };
                 // GPUI 的子元素裁剪是矩形。只重绘圆角方块中的底色、同一阴影和填充，
                 // 既遮住正文的直角，也保留圆弧外侧的投影，不留下纯色补丁。
                 let corner = state.paths(geometry).map(|paths| paths.corner);
@@ -235,7 +252,7 @@ fn surface_contour(geometry: Geometry) -> Vec<Segment> {
     let left = f32::from(bounds.left());
     let right = f32::from(bounds.right());
     let bottom = f32::from(bounds.bottom());
-    let top = f32::from(bounds.top()) + TAB_RAIL_HEIGHT;
+    let top = f32::from(bounds.top()) + geometry.rail;
     let tab = visible_tab(geometry);
     let body_radius = OUTER_RADIUS.min(bottom - top).min(tab.map_or(right - left, |tab| tab.left - left)).max(0.0);
     let arc = |path: &mut Vec<Segment>, radius: f32, sweep: bool, x: f32, y: f32| {
@@ -281,7 +298,7 @@ fn build_paths(geometry: Geometry) -> Option<Paths> {
         let outline = surface_path(&contour, PathBuilder::stroke(px(1.0)))?;
         let bounds = geometry.bounds;
         let left = f32::from(bounds.left());
-        let top = f32::from(bounds.top()) + TAB_RAIL_HEIGHT;
+        let top = f32::from(bounds.top()) + geometry.rail;
         let tab = visible_tab(geometry);
         let radius = OUTER_RADIUS.min(f32::from(bounds.bottom()) - top)
             .min(tab.map_or(f32::from(bounds.size.width), |tab| tab.left - left)).max(0.0);

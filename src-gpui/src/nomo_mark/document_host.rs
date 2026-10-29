@@ -34,6 +34,7 @@ pub use workspace_host::DocumentEvent;
 pub(crate) use workspace_host::EditTarget;
 pub use outline_queries::OutlineHeading;
 pub(crate) use outline_queries::OutlineSnapshot;
+pub(crate) use window_panes::outline_content_column;
 #[cfg(feature = "nomo-mark-demo")]
 #[path = "development_ui.rs"]
 mod development_ui;

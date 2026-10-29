@@ -106,6 +106,31 @@ $env:NOMO_OPEN_PROFILE = Join-Path $profileDir 'open.jsonl'
 
 本轮默认 `cargo check`、Release 构建及 13 项既有定向检查通过，另检查了已有 UTF-16、CRLF、单段落、长代码块和引用样本的首窗加载。原始数据位于本次任务目录 `.artifacts/first-screen-20261028/comparison.json`。这些结果不覆盖滚动流畅度、完整超大结构交互、内存趋势、真实 IME、双栏交互和三平台性能验收。
 
+## 帧耗时采样与百万字基准
+
+`NOMO_FRAME_PROFILE=<输出 JSON>` 显式启用帧采样（`src-gpui/src/frame_profile.rs`），未设置时不分配、不加锁。记录两类样本：工作区一帧从 `render` 开始到常规绘制结束的 CPU 耗时（`frame`），以及按键或派发动作到其后首个绘制完成帧的延迟（`input_to_paint`）。样本各保留最近 16,384 条，每 240 帧覆盖写一次中位数、p95 和最大值，不记录正文或路径。两项均不含 GPU 提交与垂直同步等待，不能直接等同于屏幕实际上屏时间。
+
+附加 `NOMO_FRAME_PROFILE_PAGES=<次数>` 时，打开后等待 4 秒（等待期的空帧不计入），再每帧向焦点文档派发一次 `PageDown`，最后一次翻页上屏后写最终汇总并停止采样，用于无人值守的同场景前后对照。样本文档由 `scripts/gen-perf-doc.py` 按固定种子生成（默认约 100 万字符，混合标题、段落、行内格式、列表、待办、引用、提示块、代码块和表格）：
+
+```sh
+python3 scripts/gen-perf-doc.py /tmp/nomo-perf/million.md
+NOMO_FRAME_PROFILE=/tmp/nomo-perf/r1.json NOMO_FRAME_PROFILE_PAGES=300 target/release/nomo /tmp/nomo-perf/million.md
+```
+
+目标：百万字文档滚动帧与按键到上屏的中位数均不超过 5.7 ms（参照同类 GPUI 文档客户端公开的中位数），p95 不超过 8.3 ms（120 Hz 单帧预算）。
+
+### 2026-10-28 macOS 首次基线
+
+样本 1,000,122 字符、2,638,283 字节（SHA-256 `c1ee3335d3627bfd385281e7d590437cef31093cffc75a1300c31dc0bec72459`）。基于 `09f9e8f` 加本轮界面改动的 Release 构建，GPUI 0.3.10，Apple M4、macOS 27.2，浅色、语义模式、右侧悬浮大纲显示，1280×820 逻辑像素窗口，外接 4K 显示器。三个独立进程、各 300 次 `PageDown`：
+
+| 轮次 | 帧耗时中位数 / p95 / 最大（ms） | 翻页到绘制中位数 / p95 / 最大（ms） |
+|---|---|---|
+| 1 | 2.33 / 4.86 / 6.67 | 2.39 / 4.88 / 6.76 |
+| 2 | 2.23 / 4.87 / 6.51 | 2.28 / 4.89 / 6.52 |
+| 3 | 2.46 / 4.71 / 7.08 | 2.51 / 4.75 / 7.09 |
+
+三轮均在目标内。本轮只覆盖翻页滚动；连续触控板滚动、文字输入与中文输入法上屏、双栏、Windows／Linux 及内存趋势尚未测量。
+
 ## 当前验证入口
 
 ```sh

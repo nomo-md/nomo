@@ -60,6 +60,8 @@ pub(crate) struct Home {
     _subscription: Subscription,
     active: bool,
     pub open_tabs: usize,
+    /// 与编辑页文件栏同宽（由 Workspace 每帧同步其可拖动宽度），两页切换时侧栏边界不跳动。
+    pub sidebar_width: f32,
     sidebar_scroll: UniformListScrollHandle,
     grid_scroll: UniformListScrollHandle,
     preview_theme: thumbnail::Palette,
@@ -100,7 +102,7 @@ impl Home {
             cx.notify();
         });
         cx.on_release(|home, cx| home.clear_previews(cx)).detach();
-        Self { focus: cx.focus_handle(), library, snapshot, _subscription: subscription, active, open_tabs: 0,
+        Self { focus: cx.focus_handle(), library, snapshot, _subscription: subscription, active, open_tabs: 0, sidebar_width: 250.0,
             sidebar_scroll: UniformListScrollHandle::new(), grid_scroll: UniformListScrollHandle::new(),
             preview_theme: thumbnail::Palette::new(cx.global::<Theme>()),
             previews: HashMap::new(), card_motion: HashMap::new(), bytes: 0, clock: 0, visible: Vec::new(), pending: VecDeque::new(), scheduled: false, worker: None, running: None }
@@ -208,14 +210,14 @@ impl Home {
         let remove_path = path.clone();
         let color = theme.muted;
         let label = if folder { entry_name(&path) } else { document_name(&path) };
-        div().id((if folder { "home-folder" } else { "home-recent" }, index)).relative().w_full().min_w(px(0.0)).h(px(32.0)).px(px(10.0))
+        div().id((if folder { "home-folder" } else { "home-recent" }, index)).relative().w_full().min_w(px(0.0)).h(px(28.0)).px(px(12.0))
             .group("home-sidebar-row")
-            .flex().items_center().gap(px(8.0)).rounded(px(7.0)).cursor_pointer().hover(|s| s.bg(theme.hover))
+            .flex().items_center().gap(px(6.0)).rounded(px(4.0)).cursor_pointer().text_color(theme.fg).hover(|s| s.bg(theme.hover))
             .tooltip(tooltip(label.clone()))
-            .child(icon(if folder { IconName::Folder } else { IconName::FileText },16.0,color))
-            .child(div().flex_1().min_w(px(0.0)).text_size(px(13.0)).truncate().child(label))
+            .child(icon(if folder { IconName::Folder } else { IconName::FileText },13.0,color))
+            .child(div().flex_1().min_w(px(0.0)).text_size(px(14.0)).truncate().child(label))
             .child(small_icon_button((if folder { "home-remove-folder" } else { "home-remove-recent" },index),IconName::Close,false,theme)
-                .absolute().right(px(5.0)).top(px(5.0)).bg(theme.hover)
+                .absolute().right(px(4.0)).top(px(3.0)).bg(theme.hover)
                 .invisible().group_hover("home-sidebar-row", |style| style.visible())
                 .tooltip(tooltip(if folder { "移除文件夹入口（保留磁盘文件）" } else { "从最近记录移除" }))
                 .on_click(cx.listener(move |home, _, _, cx| { cx.stop_propagation(); home.library.update(cx, |library,cx| library.change(Change::Remove { path: remove_path.clone(), folder },cx)); })))
@@ -324,24 +326,22 @@ impl Render for Home {
         let theme = Theme::ui(cx);
         let snapshot = self.snapshot.clone();
         let narrow = f32::from(window.viewport_size().width) < 850.0;
-        let sidebar_width = if narrow { 208.0 } else { 240.0 };
+        let sidebar_width = if narrow { 208.0 } else { self.sidebar_width };
         let content_padding = if narrow { 18.0 } else { 24.0 };
         let available = (f32::from(window.viewport_size().width) - sidebar_width - content_padding * 2.0 - GRID_SHADOW_INSET * 2.0).max(188.0);
         let columns = ((available + GRID_GAP) / (188.0 + GRID_GAP)).floor().clamp(1.0,6.0) as usize;
         let card_width = ((available - (columns-1) as f32 * GRID_GAP) / columns as f32).min(300.0);
         let row_height = card_height(card_width) + CARD_LIFT + GRID_GAP;
         let rows = snapshot.recent.len().div_ceil(columns);
-        let sidebar_bg = motion::color(theme.rail_bg, theme.surface, 0.35);
+        // 侧栏与编辑页文件树共用外壳底色、行悬停色和选中底色，两页切换时外壳不跳变。
         let mut sidebar_theme = theme.clone();
-        sidebar_theme.hover = motion::color(sidebar_bg, theme.fg, 0.035);
-        sidebar_theme.sidebar_active = motion::color(sidebar_bg, theme.accent, if theme.dark { 0.14 } else { 0.08 });
-        let sidebar_active = sidebar_theme.sidebar_active;
+        sidebar_theme.hover = gpui::rgba(0x80808014).into();
         let sidebar_snapshot = snapshot.clone();
         let sidebar = uniform_list("home-sidebar-list", snapshot.folders.len() + snapshot.recent.len() + 2,
             cx.processor(move |home, range: std::ops::Range<usize>, _, cx| range.map(|index| {
                 if index == 0 || index == sidebar_snapshot.folders.len()+1 {
                     let folder = index == 0;
-                    div().w_full().h(px(32.0)).px(px(10.0)).flex().items_center().justify_between().text_size(px(11.0)).font_weight(FontWeight::MEDIUM).text_color(sidebar_theme.muted)
+                    div().w_full().h(px(32.0)).px(px(12.0)).flex().items_center().justify_between().text_size(px(11.0)).font_weight(FontWeight::MEDIUM).text_color(sidebar_theme.muted)
                         .child(if folder { "文件夹" } else { "最近文档" })
                         .child(small_icon_button(if folder { "home-add-folder" } else { "home-open-recent" },IconName::Plus,false,&sidebar_theme)
                             .tooltip(tooltip(if folder { "添加文件夹" } else { "打开文件" }))
@@ -383,15 +383,15 @@ impl Render for Home {
                 }).collect::<Vec<_>>()
             })).w_full().h_full().py(px(GRID_SHADOW_INSET)).track_scroll(&self.grid_scroll).into_any_element()
         };
-        div().id("document-home").track_focus(&self.focus).w_full().flex_1().min_h(px(0.0)).flex().bg(theme.surface)
-            .child(div().w(px(sidebar_width)).h_full().flex_none().px(px(12.0)).py(px(14.0)).flex().flex_col().gap(px(10.0))
-                .bg(sidebar_bg).border_r_1().border_color(motion::color(sidebar_bg, theme.border, 0.45))
-                .child(div().w_full().h(px(34.0)).flex_none().px(px(10.0)).flex().items_center().gap(px(9.0)).rounded(px(8.0)).bg(sidebar_active).text_color(theme.accent_strong)
-                    .child(icon(IconName::Home,17.0,theme.accent)).child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).child("主页")))
+        // 外壳与编辑页一致：侧栏直接落在 rail_bg 上，内容区是左上圆角、带描边的白色面板。
+        div().id("document-home").track_focus(&self.focus).w_full().flex_1().min_h(px(0.0)).flex().bg(theme.rail_bg)
+            .child(div().w(px(sidebar_width)).h_full().flex_none().px(px(8.0)).py(px(10.0)).flex().flex_col().gap(px(6.0))
+                .child(nav_home_row(true, &theme))
                 .child(div().id("home-sidebar-list-region")
                     .w_full().flex_1().min_h(px(0.0)).overflow_hidden().child(sidebar)))
             .child(div().relative().flex_1().min_w(px(0.0)).min_h(px(0.0)).h_full().flex().flex_col()
                 .child(div().flex_1().min_w(px(0.0)).min_h(px(0.0)).bg(theme.surface).overflow_hidden()
+                    .rounded_tl(px(12.0)).border_t_1().border_l_1().border_color(theme.workspace_edge)
                     .px(px(content_padding)).pt(px(14.0)).flex().flex_col().gap(px(12.0))
                     .child(div().w_full().flex_none().flex().items_center().gap(px(12.0))
                         .child(div().flex_none().text_size(px(18.0)).font_weight(FontWeight::BOLD).child("主页"))
@@ -427,4 +427,13 @@ fn document_name(path: &Path) -> SharedString {
 
 pub(crate) fn entry_name(path: &Path) -> SharedString {
     path.file_name().unwrap_or_else(|| path.as_os_str()).to_string_lossy().chars().map(|ch|if ch.is_control(){' '}else{ch}).collect::<String>().into()
+}
+
+/// 主页与编辑页侧栏共用的“主页”导航行：主页内为选中态，编辑页内作为返回主页入口。
+pub(crate) fn nav_home_row(active: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let color = if active { theme.accent } else { theme.fg };
+    div().id("sidebar-home").w_full().h(px(28.0)).flex_none().px(px(12.0)).flex().items_center().gap(px(6.0)).rounded(px(4.0))
+        .text_size(px(14.0)).text_color(color).when(active, |el| el.bg(theme.sidebar_active).font_weight(FontWeight::SEMIBOLD))
+        .when(!active, |el| el.cursor_pointer().hover(|style| style.bg(gpui::rgba(0x80808014))))
+        .child(icon(IconName::Home, 14.0, if active { theme.accent } else { theme.muted })).child("主页")
 }

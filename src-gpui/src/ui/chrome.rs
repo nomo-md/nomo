@@ -89,6 +89,8 @@ pub struct ChromeState {
     pub word_export_busy: bool,
     pub toolbar_shortcut: SharedString,
     pub recent: Vec<ChromeRecentEntry>,
+    /// 单文档隐藏标签栏时在标题栏居中显示的文档名与未保存标记；显示标签栏或在主页时为 None。
+    pub document_title: Option<(SharedString, bool)>,
     pub capabilities: Vec<ChromeCapability>,
     pub update: Option<ChromeUpdateState>,
 }
@@ -99,7 +101,7 @@ impl Default for ChromeState {
             has_document: false, can_show_home: false, can_undo: false, can_redo: false, mode: EditorMode::Semantic,
             sidebar_visible: true, toolbar_visible: true, outline_visible: false,
             large_document: false, split_available: true, word_export_busy: false,
-            toolbar_shortcut: "".into(), recent: Vec::new(), capabilities: Vec::new(), update: None,
+            toolbar_shortcut: "".into(), recent: Vec::new(), document_title: None, capabilities: Vec::new(), update: None,
         }
     }
 }
@@ -519,7 +521,11 @@ impl Render for Chrome {
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, window, cx| { this.dismiss(window, cx); window.dispatch_action(Box::new(action::OpenSettings), cx); }))));
         }
-        root = root.child(div().flex_1().h_full());
+        root = root.child(div().flex_1().min_w(px(0.0)).h_full().flex().items_center().justify_center()
+            .children(self.state.document_title.clone().map(|(title, dirty)| div().flex().items_center().gap(px(6.0)).min_w(px(0.0))
+                .text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(theme.fg)
+                .child(div().min_w(px(0.0)).truncate().child(title))
+                .children(dirty.then(|| div().size(px(6.0)).flex_none().rounded_full().bg(theme.accent))))));
         let mut right = div().flex().items_center().h_full().flex_none();
         if let Some(update) = self.state.update {
             let enabled = self.capable(ChromeCapability::SoftwareUpdate);

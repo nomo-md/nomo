@@ -36,10 +36,12 @@ pub enum Paint {
     CodeBg,
     CodeBorder,
     QuoteBorder,
+    /// 提示块底色与描边：取语义色的低透明度，深浅主题由绘制端决定透明度。
+    CalloutBg(ColorRole),
+    CalloutBorder(ColorRole),
     TableBorder,
     TableHeader,
     Surface,
-    Role(ColorRole),
 }
 
 pub enum DisplayItem {
@@ -525,10 +527,15 @@ fn strip_tags(html: &str) -> String {
     output
 }
 
+/// 提示块内边距（px，随缩放）：左右 16、上下 12，对应飞书高亮块的留白。
+const CALLOUT_PAD_X: f32 = 16.0;
+const CALLOUT_PAD_Y: f32 = 12.0;
+
 enum Container {
     List { next: Option<u64>, depth: usize },
     Item { marker_pending: bool, number: Option<u64>, depth: usize, task: Option<(bool, usize)> },
-    Quote { start_y: f32, x: f32, role: Option<ColorRole> },
+    /// `first_item` 是块内首个显示项的下标，提示块结束时在此处插入底色，使其绘制在正文之下。
+    Quote { start_y: f32, x: f32, role: Option<ColorRole>, first_item: usize },
     Footnote,
 }
 
@@ -1005,7 +1012,7 @@ impl Builder<'_> {
     fn base_for_container(&self) -> InlineStyle {
         for container in self.containers.iter().rev() {
             if let Container::Quote { role, .. } = container {
-                return InlineStyle { color: role.unwrap_or(ColorRole::QuoteFg), ..Default::default() };
+                return InlineStyle { color: if role.is_some() { ColorRole::Fg } else { ColorRole::QuoteFg }, ..Default::default() };
             }
         }
         InlineStyle::default()
@@ -1147,16 +1154,24 @@ impl Builder<'_> {
             BlockQuoteKind::Caution => ColorRole::Caution,
         });
         let x = self.indent;
-        self.containers.push(Container::Quote { start_y: self.y, x, role });
-        self.indent += 19.0 * self.env.metrics.zoom;
-        self.y += 6.0 * self.env.metrics.zoom;
+        let zoom = self.env.metrics.zoom;
+        self.containers.push(Container::Quote { start_y: self.y, x, role, first_item: self.items.len() });
+        // 提示块参照飞书高亮块：整块浅色底与圆角描边，四周留白；普通引用保留左侧竖线。
+        if role.is_some() {
+            self.indent += CALLOUT_PAD_X * zoom;
+            self.width -= CALLOUT_PAD_X * zoom;
+            self.y += CALLOUT_PAD_Y * zoom;
+        } else {
+            self.indent += 19.0 * zoom;
+            self.y += 6.0 * zoom;
+        }
         if let (Some(kind), Some(role)) = (kind, role) {
             let title = match kind {
-                BlockQuoteKind::Note => "ⓘ 提醒",
-                BlockQuoteKind::Tip => "✓ 提示",
-                BlockQuoteKind::Important => "！重要",
-                BlockQuoteKind::Warning => "⚠ 警告",
-                BlockQuoteKind::Caution => "⊘ 注意",
+                BlockQuoteKind::Note => "📌 提醒",
+                BlockQuoteKind::Tip => "💡 提示",
+                BlockQuoteKind::Important => "❗ 重要",
+                BlockQuoteKind::Warning => "⚠️ 警告",
+                BlockQuoteKind::Caution => "🚫 注意",
             };
             let spec = ParaSpec::plain(title.into(), InlineStyle { bold: true, color: role, ..Default::default() }, Family::Text, self.env.metrics.body_size() * 0.9, self.line_height, Wrap::Greedy);
             let layout = self.env.layout(&spec, self.width, self.window);
@@ -1170,12 +1185,23 @@ impl Builder<'_> {
     fn end_quote(&mut self) {
         self.flush_paragraph();
         self.pending_gap = 0.0;
-        self.y += 6.0 * self.env.metrics.zoom;
-        if let Some(Container::Quote { start_y, x, role }) = self.containers.pop() {
-            let paint = role.map_or(Paint::QuoteBorder, Paint::Role);
-            self.items.push(DisplayItem::Rect { x, y: start_y, w: 3.0 * self.env.metrics.zoom, h: self.y - start_y, paint, radius: 1.5, border: None });
+        let zoom = self.env.metrics.zoom;
+        match self.containers.pop() {
+            Some(Container::Quote { start_y, x, role: Some(role), first_item }) => {
+                self.y += CALLOUT_PAD_Y * zoom;
+                self.width += CALLOUT_PAD_X * zoom;
+                self.indent -= CALLOUT_PAD_X * zoom;
+                let background = DisplayItem::Rect { x, y: start_y, w: self.width - x, h: self.y - start_y,
+                    paint: Paint::CalloutBg(role), radius: 8.0 * zoom, border: Some(Paint::CalloutBorder(role)) };
+                self.items.insert(first_item.min(self.items.len()), background);
+            }
+            Some(Container::Quote { start_y, x, role: None, .. }) => {
+                self.y += 6.0 * zoom;
+                self.items.push(DisplayItem::Rect { x, y: start_y, w: 3.0 * zoom, h: self.y - start_y, paint: Paint::QuoteBorder, radius: 1.5, border: None });
+                self.indent -= 19.0 * zoom;
+            }
+            _ => self.indent -= 19.0 * zoom,
         }
-        self.indent -= 19.0 * self.env.metrics.zoom;
         self.gap(self.env.metrics.paragraph_gap());
     }
 

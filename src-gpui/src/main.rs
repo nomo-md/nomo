@@ -11,6 +11,7 @@ mod document;
 mod editor;
 mod nomo_mark;
 mod open_profile;
+mod frame_profile;
 mod embeds;
 mod images;
 mod image_import;

@@ -1,7 +1,7 @@
 //! 完整轮廓的双层高斯投影。只压缩远离圆角的直线中段，再拉伸这些恒定截面。
 //! 单套 2x 图像最多 444×248 像素（约 0.42 MiB，切片护边略增）；不随窗口面积增长。
 //! 替换时主动移除 GPUI 图集中的旧图片，窗口关闭时其余资源随窗口和 SurfaceState 释放。
-use super::{Geometry, Segment, TabRect, TAB_RAIL_HEIGHT, surface_contour, visible_tab};
+use super::{Geometry, Segment, TabRect, surface_contour, visible_tab};
 use crate::theme::Theme;
 use gpui::{Bounds, ContentMask, Corners, Hsla, RenderImage, Rgba, Window, point, px, size};
 use image::{Frame, GrayImage, RgbaImage};
@@ -86,12 +86,12 @@ impl Layout {
         let compact_width = x.source - PAD;
         x.append(PAD, false);
         let mut y = Axis::new();
-        y.append(PAD + TAB_RAIL_HEIGHT, false);
-        y.append(f32::from(geometry.bounds.size.height) - TAB_RAIL_HEIGHT, true);
+        y.append(PAD + geometry.rail, false);
+        y.append(f32::from(geometry.bounds.size.height) - geometry.rail, true);
         let compact_height = y.source - PAD;
         y.append(PAD, false);
         Self {
-            geometry: Geometry { bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(compact_width), px(compact_height))), tab },
+            geometry: Geometry { bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(compact_width), px(compact_height))), tab, rail: geometry.rail },
             x: x.finish(), y: y.finish(),
         }
     }
@@ -250,6 +250,7 @@ mod tests {
         Geometry {
             bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(width), px(height))),
             tab: tab.map(|(left, width)| TabRect { left, width }),
+            rail: super::super::TAB_RAIL_HEIGHT,
         }
     }
 
