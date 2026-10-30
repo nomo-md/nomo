@@ -185,7 +185,8 @@ fn spans(source: &str, document_start: bool) -> Vec<Span> {
     }
     let mut depth = 0usize;
     let mut roots = vec![];
-    for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
+    let projected = syntax::project_comment_paragraphs(source, options());
+    for (event, range) in Parser::new_ext(&projected, options()).into_offset_iter() {
         match event {
             Event::Start(tag) => {
                 if depth == 0 {
@@ -370,7 +371,8 @@ fn prepare_scripts(source: &str) -> String {
 
 /// 标题文本独立于 slug。公式保留现有标题展示中的 $，code 的内容禁止二次解释。
 pub fn heading_title(source: &str) -> String {
-    let prepared = prepare_scripts(source);
+    // 标题内容只解释行内语法；前缀防止编号、引用符号或 HTML 被重新识别成块。
+    let prepared = prepare_scripts(&format!("x {source}"));
     let source = prepared.as_str();
     let mut text = String::new();
     let mut skip = 0usize;
@@ -382,6 +384,9 @@ pub fn heading_title(source: &str) -> String {
         match event {
             Event::Text(value) => {
                 let mut value = value.to_string();
+                if range.start == 0 {
+                    value.drain(..value.len().min(2));
+                }
                 if let Some(end) = image_end.take() {
                     if source[end..].starts_with('{') {
                         if let Some(close) = source[end..].find('}') {
@@ -518,7 +523,8 @@ fn metadata(source: &str, span: &Span, revision: u64, depth: usize) -> Block {
         block.enhancement_objects = block.enhancements.total();
         return block;
     }
-    let parser = Parser::new_ext(part, options());
+    let projected = syntax::project_comment_paragraphs(part, options());
+    let parser = Parser::new_ext(&projected, options());
     for (label, definition) in parser.reference_definitions().iter() {
         block.definitions.insert(
             normalize_label(label),
@@ -531,6 +537,7 @@ fn metadata(source: &str, span: &Span, revision: u64, depth: usize) -> Block {
     let mut text_ranges = vec![];
     let mut skip_until = 0;
     for (event, range) in parser.into_offset_iter() {
+        let event = syntax::restore_inline_comment(part, event, &range);
         if range.start < skip_until {
             continue;
         }
@@ -713,7 +720,8 @@ pub fn bullet_list_cutoff(source: &str) -> usize {
     }
     let mut depth = 0usize;
     let mut cut = 0;
-    for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
+    let projected = syntax::project_comment_paragraphs(source, options());
+    for (event, range) in Parser::new_ext(&projected, options()).into_offset_iter() {
         match event {
             Event::Start(tag) => {
                 if depth == 1 && tag == Tag::Item {

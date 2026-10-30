@@ -1,5 +1,43 @@
-//! Nomo 扩展的原文边界。只返回原文范围，不通过全文替换制造虚假的字节坐标。
-use std::collections::BTreeMap;
+//! Nomo 扩展的原文边界；临时解析投影保持字节长度，事件始终映射到原文。
+use pulldown_cmark::{Event, Options, Parser, Tag};
+use std::{borrow::Cow, collections::BTreeMap, ops::Range};
+
+/// 单行注释后还有正文时按段落解析，独立注释、目录标记和代码保持原有语义。
+pub fn project_comment_paragraphs(source: &str, options: Options) -> Cow<'_, str> {
+    let mut projected = Cow::Borrowed(source);
+    if !source.contains("<!--") {
+        return projected;
+    }
+    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
+        if !matches!(event, Event::Start(Tag::HtmlBlock)) {
+            continue;
+        }
+        let raw = source[range.clone()].trim_end_matches(['\r', '\n']);
+        if !raw.starts_with("<!--") || raw.contains(['\r', '\n']) {
+            continue;
+        }
+        let Some(close) = raw[4..].find("-->").map(|at| at + 4) else { continue; };
+        let end = close + 3;
+        let comment = raw[4..close].trim();
+        if raw[end..].trim().is_empty()
+            || comment.eq_ignore_ascii_case("toc") || comment.eq_ignore_ascii_case("/toc")
+        {
+            continue;
+        }
+        // 等长的行内标签让解析器保留正文格式和引用；随后恢复注释事件，不改写文档。
+        let marker = format!("<span{}>", " ".repeat(end - 6));
+        projected.to_mut().replace_range(range.start..range.start + end, &marker);
+    }
+    projected
+}
+
+pub fn restore_inline_comment<'a>(source: &'a str, event: Event<'a>, range: &Range<usize>) -> Event<'a> {
+    if matches!(event, Event::InlineHtml(_)) && source[range.clone()].starts_with("<!--") {
+        Event::InlineHtml(source[range.clone()].into())
+    } else {
+        event
+    }
+}
 
 #[derive(Debug)]
 pub struct HtmlTag {

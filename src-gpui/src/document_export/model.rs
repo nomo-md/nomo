@@ -64,7 +64,8 @@ pub(super) fn parse(source: &str, job: &Job, report: &mut ExportReport) -> Resul
     let mut builder = Builder { model: Model::default(), paragraph: Paragraph::default(), styles: Vec::new(),
         lists: Vec::new(), quote: 0, pending: None, note: None, slugs: BTreeSet::new(), suffixes: BTreeMap::new(),
         references: Arc::new(BTreeMap::new()), nodes: 0, bytes: 0, events: 0, job, report };
-    let parser = Parser::new_ext(source, options());
+    let projected = nomo_syntax::project_comment_paragraphs(source, options());
+    let parser = Parser::new_ext(&projected, options());
     let mut reference_bytes = 0;
     for (label, target) in parser.reference_definitions().iter() {
         let bytes = label.len() + target.dest.len() + target.title.as_ref().map_or(0, |v| v.len());
@@ -75,6 +76,7 @@ pub(super) fn parse(source: &str, job: &Job, report: &mut ExportReport) -> Resul
             (target.dest.to_string(), target.title.as_ref().map(ToString::to_string).unwrap_or_default()));
     }
     drop(parser);
+    drop(projected);
     builder.markdown(source, 0)?;
     builder.flush()?;
     Ok(builder.model)
@@ -147,7 +149,9 @@ impl Builder<'_> {
         let references = self.references.clone();
         let mut resolve = |link: pulldown_cmark::BrokenLink<'_>| references.get(&crate::text_document::normalize_reference_label(&link.reference))
             .map(|(url, title)| (url.clone().into(), title.clone().into()));
-        let mut events = Parser::new_with_broken_link_callback(source, options(), Some(&mut resolve)).into_offset_iter().peekable();
+        let projected = nomo_syntax::project_comment_paragraphs(source, options());
+        let mut events = Parser::new_with_broken_link_callback(&projected, options(), Some(&mut resolve))
+            .into_offset_iter().map(|(event, range)| (nomo_syntax::restore_inline_comment(source, event, &range), range)).peekable();
         let mut skip = 0..0;
         let mut table: Option<Table> = None;
         let mut alignments = Vec::new();

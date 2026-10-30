@@ -69,11 +69,13 @@ pub fn events(
             None
         }
     };
+    let projected = nomo_syntax::project_comment_paragraphs(&source[from..], options);
     let parser =
-        Parser::new_with_broken_link_callback(&source[from..], options, Some(&mut resolve));
+        Parser::new_with_broken_link_callback(&projected, options, Some(&mut resolve));
     let mut skip: Option<Range<usize>> = None;
     for (mut event, range) in parser.into_offset_iter() {
         let range = from + range.start..from + range.end;
+        event = nomo_syntax::restore_inline_comment(source, event, &range);
         if skip
             .as_ref()
             .is_some_and(|skip| skip.start <= range.start && range.start < skip.end)
@@ -169,7 +171,8 @@ fn parser_definitions(
     source: &str,
     options: Options,
 ) -> Vec<(String, super::protocol::ReferenceTarget)> {
-    let parser = Parser::new_ext(source, options);
+    let projected = nomo_syntax::project_comment_paragraphs(source, options);
+    let parser = Parser::new_ext(&projected, options);
     parser
         .reference_definitions()
         .iter()

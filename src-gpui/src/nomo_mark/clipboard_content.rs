@@ -121,7 +121,9 @@ pub(super) fn html(markdown: &str) -> String {
     let mut output = String::new();
     let mut image: Option<(String, String, String)> = None;
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_MATH;
-    for event in Parser::new_ext(markdown, options) {
+    let projected = super::nomo_syntax::project_comment_paragraphs(markdown, options);
+    for (event, range) in Parser::new_ext(&projected, options).into_offset_iter() {
+        let event = super::nomo_syntax::restore_inline_comment(markdown, event, &range);
         match &event {
             Event::Start(Tag::Image { dest_url, title, .. }) => { image = Some((dest_url.to_string(), title.to_string(), String::new())); continue; }
             Event::Text(text) | Event::Code(text) if image.is_some() => { image.as_mut().unwrap().2.push_str(text); continue; }
