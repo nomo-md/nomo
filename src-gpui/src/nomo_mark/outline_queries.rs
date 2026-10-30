@@ -350,6 +350,8 @@ impl DocumentHost {
         state.navigation_request.cancel(); state.navigation_request = Default::default();
         if self.status().revision == revision { self.reveal_outline_heading(heading.byte, revision, cx); return; }
         if self.hidden || self.closed || !self.ready_for_session_action(cx) { return; }
+        // 旧投影解析会复核滚动位置，先停下上次动画，避免把程序滚动误判为用户取消。
+        self.cancel_outline_navigation(cx);
         // 刷新期间仍可点击旧标题，但必须在当前索引按身份解析，绝不沿用旧字节坐标。
         let request = self.queries.outline_state.navigation_request.clone();
         let completion = request.clone();

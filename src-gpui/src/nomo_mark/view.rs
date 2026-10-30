@@ -2294,7 +2294,7 @@ impl Render for NomoMark {
                     view.dismiss_quick_insert(cx);
                 }
             }))
-            .cursor(CursorStyle::IBeam)
+            .cursor(CursorStyle::Arrow)
             .on_action(
                 cx.listener(|v, _: &editor::MoveLeft, window, cx| v.horizontal_block(false, window, cx)),
             )
@@ -2586,7 +2586,7 @@ impl IntoElement for ControlElement {
 }
 impl Element for ControlElement {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = Vec<(gpui::Hitbox, CursorStyle)>;
     fn id(&self) -> Option<ElementId> {
         None
     }
@@ -2614,7 +2614,7 @@ impl Element for ControlElement {
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
-    ) {
+    ) -> Self::PrepaintState {
         self.control.update(cx, |v, cx| {
             v.bounds = Some(bounds);
             let mask = window.content_mask().bounds;
@@ -2640,6 +2640,11 @@ impl Element for ControlElement {
             v.prepare_heading_indicator(bounds, window, cx);
             v.report_geometry(cx);
         });
+        let mut cursors = Vec::new();
+        if let Some(layout) = &self.control.read(cx).layout {
+            super::paint::prepaint_cursors(layout, bounds.origin, bounds.intersect(&window.content_mask().bounds), window, &mut cursors);
+        }
+        cursors
     }
     fn paint(
         &mut self,
@@ -2647,7 +2652,7 @@ impl Element for ControlElement {
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        _: &mut (),
+        cursors: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -2660,6 +2665,9 @@ impl Element for ControlElement {
             );
         }
         control.paint(bounds, window, cx);
+        for (hitbox, cursor) in cursors {
+            window.set_cursor_style(*cursor, hitbox);
+        }
         if control.open_profile.is_some() && control.host.presentation != Presentation::Preparing {
             let bytes = control.host.parsed.source.len();
             let source = control.host.parsed.context.source_only;

@@ -93,6 +93,8 @@ impl DocumentHost {
         })
     }
     pub(super) fn pause_pane(&mut self, pane: usize, cx:&Context<Self>) {
+        self.cancel_pane_animation(pane);
+        self.panes[pane].scrollbar_drag = None;
         self.panes[pane].viewport.request.cancel(); self.panes[pane].viewport.request=WindowRequest::default();
         self.panes[pane].viewport.generation+=1; self.panes[pane].viewport.loading=false; self.panes[pane].viewport.timer=None;
         self.panes[pane].viewport.references_loading=false;
@@ -102,6 +104,22 @@ impl DocumentHost {
     }
     pub(super) fn update_pane_cost(&self, pane: usize, cx:&Context<Self>) {
         self.panes[pane].viewport.budget.update(self.panes[pane].viewport.mounts.iter().fold(self.panes[pane].viewport.reserved,|cost,m| {let view=m.view.read(cx); Cost {views:cost.views+1,source:cost.source+view.host.parsed.source.len(),layout:cost.layout+view.estimated_bytes()}}));
+    }
+    pub(super) fn replace_pane_groups(&mut self, pane:usize, groups:Vec<Group>, cx:&Context<Self>) {
+        let viewport=&mut self.panes[pane].viewport;
+        // 同范围的实测高度可跨索引刷新复用，避免将已知几何退回估值。
+        viewport.heights=Heights::new(groups.iter().map(|group| {
+            if let Some(mount)=viewport.mounts.iter().find(|mount| {
+                let id=&mount.view.read(cx).host.parsed.identity;
+                id.from_byte==group.from && id.to_byte==group.to
+            }) { return mount.height; }
+            if let Ok(index)=viewport.groups.binary_search_by_key(&group.from,|old|old.from) {
+                if viewport.groups[index].to==group.to { return viewport.heights.top(index+1)-viewport.heights.top(index); }
+            }
+            group.estimate
+        }));
+        viewport.groups=groups;
+        viewport.dirty=false;
     }
     pub(super) fn reset_pane(&mut self, pane: usize, cx: &mut Context<Self>) {
         self.panes[pane].viewport.request.cancel();
@@ -230,9 +248,12 @@ impl DocumentHost {
         self.panes[pane].viewport.failed.retain(|start, _| *start >= from && *start < to);
         let mounted_before=self.panes[pane].viewport.mounts.len();
         let control=self.panes[pane].control.clone();
+        // 短动画只暂留已经挂载的目标；内存承压时仍服从原有回收预算。
+        let animated_target=if pressured {None}else{self.animated_outline_byte(pane)};
         self.panes[pane].viewport.mounts.retain(|mount| {
             let id=&mount.view.read(cx).host.parsed.identity;
-            if mount.view==control || (id.to_byte>from && id.from_byte<to) { return true; }
+            if mount.view==control || (id.to_byte>from && id.from_byte<to)
+                || animated_target.is_some_and(|byte| id.from_byte<=byte && byte<id.to_byte) { return true; }
             mount.view.update(cx, |v,cx|v.detach(false,cx)).is_err()
         });
         self.update_pane_cost(pane, cx);
@@ -293,17 +314,7 @@ impl DocumentHost {
                         let old_scroll=(-f32::from(host.panes[pane].scroll.offset().y)).max(0.0);
                         let old_top=(old_scroll-32.0).max(0.0);
                         let (anchor,offset)=if host.panes[pane].viewport.groups.is_empty() {(id.from_byte,old_top)} else {let index=host.panes[pane].viewport.heights.at(old_top);(host.panes[pane].viewport.groups[index].from,old_top-host.panes[pane].viewport.heights.top(index))};
-                        // 刷新结构索引不等于所有窗口几何失效。回收控件后仍保留已测高度，
-                        // 否则每次输入都会把屏外窗口退回估值，长文档阅读位置随之跳变。
-                        host.panes[pane].viewport.heights=Heights::new(groups.iter().map(|g| {
-                            if let Some(mount)=host.panes[pane].viewport.mounts.iter().find(|m| {let id=&m.view.read(cx).host.parsed.identity;id.from_byte==g.from&&id.to_byte==g.to}) {return mount.height;}
-                            if let Ok(index)=host.panes[pane].viewport.groups.binary_search_by_key(&g.from,|old|old.from) {
-                                if host.panes[pane].viewport.groups[index].to==g.to {return host.panes[pane].viewport.heights.top(index+1)-host.panes[pane].viewport.heights.top(index);}
-                            }
-                            g.estimate
-                        }));
-                        host.panes[pane].viewport.groups=groups;
-                        host.panes[pane].viewport.dirty=false;
+                        host.replace_pane_groups(pane,groups,cx);
                         if let Some(index)=host.panes[pane].viewport.groups.iter().position(|g|g.contains(anchor)) {
                             let top=host.panes[pane].viewport.heights.top(index)+offset;
                             // 高度树不含纸面顶边距；重建索引时保留已滚过的边距。

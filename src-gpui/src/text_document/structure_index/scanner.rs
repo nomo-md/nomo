@@ -119,11 +119,14 @@ impl Scanner {
             }
             self.examined = end;
             let candidate = &self.pending[..end];
-            let cutoff = if eof && !oversized {
+            let mut cutoff = if eof && !oversized {
                 end
             } else {
                 parser::stable_cutoff(candidate, self.from == 0)
             };
+            if cutoff == 0 && oversized {
+                cutoff = parser::bullet_list_cutoff(candidate);
+            }
             if cutoff > 0 {
                 for mut block in
                     parser::parse_fragment(&candidate[..cutoff], self.revision, self.from == 0)?

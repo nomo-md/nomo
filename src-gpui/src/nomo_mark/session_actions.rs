@@ -184,14 +184,20 @@ impl DocumentHost {
                 None if loaded.input.to_byte == loaded.total_bytes => tail.len(),
                 None => return Err(ControlError::NeedsContext("标题行超出当前窗口，无法安全定位行末。".into())),
             };
-            Ok::<_, ControlError>((loaded, byte + end as u64))
+            let groups=port.window_groups(revision,&[(loaded.input.from_byte,loaded.input.to_byte)],&request)?;
+            Ok::<_, ControlError>((loaded, byte + end as u64, groups))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |host, cx| {
                 host.navigating = false;
                 if host.status().revision != revision { host.action_failed(ControlError::Stale, cx); return; }
-                match result.and_then(|(loaded, end)| host.install(loaded, Some(DocumentSelection::caret(end)), cx)) {
+                match result.and_then(|(loaded, end, groups)| {
+                    host.install(loaded, Some(DocumentSelection::caret(end)), cx)?;
+                    host.replace_pane_groups(host.active_pane,groups,cx);
+                    host.position_outline_heading(byte,revision,false,cx);
+                    Ok(())
+                }) {
                     Ok(()) => {}, Err(error) => host.action_failed(error, cx),
                 }
                 cx.notify();

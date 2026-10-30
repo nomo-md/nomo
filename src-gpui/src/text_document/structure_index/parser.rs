@@ -705,6 +705,32 @@ pub fn stable_cutoff(source: &str, document_start: bool) -> usize {
     cut
 }
 
+/// 超长无序列表只在顶层兄弟项之间分窗，嵌套列表与任务标记随所属项一起解析。
+/// 有序列表仍保留整体边界，避免分窗后重新解释重复的起始编号。
+pub fn bullet_list_cutoff(source: &str) -> usize {
+    if !spans(source, false).first().is_some_and(|span| span.from == 0 && span.kind == "bullet_list_open") {
+        return 0;
+    }
+    let mut depth = 0usize;
+    let mut cut = 0;
+    for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
+        match event {
+            Event::Start(tag) => {
+                if depth == 1 && tag == Tag::Item {
+                    cut = line_start(source, range.start);
+                }
+                depth += 1;
+            }
+            Event::End(_) => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 { break; }
+            }
+            _ => {}
+        }
+    }
+    cut
+}
+
 #[derive(Default)]
 pub struct HeadingIds {
     used: BTreeSet<String>,

@@ -185,7 +185,8 @@ impl DocumentHost {
                 self.refresh_toolbar_marks(cx);
                 if !derived {
                     self.cancel_pane_follow(self.active_pane,cx);
-                    self.panes[self.active_pane].reveal_selection = true;
+                    // 任务勾选保留原选区；它不是输入或导航，不能滚向屏外的旧光标。
+                    self.panes[self.active_pane].reveal_selection = tx.history_group_id != "task-toggle";
                 }
                 let port = self.port.clone();
                 let tx = tx.clone();

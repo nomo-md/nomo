@@ -9,6 +9,43 @@ use gpui::{
     App, Bounds, Corners, Hsla, Pixels, Point, TransformationMatrix, Window, point, px, size,
 };
 use std::ops::Range;
+
+/// 指针命中与正文共用同一帧几何；只注册可见区域，不触发鼠标移动时的重排。
+pub(super) fn prepaint_cursors(
+    layout: &BlockLayout, origin: Point<Pixels>, clip: Bounds<Pixels>, window: &mut Window,
+    cursors: &mut Vec<(gpui::Hitbox, gpui::CursorStyle)>,
+) {
+    use gpui::CursorStyle::{Arrow, IBeam, PointingHand};
+    for item in &layout.items {
+        let (x, y, w, h, cursor) = match item {
+            DisplayItem::Text { x, y, layout, map } if !map.is_empty() =>
+                (*x, *y, layout.max_line_width().max(4.0), layout.height(), IBeam),
+            DisplayItem::TableCell { x, y, w, h, .. } => (*x, *y, *w, *h, IBeam),
+            DisplayItem::Checkbox { x, y, size, .. } | DisplayItem::Disclosure { x, y, size, .. }
+                | DisplayItem::CopyButton { x, y, size, .. } => (*x, *y, *size, *size, PointingHand),
+            DisplayItem::TocLink { x, y, w, h, .. } => (*x, *y, *w, *h, PointingHand),
+            DisplayItem::BlockControls { x, y, w, h, kind, .. } =>
+                (*x, *y, *w, *h, if matches!(*kind, "rule" | "diagram-toolbar") { Arrow } else { PointingHand }),
+            DisplayItem::CodeBody { x, y, w, h, body, .. } => {
+                let (width, height) = body.viewport(*w, *h);
+                (*x + body.gutter, *y, width, height, IBeam)
+            }
+            DisplayItem::Horizontal { x, y, w, h, offset, layout, .. } => {
+                let viewport = Bounds::new(origin + point(px(*x), px(*y)), size(px(*w), px((*h - 8.0).max(0.0)))).intersect(&clip);
+                if viewport.size.width > px(0.0) && viewport.size.height > px(0.0) {
+                    prepaint_cursors(layout, origin + point(px(*x - offset.get()), px(*y)), viewport, window, cursors);
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        let bounds = Bounds::new(origin + point(px(x), px(y)), size(px(w), px(h))).intersect(&clip);
+        if bounds.size.width > px(0.0) && bounds.size.height > px(0.0) {
+            cursors.push((window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal), cursor));
+        }
+    }
+}
+
 pub fn paint_block(
     layout: &BlockLayout,
     origin: Point<Pixels>,
