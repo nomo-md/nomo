@@ -441,12 +441,14 @@ impl MarkdownDocumentSessionManager {
         unpublished.remove = false;
         Ok(status)
     }
-    pub(crate) fn recover(
-        &self,
-        owner: &str,
-        document_id: &str,
-    ) -> TextDocumentResult<MarkdownStatus> {
+    pub(crate) fn recover(&self, owner: &str, document_id: &str) -> TextDocumentResult<MarkdownStatus> {
+        self.recover_with_path(owner, document_id, false)
+    }
+    fn recover_with_path(&self, owner: &str, document_id: &str, as_copy: bool) -> TextDocumentResult<MarkdownStatus> {
         let _path_operation = lock(&self.path_operations)?;
+        self.recover_under_path_lock(owner,document_id,as_copy)
+    }
+    fn recover_under_path_lock(&self, owner: &str, document_id: &str, as_copy: bool) -> TextDocumentResult<MarkdownStatus> {
         if !document_id.starts_with("md-")
             || !document_id
                 .bytes()
@@ -486,6 +488,17 @@ impl MarkdownDocumentSessionManager {
                 manifest.identity = Some(BaselineIdentity::read(&pending.path)?);
                 manifest.path = Some(pending.path);
                 manifest.saved_tree = Some(pending.saved_tree);
+            }
+        }
+        if as_copy { manifest.path = None; manifest.identity = None; }
+        if let Some(path) = &manifest.path {
+            let sessions = lock(&self.sessions)?.values().cloned().collect::<Vec<_>>();
+            for session in sessions {
+                let session = lock(&session)?;
+                if !session.closed && session.manifest.path.as_ref() == Some(path) {
+                    // 仅允许在原 owner 内完成与外部重载相同的替换事务。
+                    session.owner(owner)?;
+                }
             }
         }
         let raw_path = root.join("raw");
@@ -779,7 +792,7 @@ impl MarkdownDocumentSessionManager {
         );
         if result.revision != transaction.base_revision {
             self.writing_stats.invalidate(&transaction.document_id, false);
-            self.structure.edited(&transaction.document_id, &edits.iter().map(|edit| (edit.from_byte, edit.to_byte, edit.inserted_text.len() as u64)).collect::<Vec<_>>());
+            self.structure.edited(&transaction.document_id, result.revision, &edits.iter().map(|edit| (edit.from_byte, edit.to_byte, edit.inserted_text.len() as u64)).collect::<Vec<_>>());
             self.search.invalidate(&transaction.document_id, None);
         }
         session.ack_order.push_back(transaction.operation_id);
@@ -892,8 +905,8 @@ impl MarkdownDocumentSessionManager {
         let result = session.publish(record, tree, HistoryPointer::Existing(undo), next_redo)?;
         self.writing_stats.invalidate(document_id, false);
         if let Some(change) = structure_invalidation {
-            self.structure.edited(document_id, &[(change.from, change.to, (change.to - change.from).saturating_add_signed(change.delta))]);
-        } else { self.structure.invalidate(document_id, false); }
+            self.structure.edited(document_id, result.revision, &[(change.from, change.to, (change.to - change.from).saturating_add_signed(change.delta))]);
+        } else { self.structure.edited(document_id, result.revision, &[]); }
         self.search.invalidate(document_id, None);
         Ok(result)
     }
@@ -902,23 +915,46 @@ impl MarkdownDocumentSessionManager {
         owner: &str,
         document_id: &str,
     ) -> TextDocumentResult<SnapshotHandle> {
-        self.capture_version(owner, document_id, false)
+        self.capture_version(owner, document_id, false, false)
     }
     pub(crate) fn capture_original(
         &self,
         owner: &str,
         document_id: &str,
     ) -> TextDocumentResult<SnapshotHandle> {
-        self.capture_version(owner, document_id, true)
+        self.capture_version(owner, document_id, true, false)
+    }
+    /// 只收集仍有显式来源的空模板，不扫描或猜测用户手写的 Markdown。
+    pub(crate) fn empty_template_ranges(&self, owner: &str, document_id: &str, revision: u64) -> TextDocumentResult<Vec<std::ops::Range<u64>>> {
+        let handle = self.session(document_id)?;
+        let session = lock(&handle)?;
+        session.owner(owner)?;
+        if session.current.revision != revision {
+            return Err(TextDocumentError::revision_conflict(revision, session.current.revision));
+        }
+        // valid_set 保证来源仍有效的模板只含其它空模板；输入过正文的模板已失去来源。
+        let mut templates = session.manifest.inline_templates.iter().collect::<Vec<_>>();
+        templates.sort_by_key(|t| (t.from_byte, std::cmp::Reverse(t.to_byte)));
+        let mut ranges: Vec<std::ops::Range<u64>> = Vec::new();
+        for template in templates {
+            if ranges.last().is_some_and(|r| template.from_byte >= r.start && template.to_byte <= r.end) { continue; }
+            ranges.push(template.from_byte..template.to_byte);
+        }
+        Ok(ranges)
+    }
+    /// 保存点与撤销分组在同一会话锁内分界，后续输入不能并入保存前的组。
+    pub(crate) fn capture_for_save(&self, owner: &str, document_id: &str) -> TextDocumentResult<SnapshotHandle> {
+        self.capture_version(owner, document_id, false, true)
     }
     fn capture_version(
         &self,
         owner: &str,
         document_id: &str,
         original: bool,
+        end_history_group: bool,
     ) -> TextDocumentResult<SnapshotHandle> {
         let session = self.session(document_id)?;
-        let session = lock(&session)?;
+        let mut session = lock(&session)?;
         session.owner(owner)?;
         let mut content = session.current.clone();
         if original {
@@ -941,6 +977,7 @@ impl MarkdownDocumentSessionManager {
                 source_map: session.manifest.source_map.clone(),
             },
         );
+        if end_history_group { session.active_group = None; }
         Ok(handle)
     }
     pub(crate) fn read_snapshot(

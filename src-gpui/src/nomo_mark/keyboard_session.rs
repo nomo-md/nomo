@@ -38,7 +38,13 @@ impl DocumentHost {
             let result = task.await;
             let _ = this.update(cx,|host,cx| {
                 host.navigating = false;
-                if let Err(error) = result.and_then(|(loaded,after)|host.install(loaded,Some(after),cx)) { host.action_failed(error,cx); }
+                match result.and_then(|(loaded,after)|host.install(loaded,Some(after),cx)) {
+                    Ok(()) if semantic && !delete && !extend => host.control.update(cx, |view, cx| {
+                        view.pending_block_entry = Some(forward); cx.notify();
+                    }),
+                    Ok(()) => {}
+                    Err(error) => host.action_failed(error,cx),
+                }
                 cx.notify();
             });
         }).detach();
@@ -56,7 +62,10 @@ impl DocumentHost {
         let target = (pane.viewport.heights.top(current) + y + if down { distance } else { -distance }).clamp(0.0,(pane.viewport.heights.total()-line_height).max(0.0));
         let index = pane.viewport.heights.at(target);
         let local_y = target - pane.viewport.heights.top(index);
-        if index == current { self.control.update(cx,|view,cx|view.move_page_to(x,local_y,extend,cx)); return; }
+        if index == current { self.control.update(cx,|view,cx| {
+            view.move_page_to(x,local_y,extend,cx);
+            if !extend && !page { view.pending_block_entry = Some(down); cx.notify(); }
+        }); return; }
         let Some(group) = pane.viewport.groups.get(index) else { return; };
         let byte = group.from;
         let group_height = (pane.viewport.heights.top(index+1)-pane.viewport.heights.top(index)).max(1.0);
@@ -71,7 +80,10 @@ impl DocumentHost {
             let _ = this.update(cx,|host,cx| {
                 host.navigating = false;
                 match result.and_then(|loaded|host.install(loaded,None,cx)) {
-                    Ok(()) => host.control.update(cx,|view,cx|view.defer_page_cursor(x,fraction,anchor,cx)),
+                    Ok(()) => host.control.update(cx,|view,cx| {
+                        view.defer_page_cursor(x,fraction,anchor,cx);
+                        if !extend && !page { view.pending_block_entry = Some(down); }
+                    }),
                     Err(error) => host.action_failed(error,cx),
                 }
                 cx.notify();

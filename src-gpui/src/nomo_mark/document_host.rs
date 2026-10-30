@@ -18,8 +18,12 @@ mod viewport_ui;
 mod window_panes;
 #[path = "workspace_host.rs"]
 mod workspace_host;
+#[path = "save_dialog.rs"]
+mod save_dialog;
 #[path = "toolbar_commands.rs"]
 mod toolbar_commands;
+#[path = "metadata_commands.rs"]
+mod metadata_commands;
 #[path = "toolbar_global.rs"]
 mod toolbar_global;
 #[path = "toc_update.rs"]
@@ -134,12 +138,32 @@ impl DocumentHost {
         }
     }
     fn event(&mut self, source: Entity<NomoMark>, event: &ControlEvent, cx: &mut Context<Self>) {
+        if matches!(event, ControlEvent::ContextMenuOpened) {
+            if !self.promote(&source, cx) { return; }
+            let history = (self.status().can_undo, self.status().can_redo);
+            source.update(cx, |view, cx| { view.context_history = history; cx.notify(); });
+            return;
+        }
+        if let ControlEvent::FootnotePreview { identity, label, tooltip } = event {
+            self.preview_footnote(&source, identity, label, tooltip, cx);
+            return;
+        }
+        if let ControlEvent::InsertImages { identity, selection, inputs } = event {
+            if source.read(cx).host.parsed.identity != *identity || !self.promote(&source, cx) { return; }
+            let mode = source.read(cx).effective_mode();
+            self.quick.images = Some((EditTarget { identity: identity.clone(), selection: *selection, mode }, inputs.clone()));
+            cx.notify();
+            return;
+        }
         if let ControlEvent::LayoutReady { stamp, height } | ControlEvent::HeightChanged { stamp, height } = event {
             self.viewport_height(&source, stamp, *height, cx);
             return;
         }
         if source != self.control && !matches!(event, ControlEvent::ResourceDemand { .. } | ControlEvent::ResourceUsage { .. } | ControlEvent::Geometry { .. } | ControlEvent::Released(_)) { return; }
         match event {
+            ControlEvent::ContextMenuOpened => unreachable!(),
+            ControlEvent::FootnotePreview { .. } => unreachable!(),
+            ControlEvent::InsertImages { .. } => unreachable!(),
             ControlEvent::QuickInsertChanged => {cx.notify();return;}
             ControlEvent::QuickInsertChoose(action) => {self.quick.action=Some(*action);cx.notify();return;}
             ControlEvent::SubmitRewindow(transaction) => {
@@ -154,12 +178,7 @@ impl DocumentHost {
                 if (self.panes[self.active_pane].reveal_selection || self.control.read(cx).quick_insert.is_some()) && source == self.control && stamp.identity == source.read(cx).host.parsed.identity { cx.notify(); }
                 return;
             }
-            ControlEvent::SelectionChanged { .. } => {
-                self.panes[self.active_pane].reveal_selection = true;
-                self.sync_selection(cx);
-                self.refresh_toolbar_marks(cx);
-                self.toc_selection_changed(cx);
-            }
+            ControlEvent::SelectionChanged { .. } => self.selection_changed(cx),
             ControlEvent::ResourceUsage { .. } => { self.update_resident_cost(cx); self.schedule_viewport(16,cx); }
             ControlEvent::Submit(tx) | ControlEvent::SubmitDerived(tx) => {
                 let derived = matches!(event, ControlEvent::SubmitDerived(_));
@@ -383,6 +402,14 @@ impl DocumentHost {
         }
         cx.notify();
     }
+    pub(super) fn selection_changed(&mut self, cx:&mut Context<Self>) {
+        self.panes[self.active_pane].reveal_selection=true;
+        self.sync_selection(cx);
+        self.refresh_toolbar_marks(cx);
+        self.toc_selection_changed(cx);
+        self.schedule_stats(cx);
+        cx.emit(DocumentEvent::Status);
+    }
     fn history(&mut self, redo: bool, cx: &mut Context<Self>) {
         if self.production {
             self.session_history(redo, cx);
@@ -419,7 +446,7 @@ impl DocumentHost {
     fn toggle_hidden(&mut self, cx: &mut Context<Self>) {
         if let Err(error)=self.ready(cx) { self.report(error,cx); return; }
         self.hidden=!self.hidden;
-        if self.hidden {self.quick.cancel();}
+        if self.hidden {self.quick.cancel();self.metadata.front_matter_entry=None;}
         for pane in 0..self.panes.len() {
             if self.hidden {
                 self.panes[pane].viewport.saved_scroll=self.panes[pane].scroll.offset();
@@ -515,17 +542,17 @@ impl DocumentHost {
             self.save_path(path.into(), close_after, window, cx);
             return;
         }
-        let response = cx.prompt_for_new_path(
-            &std::env::current_dir().unwrap_or_default(),
-            Some("NomoMark-demo.md"),
-        );
-        self.close_prompt = true;
+        let response = match self.prompt_save_path(window, cx) {
+            Ok(response) => response,
+            Err(error) => { self.report(error, cx); return; }
+        };
         cx.spawn_in(window, async move |this, cx| {
-            let path = response.await.ok().and_then(Result::ok).flatten();
+            let result = response.await;
             let _ = this.update_in(cx, |host, window, cx| {
-                host.close_prompt = false;
-                if let Some(path) = path {
-                    host.save_path(path, close_after, window, cx);
+                match result {
+                    Ok(Some(path)) => host.save_path(path, close_after, window, cx),
+                    Ok(None) => {},
+                    Err(error) => host.report(error, cx),
                 }
                 cx.notify();
             });

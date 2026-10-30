@@ -21,6 +21,7 @@ pub enum InlineAtom {
         src: String,
         alt: String,
         width: Option<super::image_properties::ImageWidth>,
+        align: Option<String>,
     },
     Math(String),
     Comment(String),
@@ -37,7 +38,7 @@ impl InlineAtom {
     }
     pub fn estimated_bytes(&self) -> usize {
         match self {
-            Self::Image { src, alt, .. } => src.capacity() + alt.capacity(),
+            Self::Image { src, alt, align, .. } => src.capacity() + alt.capacity() + align.as_ref().map_or(0, String::capacity),
             Self::Math(s) | Self::Comment(s) | Self::Footnote(s) => s.capacity(),
         }
     }
@@ -84,6 +85,90 @@ pub struct HtmlTable {
     pub rows: usize,
     pub columns: usize,
     pub cells: Vec<Cell>,
+}
+
+/// 安全 HTML 容器复用表格的文本节点和实体映射；仅存当前窗口的局部结构。
+#[derive(Clone, Debug)]
+pub struct HtmlFragment {
+    pub source: Range<usize>,
+    pub label: String,
+    pub card: bool,
+    pub cells: Vec<Cell>,
+}
+impl HtmlFragment {
+    pub fn parse_all(source: &str, range: Range<usize>) -> Option<Vec<Self>> {
+        let mut at = range.start;
+        let mut fragments = Vec::new();
+        while at < range.end {
+            at += source.get(at..range.end)?.len() - source[at..range.end].trim_start().len();
+            if at == range.end { break; }
+            let start = at;
+            element(source, &mut at, 0)?;
+            if at > range.end { return None; }
+            fragments.push(Self::parse(source, start..at)?);
+        }
+        (!fragments.is_empty()).then_some(fragments)
+    }
+    pub fn parse(source: &str, range: Range<usize>) -> Option<Self> {
+        let mut at = range.start + source.get(range.clone())?.len() - source[range.clone()].trim_start().len();
+        let root = element(source, &mut at, 0)?;
+        if at > range.end || !source[at..range.end].trim().is_empty()
+            || !matches!(root.name.as_str(), "p" | "div" | "section" | "summary") { return None; }
+        let mut cells = Vec::new();
+        fragment_cells(source, &root, &mut cells)?;
+        let mut label = format!("<{}>", root.name);
+        for (key, prefix) in [("class", "."), ("id", "#")] {
+            if let Some(value) = root.attrs.get(key).filter(|value| !value.is_empty()) {
+                label.push_str(&format!(" {prefix}{value}"));
+            }
+        }
+        Some(Self { source: root.source, label, card: matches!(root.name.as_str(), "div" | "section"), cells })
+    }
+
+    pub fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.label.capacity() + self.cells.iter().map(|cell|
+            std::mem::size_of::<Cell>() + cell.spans.capacity() * std::mem::size_of::<InlineSpan>()
+                + cell.align.as_ref().map_or(0, String::capacity)
+                + cell.runs.iter().map(|run| std::mem::size_of::<InlineRun>() + run.text.capacity()
+                    + run.formats.capacity() * std::mem::size_of::<InlineFormat>()
+                    + run.link.as_ref().map_or(0, String::capacity)
+                    + run.atom.as_ref().map_or(0, InlineAtom::estimated_bytes)).sum::<usize>()
+        ).sum::<usize>()
+    }
+}
+
+fn fragment_cells(source: &str, node: &Element, cells: &mut Vec<Cell>) -> Option<()> {
+    if !matches!(node.name.as_str(), "p" | "div" | "section" | "summary")
+        || !only_attrs(node, &["class", "id", "align", "title"]) { return None; }
+    if node.children.iter().any(|child| matches!(child.name.as_str(), "p" | "div" | "section")) {
+        let mut pending: Vec<&Element> = Vec::new();
+        let flush = |pending: &mut Vec<&Element>, cells: &mut Vec<Cell>| -> Option<()> {
+            let (first, last) = (pending.first()?, pending.last()?);
+            let content = first.source.start..last.source.end;
+            if !source[content.clone()].trim().is_empty() {
+                let mut runs = Vec::new(); let mut spans = Vec::new();
+                for child in pending.iter() { inline(source, child, &[], None, &mut runs, &mut spans)?; }
+                cells.push(Cell { source: content.clone(), content, row: cells.len(), column: 0, rowspan: 1, colspan: 1,
+                    header: false, widths: Vec::new(), align: node.attrs.get("align").cloned(), runs, spans });
+            }
+            pending.clear(); Some(())
+        };
+        for child in &node.children {
+            if matches!(child.name.as_str(), "p" | "div" | "section") {
+                if !pending.is_empty() { flush(&mut pending, cells)?; }
+                let from = cells.len(); fragment_cells(source, child, cells)?;
+                for cell in &mut cells[from..] { if cell.align.is_none() { cell.align = node.attrs.get("align").cloned(); } }
+            } else { pending.push(child); }
+        }
+        if !pending.is_empty() { flush(&mut pending, cells)?; }
+        return Some(());
+    }
+    let mut runs = Vec::new();
+    let mut spans = Vec::new();
+    for child in &node.children { inline(source, child, &[], None, &mut runs, &mut spans)?; }
+    cells.push(Cell { source: node.source.clone(), content: node.content.clone(), row: cells.len(), column: 0,
+        rowspan: 1, colspan: 1, header: false, widths: Vec::new(), align: node.attrs.get("align").cloned(), runs, spans });
+    Some(())
 }
 struct Element {
     name: String,
@@ -133,6 +218,7 @@ fn element(source: &str, at: &mut usize, depth: usize) -> Option<Element> {
             *at = end;
             continue;
         }
+        if source[*at..].starts_with("<!--") { children.push(element(source, at, depth + 1)?); continue; }
         let tag = html_tag(source, *at)?;
         if tag.closing {
             if tag.name != opening.name {
@@ -285,6 +371,7 @@ fn inline(
             alt: attr("alt").unwrap_or_default(),
             width: attr("width")
                 .and_then(|s| super::image_properties::ImageWidth::parse(&s)),
+            align: attr("align"),
         })
     } else if element.name == "span"
         && attr("class").as_deref() == Some("math-inline")

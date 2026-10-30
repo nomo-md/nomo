@@ -8,9 +8,12 @@ pub enum ObjectKind {
     InlineMath,
     InsertInlineMath,
     InsertInlineComment,
+    InlineComment,
     InsertBlockMath,
     InsertBlockComment,
     BlockMath,
+    BlockComment,
+    FrontMatter,
     Mermaid,
     Image,
     Link,
@@ -24,6 +27,125 @@ pub struct ObjectDraft {
     pub range: Range<usize>,
     pub text: String,
     original: String,
+}
+/// 只隔离当前块的正文；围栏和换行仍属于同一笔宿主事务。
+pub struct BlockFrame {
+    prefix: String,
+    suffix: String,
+    marker: Option<(char, usize)>,
+    kind: ObjectKind,
+}
+impl BlockFrame {
+    pub fn split(text: &str, kind: ObjectKind) -> Option<(Self, String)> {
+        let (start, end, marker) = match kind {
+            ObjectKind::Code | ObjectKind::Mermaid => {
+                let first = text.find('\n')?;
+                let header = text[..first].trim();
+                let marker = header.chars().next()?;
+                if !matches!(marker, '`' | '~') { return None; }
+                let count = header.chars().take_while(|ch| *ch == marker).count();
+                if count < 3 { return None; }
+                let trimmed = text.trim_end_matches(['\r', '\n']);
+                let last = trimmed.rfind('\n')? + 1;
+                let closing = trimmed[last..].trim();
+                if closing.len() < count || !closing.chars().all(|ch| ch == marker) { return None; }
+                let mut end = last;
+                if end > first + 1 {
+                    end -= 1;
+                    if text[..end].ends_with('\r') { end -= 1; }
+                }
+                (first + 1, end, Some((marker, count)))
+            }
+            ObjectKind::BlockMath => {
+                let start = text.find("$$")? + 2;
+                let end = text.rfind("$$")?;
+                if end < start { return None; }
+                let body = &text[start..end];
+                let leading = if body.starts_with("\r\n") { 2 } else { usize::from(body.starts_with('\n')) };
+                let trailing = if body.ends_with("\r\n") { 2 } else { usize::from(body.ends_with('\n')) };
+                (start + leading, end.saturating_sub(trailing).max(start + leading), None)
+            }
+            ObjectKind::InlineMath => {
+                if !text.starts_with('$') || !text.ends_with('$') || text.len() < 2 { return None; }
+                (1, text.len() - 1, None)
+            }
+            ObjectKind::BlockComment => {
+                let start = text.find("<!--")? + 4;
+                let end = text.rfind("-->")?;
+                let body = &text[start..end];
+                let leading = if body.starts_with("\r\n") { 2 } else { usize::from(body.starts_with('\n')) };
+                let trailing = if body.ends_with("\r\n") { 2 } else { usize::from(body.ends_with('\n')) };
+                (start + leading, end.saturating_sub(trailing).max(start + leading), None)
+            }
+            ObjectKind::FrontMatter => {
+                let start = text.find('\n')? + 1;
+                let trimmed = text.trim_end_matches(['\r', '\n']);
+                let closing = trimmed.rfind('\n')? + 1;
+                let end = text[..closing].trim_end_matches(['\r', '\n']).len().max(start);
+                (start, end, None)
+            }
+            _ => return None,
+        };
+        if start > end || end > text.len() { return None; }
+        Some((Self { prefix: text[..start].into(), suffix: text[end..].into(), marker, kind }, text[start..end].into()))
+    }
+    pub fn body_start(&self) -> usize { self.prefix.len() }
+    pub fn language(&self) -> &str {
+        self.prefix.trim().trim_start_matches(['`', '~']).trim()
+    }
+    pub fn set_language(&mut self, language: &str) {
+        if let Some((marker, count)) = self.marker {
+            if let Some(start) = self.prefix.find(marker) {
+                let end = self.prefix.trim_end_matches(['\r', '\n']).len();
+                self.prefix.replace_range(start + count..end, language);
+            }
+        }
+    }
+    pub fn estimated_bytes(&self) -> usize { self.prefix.capacity() + self.suffix.capacity() }
+    pub fn join(&self, body: &str) -> Result<String, ControlError> {
+        let mut prefix = self.prefix.clone();
+        let mut suffix = self.suffix.clone();
+        if self.marker.is_none() && prefix.ends_with('\n') && !body.is_empty() && !body.ends_with('\n') && suffix.starts_with("$$") {
+            suffix.insert_str(0, if prefix.ends_with("\r\n") { "\r\n" } else { "\n" });
+        }
+        if let Some((marker, count)) = self.marker {
+            if !body.is_empty() && !body.ends_with('\n') && !suffix.starts_with(['\r', '\n']) {
+                suffix.insert_str(0, if prefix.ends_with("\r\n") { "\r\n" } else { "\n" });
+            }
+            let longest = body.lines().map(|line| line.trim_start().chars().take_while(|c| *c == marker).count()).max().unwrap_or(0);
+            if longest >= count {
+                let fence = marker.to_string().repeat(longest + 1);
+                if let Some(start) = prefix.find(marker) {
+                    prefix.replace_range(start..start + count, &fence);
+                }
+                if let Some(start) = suffix.find(marker) {
+                    let length = suffix[start..].chars().take_while(|c| *c == marker).count();
+                    suffix.replace_range(start..start + length, &fence);
+                }
+            }
+        } else if self.kind == ObjectKind::BlockMath && body.contains("$$") {
+            return Err(ControlError::Unsupported("公式内容不能包含块围栏".into()));
+        }
+        if self.kind == ObjectKind::BlockComment && body.contains("-->") {
+            return Err(ControlError::Unsupported("注释内容不能包含 -->".into()));
+        }
+        if self.kind == ObjectKind::FrontMatter && body.lines().any(|line| matches!(line.trim(), "---" | "...")) {
+            return Err(ControlError::Unsupported("属性内容不能包含独立的 Front Matter 围栏".into()));
+        }
+        if self.kind == ObjectKind::FrontMatter && !body.is_empty() && !body.ends_with('\n') && !suffix.starts_with(['\r', '\n']) {
+            suffix.insert_str(0, if prefix.ends_with("\r\n") { "\r\n" } else { "\n" });
+        }
+        if self.kind == ObjectKind::InlineMath {
+            if body.trim().is_empty() || body.contains(['\r', '\n']) { return Err(ControlError::Unsupported("请输入非空单行公式".into())); }
+            let mut tex = String::new(); let mut slashes = 0;
+            for ch in body.chars() {
+                if ch == '$' && slashes % 2 == 0 { tex.push('\\'); }
+                tex.push(ch); slashes = if ch == '\\' { slashes + 1 } else { 0 };
+            }
+            return Ok(format!("{prefix}{tex}{suffix}"));
+        }
+        Ok(format!("{prefix}{body}{suffix}"))
+    }
 }
 impl ObjectDraft {
     pub fn begin(

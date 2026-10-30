@@ -8,10 +8,13 @@ mod buffer;
 mod cache;
 mod clipboard;
 mod document;
+mod document_export;
 mod editor;
 mod nomo_mark;
 mod open_profile;
 mod frame_profile;
+#[cfg(windows)]
+mod open_instance;
 mod embeds;
 mod images;
 mod image_import;
@@ -70,6 +73,15 @@ fn main() {
     #[cfg(feature = "nomo-mark-demo")]
     let nomo_mark_file = std::env::args().any(|argument| matches!(argument.as_str(), "--nomo-mark" | "--editor-control"));
     let paths: Vec<PathBuf> = std::env::args().skip(1).filter(|argument| !matches!(argument.as_str(), "--nomo-mark-demo" | "--nomo-mark" | "--editor-control-demo" | "--editor-control")).map(PathBuf::from).collect();
+    let development_entry = cfg!(feature = "nomo-mark-demo") && std::env::args().any(|argument| matches!(argument.as_str(), "--nomo-mark" | "--nomo-mark-demo" | "--editor-control" | "--editor-control-demo"));
+    #[cfg(windows)]
+    let instance=if !development_entry {
+        match open_instance::start(&paths) {
+            Ok(open_instance::Startup::Forwarded)=>return,
+            Ok(open_instance::Startup::Primary(instance))=>Some(instance),
+            Err(error)=>{open_instance::show_error(&error);return;}
+        }
+    }else{None};
     #[cfg(not(windows))]
     let application = gpui_platform::application();
     #[cfg(windows)]
@@ -79,7 +91,6 @@ fn main() {
     let application = application.with_assets(ui::components::Assets);
     // 平台可能在启动完成前送达文件 URL；只暂存尚未交给 Workspace 的路径。
     let open_state = std::rc::Rc::new(std::cell::RefCell::new((None::<gpui::AsyncApp>, Vec::<PathBuf>::new())));
-    let development_entry = cfg!(feature = "nomo-mark-demo") && std::env::args().any(|argument| matches!(argument.as_str(), "--nomo-mark" | "--nomo-mark-demo" | "--editor-control" | "--editor-control-demo"));
     if !development_entry {
         let state = open_state.clone();
         application.on_open_urls(move |urls| {
@@ -107,13 +118,11 @@ fn main() {
         cx.set_global(theme::Theme::light());
         cx.set_global(ui::motion::MotionPreference::default());
         cx.set_global(settings::Settings::load());
+        theme::catalog::init(cx);
         cx.set_global(images::ImageStore::default());
         cx.set_global(embeds::EmbedStore::default());
-        editor::bind_keys(cx);
-        nomo_mark::view::bind_keys(cx);
-        ui::text_field::bind_keys(cx);
+        ui::reload_key_bindings(cx);
         ui::dialogs::init(cx);
-        workspace::bind_keys(cx);
         cx.on_action(|_: &workspace::Quit,cx|quit_workspaces(cx));
         cx.on_window_closed(|cx,_|{ui::updates::prune_closed_windows(cx);finish_quit(cx);}).detach();
         cx.on_action(|_: &workspace::OpenSettings, cx| ui::settings_window::open(cx));
@@ -133,20 +142,33 @@ fn main() {
         paths.append(&mut open_state.borrow_mut().1);
         open_workspace(paths, cx);
         open_state.borrow_mut().0 = Some(cx.to_async());
+        #[cfg(windows)]
+        if let Some(mut instance)=instance {
+            let mut receiver=instance.receiver.take().expect("instance receiver");
+            cx.set_global(instance);
+            cx.spawn(async move |cx| {
+                while let Some(paths)=receiver.recv().await {
+                    cx.update(|cx|open_paths(paths,cx));
+                }
+            }).detach();
+        }
         cx.activate(true);
     });
 }
 
 fn open_paths(paths: Vec<PathBuf>, cx: &mut App) {
-    if let Some(handle) = cx.windows().into_iter().find_map(|window| window.downcast::<Workspace>()) {
-        if let Err(error) = handle.update(cx, |workspace, window, cx| {
-            if paths.is_empty() { workspace.show_home(window, cx); }
-            for path in paths { workspace.open_path(&path, window, cx); }
-            workspace.reveal_window(window,cx);
-        }) { eprintln!("打开文档窗口失败：{error}"); }
-    } else {
-        open_workspace(paths, cx);
-    }
+    let handle=cx.active_window().and_then(|window|window.downcast::<Workspace>())
+        .or_else(||cx.windows().into_iter().find_map(|window|window.downcast::<Workspace>()));
+    if let Some(handle)=handle {
+        if let Err(error)=handle.update(cx,|workspace,window,cx| {
+            if paths.is_empty() {workspace.reveal_window(window,cx);}
+            else {
+                // 先唤醒接收窗口，再让文档路由决定最终目标，避免把源窗口重新置前。
+                workspace.reveal_window(window,cx);
+                workspace.open_paths(paths,window,cx);
+            }
+        }) {eprintln!("打开文档窗口失败：{error}");}
+    }else{open_workspace(paths,cx);}
     cx.activate(true);
 }
 
@@ -178,9 +200,13 @@ fn set_menus(cx: &mut App) {
                 MenuItem::action("新建", NewFile),
                 MenuItem::action("打开…", OpenFile),
                 MenuItem::action("打开文件夹…", OpenFolder),
+                MenuItem::action("恢复未保存文档…", RecoverDocuments),
                 MenuItem::separator(),
                 MenuItem::action("保存", Save),
                 MenuItem::action("另存为…", SaveAs),
+                MenuItem::action("导出 HTML…", ExportHtml),
+                MenuItem::action("导出 PDF…", ExportPdf),
+                MenuItem::action("导出 Word…", ExportWord),
                 MenuItem::separator(),
                 MenuItem::action("关闭标签", CloseTab),
             ],
@@ -224,6 +250,8 @@ fn set_menus(cx: &mut App) {
                 MenuItem::action("代码块", CodeBlock),
                 MenuItem::action("表格", Table),
                 MenuItem::action("公式块", MathBlock),
+                MenuItem::action("块注释", BlockComment),
+                MenuItem::action("文档元数据", EditFrontMatter),
                 MenuItem::action("分隔线", Rule),
             ],
         },

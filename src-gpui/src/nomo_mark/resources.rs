@@ -28,6 +28,7 @@ pub struct ResourceAdapter<'a> {
     pub embeds: &'a EmbedStore,
     pub em_px: f32,
     pub dark: bool,
+    pub mermaid: crate::embeds::MermaidPalette,
     pub color: [u8; 3],
     pub demands: RefCell<Vec<ResourceRequest>>,
     pub dependencies: RefCell<ResourceDependencies>,
@@ -82,7 +83,7 @@ impl ResourceAdapter<'_> {
     }
     pub fn embed(&self, kind: EmbedKind, source: &str) -> (u64, EmbedState) {
         let spec = EmbedSpec {
-            kind,
+            kind: kind.with_palette(self.mermaid),
             source: source.into(),
             em_px: self.em_px,
             dark: self.dark,

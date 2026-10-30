@@ -3,6 +3,7 @@ use super::*;
 use gpui::App;
 use crate::{image_import::{self,ImageSettings,ImportCancellation}, ui::{editor_popovers::{EditorPopover,EditorPopoverEvent},emoji_picker::{EmojiPicker,EmojiPickerEvent},quick_insert::{QuickInsertPanel,PanelAction},popup::PopupAnchor,toolbar_i18n::ToolbarLocale}};
 use crate::nomo_mark::{quick_insert::{self,QuickInsertAction as A},image_properties::ImageProperties};
+use crate::image_import::ImageInput;
 use std::{ops::Range,path::PathBuf,rc::Rc,sync::atomic::{AtomicU64,Ordering}};
 
 #[derive(Clone)]
@@ -19,11 +20,12 @@ pub(super) struct QuickInsertUi {
     pub action:Option<A>,
     picker:Option<Picker>,
     import:Option<ImportRequest>,
-    save_pending:Option<(u64,Vec<PathBuf>,PathBuf)>,
+    save_pending:Option<(u64,Vec<ImageInput>,PathBuf)>,
+    pub images:Option<(EditTarget,Vec<ImageInput>)>,
     focus:Option<(gpui::EntityId,Subscription)>,
     activation:Option<Subscription>,
 }
-impl QuickInsertUi {pub fn cancel(&mut self) {if let Some(request)=self.import.take(){request.cancel.cancel();}self.action=None;self.picker=None;self.save_pending=None;self.focus=None;self.activation=None;}}
+impl QuickInsertUi {pub fn cancel(&mut self) {if let Some(request)=self.import.take(){request.cancel.cancel();}self.action=None;self.images=None;self.picker=None;self.save_pending=None;self.focus=None;self.activation=None;}}
 impl Drop for QuickInsertUi {fn drop(&mut self){self.cancel();}}
 
 impl DocumentHost {
@@ -72,6 +74,9 @@ impl DocumentHost {
             || self.quick.import.as_ref().is_some_and(|request|!self.import_current(request,cx));
         if stale {self.quick.cancel();self.report(ControlError::Stale,cx);window.focus(&self.control.focus_handle(cx),cx);}
         if self.control.read(cx).host.pending_count()==0 {
+            if let Some((edit, inputs)) = self.quick.images.take() {
+                self.insert_image_inputs(edit, inputs, window, cx);
+            }
             if let Some(action)=self.quick.action.take(){self.activate_quick_insert(action,window,cx);}
         }
         if self.quick.save_pending.is_some() && !self.saving && self.toc_ready_for_save(cx) {
@@ -158,9 +163,27 @@ impl DocumentHost {
         self.dismiss_quick(cx);window.focus(&view.focus_handle(cx),cx);
         self.quick.picker=Some(Picker::Emoji{target,view,_subscription:subscription});cx.notify();
     }
+    fn insert_image_inputs(&mut self, edit: EditTarget, inputs: Vec<ImageInput>, window: &mut Window, cx: &mut Context<Self>) {
+        let result = self.validate_target(&edit, cx).and_then(|_| {
+            if self.control.read(cx).host.presentation != Presentation::Editable { return Err(ControlError::ReadOnly); }
+            image_import::validate_inputs(&inputs).map_err(ControlError::Unsupported)?;
+            let parsed = &self.control.read(cx).host.parsed;
+            let range = crate::nomo_mark::mapping::local_range(&parsed.source, parsed.identity.from_byte, edit.selection.range())?;
+            if edit.is_semantic() { crate::nomo_mark::table_inline::validate_insertion(parsed, &range)?; }
+            Ok(QuickTarget { trigger: parsed.source[range.clone()].into(), range, edit, pane: self.panes[self.active_pane].id })
+        });
+        let target = match result { Ok(target) => target, Err(error) => { self.report(error, cx); return; } };
+        let settings = ImageSettings::read(&cx.global::<crate::settings::Settings>().value("imageHandlingSettings"));
+        static NEXT: AtomicU64 = AtomicU64::new(1 << 32);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        self.quick.cancel();
+        self.quick.import = Some(ImportRequest { id, target, cancel: Default::default(), settings, path: self.path() });
+        self.dismiss_quick(cx);
+        self.quick_image_paths(id, inputs, window, cx);
+    }
     fn choose_quick_images(&mut self,target:QuickTarget,window:&mut Window,cx:&mut Context<Self>) {
         let settings=ImageSettings::read(&cx.global::<crate::settings::Settings>().value("imageHandlingSettings"));
-        if !matches!(settings.strategy.as_str(),"copy-current-folder"|"copy-assets"|"copy-document-assets") {self.quick_error(ControlError::Unsupported("请在图片设置中切换为本地复制策略；上传配置已保留".into()),cx);return;}
+        if !matches!(settings.strategy.as_str(),"copy-current-folder"|"copy-assets"|"copy-document-assets"|"upload") {self.quick_error(ControlError::Unsupported("图片处理方式无效".into()),cx);return;}
         static NEXT:AtomicU64=AtomicU64::new(1);
         let id=NEXT.fetch_add(1,Ordering::Relaxed);
         self.quick.cancel();self.quick.import=Some(ImportRequest{id,target,cancel:Default::default(),settings,path:self.path()});self.dismiss_quick(cx);
@@ -169,29 +192,44 @@ impl DocumentHost {
             let paths=response.await;
             let _=this.update_in(cx,|host,window,cx|{
                 if !host.quick.import.as_ref().is_some_and(|r|r.id==id){return;}
-                match paths {Ok(Ok(Some(paths))) if !paths.is_empty()=>host.quick_image_paths(id,paths,window,cx),Ok(Ok(_))=>host.quick.cancel(),_=>{host.quick.cancel();host.report(ControlError::HostFailure("无法打开图片选择窗口".into()),cx);}}
+                match paths {Ok(Ok(Some(paths))) if !paths.is_empty()=>host.quick_image_paths(id,paths.into_iter().map(ImageInput::File).collect(),window,cx),Ok(Ok(_))=>host.quick.cancel(),_=>{host.quick.cancel();host.report(ControlError::HostFailure("无法打开图片选择窗口".into()),cx);}}
                 cx.notify();
             });
         }).detach();
     }
-    fn quick_image_paths(&mut self,id:u64,paths:Vec<PathBuf>,window:&mut Window,cx:&mut Context<Self>) {
+    fn quick_image_paths(&mut self,id:u64,paths:Vec<ImageInput>,window:&mut Window,cx:&mut Context<Self>) {
         let Some(request)=self.quick.import.as_ref().filter(|r|r.id==id)else{return;};
         if !self.import_current(request,cx){self.quick.cancel();self.report(ControlError::Stale,cx);return;}
-        if self.path().is_some(){self.start_quick_image_import(id,paths,window,cx);return;}
-        let response=cx.prompt_for_new_path(&std::env::current_dir().unwrap_or_default(),Some("未命名.md"));
+        if self.path().is_some() || request.settings.strategy == "upload" {self.start_quick_image_import(id,paths,window,cx);return;}
+        let response=match self.prompt_save_path(window,cx) {
+            Ok(response)=>response,
+            Err(error)=>{self.quick.cancel();self.report(error,cx);return;}
+        };
         cx.spawn_in(window,async move|this,cx|{
             let path=response.await;
             let _=this.update_in(cx,|host,_,cx|{
                 if !host.quick.import.as_ref().is_some_and(|r|r.id==id){return;}
-                match path {Ok(Ok(Some(path)))=>host.quick.save_pending=Some((id,paths,path)),Ok(Ok(None))=>host.quick.cancel(),_=>{host.quick.cancel();host.report(ControlError::HostFailure("无法选择文档保存路径".into()),cx);}}
+                match path {Ok(Some(path))=>host.quick.save_pending=Some((id,paths,path)),Ok(None)=>host.quick.cancel(),Err(error)=>{host.quick.cancel();host.report(error,cx);}}
                 cx.notify();
             });
         }).detach();
     }
-    fn save_for_quick_image(&mut self,id:u64,paths:Vec<PathBuf>,path:PathBuf,window:&mut Window,cx:&mut Context<Self>) {
+    fn save_for_quick_image(&mut self,id:u64,paths:Vec<ImageInput>,path:PathBuf,window:&mut Window,cx:&mut Context<Self>) {
         let Some(request)=self.quick.import.as_ref().filter(|r|r.id==id)else{return;};
         if !self.import_current(request,cx){self.quick.cancel();self.report(ControlError::Stale,cx);return;}
         let (port,snapshot)=match self.begin_save(cx){Ok(value)=>value,Err(error)=>{self.quick.cancel();self.report(error,cx);return;}};
+        // 保存前清理空模板可能产生新修订；只接受原选区文本仍匹配的映射后落点。
+        if let Some(request) = self.quick.import.as_mut().filter(|r| r.id == id) {
+            let view = self.control.read(cx);
+            match crate::nomo_mark::mapping::local_range(&view.host.parsed.source, view.host.parsed.identity.from_byte, view.host.selection.range()) {
+                Ok(range) if view.host.parsed.source[range.clone()] == request.target.trigger => {
+                    request.target.edit.identity = view.host.parsed.identity.clone();
+                    request.target.edit.selection = view.host.selection;
+                    request.target.range = range;
+                }
+                _ => { self.quick.cancel(); self.saving = false; self.report(ControlError::Stale, cx); return; }
+            }
+        }
         let backup=cx.global::<crate::settings::Settings>().snapshot_before_save;
         let task=cx.background_executor().spawn(async move{port.save_captured(snapshot,Some(path),backup)});
         cx.spawn_in(window,async move|this,cx|{
@@ -205,13 +243,15 @@ impl DocumentHost {
             });
         }).detach();
     }
-    fn start_quick_image_import(&mut self,id:u64,paths:Vec<PathBuf>,window:&mut Window,cx:&mut Context<Self>) {
+    fn start_quick_image_import(&mut self,id:u64,paths:Vec<ImageInput>,window:&mut Window,cx:&mut Context<Self>) {
         let Some(mut request)=self.quick.import.as_ref().filter(|r|r.id==id).cloned()else{return;};
         if !self.import_current(&request,cx){self.quick.cancel();self.report(ControlError::Stale,cx);return;}
-        let Some(path)=self.path()else{self.quick.cancel();return;};
-        request.path=Some(path.clone());self.quick.import=Some(request.clone());
+        let path=self.path();
+        if path.is_none() && request.settings.strategy != "upload" {self.quick.cancel();return;}
+        request.path=path.clone();self.quick.import=Some(request.clone());
+        let path=path.unwrap_or_default();
         let worker=request.clone();
-        let task=cx.background_executor().spawn(async move{image_import::import(paths,&path,&worker.settings,&worker.cancel)});
+        let task=cx.background_executor().spawn(async move{image_import::import_inputs(paths,&path,&worker.settings,&worker.cancel)});
         cx.spawn_in(window,async move|this,cx|{
             let result=task.await;
             let _=this.update_in(cx,|host,window,cx|{
@@ -228,8 +268,10 @@ impl DocumentHost {
                     let markdown=inline || (request.settings.width.is_empty() && request.settings.align=="none");
                     let snippets=batch.images.iter().map(|image|ImageProperties{src:image.src.clone(),alt:image.alt.clone(),title:String::new(),width:request.settings.width.clone(),align:if request.settings.align=="none"{String::new()}else{request.settings.align.clone()}}.write("",markdown,eol)).collect::<Result<Vec<_>,_>>()?;
                     let text=snippets.join(if inline{" "}else{eol});
-                    let mut result=crate::nomo_mark::commands::apply_semantic(parsed,DocumentSelection{anchor_byte:base+range.start as u64,head_byte:base+range.end as u64},EditIntent::Replace(text))?;
-                    if !inline {quick_insert::continue_after_block(parsed,&mut result)?;}
+                    let selection=DocumentSelection{anchor_byte:base+range.start as u64,head_byte:base+range.end as u64};
+                    let mut result=if request.target.edit.is_semantic() { crate::nomo_mark::commands::apply_semantic(parsed,selection,EditIntent::Replace(text))? }
+                        else { crate::nomo_mark::commands::apply(parsed,selection,EditIntent::Replace(text))? };
+                    if !inline && request.target.edit.is_semantic() {quick_insert::continue_after_block(parsed,&mut result)?;}
                     host.control.update(cx,|view,cx|view.apply_host_edit(result,cx))?;
                     let message=format!("已插入 {} 张图片，{} 张失败{}",batch.images.len(),batch.failed,if batch.errors.is_empty(){String::new()}else{format!("：{}",batch.errors.join("；"))});
                     host.message=message.clone();cx.emit(DocumentEvent::Notice(message));Ok(())

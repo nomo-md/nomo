@@ -110,6 +110,41 @@ mod tests {
         }
     }
     #[test]
+    fn delayed_structure_snapshot_cannot_replace_current_revision() {
+        let root = std::env::temp_dir().join(id("nomo-structure-stale-request"));
+        let manager = MarkdownDocumentSessionManager::new(root.clone()).unwrap();
+        let status = manager.open("main", None, Some("> [!NOTE]\n> \n\nbody".into())).unwrap();
+        let handle = manager.session(&status.document_id).unwrap();
+        let old = lock(&handle).unwrap().current.clone();
+        let first = manager.start_structure("main", &status.document_id, 0).unwrap();
+        ready(&manager, &first);
+        let changed = manager.apply("main", MarkdownTransaction {
+            document_id: status.document_id.clone(), base_revision: 0,
+            operation_id: "exit-quote".into(), history_group_id: "exit-quote".into(),
+            edits: vec![MarkdownEdit { from_byte: 10, to_byte: 12, inserted_text: "\n".into() }],
+            selection_before: None, selection_after: None, template_update: None, derived: false,
+        }).unwrap();
+        // 旧请求既不能抢在新索引前使用错误的变更区间，也不能替换已发布的新版本。
+        for published in [false, true] {
+            let current = published.then(|| {
+                let index = manager.start_structure("main", &status.document_id, changed.revision).unwrap();
+                ready(&manager, &index);
+                index
+            });
+            let error = manager.structure.request("main", &status.document_id, old.clone(), Box::new(handle.clone())).unwrap_err();
+            assert_eq!(error.code, "revision-conflict");
+            assert_eq!(error.actual_revision, Some(changed.revision));
+            if let Some(index) = current {
+                assert_eq!(manager.query_structure("main", index, Query::Progress).unwrap().state, "ready");
+            }
+        }
+        drop(handle);
+        drop(old);
+        manager.close("main", &status.document_id, true).unwrap();
+        drop(manager);
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[test]
     fn structure_cancel_transfer_and_detach_release_inflight_generations() {
         let root = std::env::temp_dir().join(id("nomo-structure-lifecycle"));
         let manager = MarkdownDocumentSessionManager::new(root.clone()).unwrap();

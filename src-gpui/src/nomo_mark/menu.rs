@@ -73,7 +73,7 @@ pub fn commands() -> Vec<MenuEntry> {
         });
     }
     for (label, keywords, template) in [
-        ("表格", "table", "| 列一 | 列二 |\n| --- | --- |\n|  |  |"),
+        ("表格", "table", "|  |  |\n| --- | --- |\n|  |  |"),
         ("代码块", "code block", "```text\n\n```"),
         ("公式块", "math formula", "$$\n\n$$"),
         (
@@ -105,6 +105,8 @@ pub fn commands() -> Vec<MenuEntry> {
                 "code block" => EditIntent::InsertCodeBlock("text".into()),
                 "math formula" => EditIntent::InsertMathBlock,
                 "details summary" => EditIntent::InsertDetails,
+                "rule divider" => EditIntent::ToggleRule,
+                "table" => EditIntent::InsertBlockAt { block: template.into(), caret: 2 },
                 _ => EditIntent::InsertBlock(template.into()),
             },
         });

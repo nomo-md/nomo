@@ -79,8 +79,7 @@ fn blocks(parsed: &ParsedWindow, selection: &Range<usize>) -> Vec<Range<usize>> 
             _ => {}
         }
     }
-    for table in &parsed.html_tables {
-        for cell in &table.cells {
+    for cell in parsed.html_cells() {
             // 段落分隔符不属于可格式化文字；每段分别生成命令。
             let mut from = None;
             let mut end = cell.content.start;
@@ -97,7 +96,6 @@ fn blocks(parsed: &ParsedWindow, selection: &Range<usize>) -> Vec<Range<usize>> 
             if let Some(start) = from {
                 ranges.insert(start, start..end);
             }
-        }
     }
     ranges
         .into_values()
@@ -357,10 +355,7 @@ pub(crate) fn selected_with_toggle(parsed: &ParsedWindow, selection: DocumentSel
                 merged.push(index);
                 range = range.start.min(span.open.start)..range.end.max(span.close.end);
             }
-            let in_html = parsed
-                .html_tables
-                .iter()
-                .any(|t| t.source.contains(&range.start));
+            let in_html = parsed.html_cell_at(range.start).is_some();
             let text = &parsed.source[range.clone()];
             let pair = if in_html
                 || !merged.is_empty()
@@ -399,10 +394,7 @@ pub(crate) fn selected_with_toggle(parsed: &ParsedWindow, selection: DocumentSel
 
 pub fn release_code(parsed: &ParsedWindow, span: &InlineSpan) -> Vec<SourceEdit> {
     let base = parsed.identity.from_byte;
-    if parsed
-        .html_tables
-        .iter()
-        .any(|table| table.source.contains(&span.open.start))
+    if parsed.html_cell_at(span.open.start).is_some()
     {
         return [span.open.clone(), span.close.clone()]
             .into_iter()
@@ -450,10 +442,7 @@ pub fn release_code_selection(
 ) -> Result<EditResult, ControlError> {
     let base = parsed.identity.from_byte;
     let range = local_range(&parsed.source, base, selection.range())?;
-    let html_cell = parsed
-        .html_tables
-        .iter()
-        .any(|table| table.source.contains(&span.open.start));
+    let html_cell = parsed.html_cell_at(span.open.start).is_some();
     let markdown = parsed.source[span.open.clone()].starts_with('`');
     if !markdown && !html_cell {
         return Err(ControlError::Unsupported(
@@ -473,7 +462,7 @@ pub fn release_code_selection(
         return Err(ControlError::InvalidRange);
     }
     if html_cell {
-        for cell in parsed.html_tables.iter().flat_map(|t| &t.cells) {
+        for cell in parsed.html_cells() {
             if cell.runs.iter().any(|run| {
                 parsed.source.get(run.source.clone()) != Some(run.text.as_str())
                     && [selected.start, selected.end]

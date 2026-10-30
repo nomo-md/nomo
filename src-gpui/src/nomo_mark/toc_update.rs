@@ -80,7 +80,7 @@ impl DocumentHost {
                 if revision == 0 { return Ok(Vec::new()); }
                 let identity = port.ready_index(revision, &request_for_work)?;
                 let edits = port.manager.prepare_structure_toc(&port.owner, identity, 4 * 1024 * 1024, || request_for_work.is_cancelled())
-                    .map_err(|error| ControlError::HostFailure(error.to_string()))?;
+                    .map_err(crate::nomo_mark::session_window::structure_error)?;
                 request_for_work.check()?;
                 Ok::<_, ControlError>(edits.into_iter().map(|edit| SourceEdit {
                     from_byte: edit.from_byte, to_byte: edit.to_byte, inserted_text: edit.inserted_text,
@@ -94,6 +94,7 @@ impl DocumentHost {
                 }
                 let edits = match result {
                     Ok(edits) => edits,
+                    Err(ControlError::Stale) => { host.schedule_toc(300, false, cx); return; }
                     Err(error) => { host.finish_toc_check(revision, Some(error.to_string()), cx); return; }
                 };
                 let identity = &host.control.read(cx).host.parsed.identity;

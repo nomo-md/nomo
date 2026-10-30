@@ -36,11 +36,18 @@ pub enum ColorRole {
     QuoteFg,
     InlineCode,
     CodeFg,
+    CodeLabel,
+    CodeLineNumber,
     Keyword,
     Str,
     Number,
     Comment,
     Punct,
+    CodeFunction,
+    CodeTag,
+    CodeParameter,
+    CodeInserted,
+    CodeDeleted,
     Accent,
     Note,
     Tip,
@@ -48,6 +55,7 @@ pub enum ColorRole {
     Warning,
     Caution,
     OnAccent,
+    Success,
     /// 飞书风格调色板文字色：0 红、1 橙、2 黄、3 绿、4 蓝、5 紫、6 灰。
     Palette(u8),
 }
@@ -63,18 +71,26 @@ impl ColorRole {
             ColorRole::QuoteFg => theme.quote_fg,
             ColorRole::InlineCode => theme.inline_code_fg,
             ColorRole::CodeFg => theme.code_fg,
+            ColorRole::CodeLabel => theme.code_fg.opacity(0.82),
+            ColorRole::CodeLineNumber => theme.code_fg.opacity(0.42),
             ColorRole::Keyword => theme.code_keyword,
             ColorRole::Str => theme.code_string,
             ColorRole::Number => theme.code_number,
             ColorRole::Comment => theme.code_comment,
             ColorRole::Punct => theme.code_punct,
+            ColorRole::CodeFunction => theme.code_function,
+            ColorRole::CodeTag => theme.code_tag,
+            ColorRole::CodeParameter => theme.code_parameter,
+            ColorRole::CodeInserted => theme.code_inserted,
+            ColorRole::CodeDeleted => theme.code_deleted,
             ColorRole::Accent => theme.accent,
-            ColorRole::Note => theme.callout_note,
-            ColorRole::Tip => theme.callout_tip,
-            ColorRole::Important => theme.callout_important,
-            ColorRole::Warning => theme.callout_warning,
-            ColorRole::Caution => theme.callout_caution,
+            ColorRole::Note => theme.callout_note_fg,
+            ColorRole::Tip => theme.callout_tip_fg,
+            ColorRole::Important => theme.callout_important_fg,
+            ColorRole::Warning => theme.callout_warning_fg,
+            ColorRole::Caution => theme.callout_caution_fg,
             ColorRole::OnAccent => theme.on_accent,
+            ColorRole::Success => theme.success,
             ColorRole::Palette(index) => theme.palette_fg[(index as usize).min(6)],
         }
     }
@@ -83,21 +99,25 @@ impl ColorRole {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct InlineStyle {
     pub bold: bool,
+    /// 表头沿用旧版的 800 字重；普通加粗仍为 700。
+    pub extra_bold: bool,
     pub italic: bool,
     pub mono: bool,
     pub strike: bool,
     pub underline: bool,
     /// 行内代码的圆角底色。
     pub code_bg: bool,
+    pub footnote: bool,
     /// 文字底色：0 无，1 为 `<mark>` 默认高亮，2–8 对应调色板 0–6 的背景色。
     pub bg: u8,
-    /// 基线偏移：1 为上标，-1 为下标。整段只能用一个字号塑形，上下标只做位移不缩小。
+    /// 基线偏移：1 为上标，-1 为下标；字形与字宽同步缩至 0.75em。
     pub shift: i8,
     pub color: ColorRole,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Wrap {
+    None,
     Greedy,
     KnuthPlass,
 }
@@ -109,8 +129,10 @@ pub const OBJECT_CHAR: char = '\u{FFFC}';
 /// `key` 由调用方解释（公式渲染缓存键）。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum InlineAsset {
+    MathInput,
     Embed(u64),
     Image(std::path::PathBuf),
+    Comment { label: String, font_size: u32, zoom: u32, editing: bool },
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct InlineObject {
@@ -186,6 +208,8 @@ impl ParaSpec {
 struct Glyph {
     index: usize,
     x: f32,
+    ink_offset: f32,
+    font_size: f32,
     font_id: FontId,
     id: GlyphId,
     emoji: bool,
@@ -216,6 +240,7 @@ pub struct TextLayout {
 }
 
 impl TextLayout {
+    pub(crate) fn first_baseline(&self) -> f32 { self.baseline }
     /// 对象点击返回占位符起点，而不是用于光标的最近左右边界。
     pub fn object_at_point(&self, x: f32, y: f32) -> Option<usize> {
         self.objects.iter().find_map(|object| {
@@ -234,18 +259,20 @@ impl TextLayout {
         self.object_rects_clipped(f32::NEG_INFINITY..f32::INFINITY)
     }
     pub fn object_rects_clipped(&self, clip: Range<f32>) -> Vec<(&InlineAsset, f32, f32, f32, f32)> {
+        self.object_rects_with_offsets(clip).map(|(_, key, x, y, w, h)| (key, x, y, w, h)).collect()
+    }
+    pub fn object_rects_with_offsets(&self, clip: Range<f32>) -> impl Iterator<Item = (usize, &InlineAsset, f32, f32, f32, f32)> {
         self.objects
             .iter()
-            .filter_map(|object| {
+            .filter_map(move |object| {
                 let line_index = self.lines.partition_point(|line| line.end <= object.at);
                 let line = self.lines.get(line_index)?;
                 if object.at < line.start { return None; }
                 let x = self.x_in_line(line, object.at);
                 let baseline = line_index as f32 * self.line_height + self.baseline;
                 if baseline - object.ascent > clip.end || baseline + object.descent < clip.start { return None; }
-                Some((&object.key, x, baseline - object.ascent, object.width, object.ascent + object.descent))
+                Some((object.at, &object.key, x, baseline - object.ascent, object.width, object.ascent + object.descent))
             })
-            .collect()
     }
 
     pub fn height(&self) -> f32 {
@@ -258,7 +285,7 @@ impl TextLayout {
             + self.lines.iter().map(|line| 48 + line.glues.len() * 16).sum::<usize>()
             + self.styles.len() * 48
             + self.objects.capacity() * std::mem::size_of::<InlineObject>()
-            + self.objects.iter().map(|o| match &o.key { InlineAsset::Image(path) => path.as_os_str().len(), _ => 0 }).sum::<usize>()
+            + self.objects.iter().map(|o| match &o.key { InlineAsset::Image(path) => path.as_os_str().len(), InlineAsset::Comment { label, .. } => label.capacity(), _ => 0 }).sum::<usize>()
     }
 
     /// 最宽视觉行的宽度，用于表格列宽和行内元素对齐。
@@ -324,7 +351,7 @@ impl TextLayout {
             let end = range.end.min(line.end);
             if start < end {
                 rects.push((index, self.x_in_line(line, start), self.x_in_line(line, end)));
-            } else if start == end && range.end > line.end && range.start <= line.end && line.start < line.end {
+            } else if start == end && range.end > line.end && range.start <= line.end {
                 // 选区跨越本行末尾：补一个窄条，表示换行符被选中。
                 let x = self.x_in_line(line, line.end);
                 rects.push((index, x, x + self.font_size * 0.3));
@@ -335,7 +362,6 @@ impl TextLayout {
 
     /// 绘制段落。`clip` 为段落坐标系下需要绘制的纵向区间，区间外的视觉行直接跳过。
     pub fn paint(&self, origin: Point<Pixels>, clip: Range<f32>, theme: &Theme, window: &mut Window) {
-        let font_size = px(self.font_size);
         for (line_index, line) in self.lines.iter().enumerate() {
             let top = line_index as f32 * self.line_height;
             if top + self.line_height < clip.start || top > clip.end {
@@ -343,13 +369,25 @@ impl TextLayout {
             }
             // 行内代码与高亮底色先画，保证在文字之下。
             for (range, style) in &self.styles {
-                if !(style.code_bg || style.bg > 0) || range.end <= line.start || range.start >= line.end {
+                if !(style.code_bg || style.footnote || style.bg > 0) || range.end <= line.start || range.start >= line.end {
                     continue;
                 }
-                let inset = if style.code_bg { 3.0 } else { 1.0 };
+                let inset = if style.code_bg || style.footnote { 0.0 } else { 1.0 };
                 let x0 = self.x_in_line(line, range.start.max(line.start)) - inset;
                 let x1 = self.x_in_line(line, range.end.min(line.end)) + inset;
                 let pad = (self.line_height - self.font_size * 1.35).max(0.0) / 2.0;
+                if style.footnote {
+                    let h = self.font_size * 0.95;
+                    let y = top + self.baseline - self.font_size * 1.1;
+                    paint_box(Bounds::new(point(origin.x + px(x0), origin.y + px(y)), size(px((x1 - x0).max(0.0)), px(h))),
+                        theme.surface, 3.0, Some((theme.border, 1.0)), window);
+                    continue;
+                }
+                if style.code_bg {
+                    paint_box(Bounds::new(point(origin.x + px(x0), origin.y + px(top + pad)), size(px((x1 - x0).max(0.0)), px(self.line_height - pad * 2.0))),
+                        theme.inline_code_bg, 4.0, Some((theme.border, 1.0)), window);
+                    continue;
+                }
                 window.paint_quad(
                     fill(
                         Bounds::new(
@@ -388,7 +426,8 @@ impl TextLayout {
                     -1 => self.font_size * 0.22,
                     _ => 0.0,
                 };
-                let at = point(origin.x + px(glyph.x - line.origin_x + shift), origin.y + px(baseline + lift));
+                let font_size = px(glyph.font_size);
+                let at = point(origin.x + px(glyph.x + glyph.ink_offset - line.origin_x + shift), origin.y + px(baseline + lift));
                 let _ = if glyph.emoji {
                     window.paint_emoji(at, glyph.font_id, glyph.id, font_size)
                 } else {
@@ -444,10 +483,15 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
     // 显式改用正文字体，而不交给 CoreText 级联回退：回退得到的苹方字形 ID 与 gpui 按 PostScript
     // 名复用的已加载字体不是同一字形表，光栅化会画出错字。
     let mut fonts: Vec<(usize, gpui::Font)> = Vec::with_capacity(styles.len());
+    let styled_font = |family, style: &InlineStyle| {
+        let mut font = font_for(family, style.bold, style.italic);
+        if style.extra_bold { font.weight = gpui::FontWeight::EXTRA_BOLD; }
+        font
+    };
     for (range, style) in &styles {
         let family = if style.mono { Family::Mono } else { spec.family };
-        if family != Family::Mono {
-            fonts.push((range.len(), font_for(family, style.bold, style.italic)));
+        if !matches!(family, Family::Mono | Family::Code) {
+            fonts.push((range.len(), styled_font(family, style)));
             continue;
         }
         let text = &spec.text[range.clone()];
@@ -457,15 +501,15 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
         for (offset, cluster) in text.grapheme_indices(true) {
             let mono = cluster.chars().all(mono_covers);
             if current.is_some_and(|value| value != mono) {
-                let segment_family = if current == Some(true) { Family::Mono } else { Family::Text };
-                fonts.push((offset - start, font_for(segment_family, style.bold, style.italic)));
+                let segment_family = if current == Some(true) { family } else { Family::Text };
+                fonts.push((offset - start, styled_font(segment_family, style)));
                 start = offset;
             }
             current = Some(mono);
         }
         if start < text.len() {
-            let segment_family = if current != Some(false) { Family::Mono } else { Family::Text };
-            fonts.push((text.len() - start, font_for(segment_family, style.bold, style.italic)));
+            let segment_family = if current != Some(false) { family } else { Family::Text };
+            fonts.push((text.len() - start, styled_font(segment_family, style)));
         }
     }
     let runs: Vec<TextRun> = fonts
@@ -492,6 +536,8 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
             run.glyphs.iter().map(|glyph| Glyph {
                 index: glyph.index,
                 x: f32::from(glyph.position.x),
+                ink_offset: 0.0,
+                font_size: spec.font_size,
                 font_id: run.font_id,
                 id: glyph.id,
                 emoji: glyph.is_emoji,
@@ -501,6 +547,29 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
         .collect();
     let mut glyphs = glyphs;
     let mut natural_width = f32::from(shaped.width);
+    // 保留整段塑形的字素/连字结果，按样式缩放字形和 advance；留白参与断行与光标几何。
+    let transforms: Vec<_> = styles.iter().enumerate().map(|(index, (range, style))| {
+        let first = glyphs.partition_point(|glyph| glyph.index < range.start);
+        let last = glyphs.partition_point(|glyph| glyph.index < range.end);
+        let left = glyphs.get(first).map_or(natural_width, |glyph| glyph.x);
+        let right = glyphs.get(last).map_or(natural_width, |glyph| glyph.x);
+        let scale = (if style.shift != 0 { 0.75 } else { 1.0 }) * if style.code_bg { 0.92 } else { 1.0 };
+        let pad = spec.font_size * if style.footnote { 0.18 } else { 0.375 };
+        let boxed = |s: &InlineStyle| s.code_bg || s.footnote;
+        let before = if boxed(style) && (index == 0 || !boxed(&styles[index - 1].1)) { pad } else { 0.0 };
+        let after = if boxed(style) && styles.get(index + 1).is_none_or(|(_, next)| !boxed(next)) { pad } else { 0.0 };
+        (first, last, left, right, scale, before, after, range.start)
+    }).collect();
+    let mut advance = 0.0;
+    for (first, last, left, right, scale, before, after, start) in transforms {
+        for glyph in &mut glyphs[first..last] {
+            glyph.x = left + advance + (glyph.x - left) * scale;
+            if glyph.index == start { glyph.ink_offset = before; } else { glyph.x += before; }
+            glyph.font_size = spec.font_size * scale;
+        }
+        advance += (right - left) * (scale - 1.0) + before + after;
+    }
+    natural_width += advance;
     // 行内对象：占位字符按塑形得到的宽度与对象实际宽度之差，平移其后的所有字形。
     if !spec.objects.is_empty() {
         let original_x = |byte: usize| glyphs.get(glyphs.partition_point(|glyph| glyph.index < byte)).map_or(natural_width, |glyph| glyph.x);
@@ -536,22 +605,60 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
         objects: spec.objects.clone(),
     };
     let space_width = spec.font_size * 0.28;
-    let mut items = kp::build_items(&layout.text, spec.font_size, space_width, |byte| layout.shaped_x(byte));
-    // 行尾及纯空白段落中的实字符必须占位，不能作为断行时可丢弃或伸缩的胶。
-    for item in items.iter_mut().rev() {
-        if item.from == item.to || !layout.text[item.from..item.to].bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
-            break;
+    // 表格等行内投影保留显式换行；先按逻辑行分段，再复用原有自动折行。
+    // split 保留首尾和连续空行，所有条目仍使用原段落字节坐标。
+    let mut start = 0;
+    for logical in layout.text.split('\n') {
+        let text = logical.strip_suffix('\r').unwrap_or(logical);
+        if spec.wrap == Wrap::None {
+            layout.lines.push(VisualLine { start, end: start + text.len(), origin_x: layout.shaped_x(start), glues: Vec::new() });
+            start += logical.len() + 1;
+            continue;
         }
-        item.kind = ItemKind::Box;
-    }
-    split_oversized_boxes(&mut items, &layout, width);
-    let lines = match spec.wrap {
-        Wrap::KnuthPlass => kp::break_lines(&items, width),
-        Wrap::Greedy => kp::greedy_lines(&items, width),
-    };
-    layout.lines = lines.iter().map(|line| visual_line(&layout, &items, line)).collect();
-    if layout.lines.is_empty() {
-        layout.lines.push(VisualLine { start: 0, end: 0, origin_x: 0.0, glues: Vec::new() });
+        let mut items = kp::build_items(text, spec.font_size, space_width, |byte| layout.shaped_x(start + byte));
+        for item in &mut items {
+            item.from += start;
+            item.to += start;
+        }
+        // 每个逻辑行的行尾空格都必须保留宽度和光标位置。
+        for item in items.iter_mut().rev() {
+            if item.from == item.to || !layout.text[item.from..item.to].bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
+                break;
+            }
+            item.kind = ItemKind::Box;
+        }
+        let mut atomic: Vec<Item> = Vec::with_capacity(items.len());
+        let mut item_index = 0;
+        let mut code_index = 0;
+        let code: Vec<_> = layout.styles.iter().filter(|(_, style)| style.code_bg || style.footnote).map(|(range, _)| range).collect();
+        while item_index < items.len() {
+            let item = items[item_index];
+            while code_index < code.len() && code[code_index].end <= item.from { code_index += 1; }
+            if let Some(range) = code.get(code_index).filter(|range| item.from < range.end && range.start < item.to) {
+                let mut end = item_index + 1;
+                while end < items.len() && items[end].from < range.end { end += 1; }
+                let to = items[end - 1].to;
+                atomic.push(Item { kind: ItemKind::Box, from: item.from, to, width: layout.shaped_x(to) - layout.shaped_x(item.from) });
+                item_index = end;
+            } else { atomic.push(item); item_index += 1; }
+        }
+        items = atomic;
+        split_oversized_boxes(&mut items, &layout, width);
+        if items.is_empty() {
+            layout.lines.push(VisualLine { start, end: start, origin_x: layout.shaped_x(start), glues: Vec::new() });
+        } else {
+            let lines = match spec.wrap {
+                Wrap::None => unreachable!("unwrapped lines are handled before line breaking"),
+                Wrap::KnuthPlass => kp::break_lines(&items, width),
+                Wrap::Greedy => kp::greedy_lines(&items, width),
+            };
+            layout.lines.reserve(lines.len());
+            for line in &lines {
+                let visual = visual_line(&layout, &items, line);
+                layout.lines.push(visual);
+            }
+        }
+        start += logical.len() + 1;
     }
     layout.max_width = layout.lines.iter().map(|line| layout.x_in_line(line, line.end)).fold(0.0, f32::max);
     layout
@@ -565,7 +672,8 @@ fn split_oversized_boxes(items: &mut Vec<Item>, layout: &TextLayout, width: f32)
     use unicode_segmentation::UnicodeSegmentation;
     let mut output = Vec::with_capacity(items.len() * 2);
     for item in items.drain(..) {
-        if !(matches!(item.kind, ItemKind::Box) && item.width > width) {
+        if !(matches!(item.kind, ItemKind::Box) && item.width > width)
+            || layout.styles.iter().any(|(range, style)| style.code_bg && item.from < range.end && range.start < item.to) {
             output.push(item);
             continue;
         }

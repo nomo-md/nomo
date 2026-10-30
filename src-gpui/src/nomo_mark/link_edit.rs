@@ -42,7 +42,7 @@ impl LinkDraft {
             return Ok(Self {text:plain_text(parsed,&content),href:dest_url.to_string(),active:true,
                 range:range.clone(),content,title:title.to_string(),html:false,attrs:BTreeMap::new()});
         }
-        let html_cell=parsed.html_tables.iter().flat_map(|table|&table.cells).find(|cell|cell.content.start<=selected.start && selected.end<=cell.content.end);
+        let html_cell=parsed.html_cell_at(selected.start).filter(|cell| selected.end <= cell.content.end);
         let html_span=parsed.inline.iter().chain(html_cell.into_iter().flat_map(|cell|&cell.spans))
             .find(|span|span.format==InlineFormat::Link && contains(&span.range()));
         if let Some(span)=html_span {

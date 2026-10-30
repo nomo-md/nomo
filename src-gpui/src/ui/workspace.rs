@@ -24,6 +24,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Transformation, UniformListScrollHandle, Window,
     actions, div, ease_in_out, prelude::*, px, radians, uniform_list,
 };
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::cell::Cell;
 use std::rc::Rc;
@@ -38,16 +39,21 @@ mod toolbar;
 mod status;
 mod application_dialogs;
 mod mini;
+mod document_transition;
+mod open_requests;
+mod recovery_ui;
+mod export;
+use open_requests::{OpenRequests, OpenRequest, AfterOpen};
 use explorer::ExplorerState;
 
 actions!(
     workspace,
     [
-        NewFile, NewWindow, OpenFile, OpenFolder, Save, SaveAs, CloseTab, NextTab, PrevTab, Find, FindReplace, FindNext,
+        NewFile, NewWindow, OpenFile, OpenFolder, Save, SaveAs, ExportHtml, ExportPdf, ExportWord, CloseTab, NextTab, PrevTab, Find, FindReplace, ToggleFind, ToggleReplace, FindNext,
         FindPrev, ToggleSource, ModeSemantic, ModeSource, ModeSplit, ToggleOutline, ToggleSidebar, ToggleToolbar,
         ToggleTheme, FollowSystemTheme, ToggleTypography, Underline, Highlight, ZoomIn, ZoomOut, ZoomReset, Bold, Italic, Strike, InlineCode, Link,
         Heading1, Heading2, Heading3, Heading4, Heading5, Heading6, ClearFormatting, Paragraph, Quote, BulletList, OrderedList, TaskList, CodeBlock, Table,
-        MathBlock, Rule, OpenSettings, ShowHome, ToggleMini, Quit
+        MathBlock, BlockComment, EditFrontMatter, Rule, PromoteHeading, DemoteHeading, OpenSettings, ShowHome, RecoverDocuments, ToggleMini, Quit
     ]
 );
 
@@ -75,6 +81,7 @@ struct PendingSave {
 
 struct OpeningDocument {
     id: u64,
+    generation: u64,
     path: Option<PathBuf>,
     request: WindowRequest,
     preview: bool,
@@ -212,9 +219,12 @@ pub struct Workspace {
     services: Option<MarkdownDocumentSessionManager>,
     owner: String,
     opening: Vec<OpeningDocument>,
+    open_requests: OpenRequests,
     pending_saves: Vec<PendingSave>,
+    export_job: Option<export::ExportJob>,
+    pending_document_transition: Option<document_transition::PendingDocumentTransition>,
     pending_tree_click: Option<Task<()>>,
-    deferred_open: Option<(PathBuf, bool, Option<String>)>,
+    deferred_open: Option<(PathBuf, bool, Option<String>, u64)>,
     tree_animation: Option<TreeChevronAnimation>,
     tree_animation_id: usize,
     tree_selection: Option<TreeSelection>,
@@ -284,8 +294,19 @@ impl Workspace {
             HomeEvent::AddFolder => workspace.prompt_home_folder(window, cx),
             HomeEvent::Resume => workspace.activate(workspace.active, window, cx),
         });
-        let library_subscription = cx.observe_in(&library, window, |workspace, library, window, cx| {
-            if !workspace.home_visible { if let Some(error) = &library.read(cx).error { workspace.notice = Some(error.clone().into()); } }
+        let mut last_library_error = None;
+        let library_subscription = cx.observe_in(&library, window, move |workspace, library, window, cx| {
+            let error = library.read(cx).error.as_ref();
+            let error_key = error.map(|error| {
+                let mut hash = DefaultHasher::new();
+                error.hash(&mut hash);
+                hash.finish()
+            });
+            // 任务结束也会 notify；持续的同一个后台错误只提示一次，恢复后允许再次提示。
+            if !workspace.home_visible && error_key != last_library_error {
+                if let Some(error) = error { workspace.failure_notice = Some(error.clone().into()); }
+            }
+            last_library_error = error_key;
             if workspace.waiting_library_close && !library.read(cx).is_busy() {
                 workspace.waiting_library_close = false;
                 if workspace.tabs.is_empty() && workspace.opening.is_empty() { window.remove_window(); }
@@ -330,7 +351,7 @@ impl Workspace {
             motion_query: None,
             services: service.ok(),
             owner: format!("workspace-{:?}",cx.entity_id()),
-            opening: Vec::new(), pending_saves: Vec::new(), pending_tree_click: None, deferred_open: None,
+            opening: Vec::new(), open_requests: OpenRequests::default(), pending_saves: Vec::new(), export_job: None, pending_document_transition: None, pending_tree_click: None, deferred_open: None,
             tree_animation: None, tree_animation_id: 0,
             tree_selection: None, tree_selection_animation: None, tree_selection_animation_id: 0,
             close_prompt:false, closing_window:false, waiting_library_close:false,
@@ -374,8 +395,9 @@ impl Workspace {
         workspace.refresh_system_motion(cx);
         workspace.init_tree_search(window, cx);
         for path in paths {
-            workspace.open_path(&path, window, cx);
+            workspace.enqueue_open(Some(path), false, None, false, cx);
         }
+        workspace.drain_open_requests(window, cx);
         window.focus(&workspace.focus, cx);
         workspace.start_application_dialogs(window, cx);
         workspace
@@ -431,7 +453,16 @@ impl Workspace {
     }
 
     pub(crate) fn show_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.home_visible || self.closing_window || window.has_active_prompt() { return; }
+        if self.closing_window || window.has_active_prompt() { return; }
+        self.next_open_intent();
+        self.open_requests.pending.clear();
+        self.pending_tree_click.take();
+        self.deferred_open = None;
+        for opening in &self.opening { opening.request.cancel(); }
+        if self.home_visible { return; }
+        if let Some(document) = self.document() {
+            if !self.prepare_document_transition(&document, false, window, cx, |workspace, window, cx| workspace.show_home(window, cx)) { return; }
+        }
         if !self.leave_mini(window, cx) { return; }
         if let Some(document) = self.document() {
             if let Err(error) = document.update(cx, |host, cx| host.set_active(false, cx)) {
@@ -476,8 +507,8 @@ impl Workspace {
         if self.waiting_library_close { self.waiting_library_close=false; self.cancel_close(cx); }
         self.pending_tree_click.take();
         self.deferred_open=None;
-        if self.application_dialogs.ready {self.route_open_path(path.to_path_buf(),window,cx);return;}
-        self.open_path_with_preview(path,false,window,cx);
+        self.enqueue_open(Some(path.to_path_buf()), false, None, true, cx);
+        self.drain_open_requests(window, cx);
     }
 
     fn cancel_preview_opens(&self, except: Option<&Path>) {
@@ -499,17 +530,27 @@ impl Workspace {
     }
 
     fn open_path_with_anchor(&mut self,path:&Path,preview:bool,anchor:Option<String>,window:&mut Window,cx:&mut Context<Self>) {
+        self.enqueue_open(Some(path.to_path_buf()), preview, anchor, false, cx);
+        self.drain_open_requests(window, cx);
+    }
+
+    fn open_path_now(&mut self,path:&Path,preview:bool,anchor:Option<String>,generation:u64,window:&mut Window,cx:&mut Context<Self>) {
         if !self.leave_mini(window,cx) {return;}
         if self.explorer.mutating.iter().any(|busy| path.starts_with(busy)) {self.notice=Some("文件操作正在进行，请稍后打开。".into());cx.notify();return;}
         if path.is_dir() {
             self.cancel_preview_opens(None);
             let root=path.canonicalize().unwrap_or_else(|_|path.to_path_buf());
-            if self.home_visible && !self.tabs.is_empty() {
-                self.activate(self.active, window, cx);
-                if self.home_visible { return; }
+            if generation==self.open_requests.generation {
+                if self.home_visible && !self.tabs.is_empty() {
+                    let document=self.tabs[self.active].document.clone();
+                    let retry=root.clone();
+                    if !self.prepare_document_transition(&document,false,window,cx,move |workspace,window,cx|workspace.open_path_now(&retry,false,None,generation,window,cx)) {return;}
+                    self.activate_after_open(self.active,generation,AfterOpen::default(),window,cx);
+                    if self.home_visible {return;}
+                }
+                self.home_visible = false;
+                self.home.update(cx, |home, cx| home.set_active(false, cx));
             }
-            self.home_visible = false;
-            self.home.update(cx, |home, cx| home.set_active(false, cx));
             self.library.update(cx, |library, cx| library.change(LibraryChange::AddFolder(root.clone()), cx));
             Settings::set(cx, "sidebarHidden", serde_json::json!(false));
             self.replace_tree(root,cx);
@@ -522,21 +563,21 @@ impl Workspace {
         self.cancel_preview_opens(Some(&path));
         if let Some(index)=self.tabs.iter().position(|tab|tab.document.read(cx).path().as_ref()==Some(&path)) {
             if !preview {self.tabs[index].preview=false;}
-            self.activate(index,window,cx);
-            if self.active==index {if let Some(anchor)=anchor {self.tabs[index].document.update(cx,|host,cx|host.anchor(anchor,cx));}}
+            self.activate_after_open(index,generation,AfterOpen {anchor,..Default::default()},window,cx);
             return;
         }
         if let Some(opening)=self.opening.iter_mut().find(|opening|opening.path.as_ref()==Some(&path) && opening.request.check().is_ok()) {
+            opening.generation = generation;
             if !preview {opening.preview=false;}
             if anchor.is_some() {opening.anchor=anchor;}
             return;
         }
         // 同一路径的过期请求必须先释放会话，才能重新打开。
         if self.opening.iter().any(|opening|opening.path.as_ref()==Some(&path)) {
-            self.deferred_open=Some((path,preview,anchor));
+            self.deferred_open=Some((path,preview,anchor,generation));
             return;
         }
-        self.open_document(Some(path),preview,anchor,window,cx);
+        self.open_document_from(Some(path),preview,anchor,application_dialogs::OpenSource::File,generation,window,cx);
     }
 
     fn open_tree_file(&mut self,path:PathBuf,click_count:usize,window:&mut Window,cx:&mut Context<Self>) {
@@ -613,28 +654,31 @@ impl Workspace {
         self.tree_animation=Some(TreeChevronAnimation {path,id:self.tree_animation_id,started:Instant::now(),from,to});
     }
 
-    fn open_document(&mut self,path:Option<PathBuf>,preview:bool,anchor:Option<String>,window:&mut Window,cx:&mut Context<Self>) {
-        self.open_document_from(path, preview, anchor, application_dialogs::OpenSource::File, window, cx);
-    }
-    fn open_document_from(&mut self,path:Option<PathBuf>,preview:bool,anchor:Option<String>,source:application_dialogs::OpenSource,window:&mut Window,cx:&mut Context<Self>) {
+    fn open_document_from(&mut self,path:Option<PathBuf>,preview:bool,anchor:Option<String>,source:application_dialogs::OpenSource,generation:u64,window:&mut Window,cx:&mut Context<Self>) {
         let Some(manager)=self.services.clone() else {return;};
-        if let Some(current)=self.document() {if let Err(e)=current.read(cx).ready(cx) {self.notice=Some(e.to_string().into());cx.notify();return;}}
+        if let Some(current)=self.document() {
+            let (path, anchor, source) = (path.clone(), anchor.clone(), source.clone());
+            if !self.prepare_document_transition(&current, false, window, cx, move |workspace, window, cx| {
+                workspace.open_document_from(path, preview, anchor, source, generation, window, cx);
+            }) { return; }
+        }
+        if !self.begin_recovery_attempt(&source,cx) {return;}
         let request=WindowRequest::default();
         let open_profile=crate::open_profile::OpenProfile::begin();
         let loading_profile=open_profile.clone();
         // 查询服务按 owner 取消任务；每文档独立 owner 防止后台标签误取消活动文档。
         static NEXT_DOCUMENT: std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
         let id=NEXT_DOCUMENT.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
-        let owner=match &source { application_dialogs::OpenSource::Reload(document,_) | application_dialogs::OpenSource::DiskRecovery(_,Some(document),_) => document.read(cx).port().owner, _ => format!("{}:document-{}",self.owner,id) };
-        self.opening.push(OpeningDocument {id,path:path.clone(),request:request.clone(),preview,anchor});
+        let owner=match &source { application_dialogs::OpenSource::Reload(document,_) | application_dialogs::OpenSource::DiskRecovery(_,Some(document),_) | application_dialogs::OpenSource::Recovery(_,false,Some(document),_) => document.read(cx).port().owner, _ => format!("{}:document-{}",self.owner,id) };
+        self.opening.push(OpeningDocument {id,generation,path:path.clone(),request:request.clone(),preview,anchor});
         let requested=path.clone();
-        let recovery=match &source {application_dialogs::OpenSource::Recovery(candidate,_)=>Some(candidate.clone()),_=>None};
+        let recovery=match &source {application_dialogs::OpenSource::Recovery(candidate,copy,_,_)=>Some((candidate.clone(),*copy)),_=>None};
         let fresh=matches!(&source,application_dialogs::OpenSource::Reload(_,_)|application_dialogs::OpenSource::DiskRecovery(_,_,_));
         self.last_notice=Some("正在打开文档…".into());
         let task=cx.background_executor().spawn(async move {
             request.check()?;
             let port=match recovery {
-                Some(candidate) => { let status=manager.adopt_recovery(&owner,&candidate).map_err(|error|ControlError::HostFailure(error.to_string()))?; NativeWindowPort {manager,owner,document_id:status.document_id} },
+                Some((candidate,copy)) => { let status=manager.adopt_recovery(&owner,&candidate,copy).map_err(|error|ControlError::HostFailure(error.to_string()))?; NativeWindowPort {manager,owner,document_id:status.document_id} },
                 None if fresh => { let status=manager.open_with_policy(&owner,path.clone(),None,true).map_err(|error|ControlError::HostFailure(error.to_string()))?; NativeWindowPort {manager,owner,document_id:status.document_id} },
                 _ => NativeWindowPort::open_in(manager,owner,path.clone(),path.is_none().then(String::new))?,
             };
@@ -661,30 +705,38 @@ impl Workspace {
                 if opening.request.check().is_err() {return false;}
                 let preview=opening.preview && cx.global::<Settings>().bool("filePreviewEnabled");
                 let anchor=opening.anchor.clone();
+                let generation=opening.generation;
                 match result {
                     Ok((port,loaded))=> {
-                        let mode=match &source {application_dialogs::OpenSource::Reload(previous,_)|application_dialogs::OpenSource::DiskRecovery(_,Some(previous),_)=>workspace.tabs.iter().find(|tab|tab.document==*previous).map(|tab|tab.mode).unwrap_or(cx.global::<Settings>().default_mode),_=>cx.global::<Settings>().default_mode};
+                        let mode=match &source {application_dialogs::OpenSource::Reload(previous,_)|application_dialogs::OpenSource::DiskRecovery(_,Some(previous),_)|application_dialogs::OpenSource::Recovery(_,false,Some(previous),_)=>workspace.tabs.iter().find(|tab|tab.document==*previous).map(|tab|tab.mode).unwrap_or(cx.global::<Settings>().default_mode),_=>cx.global::<Settings>().default_mode};
                         let status=match port.status(){Ok(status)=>status,Err(e)=>{workspace.notice=Some(e.to_string().into());return false;}};
                         let adapter=match crate::nomo_mark::host::WindowHostAdapter::new(loaded.input,"workspace-window",0,loaded.context) {
                             Ok(adapter)=>adapter,Err(e)=>{workspace.notice=Some(e.to_string().into());return false;}
                         };
                         let mut reload_selection=None;
-                        if let application_dialogs::OpenSource::Recovery(candidate,_)=&source {
-                            if let Some(index)=workspace.tabs.iter().position(|tab|tab.document.read(cx).path()==candidate.path && candidate.path.is_some()) {
-                                let previous=workspace.tabs[index].document.clone();
-                                if previous.read(cx).is_dirty(cx){workspace.failure_notice=Some("当前窗口已有未保存修改，恢复资料仍保留。".into());return false;}
-                                if let Err(error)=previous.update(cx,|host,cx|host.close_document(false,cx)){workspace.failure_notice=Some(error.to_string().into());return false;}
-                                workspace.tabs.remove(index);workspace.active=workspace.active.min(workspace.tabs.len().saturating_sub(1));
+                        if let application_dialogs::OpenSource::Recovery(_,false,Some(previous),revision)=&source {
+                            let Some(index)=workspace.tabs.iter().position(|tab|tab.document==*previous) else {return false;};
+                            if previous.read(cx).status().revision!=*revision || previous.read(cx).is_dirty(cx) {
+                                workspace.failure_notice=Some("当前文档已有新修改，草稿仍保留，请使用另存草稿。".into());return false;
                             }
+                            workspace.cancel_export_for(previous);
+                            if let Err(error)=previous.update(cx,|host,cx|host.close_document(false,cx)){workspace.failure_notice=Some(error.to_string().into());return false;}
+                            application_dialogs::clear_external_after_save(workspace,previous,cx);
+                            workspace.forget_document_transition(previous);
+                            workspace.pending_saves.retain(|pending|pending.document!=*previous);
+                            workspace.tabs.remove(index);workspace.active=workspace.active.saturating_sub(usize::from(index<workspace.active)).min(workspace.tabs.len().saturating_sub(1));
                         }
                         let replacement=match &source {application_dialogs::OpenSource::Reload(previous,revision)=>Some((previous,*revision,true)),application_dialogs::OpenSource::DiskRecovery(_,Some(previous),revision)=>Some((previous,*revision,false)),_=>None};
                         if let Some((previous,revision,discard))=replacement {
                             let Some(index)=workspace.tabs.iter().position(|tab|tab.document==*previous) else {return false;};
                             if previous.read(cx).status().revision!=revision {workspace.failure_notice=Some("文档已有新修改，重载已取消。".into());return false;}
                             reload_selection=Some(previous.read(cx).selection(cx));
+                            workspace.cancel_export_for(previous);
                             if let Err(error)=previous.update(cx,|host,cx|host.close_document(discard,cx)) {workspace.failure_notice=Some(error.to_string().into());return false;}
+                            application_dialogs::clear_external_after_save(workspace,previous,cx);
+                            workspace.forget_document_transition(previous);
                             workspace.pending_saves.retain(|pending|pending.document!=*previous);
-                            workspace.tabs.remove(index); workspace.active=workspace.active.min(workspace.tabs.len().saturating_sub(1));
+                            workspace.tabs.remove(index); workspace.active=workspace.active.saturating_sub(usize::from(index<workspace.active)).min(workspace.tabs.len().saturating_sub(1));
                             workspace.search=None; workspace.popover=None;
                         }
                         let document=cx.new(|cx|DocumentHost::workspace(port,adapter,status,if mode==EditorMode::Source {ViewMode::Source}else{ViewMode::Semantic},open_profile,cx));
@@ -726,24 +778,28 @@ impl Workspace {
                             cx.observe(&document,|_,_,cx|cx.notify()),
                         ];
                         let _=document.update(cx,|host,cx|host.set_active(false,cx));
+                        if let Some(path)=document.read(cx).path() {workspace.library.update(cx,|library,cx|library.change(LibraryChange::Opened(path),cx));}
                         if workspace.tree.is_none() {if let Some(parent)=document.read(cx).path().as_ref().or(requested.as_ref()).and_then(|p|p.parent()){workspace.replace_tree(parent.to_path_buf(),cx);}}
                         if preview {for tab in &mut workspace.tabs {tab.preview=false;}}
                         let dirty=document.read(cx).is_dirty(cx);
                         workspace.tabs.push(Tab {document,mode,preview,opened_at:Instant::now(),dirty,dirty_animation_started:dirty.then(Instant::now),hover:ScalarMotion::default(),close_hover:ScalarMotion::default(),active_color:ScalarMotion::default(),hidden_hover:ScalarMotion::default(),autosave:None,_subscriptions:subscriptions});
-                        workspace.activate(workspace.tabs.len()-1,window,cx);
-                        if workspace.active==workspace.tabs.len()-1 {
-                            if let Some(anchor)=anchor {workspace.tabs[workspace.active].document.update(cx,|host,cx|host.anchor(anchor,cx));}
-                        }
-                        if let Some(selection)=reload_selection {if let Some(document)=workspace.document(){let byte=selection.head_byte.min(document.read(cx).status().byte_length);document.update(cx,|host,cx|host.navigate(byte,Some(crate::nomo_mark::protocol::DocumentSelection::caret(byte)),cx));}}
-                        if matches!(&source, application_dialogs::OpenSource::Recovery(_,true)) { if let Some(document)=workspace.document(){workspace.save_document(&document,true,false,window,cx);} }
+                        let save_as=matches!(&source, application_dialogs::OpenSource::Recovery(_,true,_,_));
+                        workspace.activate_after_open(workspace.tabs.len()-1,generation,AfterOpen {anchor,selection:reload_selection,save_as},window,cx);
                         true
                     }
                     Err(e)=>{workspace.failure_notice=Some(format!("打开失败：{e}").into());cx.notify();false}
                 }
             }).unwrap_or(false);
+            let mut recovery_finished=accepted;
             if accepted {if let application_dialogs::OpenSource::DiskRecovery(candidate,_,_)=&source {
                 let candidate=candidate.clone();
-                if let Err(error)=cx.background_executor().spawn(async move{candidate.dismiss()}).await {let _=this.update_in(cx,|workspace,_,cx|{workspace.failure_notice=Some(format!("磁盘版本已打开，旧草稿清理失败：{error}").into());cx.notify();});}
+                let manager=cleanup.as_ref().map(|port|port.manager.clone());
+                if let Some(manager)=manager {
+                    if let Err(error)=cx.background_executor().spawn(async move{manager.dismiss_recovery(&candidate)}).await {
+                        recovery_finished=false;
+                        let _=this.update_in(cx,|workspace,_,cx|{workspace.failure_notice=Some(format!("磁盘版本已打开，旧草稿清理失败：{error}").into());cx.notify();});
+                    }
+                }
             }}
             let cleanup_error=if !accepted {
                 let _=this.update_in(cx,|workspace,_,_| {
@@ -757,28 +813,55 @@ impl Workspace {
                     completed_path=workspace.opening[index].path.clone().or(completed_path);
                     workspace.opening.remove(index);
                 }
-                let retry=completed_path.as_ref().is_some_and(|completed|workspace.deferred_open.as_ref().is_some_and(|(path,_,_)|path==completed));
+                let retry=completed_path.as_ref().is_some_and(|completed|workspace.deferred_open.as_ref().is_some_and(|(path,_,_,_)|path==completed));
                 if let Some(error)=cleanup_error {
                     if retry {workspace.deferred_open=None;}
                     workspace.notice=Some(format!("清理未完成的文档会话失败：{error}").into());
                     cx.notify();
                 } else if retry {
-                    if let Some((path,preview,anchor))=workspace.deferred_open.take() {
-                        workspace.open_path_with_anchor(&path,preview,anchor,window,cx);
+                    if let Some((path,preview,anchor,generation))=workspace.deferred_open.take() {
+                        workspace.open_path_now(&path,preview,anchor,generation,window,cx);
                     }
                 }
+                workspace.finish_recovery_attempt(&source,recovery_finished,cx);
+                workspace.drain_open_requests(window,cx);
+                cx.notify();
             });
         }).detach();
         cx.notify();
     }
 
     fn activate(&mut self,index:usize,window:&mut Window,cx:&mut Context<Self>) {
+        let generation=self.next_open_intent();
+        self.activate_after_open(index,generation,AfterOpen::default(),window,cx);
+    }
+
+    fn activate_after_open(&mut self,index:usize,generation:u64,after:AfterOpen,window:&mut Window,cx:&mut Context<Self>) {
+        if generation!=self.open_requests.generation {return;}
         if index>=self.tabs.len() {return;}
+        let document=self.tabs[index].document.clone();
+        if let Some(current)=self.document() {
+            let target = self.tabs[index].document.downgrade();
+            let after=after.clone();
+            if !self.prepare_document_transition(&current, false, window, cx, move |workspace, window, cx| {
+                if let Some(index) = target.upgrade().and_then(|target| workspace.tabs.iter().position(|tab| tab.document == target)) {
+                    workspace.activate_after_open(index, generation, after, window, cx);
+                }
+            }) { return; }
+        }
+        if self.document().as_ref() != Some(&document) {
+            let target = document.downgrade();
+            let after=after.clone();
+            if !self.prepare_document_transition(&document, false, window, cx, move |workspace, window, cx| {
+                if let Some(index) = target.upgrade().and_then(|target| workspace.tabs.iter().position(|tab| tab.document == target)) {
+                    workspace.activate_after_open(index, generation, after, window, cx);
+                }
+            }) { return; }
+        }
         if !self.leave_mini(window,cx) {return;}
         if index!=self.active {
             if let Some(current)=self.document() {if let Err(e)=current.update(cx,|host,cx|host.set_active(false,cx)) {self.notice=Some(e.to_string().into());cx.notify();return;}}
         }
-        let document=self.tabs[index].document.clone();
         if let Err(e)=document.update(cx,|host,cx|host.set_active(true,cx)) {self.notice=Some(e.to_string().into());cx.notify();return;}
         let from_home = self.home_visible;
         self.home_visible = false;
@@ -798,11 +881,20 @@ impl Workspace {
         if !window.has_active_prompt() { window.focus(&document.focus_handle(cx), cx); }
         self.last_notice=None;
         self.run_search(cx);
+        if let Some(selection)=after.selection {
+            let byte=selection.head_byte.min(document.read(cx).status().byte_length);
+            document.update(cx,|host,cx|host.navigate(byte,Some(crate::nomo_mark::protocol::DocumentSelection::caret(byte)),cx));
+        } else if let Some(anchor)=after.anchor {document.update(cx,|host,cx|host.anchor(anchor,cx));}
+        if after.save_as {self.save_document(&document,true,false,window,cx);}
         cx.notify();
     }
     pub(crate) fn set_mode(&mut self,mode:EditorMode,window:&mut Window,cx:&mut Context<Self>) {
-        if !self.leave_mini(window,cx) {return;}
         let Some(document)=self.document() else{return;};
+        let target = document.downgrade();
+        if !self.prepare_document_transition(&document, false, window, cx, move |workspace, window, cx| {
+            if workspace.document().as_ref() == target.upgrade().as_ref() { workspace.set_mode(mode, window, cx); }
+        }) { return; }
+        if !self.leave_mini(window,cx) {return;}
         match document.update(cx,|host,cx|host.change_mode(mode,cx)) {
             Ok(())=>{self.popover=None;self.toolbar_popup=None;self.close_status(cx);self.tabs[self.active].mode=mode;
                 let preference=match mode { EditorMode::Semantic=>"semantic", EditorMode::Source=>"source", EditorMode::Split=>"split" };
@@ -814,10 +906,15 @@ impl Workspace {
     }
     fn close_tab(&mut self,index:usize,window:&mut Window,cx:&mut Context<Self>) {
         if self.close_prompt || window.has_active_prompt() {return;}
-        if !self.leave_mini(window,cx) {return;}
         let Some(tab)=self.tabs.get(index) else{return;};
         let document=tab.document.clone();
-        if let Err(e)=document.read(cx).ready(cx) {self.notice=Some(e.to_string().into());self.cancel_close(cx);cx.notify();return;}
+        let target = document.downgrade();
+        if !self.prepare_document_transition(&document, true, window, cx, move |workspace, window, cx| {
+            if let Some(index) = target.upgrade().and_then(|target| workspace.tabs.iter().position(|tab| tab.document == target)) {
+                workspace.close_tab(index, window, cx);
+            }
+        }) { return; }
+        if !self.leave_mini(window,cx) {return;}
         if !document.read(cx).is_dirty(cx) {self.remove_tab(&document,false,window,cx);return;}
         self.close_prompt=true;
         let response=dialogs::confirm_save(&document.read(cx).title(),window,cx);
@@ -836,7 +933,10 @@ impl Workspace {
     }
     fn remove_tab(&mut self,document:&Entity<DocumentHost>,discard:bool,window:&mut Window,cx:&mut Context<Self>) {
         let Some(index)=self.tabs.iter().position(|tab|tab.document==*document) else{return;};
+        self.cancel_export_for(document);
         if let Err(e)=document.update(cx,|host,cx|host.close_document(discard,cx)) {self.notice=Some(e.to_string().into());self.cancel_close(cx);cx.notify();return;}
+        application_dialogs::clear_external_after_save(self,document,cx);
+        self.forget_document_transition(document);
         if self.popover.as_ref().and_then(|p|p.document.upgrade()).as_ref()==Some(document) {self.popover=None;}
         self.pending_saves.retain(|pending| &pending.document != document);
         self.tabs.remove(index);
@@ -862,9 +962,15 @@ impl Workspace {
     }
     pub(crate) fn request_close_window(&mut self,window:&mut Window,cx:&mut Context<Self>)->bool {
         if window.has_active_prompt() {return false;}
+        if self.closing_window && !self.tabs.is_empty() {return false;}
+        if let Some(document)=self.document() {
+            if !self.prepare_document_transition(&document, true, window, cx, |workspace, window, cx| {
+                if workspace.request_close_window(window, cx) { window.remove_window(); }
+            }) { return false; }
+        }
         if self.mini.active() { self.toggle_mini(window,cx); return false; }
         if !self.application_dialogs.close_approved {self.choose_close_behavior(window,cx);return false;}
-        if !self.opening.is_empty() {self.notice=Some("文档仍在打开，请稍后关闭".into());cx.notify();return false;}
+        if !self.opening.is_empty() || !self.open_requests.pending.is_empty() {self.notice=Some("文档仍在打开，请稍后关闭".into());cx.notify();return false;}
         if self.tabs.is_empty() {
             if self.library.read(cx).is_busy() {
                 self.waiting_library_close=true;
@@ -878,6 +984,12 @@ impl Workspace {
     fn cancel_close(&mut self,cx:&mut Context<Self>){self.closing_window=false;self.application_dialogs.close_approved=false;crate::cancel_quit(cx);}
     pub(crate) fn request_quit(&mut self,window:&mut Window,cx:&mut Context<Self>)->bool {
         if window.has_active_prompt(){crate::cancel_quit(cx);return false;}
+        if self.closing_window && !self.tabs.is_empty() {return false;}
+        if let Some(document)=self.document() {
+            if !self.prepare_document_transition(&document, true, window, cx, |workspace, window, cx| {
+                if workspace.request_quit(window, cx) { window.remove_window(); }
+            }) { return false; }
+        }
         if !self.leave_mini(window,cx) {crate::cancel_quit(cx);return false;}
         if self.tabs.iter().any(|tab|tab.document.read(cx).is_dirty(cx)){self.reveal_window(window,cx);}
         self.application_dialogs.close_approved=true;
@@ -887,21 +999,29 @@ impl Workspace {
         if !self.leave_mini(window,cx) {return;}
         let response=cx.prompt_for_paths(PathPromptOptions {files:!directories,directories,multiple:!directories,prompt:Some("打开".into())});
         cx.spawn_in(window,async move |this,cx| {
-            if let Ok(Ok(Some(paths)))=response.await {let _=this.update_in(cx,|workspace,window,cx| {for path in paths {workspace.open_path(&path,window,cx);}});}
+            if let Ok(Ok(Some(paths)))=response.await {let _=this.update_in(cx,|workspace,window,cx| {workspace.open_paths(paths,window,cx);});}
         }).detach();
     }
     fn save_document(&mut self,document:&Entity<DocumentHost>,save_as:bool,close_after:bool,window:&mut Window,cx:&mut Context<Self>) {
         if !save_as && self.resolve_external_before_save(document,window,cx){return;}
         let existing=document.read(cx).path();
         if !save_as {if let Some(path)=existing.clone() {self.save_path(document.clone(),path,true,close_after,window,cx);return;}}
-        let directory=existing.as_ref().and_then(|p|p.parent()).map(PathBuf::from).unwrap_or_else(||std::env::current_dir().unwrap_or_default());
-        let filename=if existing.is_some(){document.read(cx).title()}else{"未命名.md".into()};
-        let response=cx.prompt_for_new_path(&directory,Some(&filename));
+        let response=match document.update(cx,|host,cx| {
+            host.set_save_directory(self.tree.as_ref().map(|tree|tree.root.as_path()));
+            host.prompt_save_path(window,cx)
+        }) {
+            Ok(response)=>response,
+            Err(error)=>{self.failure_notice=Some(error.to_string().into());self.cancel_close(cx);cx.notify();return;}
+        };
         let document=document.clone();
         cx.spawn_in(window,async move |this,cx| {
-            let path=response.await.ok().and_then(Result::ok).flatten();
+            let result=response.await;
             let _=this.update_in(cx,|workspace,window,cx| {
-                if let Some(path)=path {workspace.save_path(document,path,false,close_after,window,cx);}else{workspace.cancel_close(cx);}
+                match result {
+                    Ok(Some(path))=>workspace.save_path(document,path,false,close_after,window,cx),
+                    Ok(None)=>workspace.cancel_close(cx),
+                    Err(error)=>{workspace.failure_notice=Some(error.to_string().into());workspace.cancel_close(cx);cx.notify();}
+                }
             });
         }).detach();
     }
@@ -951,10 +1071,19 @@ impl Workspace {
 
     // ---- 搜索 ----
 
+    fn toggle_search(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.as_ref().is_some_and(|search| search.show_replace == replace) {
+            self.close_search(window, cx);
+        } else {
+            self.open_search(replace, window, cx);
+        }
+    }
+
     pub(crate) fn open_search(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.popover=None;
         let Some(buffer) = self.document() else { return };
         let selected = buffer.read(cx).selected_text(cx);
+        let was_open = self.search.is_some();
         if self.search.is_none() {
             let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
             let query = cx.new(|cx| TextField::new(locale.text("find"), cx));
@@ -970,9 +1099,9 @@ impl Workspace {
             self.search = Some(SearchPanel { query, replacement, show_replace: replace, case_sensitive: false, whole_word: false, backwards: false, wrap_around: true, _subscriptions: subscriptions });
         }
         let search = self.search.as_mut().expect("created");
-        search.show_replace |= replace;
+        search.show_replace = replace;
         let query = search.query.clone();
-        if !selected.is_empty() && !selected.contains('\n') && selected.len() < 200 {
+        if !was_open && !selected.is_empty() && !selected.contains('\n') && selected.len() < 200 {
             query.update(cx, |field, cx| field.set_text(&selected, cx));
         } else {
             let text = query.read(cx).content.clone();
@@ -1055,6 +1184,28 @@ impl Workspace {
         }
     }
 
+    fn open_block_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(document) = self.document() else { return; };
+        let target = document.clone();
+        if !self.prepare_document_transition(&document, false, window, cx, move |workspace, window, cx| {
+            if workspace.document().as_ref() == Some(&target) { workspace.open_block_comment(window, cx); }
+        }) { return; }
+        if let Err(error) = document.update(cx, |host, cx| host.begin_block_comment(window, cx)) {
+            self.notice = Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).error(&error).into()); cx.notify();
+        }
+    }
+
+    fn open_front_matter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(document) = self.document() else { return; };
+        let target = document.clone();
+        if !self.prepare_document_transition(&document, false, window, cx, move |workspace, window, cx| {
+            if workspace.document().as_ref() == Some(&target) { workspace.open_front_matter(window, cx); }
+        }) { return; }
+        if let Err(error) = document.update(cx, |host, cx| host.edit_front_matter(window, cx)) {
+            self.notice = Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).error(&error).into()); cx.notify();
+        }
+    }
+
     fn open_editor_popover(&mut self,kind:EditorPopoverKind,window:&mut Window,cx:&mut Context<Self>) {
         self.open_editor_popover_at(kind, None, window, cx);
     }
@@ -1130,14 +1281,18 @@ impl Workspace {
             ChromeEvent::Quit=>cx.defer(crate::quit_workspaces),
             ChromeEvent::NewWindow=>crate::open_workspace(Vec::new(),cx),
             ChromeEvent::Command(ChromeCommand::Heading(level))=>self.with_document(window,cx,|host,cx|host.set_heading(*level,cx)),
+            ChromeEvent::Command(ChromeCommand::AdjustHeading { increase })=>self.with_document(window,cx,|host,cx|host.command(crate::nomo_mark::commands::EditIntent::AdjustHeading { increase: *increase },cx)),
             ChromeEvent::Command(ChromeCommand::ClearFormatting)=>self.with_document(window,cx,|host,cx|host.command(crate::nomo_mark::commands::EditIntent::ClearFormatting,cx)),
             ChromeEvent::Command(ChromeCommand::MathInline)=>self.open_inline_math(window,cx),
             ChromeEvent::Command(ChromeCommand::InlineComment)=>self.open_inline_comment(window,cx),
+            ChromeEvent::Command(ChromeCommand::BlockComment)=>self.open_block_comment(window,cx),
+            ChromeEvent::Export(format)=>self.export_document(*format,window,cx),
+            ChromeEvent::FrontMatter=>self.open_front_matter(window,cx),
             ChromeEvent::Command(ChromeCommand::Callout)=>self.with_document(window,cx,|host,cx|host.insert_block("> [!NOTE]\n> ",12,cx)),
             ChromeEvent::Command(ChromeCommand::Details)=>self.with_document(window,cx,|host,cx|host.command(crate::nomo_mark::commands::EditIntent::InsertDetails,cx)),
             ChromeEvent::Command(ChromeCommand::Footnote)=>self.with_document(window,cx,|host,cx|host.insert_footnote(cx)),
             ChromeEvent::Command(ChromeCommand::Toc)=>self.with_document(window,cx,|host,cx|host.insert_toc(cx)),
-            ChromeEvent::Command(ChromeCommand::Diagram(kind))=>{let template=toolbar::diagram_template(*kind);self.with_document(window,cx,|host,cx|host.command(crate::nomo_mark::commands::EditIntent::InsertDiagram(template.into()),cx));},
+            ChromeEvent::Command(ChromeCommand::Diagram(kind))=>{let template=toolbar::diagram_template(*kind, &cx.global::<Settings>().string("defaultDiagramType"));self.with_document(window,cx,|host,cx|host.command(crate::nomo_mark::commands::EditIntent::InsertDiagram(template.into()),cx));},
             ChromeEvent::LinkPicker=>self.open_editor_popover(EditorPopoverKind::Link,window,cx),
             ChromeEvent::TablePicker=>self.open_editor_popover(EditorPopoverKind::Table,window,cx),
             ChromeEvent::ResetOutlinePosition=>self.reset_outline_position(cx),
@@ -1384,7 +1539,8 @@ impl Workspace {
         self.pending_tree_click.take();
         self.deferred_open=None;
         self.cancel_preview_opens(None);
-        self.open_document(None,false,None,window,cx);
+        self.enqueue_open(None,false,None,false,cx);
+        self.drain_open_requests(window,cx);
     }
 
     fn render_search(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1448,7 +1604,7 @@ impl Workspace {
                         })))
                         .child(small_icon_button("prev", IconName::ArrowUp, false, theme).tooltip(tooltip(format!("{} ⇧⏎", locale.text("previous")))).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.step_match(false, window, cx))))
                         .child(small_icon_button("next", IconName::ArrowDown, false, theme).tooltip(tooltip(format!("{} ⏎", locale.text("next")))).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.step_match(true, window, cx))))
-                        .child(small_icon_button("toggle-replace", IconName::Replace, show_replace, theme).tooltip(tooltip(locale.tooltip("replace", "⌘⌥F"))).on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
+                        .child(small_icon_button("toggle-replace", IconName::Replace, show_replace, theme).tooltip(tooltip(locale.tooltip("replace", if cfg!(target_os = "macos") { "⌘⌥F" } else { "Ctrl+H" }))).on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
                             if let Some(search) = &mut w.search {
                                 search.show_replace = !search.show_replace;
                             }
@@ -1515,13 +1671,17 @@ impl Render for Workspace {
             None => {}
         }
         let mini = self.mini.active();
-        let failure = self.failure_notice.take();
-        let persistent = failure.is_some();
-        if let Some(message) = failure.or_else(|| self.notice.take()) {
-            self.last_notice = Some(message.clone());
-            if persistent { self.notice = None; }
-            if let Some(toast) = &self.toast { toast.update(cx, |toast, cx| toast.show_with(message, persistent, cx)); }
-            else { self.toast = Some(cx.new(|cx| Toast::new_with(message, persistent, cx))); }
+        // 确认框期间保留待显示消息，避免 Toast 在被遮挡时已经计时结束。
+        if !window.has_active_prompt() {
+            let failure = self.failure_notice.take();
+            let is_failure = failure.is_some();
+            if let Some(message) = failure.or_else(|| self.notice.take()) {
+                self.last_notice = Some(message.clone());
+                if is_failure { self.notice = None; }
+                let duration = Duration::from_millis(if is_failure { 3500 } else { 1500 });
+                if let Some(toast) = &self.toast { toast.update(cx, |toast, cx| toast.show(message, duration, cx)); }
+                else { self.toast = Some(cx.new(|cx| Toast::new(message, duration, cx))); }
+            }
         }
         let reduced = self.explorer.reduce_motion;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
@@ -1553,10 +1713,10 @@ impl Render for Workspace {
             can_redo:status.as_ref().is_some_and(|s|s.can_redo),mode:mode.unwrap_or(EditorMode::Semantic),
             sidebar_visible:settings.show_sidebar, toolbar_visible:settings.show_toolbar,
             outline_visible:settings.show_outline,split_available:true,
-            toolbar_shortcut:"Ctrl + Shift + B".into(),
+            toolbar_shortcut: crate::ui::shortcuts::current("toggle-toolbar", cx).into(),
             recent, document_title,
-            capabilities:vec![ChromeCapability::Recent,ChromeCapability::NewWindow,ChromeCapability::HeadingLevels,ChromeCapability::ClearFormatting,ChromeCapability::LinkPicker,ChromeCapability::TablePicker,ChromeCapability::MathInline,ChromeCapability::Callout,ChromeCapability::Details,ChromeCapability::InlineComment,ChromeCapability::Diagrams,ChromeCapability::Footnote,ChromeCapability::Toc,ChromeCapability::UnavailableNotice,ChromeCapability::ResetOutlinePosition]
-                .into_iter().chain((cfg!(windows) && status.is_some() && !window.is_fullscreen()).then_some(ChromeCapability::Mini)).collect(),
+            capabilities:vec![ChromeCapability::Recent,ChromeCapability::NewWindow,ChromeCapability::HeadingLevels,ChromeCapability::HeadingAdjustment,ChromeCapability::ClearFormatting,ChromeCapability::LinkPicker,ChromeCapability::TablePicker,ChromeCapability::MathInline,ChromeCapability::Callout,ChromeCapability::Details,ChromeCapability::InlineComment,ChromeCapability::BlockComment,ChromeCapability::FrontMatter,ChromeCapability::Diagrams,ChromeCapability::Footnote,ChromeCapability::Toc,ChromeCapability::UnavailableNotice,ChromeCapability::ResetOutlinePosition]
+                .into_iter().chain([ChromeCapability::ExportHtml, ChromeCapability::ExportPdf, ChromeCapability::ExportWord].into_iter().filter(|_| self.export_job.is_none())).chain((cfg!(windows) && status.is_some() && !window.is_fullscreen()).then_some(ChromeCapability::Mini)).collect(),
             ..Default::default()
         },cx));
         let tabs = show_tabs.then(|| self.render_tabs(&theme, cx).into_any_element());
@@ -1580,6 +1740,7 @@ impl Render for Workspace {
             Some(mode) => {
                 let toolbar = if mini { None } else { self.render_toolbar_animated(settings.show_toolbar, &theme, mode, cx) };
                 let tab = self.tab().expect("active tab");
+                tab.document.update(cx, |host, _| host.set_save_directory(self.tree.as_ref().map(|tree|tree.root.as_path())));
                 let editors=div().size_full().child(tab.document.clone()).into_any_element();
                 let outline = if mini { None } else { self.render_outline_panel(&theme, window, cx) };
                 let measured = self.outline_ui.bounds.clone();
@@ -1641,6 +1802,7 @@ impl Render for Workspace {
             .on_mouse_up_out(MouseButton::Left, cx.listener(|workspace, event: &gpui::MouseUpEvent, window, cx| workspace.outline_mouse_up_out(event, window, cx)))
             .on_action(cx.listener(|w, _: &NewFile, window, cx| w.new_file(window, cx)))
             .on_action(cx.listener(|w, _: &ShowHome, window, cx| w.show_home(window, cx)))
+            .on_action(cx.listener(|w, _: &RecoverDocuments, window, cx| w.show_recovery_list(window, cx)))
             .on_action(cx.listener(|w, _: &ToggleMini, window, cx| w.toggle_mini(window, cx)))
             .on_action(cx.listener(|w, _: &OpenFile, window, cx| w.prompt_open(false, window, cx)))
             .on_action(cx.listener(|w, _: &OpenFolder, window, cx| w.prompt_open(true, window, cx)))
@@ -1649,6 +1811,9 @@ impl Render for Workspace {
                     w.save_document(&buffer,false,false,window,cx);
                 }
             }))
+            .on_action(cx.listener(|w, _: &ExportHtml, window, cx| w.export_document(crate::document_export::Format::Html, window, cx)))
+            .on_action(cx.listener(|w, _: &ExportPdf, window, cx| w.export_document(crate::document_export::Format::Pdf, window, cx)))
+            .on_action(cx.listener(|w, _: &ExportWord, window, cx| w.export_document(crate::document_export::Format::Word, window, cx)))
             .on_action(cx.listener(|w, _: &SaveAs, window, cx| {
                 if let Some(buffer) = w.document() {
                     w.save_document(&buffer,true,false,window,cx);
@@ -1673,6 +1838,8 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|w, _: &Find, window, cx| w.open_search(false, window, cx)))
             .on_action(cx.listener(|w, _: &FindReplace, window, cx| w.open_search(true, window, cx)))
+            .on_action(cx.listener(|w, _: &ToggleFind, window, cx| w.toggle_search(false, window, cx)))
+            .on_action(cx.listener(|w, _: &ToggleReplace, window, cx| w.toggle_search(true, window, cx)))
             .on_action(cx.listener(|w, _: &FindNext, window, cx| w.step_match(true, window, cx)))
             .on_action(cx.listener(|w, _: &FindPrev, window, cx| w.step_match(false, window, cx)))
             .on_action(cx.listener(|w, _: &ToggleSource, window, cx| {
@@ -1704,6 +1871,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &Heading4, window, cx| w.with_document(window, cx, |b, cx| b.set_heading(4, cx))))
             .on_action(cx.listener(|w, _: &Heading5, window, cx| w.with_document(window, cx, |b, cx| b.set_heading(5, cx))))
             .on_action(cx.listener(|w, _: &Heading6, window, cx| w.with_document(window, cx, |b, cx| b.set_heading(6, cx))))
+            .on_action(cx.listener(|w, _: &PromoteHeading, window, cx| w.with_document(window, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::AdjustHeading { increase: true }, cx))))
+            .on_action(cx.listener(|w, _: &DemoteHeading, window, cx| w.with_document(window, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::AdjustHeading { increase: false }, cx))))
             .on_action(cx.listener(|w, _: &ClearFormatting, window, cx| w.with_document(window,cx,|b,cx|b.command(crate::nomo_mark::commands::EditIntent::ClearFormatting,cx))))
             .on_action(cx.listener(|_, _: &NewWindow, _, cx|crate::open_workspace(Vec::new(),cx)))
             .on_action(cx.listener(|w, _: &Paragraph, window, cx| w.with_document(window, cx, |b, cx| b.set_heading(0, cx))))
@@ -1714,7 +1883,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &CodeBlock, window, cx| w.with_document(window, cx, |b, cx| insert_code_block(b, cx))))
             .on_action(cx.listener(|w, _: &Table, window, cx| w.open_editor_popover(EditorPopoverKind::Table,window,cx)))
             .on_action(cx.listener(|w, _: &MathBlock, window, cx| w.with_document(window, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::InsertMathBlock, cx))))
-            .on_action(cx.listener(|w, _: &Rule, window, cx| w.with_document(window, cx, |b, cx| b.insert_block("---", 3, cx))))
+            .on_action(cx.listener(|w, _: &BlockComment, window, cx| w.open_block_comment(window, cx)))
+            .on_action(cx.listener(|w, _: &EditFrontMatter, window, cx| w.open_front_matter(window, cx)))
+            .on_action(cx.listener(|w, _: &Rule, window, cx| w.with_document(window, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::ToggleRule, cx))))
             .on_action(cx.listener(|w, _: &crate::editor::Undo, _, cx| {if let Some(doc)=w.document(){doc.update(cx,|h,cx|h.undo_redo(false,cx));}}))
             .on_action(cx.listener(|w, _: &crate::editor::Redo, _, cx| {if let Some(doc)=w.document(){doc.update(cx,|h,cx|h.undo_redo(true,cx));}}))
             .on_action(cx.listener(|_, _: &Quit, _, cx|cx.defer(crate::quit_workspaces)))
@@ -1769,22 +1940,17 @@ pub fn bind_keys(cx: &mut App) {
     use gpui::KeyBinding;
     let context = Some("Workspace");
     cx.bind_keys([
-        crate::ui::key_binding("secondary-n", NewFile, context, cx),
-        crate::ui::key_binding("secondary-shift-h", ShowHome, context, cx),
-        crate::ui::key_binding("secondary-alt-m", ToggleMini, context, cx),
+        crate::ui::key_binding("secondary-alt-shift-h", ShowHome, context, cx),
         crate::ui::key_binding("secondary-shift-n", NewWindow, context, cx),
-        crate::ui::key_binding("secondary-o", OpenFile, context, cx),
         crate::ui::key_binding("secondary-shift-o", OpenFolder, context, cx),
-        crate::ui::key_binding("secondary-s", Save, context, cx),
         crate::ui::key_binding("secondary-shift-s", SaveAs, context, cx),
         crate::ui::key_binding("secondary-w", CloseTab, context, cx),
         KeyBinding::new("ctrl-tab", NextTab, context),
         KeyBinding::new("ctrl-shift-tab", PrevTab, context),
-        crate::ui::key_binding("secondary-f", Find, context, cx),
-        crate::ui::key_binding("secondary-alt-f", FindReplace, context, cx),
+        crate::ui::key_binding("secondary-f", ToggleFind, context, cx),
+        crate::ui::key_binding("secondary-alt-f", ToggleReplace, context, cx),
         crate::ui::key_binding("secondary-g", FindNext, context, cx),
         crate::ui::key_binding("secondary-shift-g", FindPrev, context, cx),
-        crate::ui::key_binding("secondary-e", ToggleSource, context, cx),
         crate::ui::key_binding("secondary-1", Heading1, context, cx),
         crate::ui::key_binding("secondary-2", Heading2, context, cx),
         crate::ui::key_binding("secondary-3", Heading3, context, cx),
@@ -1796,12 +1962,9 @@ pub fn bind_keys(cx: &mut App) {
         crate::ui::key_binding("secondary-shift-z", crate::editor::Redo, Some("Outline"), cx),
         KeyBinding::new("ctrl-y", crate::editor::Redo, Some("Outline")),
         crate::ui::key_binding("secondary-alt-s", ToggleSidebar, context, cx),
-        crate::ui::key_binding("secondary-shift-f", ToggleSidebar, context, cx),
-        crate::ui::key_binding("secondary-shift-b", ToggleToolbar, context, cx),
-        crate::ui::key_binding("secondary-shift-l", ToggleTheme, context, cx),
-        crate::ui::key_binding("secondary-=", ZoomIn, context, cx),
+        crate::ui::key_binding("secondary-=", PromoteHeading, context, cx),
         crate::ui::key_binding("secondary-+", ZoomIn, context, cx),
-        crate::ui::key_binding("secondary--", ZoomOut, context, cx),
+        crate::ui::key_binding("secondary--", DemoteHeading, context, cx),
         crate::ui::key_binding("secondary-0", Paragraph, context, cx),
         crate::ui::key_binding("secondary-b", Bold, context, cx),
         crate::ui::key_binding("secondary-i", Italic, context, cx),
@@ -1813,17 +1976,15 @@ pub fn bind_keys(cx: &mut App) {
         crate::ui::key_binding("secondary-u", Underline, context, cx),
         crate::ui::key_binding("secondary-shift-h", Rule, context, cx),
         crate::ui::key_binding("secondary-`", InlineCode, context, cx),
-        crate::ui::key_binding("secondary-\\", ClearFormatting, context, cx),
         crate::ui::key_binding("secondary-shift-c", InlineCode, context, cx),
-        crate::ui::key_binding("secondary-k", Link, context, cx),
         crate::ui::key_binding("secondary-alt-1", Heading1, context, cx),
         crate::ui::key_binding("secondary-alt-2", Heading2, context, cx),
         crate::ui::key_binding("secondary-alt-3", Heading3, context, cx),
         crate::ui::key_binding("secondary-alt-0", Paragraph, context, cx),
-        crate::ui::key_binding("secondary-shift-k", CodeBlock, context, cx),
-        crate::ui::key_binding("secondary-shift-t", Table, context, cx),
-        crate::ui::key_binding("secondary-shift-m", MathBlock, context, cx),
         crate::ui::key_binding("secondary-q", Quit, None, cx),
         crate::ui::key_binding("secondary-,", OpenSettings, None, cx),
     ]);
+    if !cfg!(target_os = "macos") {
+        cx.bind_keys([KeyBinding::new("ctrl-h", ToggleReplace, context)]);
+    }
 }

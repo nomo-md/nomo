@@ -2,35 +2,39 @@
 use super::*;
 use crate::text_document::markdown_session::{ExternalChange, RecoveryCandidate};
 use crate::ui::{dialogs::{SecondaryDialog, SecondaryKind, SecondaryAction as A, Tone}, toolbar_i18n::ToolbarLocale};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 #[derive(Clone)]
-pub(super) enum OpenSource { File, Reload(Entity<DocumentHost>,u64), Recovery(RecoveryCandidate,bool), DiskRecovery(RecoveryCandidate,Option<Entity<DocumentHost>>,u64) }
+pub(super) enum OpenSource { File, Reload(Entity<DocumentHost>,u64), Recovery(RecoveryCandidate,bool,Option<Entity<DocumentHost>>,u64), DiskRecovery(RecoveryCandidate,Option<Entity<DocumentHost>>,u64) }
 #[derive(Default)]
 pub(super) struct ApplicationDialogs {
-    pub ready: bool,
     pub close_approved: bool,
     tray: Option<crate::ui::tray::TrayIcon>,
     watch: Option<Task<()>>,
     probe: Option<Task<()>>,
     checking: bool,
+    /// 只记录最近一次失败的身份摘要，避免每 1.2 秒的检查反复弹出相同错误。
+    probe_failure: Option<u64>,
     generation: u64,
-    busy: bool,
+    pub(super) busy: bool,
     ignored: HashMap<String,ExternalChange>,
-    recoveries: VecDeque<RecoveryCandidate>,
-    opening: VecDeque<PathBuf>,
+    mini_deferred: std::collections::HashSet<String>,
 }
-#[derive(Default)]
-struct RecoveryStarted;
-impl gpui::Global for RecoveryStarted {}
+
 
 fn spec(kind:SecondaryKind,title:String,message:String,actions:Vec<A>,cancel:usize)->SecondaryDialog {
     SecondaryDialog {kind,title,message,detail:None,notes:None,actions,cancel,remember:None,leading:Vec::new()}
 }
 fn display(path:&Path)->String { super::explorer_actions::display_tree_path(path) }
-pub(super) fn clear_external_after_save(workspace:&mut Workspace,document:&Entity<DocumentHost>,cx:&App){workspace.application_dialogs.ignored.remove(&document.read(cx).status().document_id);workspace.application_dialogs.generation=workspace.application_dialogs.generation.wrapping_add(1);}
+pub(super) fn clear_external_after_save(workspace:&mut Workspace,document:&Entity<DocumentHost>,cx:&App){
+    let id=&document.read(cx).status().document_id;
+    workspace.application_dialogs.ignored.remove(id);
+    workspace.application_dialogs.mini_deferred.remove(id);
+    workspace.application_dialogs.generation=workspace.application_dialogs.generation.wrapping_add(1);
+}
 pub(super) fn mark_recovered_change(workspace:&mut Workspace,document:&Entity<DocumentHost>,source:&OpenSource,cx:&App){
-    if let OpenSource::Recovery(candidate,_)=source {if let Some(change)=&candidate.change {workspace.application_dialogs.ignored.insert(document.read(cx).status().document_id.clone(),change.clone());}}
+    if let OpenSource::Recovery(candidate,false,_,_)=source {if let Some(change)=&candidate.change {workspace.application_dialogs.ignored.insert(document.read(cx).status().document_id.clone(),change.clone());}}
 }
 
 impl Workspace {
@@ -40,24 +44,15 @@ impl Workspace {
         if let Some(document)=self.document(){let _=document.update(cx,|host,cx|host.set_active(true,cx));}
     }
     pub(super) fn start_application_dialogs(&mut self,window:&mut Window,cx:&mut Context<Self>) {
-        self.application_dialogs.ready=true;
-        if cx.try_global::<RecoveryStarted>().is_none() {
-            cx.set_global(RecoveryStarted);
-            if let Some(manager)=self.services.clone() {
-                let task=cx.background_executor().spawn(async move {manager.recovery_candidates()});
-                cx.spawn_in(window,async move |this,cx| {
-                    let result=task.await;
-                    let _=this.update_in(cx,|workspace,_,cx| {match result {Ok(candidates)=>workspace.application_dialogs.recoveries=candidates.into(),Err(error)=>workspace.failure_notice=Some(format!("恢复资料检查失败：{error}").into())};cx.notify();});
-                }).detach();
-            }
-        }
+        self.start_recovery_catalog(cx);
         self.application_dialogs.watch=Some(cx.spawn_in(window,async move |this,cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(1200)).await;
                 if this.update_in(cx,|workspace,window,cx| {
                     if workspace.application_dialogs.busy || window.has_active_prompt() || workspace.closing_window || !workspace.opening.is_empty() {return;}
-                    if let Some(path)=workspace.application_dialogs.opening.pop_front() {workspace.route_open_path(path,window,cx);return;}
-                    if let Some(candidate)=workspace.application_dialogs.recoveries.pop_front() {workspace.choose_recovery(candidate,window,cx);return;}
+                    workspace.drain_open_requests(window,cx);
+                    if workspace.application_dialogs.busy || window.has_active_prompt() || !workspace.opening.is_empty() || workspace.pending_document_transition.is_some() {return;}
+                    if workspace.offer_document_recovery(window,cx) {return;}
                     if crate::ui::updates::present_pending(window,cx){return;}
                     if window.is_window_active() {workspace.check_external_change(window,cx);}
                 }).is_err(){break;}
@@ -66,28 +61,22 @@ impl Workspace {
         crate::ui::updates::startup(window,cx);
     }
 
-    pub(super) fn route_open_path(&mut self,path:PathBuf,window:&mut Window,cx:&mut Context<Self>) {
-        if self.application_dialogs.busy || window.has_active_prompt() {
-            if self.application_dialogs.opening.len()<64 {self.application_dialogs.opening.push_back(path);}
-            else {self.failure_notice=Some("打开请求过多，请等待当前选择完成。".into());cx.notify();}
-            return;
-        }
+    pub(super) fn route_open_request(&mut self,mut request:OpenRequest,window:&mut Window,cx:&mut Context<Self>) {
+        let Some(path)=request.path.take() else {self.open_request_here(request,window,cx);return;};
         let path=path.canonicalize().unwrap_or(path);
+        request.path=Some(path.clone());
+        if self.reuse_open_document(&request,window,cx) {return;}
         let current=window.window_handle();
         let mut directory_windows=Vec::new();
         for handle in cx.windows().into_iter().filter_map(|handle|handle.downcast::<Workspace>()) {
             if gpui::AnyWindowHandle::from(handle)==current {continue;}
-            let match_result=handle.update(cx,|workspace,window,cx| {
-                if let Some(index)=workspace.tabs.iter().position(|tab|tab.document.read(cx).path().as_ref()==Some(&path)) {workspace.activate(index,window,cx);workspace.reveal_window(window,cx);return (true,None);}
-                (false,workspace.tree.as_ref().filter(|tree|path.starts_with(&tree.root)).map(|tree|tree.root.clone()))
-            });
-            if let Ok((opened,root))=match_result {if opened{return;}if let Some(root)=root {directory_windows.push((handle,root));}}
+            if let Ok(Some(root))=handle.update(cx,|workspace,_,_|workspace.tree.as_ref().filter(|tree|path.starts_with(&tree.root)).map(|tree|tree.root.clone())) {directory_windows.push((handle,root));}
         }
         let reusable=self.tabs.is_empty() && self.opening.is_empty();
         let belongs=self.tree.as_ref().is_some_and(|tree|path.starts_with(&tree.root));
         let already=self.tabs.iter().any(|tab|tab.document.read(cx).path().as_ref()==Some(&path));
         let preference=cx.global::<Settings>().string("openDefaultBehavior");
-        if reusable || belongs || already || preference=="current-window" {self.open_path_with_preview(&path,false,window,cx);return;}
+        if !request.choose_window || reusable || belongs || already || preference=="current-window" {self.open_request_here(request,window,cx);return;}
         if preference=="new-window" {crate::open_workspace(vec![path],cx);return;}
         let locale=ToolbarLocale::current(cx);
         let name=path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
@@ -104,20 +93,29 @@ impl Workspace {
             let _=this.update_in(cx,|workspace,window,cx| {
                 workspace.application_dialogs.busy=false;
                 if choice.index<current_index {
-                    if let Some((handle,_))=directory_windows.get(choice.index) {let _=handle.update(cx,|target,window,cx|{target.open_path_with_preview(&path,false,window,cx);target.reveal_window(window,cx);});}
-                } else if choice.index==current_index {if choice.remember {Settings::set(cx,"openDefaultBehavior",serde_json::json!("current-window"));}workspace.open_path_with_preview(&path,false,window,cx);}
-                else if choice.index==current_index+1 {if choice.remember {Settings::set(cx,"openDefaultBehavior",serde_json::json!("new-window"));}crate::open_workspace(vec![path],cx);}
+                    if let Some((handle,_))=directory_windows.get(choice.index) {let _=handle.update(cx,|target,window,cx|{
+                        target.enqueue_open(Some(path),false,None,false,cx);
+                        target.drain_open_requests(window,cx);target.reveal_window(window,cx);
+                    });}
+                } else if choice.index==current_index {
+                    if choice.remember {Settings::set(cx,"openDefaultBehavior",serde_json::json!("current-window"));}
+                    if !workspace.reuse_open_document(&request,window,cx) {workspace.open_requests.pending.push_front(OpenRequest {choose_window:false,..request});}
+                } else if choice.index==current_index+1 {
+                    if choice.remember {Settings::set(cx,"openDefaultBehavior",serde_json::json!("new-window"));}
+                    if !workspace.reuse_open_document(&request,window,cx) {crate::open_workspace(vec![path],cx);}
+                }
+                workspace.drain_open_requests(window,cx);
                 cx.notify();
             });
         }).detach();
     }
-
     pub(super) fn check_external_change(&mut self,window:&mut Window,cx:&mut Context<Self>) {
         if self.application_dialogs.checking || window.has_active_prompt() || self.application_dialogs.busy {return;}
         let Some(document)=self.document() else {return;};
         if document.read(cx).ready(cx).is_err() || document.read(cx).path().is_none() {return;}
         let port=document.read(cx).port();
         self.application_dialogs.ignored.retain(|id,change|self.tabs.iter().any(|tab|{let host=tab.document.read(cx);host.status().document_id==*id&&host.path().as_ref()==Some(&change.path)}));
+        self.application_dialogs.mini_deferred.retain(|id| self.application_dialogs.ignored.contains_key(id));
         self.application_dialogs.checking=true;
         let generation=self.application_dialogs.generation;
         let task=cx.background_executor().spawn(async move {port.manager.external_change(&port.owner,&port.document_id)});
@@ -125,22 +123,56 @@ impl Workspace {
             let result=task.await;
             let _=this.update_in(cx,|workspace,window,cx| {
                 workspace.application_dialogs.checking=false;
-                if generation!=workspace.application_dialogs.generation || workspace.document().as_ref()!=Some(&document) || window.has_active_prompt() || document.read(cx).ready(cx).is_err() {return;}
+                if generation!=workspace.application_dialogs.generation || workspace.document().as_ref()!=Some(&document) || window.has_active_prompt() || workspace.application_dialogs.busy || !workspace.opening.is_empty() || workspace.pending_document_transition.is_some() || document.read(cx).ready(cx).is_err() {return;}
+                if result.is_ok() { workspace.application_dialogs.probe_failure = None; }
                 match result {
                     Ok(Some(change)) if document.read(cx).status().revision==change.revision && document.read(cx).path().as_ref()==Some(&change.path) => {
                         let id=document.read(cx).status().document_id.clone();
-                        if workspace.application_dialogs.ignored.get(&id).map(|change|&change.token)!=Some(&change.token) {
+                        // 必须先消费延迟标记；磁盘令牌改变时也不能被 || 短路留到下一轮。
+                        let deferred = !workspace.mini.active() && workspace.application_dialogs.mini_deferred.remove(&id);
+                        if workspace.application_dialogs.ignored.get(&id).map(|change|&change.token)!=Some(&change.token) || deferred {
                             if workspace.mini.active() {
+                                workspace.application_dialogs.mini_deferred.insert(id.clone());
                                 workspace.application_dialogs.ignored.insert(id,change);
                                 cx.notify();
-                            } else {workspace.choose_external(document,change,window,cx);}
+                            } else if !workspace.apply_external_preference(&document, &change, window, cx) {workspace.choose_external(document,change,window,cx);}
                         }
                     }
-                    Err(error)=>{workspace.failure_notice=Some(format!("检查外部文件变化失败：{error}").into());cx.notify();},
+                    Err(error)=>{
+                        let message = format!("检查外部文件变化失败：{error}");
+                        let mut hash = DefaultHasher::new();
+                        (document.entity_id(), document.read(cx).path(), &message).hash(&mut hash);
+                        let key = hash.finish();
+                        if workspace.application_dialogs.probe_failure != Some(key) {
+                            workspace.application_dialogs.probe_failure = Some(key);
+                            workspace.failure_notice = Some(message.into());
+                            cx.notify();
+                        }
+                    },
                     _=>{}
                 }
             });
         }));
+    }
+
+    /// 原版仅在没有本地修改时自动处理；忽略仍保留保存冲突，覆盖仍验证检测到的磁盘身份。
+    fn apply_external_preference(&mut self, document: &Entity<DocumentHost>, change: &ExternalChange, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if change.deleted || document.read(cx).is_dirty(cx) { return false; }
+        let preference = cx.global::<Settings>().string("externalFileChangeBehavior");
+        if !matches!(preference.as_str(), "reload-external" | "overwrite-external" | "ignore") { return false; }
+        self.pending_saves.retain(|pending| pending.document != *document);
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.document == *document) { tab.autosave = None; }
+        self.application_dialogs.ignored.insert(document.read(cx).status().document_id.clone(), change.clone());
+        match preference.as_str() {
+            "reload-external" => {
+                let generation = self.next_open_intent();
+                self.open_document_from(Some(change.path.clone()), false, None, OpenSource::Reload(document.clone(), change.revision), generation, window, cx);
+            }
+            "overwrite-external" => self.overwrite_external(document.clone(), change.clone(), window, cx),
+            _ => self.notice = Some(ToolbarLocale::current(cx).text("externalChangeKeptCurrent").to_owned().into()),
+        }
+        cx.notify();
+        true
     }
 
     fn choose_external(&mut self,document:Entity<DocumentHost>,change:ExternalChange,window:&mut Window,cx:&mut Context<Self>) {
@@ -166,7 +198,7 @@ impl Workspace {
                 // 忽略只记住本次文件身份；普通保存仍由原服务拒绝覆盖未确认的外部内容。
                 workspace.application_dialogs.ignored.insert(id,change.clone());
                 match (deleted,choice.index) {
-                    (false,0)=>workspace.open_document_from(Some(change.path.clone()),false,None,OpenSource::Reload(document,change.revision),window,cx),
+                    (false,0)=>{let generation=workspace.next_open_intent();workspace.open_document_from(Some(change.path.clone()),false,None,OpenSource::Reload(document,change.revision),generation,window,cx);},
                     (false,1)|(true,0)=>workspace.save_document(&document,true,false,window,cx),
                     (false,2)|(true,1)=>workspace.overwrite_external(document,change,window,cx),
                     (true,2)=>workspace.remove_tab(&document,true,window,cx),
@@ -188,32 +220,7 @@ impl Workspace {
         let (port,snapshot)=match document.update(cx,|host,cx|host.begin_save(cx)) {Ok(value)=>value,Err(error)=>{self.failure_notice=Some(error.to_string().into());cx.notify();return;}};
         let before=cx.global::<Settings>().snapshot_before_save;
         let task=cx.background_executor().spawn(async move {port.save_external_captured(snapshot,&change,before)});
-        cx.spawn_in(window,async move |this,cx| {let result=task.await;let _=this.update_in(cx,|workspace,_,cx| {document.update(cx,|host,cx|host.finish_save(result,cx));clear_external_after_save(workspace,&document,cx);workspace.refresh_tree(cx);cx.notify();});}).detach();
-    }
-
-    fn choose_recovery(&mut self,candidate:RecoveryCandidate,window:&mut Window,cx:&mut Context<Self>) {
-        let locale=ToolbarLocale::current(cx);
-        let name=candidate.path.as_ref().and_then(|path|path.file_name()).map(|name|name.to_string_lossy().into_owned()).unwrap_or_else(||"未命名".into());
-        let dialog=spec(SecondaryKind::Recovery,locale.text(if candidate.conflict {"startupDraftConflictTitle"}else{"nativeRecoveryTitle"}).into(),locale.text(if candidate.conflict {"startupDraftConflictMessage"}else{"nativeRecoveryMessage"}).replace("{fileName}",&name),vec![A::new(locale.text("startupDraftConflictSaveDraftAs"),IconName::Save,Tone::Accent),A::new(locale.text("startupDraftConflictRestoreDraft"),IconName::AlertTriangle,Tone::Warning),A::new(locale.text(if candidate.path.is_some(){"startupDraftConflictUseDisk"}else{"cancel"}),IconName::Close,Tone::Normal)],3);
-        self.application_dialogs.busy=true;
-        let response=dialogs::choose(dialog,window,cx);
-        cx.spawn_in(window,async move |this,cx| {let choice=response.await;let _=this.update_in(cx,|workspace,window,cx| {
-            workspace.application_dialogs.busy=false;
-            match choice.index {
-                0|1=>{let path=candidate.path.clone();workspace.open_document_from(path,false,None,OpenSource::Recovery(candidate,choice.index==0),window,cx);},
-                2=>{if let Some(path)=candidate.path.clone() {
-                    if !path.exists(){workspace.failure_notice=Some("磁盘文件已不存在，恢复资料仍保留。".into());}
-                    else {
-                        let previous=workspace.tabs.iter().find(|tab|tab.document.read(cx).path().as_ref()==Some(&path)).map(|tab|tab.document.clone());
-                        let revision=previous.as_ref().map(|document|document.read(cx).status().revision).unwrap_or(0);
-                        if previous.as_ref().is_some_and(|document|document.read(cx).is_dirty(cx)){workspace.failure_notice=Some("当前文档已有新修改，草稿和当前内容均保留。".into());}
-                        else{workspace.open_document_from(Some(path),false,None,OpenSource::DiskRecovery(candidate,previous,revision),window,cx);}
-                    }
-                }},
-                _=>{},
-            }
-            cx.notify();
-        });}).detach();
+        cx.spawn_in(window,async move |this,cx| {let result=task.await;let _=this.update_in(cx,|workspace,_,cx| {if document.update(cx,|host,cx|host.finish_save(result,cx)) {clear_external_after_save(workspace,&document,cx);workspace.refresh_tree(cx);}cx.notify();});}).detach();
     }
 
     pub(super) fn choose_close_behavior(&mut self,window:&mut Window,cx:&mut Context<Self>) {

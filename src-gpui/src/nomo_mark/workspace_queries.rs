@@ -21,9 +21,13 @@ pub struct SearchState {
 }
 #[derive(Default)]
 pub(super) struct Queries {
+    footnote_request: WindowRequest,
     pub search: SearchState,
     pub outline_state: super::outline_queries::OutlineState,
     pub stats: Option<DocumentStats>,
+    selected_stats: Option<DocumentStats>,
+    stats_selection: Option<DocumentSelection>,
+    stats_requested_selection: Option<DocumentSelection>,
     pub stats_failed: bool,
     stats_enabled: bool,
     stats_revision: Option<u64>,
@@ -36,6 +40,7 @@ pub(super) struct Queries {
 }
 impl Drop for Queries {
     fn drop(&mut self) {
+        self.footnote_request.cancel();
         self.metadata_request.cancel();
         self.search.request.cancel();
     }
@@ -45,8 +50,34 @@ fn error(e: impl std::fmt::Display) -> ControlError {
 }
 
 impl DocumentHost {
+    pub(super) fn preview_footnote(&mut self, source: &Entity<NomoMark>, identity: &WindowIdentity, label: &str,
+        tooltip: &gpui::WeakEntity<crate::nomo_mark::footnote_preview::FootnotePreview>, cx: &mut Context<Self>) {
+        if self.hidden || source.read(cx).host.parsed.identity != *identity { return; }
+        let Some(preview) = tooltip.upgrade() else { return; };
+        self.queries.footnote_request.cancel();
+        let request = preview.read(cx).request.clone();
+        self.queries.footnote_request = request.clone();
+        let port = self.port.clone();
+        let label = label.to_string();
+        let identity = identity.clone();
+        let tooltip = tooltip.clone();
+        let source = source.downgrade();
+        let revision = identity.revision;
+        let task = cx.background_executor().spawn(async move {
+            crate::nomo_mark::footnote_preview::read(&port, revision, &label, &request)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |host, cx| {
+                if host.hidden || !source.upgrade().is_some_and(|source| source.read(cx).host.parsed.identity == identity) { return; }
+                if let Ok(text) = result {
+                    let _ = tooltip.update(cx, |preview, cx| { preview.text = text; cx.notify(); });
+                }
+            });
+        }).detach();
+    }
     pub(crate) fn stats(&self) -> Option<&DocumentStats> {
-        self.queries.stats.as_ref()
+        self.queries.selected_stats.as_ref().or(self.queries.stats.as_ref())
     }
     pub(crate) fn stats_failed(&self) -> bool {
         self.queries.stats_failed
@@ -66,6 +97,8 @@ impl DocumentHost {
         &self.queries.search
     }
     pub(super) fn cancel_queries(&mut self, cx: &mut Context<Self>) {
+        self.metadata.save_dialog.cancel();
+        self.queries.footnote_request.cancel();
         self.queries.search.serial += 1;
         self.cancel_stats();
         self.cancel_toc_when_hidden();
@@ -94,15 +127,18 @@ impl DocumentHost {
         self.refresh_outline(cx);
         self.schedule_stats(cx);
     }
-    fn schedule_stats(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn schedule_stats(&mut self, cx: &mut Context<Self>) {
         self.queries.stats_enabled = cx.global::<crate::settings::Settings>().stats_visible;
         if self.hidden || self.closed || !self.queries.stats_enabled {
             self.cancel_stats();
             return;
         }
         let revision = self.status().revision;
-        if self.queries.stats_revision == Some(revision)
-            || self.queries.stats_requested_revision == Some(revision) { return; }
+        let selection = self.selection(cx);
+        let selection = (!selection.range().is_empty()).then_some(selection);
+        if selection != self.queries.stats_selection || self.queries.stats_revision != Some(revision) { self.queries.selected_stats = None; }
+        if (self.queries.stats_revision == Some(revision) && self.queries.stats_selection == selection)
+            || (self.queries.stats_requested_revision == Some(revision) && self.queries.stats_requested_selection == selection) { return; }
         // 首屏先让引用上下文恢复；已有统计刷新不再依赖局部窗口的引用查询。
         if self.queries.stats.is_none() && self.control.read(cx).host.parsed.context.pending_references { return; }
         self.queries.metadata_request.cancel();
@@ -110,6 +146,7 @@ impl DocumentHost {
         self.queries.metadata_request = WindowRequest::default();
         self.queries.serial += 1;
         self.queries.stats_requested_revision = Some(revision);
+        self.queries.stats_requested_selection = selection;
         self.queries.stats_failed = false;
         let dirty = *self.queries.stats_dirty_since.get_or_insert_with(Instant::now);
         let delay = Duration::from_millis(300).min(Duration::from_millis(900).saturating_sub(dirty.elapsed()));
@@ -133,14 +170,14 @@ impl DocumentHost {
                             document_id: port.document_id.clone(),
                             revision,
                             request_id: serial,
-                            selection_version: 0,
-                            selection: None,
+                            selection_version: serial,
+                            selection: selection.map(|s| crate::text_document::ByteRange { from: s.range().start, to: s.range().end }),
                         },
                     )
                     .await
                     .map_err(error)?;
                 request.check()?;
-                Ok::<_, ControlError>(stats.full)
+                Ok::<_, ControlError>(stats)
             });
             let result = task.await;
             let _ = this.update(cx, |host, cx| {
@@ -152,12 +189,15 @@ impl DocumentHost {
                 }
                 match result {
                     Ok(stats) => {
-                        host.queries.stats = Some(stats);
+                        host.queries.stats = Some(stats.full);
+                        host.queries.selected_stats = stats.selected;
+                        host.queries.stats_selection = selection;
                         host.queries.stats_revision = Some(revision);
                         host.queries.stats_dirty_since = None;
                     }
                     Err(ControlError::Stale) => return,
                     Err(e) => {
+                        host.queries.stats_requested_revision = None;
                         host.queries.stats_failed = true;
                         host.report(e, cx);
                     }

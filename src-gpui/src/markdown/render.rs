@@ -16,6 +16,14 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+#[path = "table_layout.rs"]
+mod table_layout;
+#[path = "code_layout.rs"]
+pub(crate) mod code_layout;
+
+/// 与表格工具条共用的布局留白；始终占位，激活表格不改变正文高度。
+pub(crate) const TABLE_TOOLBAR_SPACE: f32 = 42.0;
+
 /// 渲染文本区间到块内源码偏移的映射段；`exact` 为真时逐字节对应，否则整段对应到 `source`。
 #[derive(Clone, Debug)]
 pub struct MapSeg {
@@ -34,17 +42,26 @@ impl MapSeg {
 pub enum Paint {
     Border,
     CodeBg,
+    TocCard,
     CodeBorder,
     QuoteBorder,
-    /// 提示块底色与描边：取语义色的低透明度，深浅主题由绘制端决定透明度。
-    CalloutBg(ColorRole),
-    CalloutBorder(ColorRole),
     TableBorder,
     TableHeader,
     Surface,
+    Role(ColorRole),
+    CalloutBorder(ColorRole),
 }
 
 pub enum DisplayItem {
+    CodeBody { x: f32, y: f32, w: f32, h: f32, source: Range<usize>, body: Box<code_layout::CodeViewport> },
+    CodeHeader { x: f32, y: f32, w: f32, h: f32, source: usize, text: Rc<str>, expanded: Option<bool> },
+    /// 代码语言标签的真实命中区域；文字仍由共享显示列表绘制。
+    CodeLanguage { x: f32, y: f32, w: f32, h: f32, source: usize },
+    BlockControls { x: f32, y: f32, w: f32, h: f32, source: Range<usize>, kind: &'static str },
+    TocLink { x: f32, y: f32, w: f32, h: f32, source: usize, target: String },
+    CalloutHeader { x: f32, y: f32, size: f32, button_offset: f32, source: usize, kind: BlockQuoteKind, role: ColorRole },
+    /// 当前窗口内单元格的真实边界，供控件命中和矩形选区使用；不绘制正文。
+    TableCell { x: f32, y: f32, w: f32, h: f32, table: usize, row: usize, column: usize, rowspan: usize, colspan: usize, source: Range<usize> },
     /// 宽表格只在自己的矩形内横向滚动，正文与宿主纵向调度保持原位。
     Horizontal {x:f32,y:f32,w:f32,h:f32,content_width:f32,source:Range<usize>,offset:std::cell::Cell<f32>,layout:Box<BlockLayout>},
     Text { x: f32, y: f32, layout: Rc<TextLayout>, map: Vec<MapSeg> },
@@ -64,12 +81,111 @@ pub struct BlockLayout {
 }
 
 impl BlockLayout {
+    pub fn embed_rects(&self) -> Vec<(usize, f32, f32, f32)> {
+        let mut result = Vec::new();
+        for item in &self.items {
+            match item {
+                DisplayItem::Embed { x, y, w, source, .. } => result.push((*source, *x, *y, *w)),
+                DisplayItem::Horizontal { x, y, w, offset, layout, .. } => {
+                    for (source, ix, iy, iw) in layout.embed_rects() {
+                        let left = (ix - offset.get()).max(0.0); let right = (ix + iw - offset.get()).min(*w);
+                        if right > left { result.push((source, x + left, y + iy, right - left)); }
+                    }
+                }
+                _ => {}
+            }
+        }
+        result
+    }
+    pub fn math_input_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        for item in &self.items {
+            match item {
+                DisplayItem::Text { x, y, layout, .. } => {
+                    for (key, ox, oy, w, h) in layout.object_rects_clipped(f32::NEG_INFINITY..f32::INFINITY) {
+                        if matches!(key, InlineAsset::MathInput) { return Some((x + ox, y + oy, w, h)); }
+                    }
+                }
+                DisplayItem::Horizontal { x, y, w, offset, layout, .. } => {
+                    if let Some((ix, iy, iw, ih)) = layout.math_input_rect() {
+                        let left = (ix - offset.get()).max(0.0); let right = (ix + iw - offset.get()).min(*w);
+                        if right > left { return Some((x + left, y + iy, right - left, ih)); }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    /// 标签命中区域来自同一份行内排版，包含宽表格的滚动裁切。
+    pub fn comment_rects(&self) -> Vec<(Range<usize>, f32, f32, f32, f32, f32, Range<f32>)> {
+        let mut rects = Vec::new();
+        for item in &self.items {
+            match item {
+                DisplayItem::Text { x, y, layout, map } => {
+                    for (at, key, ox, oy, w, h) in layout.object_rects_with_offsets(f32::NEG_INFINITY..f32::INFINITY) {
+                        if let InlineAsset::Comment { font_size, .. } = key {
+                            if let Some(segment) = map.iter().find(|segment| segment.text.contains(&at)) {
+                                rects.push((segment.source..segment.source_end, x + ox, y + oy, w, h, f32::from_bits(*font_size), x + ox..x + ox + w));
+                            }
+                        }
+                    }
+                }
+                DisplayItem::Horizontal { x, y, w, offset, layout, .. } => {
+                    for (source, ix, iy, iw, ih, em, clip) in layout.comment_rects() {
+                        let left = ix - offset.get();
+                        let clip = (x + clip.start - offset.get()).max(*x)..(x + clip.end - offset.get()).min(x + w);
+                        if clip.start < clip.end { rects.push((source, x + left, y + iy, iw, ih, em, clip)); }
+                    }
+                }
+                _ => {}
+            }
+        }
+        rects
+    }
+    pub fn selected_cell_rects(&self, ranges: &[Range<usize>]) -> Vec<(f32, f32, f32, f32)> {
+        let mut rects = Vec::new();
+        for item in &self.items {
+            match item {
+                DisplayItem::TableCell { x, y, w, h, source, .. } if ranges.iter().any(|r| r.start <= source.start && source.end <= r.end) =>
+                    rects.push((*x, *y, *w, *h)),
+                DisplayItem::Horizontal { x, y, w, offset, layout, .. } => {
+                    for (ix, iy, iw, ih) in layout.selected_cell_rects(ranges) {
+                        let left = (ix - offset.get()).max(0.0);
+                        let right = (ix + iw - offset.get()).min(*w);
+                        if right > left { rects.push((x + left, y + iy, right - left, ih)); }
+                    }
+                }
+                _ => {}
+            }
+        }
+        rects
+    }
+    pub fn table_cells(&self, table: usize) -> Vec<(usize, usize, usize, usize, f32, f32, f32, f32, Range<usize>)> {
+        let mut cells = Vec::new();
+        for item in &self.items {
+            match item {
+                DisplayItem::TableCell { x, y, w, h, table: id, row, column, rowspan, colspan, source } if *id == table =>
+                    cells.push((*row, *column, *rowspan, *colspan, *x, *y, *w, *h, source.clone())),
+                DisplayItem::Horizontal { x, y, w, offset, layout, .. } => {
+                    for (r, c, rs, cs, ix, iy, iw, ih, source) in layout.table_cells(table) {
+                        let left = (ix - offset.get()).max(0.0);
+                        let right = (ix + iw - offset.get()).min(*w);
+                        if right > left { cells.push((r, c, rs, cs, x + left, y + iy, right - left, ih, source)); }
+                    }
+                }
+                _ => {}
+            }
+        }
+        cells
+    }
     pub fn object_source_at(&self, x: f32, y: f32) -> Option<usize> {
         self.items.iter().find_map(|item| match item {
             DisplayItem::Horizontal { x: ix, y: iy, w, h, offset, layout, .. }
                 if x >= *ix && x <= ix + w && y >= *iy && y < iy + h - 8.0 =>
                 layout.object_source_at(x - ix + offset.get(), y - iy),
             DisplayItem::Image { x: ix, y: iy, w, h, source, .. }
+                if x >= *ix && x <= ix + w && y >= *iy && y <= iy + h => Some(source.start),
+            DisplayItem::BlockControls { x: ix, y: iy, w, h, source, .. }
                 if x >= *ix && x <= ix + w && y >= *iy && y <= iy + h => Some(source.start),
             DisplayItem::Embed { x: ix, y: iy, w, h, source, .. }
                 if x >= *ix && x <= ix + w && y >= *iy && y <= iy + h => Some(*source),
@@ -88,6 +204,7 @@ impl BlockLayout {
         };
         for item in &self.items {
             match item {
+                DisplayItem::CodeBody { body, .. } => { if let Some(next) = body.code.horizontal_caret(at, unit, forward) { accept(next); } }
                 DisplayItem::Horizontal { layout, .. } => { if let Some(next) = layout.horizontal_caret(at, unit, forward) { accept(next); } }
                 DisplayItem::Image { source, .. } => accept(if forward { if at < source.start { source.start } else { source.end } } else if at > source.end { source.end } else { source.start }),
                 DisplayItem::Embed { source, .. } => accept(*source),
@@ -112,6 +229,7 @@ impl BlockLayout {
         let mut distance = usize::MAX;
         for item in &self.items {
             match item {
+                DisplayItem::CodeBody { source, body, .. } if source.contains(&at) => return body.code.line_boundary(at, end),
                 DisplayItem::Horizontal { source, layout, .. } if source.start <= at && at <= source.end => return layout.line_boundary(at, end),
                 DisplayItem::Image { source, .. } if source.start <= at && at <= source.end => return Some(if end { source.end } else { source.start }),
                 DisplayItem::Text { layout, map, .. } => {
@@ -131,7 +249,10 @@ impl BlockLayout {
     }
     pub fn remember_text(&self, reuse: &mut crate::layout::TextLayoutReuse) {
         for item in &self.items {
-            match item { DisplayItem::Text { layout, .. } => reuse.remember(layout), DisplayItem::Horizontal { layout, .. } => layout.remember_text(reuse), _ => {} }
+            match item {
+                DisplayItem::CodeBody { body, .. } => { body.code.remember_text(reuse); body.numbers.remember_text(reuse); }
+                DisplayItem::Text { layout, .. } => reuse.remember(layout), DisplayItem::Horizontal { layout, .. } => layout.remember_text(reuse), _ => {}
+            }
         }
     }
     pub fn estimated_bytes(&self) -> usize {
@@ -139,7 +260,9 @@ impl BlockLayout {
             .iter()
             .map(|item| match item {
                 DisplayItem::Text { layout, map, .. } => layout.estimated_bytes() + map.capacity() * std::mem::size_of::<MapSeg>(),
-                DisplayItem::CopyButton { text, .. } => text.len() + 64,
+                DisplayItem::CodeBody { body, .. } => body.code.estimated_bytes() + body.numbers.estimated_bytes() + std::mem::size_of_val(&**body),
+                DisplayItem::CodeHeader { text, .. } | DisplayItem::CopyButton { text, .. } => text.len() + 64,
+                DisplayItem::TocLink { target, .. } => target.capacity() + 64,
                 DisplayItem::Embed { .. } => 64,
                 DisplayItem::Horizontal{layout,..}=>layout.estimated_bytes(),
                 _ => 64,
@@ -151,6 +274,17 @@ impl BlockLayout {
     pub fn source_at(&self, x: f32, y: f32) -> Option<usize> {
         let mut best: Option<((f32, f32), usize)> = None;
         for item in &self.items {
+            if let DisplayItem::CodeBody { x: ix, y: iy, w, h, body, .. } = item {
+                let vertical = if y < *iy { iy-y } else if y > iy+h { y-iy-h } else { 0.0 };
+                let horizontal = if x < *ix { ix-x } else if x > ix+w { x-ix-w } else { 0.0 };
+                let distance = (vertical, horizontal);
+                let (width, height) = body.viewport(*w, *h);
+                let (sx, sy) = body.offset.get();
+                if !best.is_some_and(|(current, _)| current <= distance) {
+                    if let Some(source) = body.code.source_at((x-ix-body.gutter).clamp(0.0, width)+sx, (y-iy).clamp(0.0, height)+sy) { best = Some((distance, source)); }
+                }
+                continue;
+            }
             if let DisplayItem::Horizontal{x:ix,y:iy,w,h,offset,layout,..}=item{
                 let vertical=if y<*iy{iy-y}else if y>iy+h{y-iy-h}else{0.0};
                 let horizontal=if x<*ix{ix-x}else if x>ix+w{x-ix-w}else{0.0};
@@ -192,6 +326,17 @@ impl BlockLayout {
         let mut rects = Vec::new();
         if range.is_empty() { return rects; }
         for item in &self.items {
+            if let DisplayItem::CodeBody { x, y, w, h, body, .. } = item {
+                let (width, height) = body.viewport(*w, *h);
+                if y + height < clip.start || *y > clip.end { continue; }
+                let (dx, dy) = body.offset.get();
+                for (sx, sy, sw, sh) in body.code.source_rects_clipped(range.clone(), (clip.start-y+dy).max(dy)..(clip.end-y+dy).min(dy+height)) {
+                    let left = (sx-dx).max(0.0); let right = (sx+sw-dx).min(width);
+                    let top = (sy-dy).max(0.0); let bottom = (sy+sh-dy).min(height);
+                    if right > left && bottom > top { rects.push((x+body.gutter+left, y+top, right-left, bottom-top)); }
+                }
+                continue;
+            }
             if let DisplayItem::Horizontal{x,y,w,h,offset,layout,..}=item{
                 if y + h < clip.start || *y > clip.end { continue; }
                 for (sx,sy,sw,sh) in layout.source_rects_clipped(range.clone(),(clip.start-y)..(clip.end-y)) {let left=(sx-offset.get()).max(0.0);let right=(sx+sw-offset.get()).min(*w);if right>left{rects.push((x+left,y+sy,right-left,sh));}}
@@ -200,6 +345,12 @@ impl BlockLayout {
             if let DisplayItem::Image{x,y,w,h,source,..}=item{
                 if y + h < clip.start || *y > clip.end { continue; }
                 if range.start<source.end&&source.start<range.end{rects.push((*x,*y,*w,*h));}continue;
+            }
+            if let DisplayItem::BlockControls { x, y, w, h, source, kind: "rule", .. } = item {
+                if y + h >= clip.start && *y <= clip.end && range.start < source.end && source.start < range.end {
+                    rects.push((*x, *y, *w, *h));
+                }
+                continue;
             }
             let DisplayItem::Text { x, y, layout, map } = item else { continue };
             if y + layout.height() < clip.start || *y > clip.end { continue; }
@@ -229,6 +380,15 @@ impl BlockLayout {
         let mut best = None;
         let mut distance = usize::MAX;
         for item in &self.items {
+            if let DisplayItem::CodeBody { x, y, source: range, body, .. } = item {
+                if range.contains(&source) {
+                    if let Some((sx, sy, h)) = body.code.caret_at(source) {
+                        let (dx, dy) = body.offset.get();
+                        return Some((x+body.gutter+sx-dx, y+sy-dy, h));
+                    }
+                }
+                continue;
+            }
             if let DisplayItem::Horizontal{x,y,source:range,offset,layout,..}=item{
                 if range.start<=source&&source<=range.end{if let Some((sx,sy,h))=layout.caret_at(source){return Some((x+sx-offset.get(),y+sy,h));}}continue;
             }
@@ -273,6 +433,13 @@ pub struct RenderEnv<'a> {
     pub code_line_numbers: bool,
     /// 设置“渲染行内代码”：关闭时行内代码按源码（含反引号）显示。
     pub inline_code: bool,
+    pub block_open: Option<&'a std::collections::BTreeMap<u64, bool>>,
+    pub source_base: u64,
+    pub active_code: Option<usize>,
+    pub comment_edit: Option<(Range<usize>, &'a str)>,
+    pub math_edit: Option<(Range<usize>, &'a str)>,
+    pub object_edit: Option<(Range<usize>, f32)>,
+    pub empty_comment: &'a str,
     /// 查询公式或图表的渲染状态（返回缓存键与状态）；未请求过的条目由调用方登记后台渲染，此处视为渲染中。
     pub embed: &'a dyn Fn(EmbedKind, &str) -> (u64, EmbedState),
 }
@@ -297,11 +464,12 @@ struct ParaBuilder {
     spans: Vec<(Range<usize>, InlineStyle)>,
     map: Vec<MapSeg>,
     objects: Vec<InlineObject>,
+    table_images: Vec<table_layout::ImageMetric>,
 }
 
 impl ParaBuilder {
     fn new() -> Self {
-        Self { text: String::new(), spans: Vec::new(), map: Vec::new(), objects: Vec::new() }
+        Self { text: String::new(), spans: Vec::new(), map: Vec::new(), objects: Vec::new(), table_images: Vec::new() }
     }
 
     /// 追加一个行内对象（占位字符），整体映射到 `source`。
@@ -409,6 +577,7 @@ impl InlineState {
             _ => {}
         }
         let counter = match name.as_str() {
+            "a" => &mut self.link,
             "code" => &mut self.code,
             "b" | "strong" => &mut self.bold,
             "i" | "em" => &mut self.italic,
@@ -425,17 +594,11 @@ impl InlineState {
     }
 }
 
-/// 从 HTML 片段中取属性值（不处理转义，足以覆盖 `<img src="..." width="...">`）。
+/// 属性解析与结构模型共用同一套带边界、引号及实体处理的规则。
 fn html_attr(html: &str, name: &str) -> Option<String> {
-    let lower = html.to_ascii_lowercase();
-    let at = lower.find(&format!("{name}="))?;
-    let rest = &html[at + name.len() + 1..];
-    let quote = rest.chars().next()?;
-    if quote == '"' || quote == '\'' {
-        rest[1..].find(quote).map(|end| rest[1..1 + end].to_string())
-    } else {
-        Some(rest.split(|ch: char| ch.is_whitespace() || ch == '>').next().unwrap_or("").to_string())
-    }
+    let start = html.len() - html.trim_start().len();
+    let tag = crate::nomo_mark::nomo_syntax::html_tag(html, start)?;
+    tag.attrs.get(name).map(|value| html_escape::decode_html_entities(value).into_owned())
 }
 
 /// 把 CSS 颜色（#rgb、#rrggbb、rgb()、常见颜色名）归到最接近的调色板项：
@@ -527,16 +690,11 @@ fn strip_tags(html: &str) -> String {
     output
 }
 
-/// 提示块内边距（px，随缩放）：左右 16、上下 12，对应飞书高亮块的留白。
-const CALLOUT_PAD_X: f32 = 16.0;
-const CALLOUT_PAD_Y: f32 = 12.0;
-
 enum Container {
     List { next: Option<u64>, depth: usize },
     Item { marker_pending: bool, number: Option<u64>, depth: usize, task: Option<(bool, usize)> },
-    /// `first_item` 是块内首个显示项的下标，提示块结束时在此处插入底色，使其绘制在正文之下。
-    Quote { start_y: f32, x: f32, role: Option<ColorRole>, first_item: usize },
-    Footnote,
+    Quote { start_y: f32, x: f32, width: f32, role: Option<ColorRole> },
+    Footnote { indent: f32, min_bottom: f32 },
 }
 
 struct Builder<'a> {
@@ -562,6 +720,7 @@ struct Builder<'a> {
     html_align: Option<String>,
     controlled: bool,
     details:Vec<usize>,
+    details_frames: Vec<(usize, f32)>,
     closed_details:std::collections::HashSet<usize>,
 }
 
@@ -578,7 +737,7 @@ pub fn layout_block(source: &str, width: f32, env: &RenderEnv, window: &Window) 
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS |
         Options::ENABLE_FOOTNOTES | Options::ENABLE_MATH | Options::ENABLE_GFM |
         Options::ENABLE_SUPERSCRIPT | Options::ENABLE_SUBSCRIPT;
-    layout_events(source, width, env, window, Parser::new_ext(source, options).into_offset_iter(), &[],None,&[],&[])
+    layout_events(source, width, env, window, Parser::new_ext(source, options).into_offset_iter(), &[],None,&[],&[],&[])
 }
 
 /// 控件入口：解析已在适配层完成，此处不创建解析器或读取正文。
@@ -586,11 +745,11 @@ pub fn layout_parsed(parsed: &ParsedWindow, revealed: &[Range<usize>], details_o
     let closed:Vec<_>=parsed.details.iter().filter(|block|!details_open.get(&(parsed.identity.from_byte+block.source.start as u64)).copied().unwrap_or(block.default_open)).collect();
     let starts:Vec<_>=closed.iter().map(|block|block.source.start).collect();
     let events=parsed.with_blank_paragraphs(parsed.display_events(revealed)).into_iter().filter(|(_,range)|!closed.iter().any(|block|block.body.start<=range.start&&range.end<=block.body.end));
-    layout_events(&parsed.source, width, env, window, events, revealed,Some(&parsed.context),&starts,&parsed.html_tables)
+    layout_events(&parsed.source, width, env, window, events, revealed,Some(&parsed.context),&starts,&parsed.html_tables,&parsed.html_fragments)
 }
 
 fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
-    events: impl Iterator<Item=(Event<'a>, Range<usize>)>, revealed: &[Range<usize>],context:Option<&crate::nomo_mark::protocol::ParseContext>,closed_details:&[usize],html_tables:&[crate::nomo_mark::html_table::HtmlTable]) -> BlockLayout {
+    events: impl Iterator<Item=(Event<'a>, Range<usize>)>, revealed: &[Range<usize>],context:Option<&crate::nomo_mark::protocol::ParseContext>,closed_details:&[usize],html_tables:&[crate::nomo_mark::html_table::HtmlTable],html_fragments:&[crate::nomo_mark::html_table::HtmlFragment]) -> BlockLayout {
     let metrics = env.metrics;
     let mut builder = Builder {
         env,
@@ -613,12 +772,12 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
         in_html_block: false,
         html_align: None,
         controlled: context.is_some(),
-        details:Vec::new(),closed_details:closed_details.iter().copied().collect(),
+        details:Vec::new(),details_frames:Vec::new(),closed_details:closed_details.iter().copied().collect(),
     };
     if let Some(context)=context{
         use crate::nomo_mark::protocol::AncestorContainer;
         for ancestor in &context.ancestors{match ancestor{
-            AncestorContainer::Quote=>builder.begin_quote(None),
+            AncestorContainer::Quote=>builder.begin_quote(None, 0),
             AncestorContainer::ListItem{number}=>{
                 builder.indent+=metrics.list_indent();builder.containers.push(Container::Item{marker_pending:false,number:*number,depth:0,task:None});
             },
@@ -627,10 +786,27 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
     }
     if context.is_none()&&source.starts_with("---") && (source.ends_with("---") || source.ends_with("...")) && source.lines().count() >= 2 {
         builder.front_matter(0..source.len());
-        return builder.finish();
+        return builder.finish(context.is_some_and(|context| context.has_following_block));
     }
     let mut events = events.peekable();
     while let Some((event, range)) = events.next() {
+        if let Some((edited, height)) = env.object_edit.as_ref().filter(|(edited, _)| range.start == edited.start && range.end >= edited.end) {
+            builder.flush_paragraph(); builder.apply_gap();
+            builder.items.push(DisplayItem::BlockControls { x: builder.indent, y: builder.y, w: builder.width - builder.indent,
+                h: *height, source: edited.clone(), kind: "object-edit" });
+            builder.y += height; builder.gap(metrics.paragraph_gap());
+            while events.peek().is_some_and(|(_, span)| span.start < edited.end) { events.next(); }
+            continue;
+        }
+        if builder.controlled && matches!(&event, Event::Html(html) if html.trim_start().starts_with("<!-- toc -->")) {
+            if let Some(end) = source[range.start..].find("<!-- /toc -->") {
+                let end = range.start + end + "<!-- /toc -->".len();
+                builder.toc(range.start..end);
+                while events.peek().is_some_and(|(_, range)| range.start < end) { events.next(); }
+                builder.in_html_block = false;
+                continue;
+            }
+        }
         match event {
             Event::Start(tag) => match tag {
                 Tag::Heading { level, .. } => {
@@ -647,7 +823,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                     }
                 }
                 Tag::Paragraph => { builder.begin_paragraph(); if builder.controlled && range.is_empty() { builder.empty_anchor(range.start); } },
-                Tag::BlockQuote(kind) => builder.begin_quote(kind),
+                Tag::BlockQuote(kind) => builder.begin_quote(kind, range.start),
                 Tag::CodeBlock(kind) => {
                     let lang = match &kind {
                         CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or("").to_lowercase(),
@@ -669,7 +845,12 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                             _ => {}
                         }
                     }
-                    builder.code_block(&lang, &text, text_start.unwrap_or(range.start),&text_map);
+                    let mut empty_start = source[range.clone()].find('\n').map_or(range.start, |end| range.start + end + 1);
+                    if text.is_empty() {
+                        let tail = &source[empty_start..range.end];
+                        empty_start += tail.len() - tail.trim_start_matches([' ', '\t', '>']).len();
+                    }
+                    builder.code_block(&lang, &text, text_start.unwrap_or(empty_start),&text_map, range.start);
                 }
                 Tag::List(start) => {
                     builder.flush_paragraph();
@@ -701,16 +882,28 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                 Tag::FootnoteDefinition(label) => {
                     builder.flush_paragraph();
                     builder.gap(metrics.paragraph_gap() * 0.5);
-                    builder.containers.push(Container::Footnote);
-                    builder.font_size = metrics.body_size() * 0.85;
-                    builder.line_height = metrics.body_line_height() * 0.85;
-                    let style = InlineStyle { color: ColorRole::Muted, ..Default::default() };
-                    builder.para.push(&format!("{label}. "), style, Some((range.start, false)));
+                    builder.apply_gap();
+                    let zoom = metrics.zoom;
+                    builder.items.push(DisplayItem::Rect { x: builder.indent, y: builder.y, w: builder.width - builder.indent, h: 1.0,
+                        paint: Paint::Border, radius: 0.0, border: None });
+                    builder.y += 10.0 * zoom;
+                    let spec = ParaSpec::plain(label.to_string(), InlineStyle { color: ColorRole::Link, bold: true, ..Default::default() },
+                        Family::Text, metrics.body_size() * 0.75, metrics.body_line_height() * 0.9, Wrap::Greedy);
+                    let badge = env.layout(&spec, (builder.width * 0.2).max(24.0 * zoom), window);
+                    let w = (badge.max_line_width() + 8.0 * zoom).max(24.0 * zoom); let h = badge.height();
+                    builder.items.push(DisplayItem::Rect { x: builder.indent, y: builder.y, w, h, paint: Paint::Surface, radius: 4.0 * zoom, border: Some(Paint::Border) });
+                    builder.items.push(DisplayItem::Text { x: builder.indent + 4.0 * zoom, y: builder.y, layout: badge,
+                        map: vec![MapSeg { text: 0..label.len(), source: range.start, source_end: range.start, exact: false }] });
+                    builder.items.push(DisplayItem::TocLink { x: builder.indent, y: builder.y, w, h, source: range.start, target: format!("#fnref-{}", label.replace('%', "%25")) });
+                    builder.containers.push(Container::Footnote { indent: w + 10.0 * zoom, min_bottom: builder.y + h });
+                    builder.indent += w + 10.0 * zoom;
+                    builder.font_size = metrics.body_size() * 0.9;
+                    builder.line_height = metrics.body_line_height() * 0.9;
                 }
                 Tag::Table(alignments) => {
                     builder.flush_paragraph();
-                    let table = collect_table(&mut events, alignments, source,range,env,context);
-                    builder.table(table);
+                    let table = collect_table(&mut events, alignments, source,range,env,context,window);
+                    builder.table(table, revealed);
                 }
                 Tag::Emphasis => builder.inline.italic += 1,
                 Tag::Strong => builder.inline.bold += 1,
@@ -734,6 +927,24 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                     builder.para.push(&format!("［图片：{}］", if alt.is_empty() { dest_url.as_ref() } else { alt.as_str() }), style, Some((range.start, false)));
                 }
                 Tag::HtmlBlock => {
+                    let raw = &source[range.clone()];
+                    if builder.controlled && ((range.start == 0 && env.source_base == 0 && crate::nomo_mark::nomo_syntax::front_matter_end(raw).is_some())
+                        || (raw.trim().starts_with("<!--") && raw.trim().ends_with("-->") && raw.contains('\n') && !raw.trim_start().starts_with("<!-- toc -->"))) {
+                        builder.html_line(raw, range.start, None);
+                        while let Some((event, _)) = events.next() { if matches!(event, Event::End(TagEnd::HtmlBlock)) { break; } }
+                        continue;
+                    }
+                    let fragments: Vec<_> = html_fragments.iter().filter(|fragment| range.start <= fragment.source.start && fragment.source.end <= range.end).collect();
+                    let mut previous = range.start;
+                    let complete = !fragments.is_empty() && fragments.iter().all(|fragment| {
+                        let adjacent = previous <= fragment.source.start && source[previous..fragment.source.start].trim().is_empty();
+                        previous = fragment.source.end; adjacent
+                    }) && source[previous..range.end].trim().is_empty();
+                    if complete {
+                        for fragment in fragments { builder.html_fragment(fragment); }
+                        while let Some((event, _)) = events.next() { if matches!(event, Event::End(TagEnd::HtmlBlock)) { break; } }
+                        continue;
+                    }
                     if let Some(table)=html_tables.iter().find(|table|range.start<=table.source.start&&table.source.end<=range.end&&source[range.start..table.source.start].trim().is_empty()) {
                         builder.html_table(table,revealed);
                         while let Some((event,_))=events.next(){if matches!(event,Event::End(TagEnd::HtmlBlock)){break;}}
@@ -767,7 +978,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                 }
                 TagEnd::FootnoteDefinition => {
                     builder.flush_paragraph();
-                    builder.containers.pop();
+                    if let Some(Container::Footnote { indent, min_bottom }) = builder.containers.pop() { builder.indent -= indent; builder.y = builder.y.max(min_bottom); }
                     builder.font_size = metrics.body_size();
                     builder.line_height = metrics.body_line_height();
                 }
@@ -816,10 +1027,28 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
             }
             Event::InlineMath(tex) => {
                 builder.image_only = false;
-                builder.inline_math(&tex, range.start + 1);
+                if !push_math_input(&mut builder.para, &range, builder.font_size, builder.width - builder.indent, env) {
+                    builder.inline_math(&tex, range.start + 1);
+                    if let Some(map) = builder.para.map.last_mut() { map.source_end = range.end; }
+                }
             }
             Event::DisplayMath(tex) => builder.display_math(&tex, range.start + 2),
-            Event::InlineHtml(html) => match builder.inline.apply_html(&html) {
+            Event::InlineHtml(html) if builder.controlled && crate::nomo_mark::comments::content(&html).is_some() => {
+                builder.image_only = false;
+                let content = crate::nomo_mark::comments::content(&html).unwrap();
+                push_comment(&mut builder.para, &content, range, builder.font_size, env, window);
+            }
+            Event::InlineHtml(html) => {
+                if let Some(run) = builder.controlled.then(|| crate::nomo_mark::comments::span_at(source, range.start)).flatten() {
+                    if let Some(crate::nomo_mark::html_table::InlineAtom::Comment(content)) = run.atom {
+                        builder.image_only = false;
+                        push_comment(&mut builder.para, &content, run.source.clone(), builder.font_size, env, window);
+                        while events.peek().is_some_and(|(event, range)| !matches!(event, Event::Start(_) | Event::End(_))
+                            && run.source.start <= range.start && range.end <= run.source.end) { events.next(); }
+                        continue;
+                    }
+                }
+                match builder.inline.apply_html(&html) {
                 Some(true) => {}
                 Some(false) => builder.line_break(range),
                 None => {
@@ -827,14 +1056,20 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                     let style = InlineStyle { mono: true, color: ColorRole::Muted, ..Default::default() };
                     builder.para.push(&html, style, Some((range.start, html.len() == range.len())));
                 }
+                }
             },
-            Event::Html(html) => builder.html_line(&html, range.start),
+            Event::Html(html) => builder.html_line(&html, range.start, html_fragments.iter().find(|fragment| fragment.source.start == range.start)),
             Event::FootnoteReference(label) => {
                 builder.image_only = false;
-                let style = InlineStyle { color: ColorRole::Link, ..builder.base };
-                builder.para.push(&format!("[{label}]"), style, Some((range.start, false)));
+                let style = InlineStyle { color: ColorRole::Link, shift: 1, footnote: true, ..builder.base };
+                builder.para.push(&label, style, Some((range.start, false)));
+                if let Some(map) = builder.para.map.last_mut() { map.source_end = range.end; }
             }
             Event::SoftBreak => {
+                if env.wrap != Wrap::KnuthPlass {
+                    builder.line_break(range);
+                    continue;
+                }
                 let left = builder.para.text.chars().last();
                 let right = source[range.end..].chars().find(|ch| !ch.is_whitespace());
                 if !left.is_some_and(is_cjk) && !right.is_some_and(is_cjk) {
@@ -842,7 +1077,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                 }
             }
             Event::HardBreak => builder.line_break(range),
-            Event::Rule => builder.rule(),
+            Event::Rule => builder.rule(range),
             Event::TaskListMarker(checked) => {
                 if let Some(Container::Item { task, .. }) = builder.containers.last_mut() {
                     let at = source[range.clone()].find('[').map_or(range.start, |offset| range.start + offset);
@@ -860,7 +1095,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
             AncestorContainer::Details{..}=>builder.indent-=16.0*metrics.zoom,
         }}
     }
-    builder.finish()
+    builder.finish(context.is_some_and(|context| context.has_following_block))
 }
 
 fn is_cjk(ch: char) -> bool {
@@ -873,8 +1108,31 @@ struct TableData {
     rows: Vec<(bool, Vec<ParaBuilder>)>,
 }
 
-fn push_table_atom(para: &mut ParaBuilder, atom: &crate::nomo_mark::html_table::InlineAtom, range: Range<usize>, mut style: InlineStyle, env: &RenderEnv) {
+fn push_comment(para: &mut ParaBuilder, content: &str, range: Range<usize>, font_size: f32, env: &RenderEnv, window: &Window) {
+    let edit = env.comment_edit.as_ref().filter(|(target, _)| *target == range);
+    let content = edit.map_or(content, |(_, text)| *text);
+    let object = crate::nomo_mark::comments::object(content, env.empty_comment, edit.is_some(), font_size, env.metrics.zoom, window);
+    para.push_object(object, InlineStyle::default(), range.start);
+    if let Some(map) = para.map.last_mut() { map.source_end = range.end; }
+}
+
+fn push_math_input(para: &mut ParaBuilder, range: &Range<usize>, em: f32, available: f32, env: &RenderEnv) -> bool {
+    let Some((_, text)) = env.math_edit.as_ref().filter(|(target, _)| target == range) else { return false; };
+    let width = (text.chars().take(64).count() as f32 * em * 0.65 + 20.0 * env.metrics.zoom)
+        .max(72.0 * env.metrics.zoom).min(available.max(32.0)).min(480.0 * env.metrics.zoom);
+    para.push_object(InlineObject { at: 0, width, width_percent: None, ascent: em * 1.2, descent: em * 0.35, key: InlineAsset::MathInput }, InlineStyle::default(), range.start);
+    if let Some(map) = para.map.last_mut() { map.source_end = range.end; }
+    true
+}
+
+fn push_table_atom(para: &mut ParaBuilder, atom: &crate::nomo_mark::html_table::InlineAtom, range: Range<usize>, mut style: InlineStyle, env: &RenderEnv, window: &Window) {
     use crate::nomo_mark::html_table::InlineAtom;
+    if matches!(atom, InlineAtom::Math(_)) && push_math_input(para, &range, 14.0 * env.metrics.zoom, 320.0 * env.metrics.zoom, env) { return; }
+    if let InlineAtom::Comment(content) = atom {
+        push_comment(para, content, range, 14.0 * env.metrics.zoom, env, window);
+        return;
+    }
+    let start = para.text.len();
     let mut fallback = atom.display_text();
     let object = match atom {
         InlineAtom::Math(tex) => {
@@ -885,31 +1143,34 @@ fn push_table_atom(para: &mut ParaBuilder, atom: &crate::nomo_mark::html_table::
             } else { style.color = ColorRole::Accent; None }
         }
         InlineAtom::Image { src, width, .. } => {
-            let decoded = percent_decode(src);
-            let candidate = Path::new(&decoded);
-            let path = if candidate.is_absolute() { Some(candidate.to_path_buf()) }
-                else if !src.contains("://") && !src.starts_with("data:") { env.base_dir.map(|dir| dir.join(candidate)) }
-                else { None };
+            let path = crate::images::resolve_source(src, env.base_dir);
             path.and_then(|path| {
                 let size = (env.image_size)(&path);
                 if let Some(reason) = (env.image_failure)(&path) { fallback = format!("{reason}：{fallback}"); }
                 size.map(|(w, h)| (path, w, h))
             }).filter(|(_, w, h)| *w > 0 && *h > 0).map(|(path, w, h)| {
                 // 百分比在最终单元格宽度确定后解析；先保留非零的固有比例。
-                let display_w = match *width {Some(ImageWidth::Pixels(value))=>value*env.metrics.zoom,_=>w as f32/2.0*env.metrics.zoom};
+                let display_w = match *width {Some(ImageWidth::Pixels(value))=>value*env.metrics.zoom,_=>w as f32*env.metrics.zoom};
                 let width_percent=match width {Some(ImageWidth::Percent(value))=>Some(*value),_=>None};
                 InlineObject { at: 0, width: display_w, width_percent, ascent: display_w * h as f32 / w as f32, descent: 0.0, key: InlineAsset::Image(path) }
             })
         }
         InlineAtom::Comment(_) => { style.color = ColorRole::Muted; style.bg = 1; None }
-        InlineAtom::Footnote(_) => { style.color = ColorRole::Link; style.shift = 1; None }
+        InlineAtom::Footnote(id) => { style.color = ColorRole::Link; style.shift = 1; style.footnote = true; fallback = id.clone(); None }
     };
     if let Some(object) = object { para.push_object(object, style, range.start); }
     else { para.push(&fallback, style, Some((range.start, false))); }
+    if let InlineAtom::Image { width, align, .. } = atom {
+        para.table_images.push(table_layout::ImageMetric {
+            text: start..para.text.len(),
+            width: match width { Some(ImageWidth::Pixels(value)) => Some(value * env.metrics.zoom), _ => None },
+            align: match align.as_deref() { Some("center") => Some(Alignment::Center), Some("right") => Some(Alignment::Right), Some("left") => Some(Alignment::Left), _ => None },
+        });
+    }
     if let Some(map) = para.map.last_mut() { map.source_end = range.end; }
 }
 
-fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)>, alignments: Vec<Alignment>, source:&str,range:Range<usize>,env:&RenderEnv,context:Option<&crate::nomo_mark::protocol::ParseContext>) -> TableData {
+fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)>, alignments: Vec<Alignment>, source:&str,range:Range<usize>,env:&RenderEnv,context:Option<&crate::nomo_mark::protocol::ParseContext>,window:&Window) -> TableData {
     use crate::nomo_mark::{html_table::{self, InlineAtom}, table_inline};
     let mut table = TableData { source:range,alignments, rows: Vec::new() };
     let mut in_head = false;
@@ -948,7 +1209,7 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
             Event::InlineHtml(html) => {
                 if let Some(run) = html_table::atom_at(source, range.start).filter(|run| cell_range.as_ref().is_some_and(|cell| run.source.end <= cell.end)) {
                     if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
-                        push_table_atom(cell, run.atom.as_ref().unwrap(), run.source.clone(), inline.style(InlineStyle::default()), env);
+                        push_table_atom(cell, run.atom.as_ref().unwrap(), run.source.clone(), inline.style(InlineStyle::default()), env, window);
                     }
                     skip = Some(run.source);
                 } else {
@@ -968,12 +1229,12 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
             Event::Start(Tag::Image { dest_url, title, .. }) => {
                 let pending = context.is_some_and(|context| context.reference_target_pending(&range));
                 let (image, range) = table_inline::image(source, events, &dest_url, &title, range);
-                let atom = InlineAtom::Image { src: image.src, alt: image.alt, width: ImageWidth::parse(&image.width) };
+                let atom = InlineAtom::Image { src: image.src, alt: image.alt, width: ImageWidth::parse(&image.width), align: Some(image.align) };
                 if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
                     if pending {
                         cell.push(&atom.display_text(), inline.style(InlineStyle::default()), Some((range.start, false)));
                     } else {
-                        push_table_atom(cell, &atom, range.clone(), inline.style(InlineStyle::default()), env);
+                        push_table_atom(cell, &atom, range.clone(), inline.style(InlineStyle::default()), env, window);
                     }
                 }
                 skip = Some(range);
@@ -995,11 +1256,11 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
             }
             Event::InlineMath(tex) | Event::DisplayMath(tex) => {
                 if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
-                    push_table_atom(cell, &InlineAtom::Math(tex.to_string()), range, inline.style(InlineStyle::default()), env);
+                    push_table_atom(cell, &InlineAtom::Math(tex.to_string()), range, inline.style(InlineStyle::default()), env, window);
                 }
             }
             Event::FootnoteReference(id) => {
-                if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) { push_table_atom(cell, &InlineAtom::Footnote(id.to_string()), range, inline.style(InlineStyle::default()), env); }
+                if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) { push_table_atom(cell, &InlineAtom::Footnote(id.to_string()), range, inline.style(InlineStyle::default()), env, window); }
             }
             Event::End(TagEnd::Table) => break,
             _ => {}
@@ -1012,7 +1273,7 @@ impl Builder<'_> {
     fn base_for_container(&self) -> InlineStyle {
         for container in self.containers.iter().rev() {
             if let Container::Quote { role, .. } = container {
-                return InlineStyle { color: if role.is_some() { ColorRole::Fg } else { ColorRole::QuoteFg }, ..Default::default() };
+                return InlineStyle { color: role.unwrap_or(ColorRole::QuoteFg), ..Default::default() };
             }
         }
         InlineStyle::default()
@@ -1027,6 +1288,16 @@ impl Builder<'_> {
             self.y += self.pending_gap;
         }
         self.pending_gap = 0.0;
+    }
+
+    fn apply_table_gap(&mut self) {
+        if self.controlled {
+            // 窗口首块也要保留工具条空间，不能依赖前一段落或另一窗口的段距。
+            self.y += self.pending_gap.max(TABLE_TOOLBAR_SPACE * self.env.metrics.zoom);
+            self.pending_gap = 0.0;
+        } else {
+            self.apply_gap();
+        }
     }
 
     fn begin_paragraph(&mut self) {
@@ -1080,10 +1351,12 @@ impl Builder<'_> {
         let para = std::mem::replace(&mut self.para, ParaBuilder::new());
         let (spec, map) = self.spec(para);
         let width = (self.width - self.indent).max(40.0);
-        let layout = self.env.layout(&spec, width, self.window);
+        let layout = table_layout::layout(&spec, width, self.env, self.window);
         self.draw_marker();
         let height = layout.height();
-        self.items.push(DisplayItem::Text { x: self.indent, y: self.y, layout, map });
+        let free = (width - layout.max_line_width()).max(0.0);
+        let offset = match self.html_align.as_deref() { Some("center") => free / 2.0, Some("right") => free, _ => 0.0 };
+        self.items.push(DisplayItem::Text { x: self.indent + offset, y: self.y, layout, map });
         self.y += height;
     }
 
@@ -1143,8 +1416,10 @@ impl Builder<'_> {
         self.items.push(DisplayItem::Text { x, y, layout, map: Vec::new() });
     }
 
-    fn begin_quote(&mut self, kind: Option<BlockQuoteKind>) {
+    fn begin_quote(&mut self, kind: Option<BlockQuoteKind>, source: usize) {
         self.flush_paragraph();
+        let zoom = self.env.metrics.zoom;
+        self.gap(18.0 * zoom);
         self.apply_gap();
         let role = kind.map(|kind| match kind {
             BlockQuoteKind::Note => ColorRole::Note,
@@ -1154,30 +1429,27 @@ impl Builder<'_> {
             BlockQuoteKind::Caution => ColorRole::Caution,
         });
         let x = self.indent;
-        let zoom = self.env.metrics.zoom;
-        self.containers.push(Container::Quote { start_y: self.y, x, role, first_item: self.items.len() });
-        // 提示块参照飞书高亮块：整块浅色底与圆角描边，四周留白；普通引用保留左侧竖线。
-        if role.is_some() {
-            self.indent += CALLOUT_PAD_X * zoom;
-            self.width -= CALLOUT_PAD_X * zoom;
-            self.y += CALLOUT_PAD_Y * zoom;
-        } else {
-            self.indent += 19.0 * zoom;
-            self.y += 6.0 * zoom;
-        }
+        self.containers.push(Container::Quote { start_y: self.y, x, width: self.width, role });
+        self.indent += if kind.is_some() { 12.0 * zoom } else { 16.0 * zoom };
+        self.y += 8.0 * zoom;
         if let (Some(kind), Some(role)) = (kind, role) {
             let title = match kind {
-                BlockQuoteKind::Note => "📌 提醒",
-                BlockQuoteKind::Tip => "💡 提示",
-                BlockQuoteKind::Important => "❗ 重要",
-                BlockQuoteKind::Warning => "⚠️ 警告",
-                BlockQuoteKind::Caution => "🚫 注意",
+                BlockQuoteKind::Note => "提醒",
+                BlockQuoteKind::Tip => "建议",
+                BlockQuoteKind::Important => "重要",
+                BlockQuoteKind::Warning => "警告",
+                BlockQuoteKind::Caution => "风险",
             };
-            let spec = ParaSpec::plain(title.into(), InlineStyle { bold: true, color: role, ..Default::default() }, Family::Text, self.env.metrics.body_size() * 0.9, self.line_height, Wrap::Greedy);
+            let header_height = (14.0 * self.env.metrics.line_height).max(24.0) * zoom;
+            let spec = ParaSpec::plain(title.into(), InlineStyle { bold: true, color: role, ..Default::default() }, Family::Text, 14.0 * zoom, header_height, Wrap::Greedy);
             let layout = self.env.layout(&spec, self.width, self.window);
             let height = layout.height();
-            self.items.push(DisplayItem::Text { x: self.indent, y: self.y, layout, map: Vec::new() });
-            self.y += height;
+            let button_offset = 28.0 * zoom + layout.max_line_width();
+            self.items.push(DisplayItem::CalloutHeader { x: self.indent, y: self.y + (height - 16.0 * zoom) / 2.0, size: 16.0 * zoom, button_offset, source, kind, role });
+            self.items.push(DisplayItem::Text { x: self.indent + 22.0 * zoom, y: self.y, layout, map: Vec::new() });
+            // 原版 header 下内边距 7px，正文上内边距 11px，正文右侧保留 16px。
+            self.y += height + 18.0 * zoom;
+            self.width -= 16.0 * zoom;
         }
         self.pending_gap = 0.0;
     }
@@ -1185,28 +1457,21 @@ impl Builder<'_> {
     fn end_quote(&mut self) {
         self.flush_paragraph();
         self.pending_gap = 0.0;
-        let zoom = self.env.metrics.zoom;
-        match self.containers.pop() {
-            Some(Container::Quote { start_y, x, role: Some(role), first_item }) => {
-                self.y += CALLOUT_PAD_Y * zoom;
-                self.width += CALLOUT_PAD_X * zoom;
-                self.indent -= CALLOUT_PAD_X * zoom;
-                let background = DisplayItem::Rect { x, y: start_y, w: self.width - x, h: self.y - start_y,
-                    paint: Paint::CalloutBg(role), radius: 8.0 * zoom, border: Some(Paint::CalloutBorder(role)) };
-                self.items.insert(first_item.min(self.items.len()), background);
-            }
-            Some(Container::Quote { start_y, x, role: None, .. }) => {
-                self.y += 6.0 * zoom;
-                self.items.push(DisplayItem::Rect { x, y: start_y, w: 3.0 * zoom, h: self.y - start_y, paint: Paint::QuoteBorder, radius: 1.5, border: None });
-                self.indent -= 19.0 * zoom;
-            }
-            _ => self.indent -= 19.0 * zoom,
+        if let Some(Container::Quote { start_y, x, width, role }) = self.containers.pop() {
+            self.y += if role.is_some() { 13.0 * self.env.metrics.zoom } else { 8.0 * self.env.metrics.zoom };
+            let paint = role.map_or(Paint::QuoteBorder, Paint::CalloutBorder);
+            let inset = 8.0 * self.env.metrics.zoom;
+            self.items.push(DisplayItem::Rect { x, y: start_y + inset, w: 4.0 * self.env.metrics.zoom, h: (self.y - start_y - inset * 2.0).max(0.0), paint, radius: 2.0 * self.env.metrics.zoom, border: None });
+            self.indent = x;
+            self.width = width;
         }
-        self.gap(self.env.metrics.paragraph_gap());
+        self.base = self.base_for_container();
+        self.gap(18.0 * self.env.metrics.zoom);
     }
 
-    fn code_block(&mut self, lang: &str, text: &str, text_start: usize, text_map:&[MapSeg]) {
+    fn code_block(&mut self, lang: &str, text: &str, text_start: usize, text_map:&[MapSeg], block_start: usize) {
         self.flush_paragraph();
+        if self.controlled { self.gap(18.0 * self.env.metrics.zoom); }
         self.apply_gap();
         let mut failure = None;
         if lang == "mermaid" {
@@ -1218,6 +1483,10 @@ impl Builder<'_> {
                 Err(message) => failure = Some(message),
             }
         }
+        if self.controlled {
+            self.code_card(lang, text, text_start, text_map, block_start, failure.as_deref());
+            return;
+        }
         let metrics = self.env.metrics;
         let x = self.indent;
         let width = self.width - self.indent;
@@ -1225,20 +1494,25 @@ impl Builder<'_> {
         let top = self.y;
         let header = 26.0 * metrics.zoom;
         let label = match lang {
-            "" => "代码".to_string(),
+            "" => "code".to_string(),
             "mermaid" => format!("Mermaid · {}", failure.as_deref().unwrap_or("渲染失败")),
-            other => other.to_string(),
+            other => crate::nomo_mark::code_blocks::language_label(other).to_string(),
         };
         let label_spec = ParaSpec::plain(label, InlineStyle { bold: true, color: ColorRole::Muted, ..Default::default() }, Family::Text, 12.0 * metrics.zoom, header, Wrap::Greedy);
         let label_layout = self.env.layout(&label_spec, width, self.window);
+        let label_width = label_layout.max_line_width();
         let mut y = top + header;
         let mut lines = Vec::new();
         let mut offset = 0;
         let body = text.strip_suffix('\n').unwrap_or(text);
         // 行号槽：宽度按最大行号位数估算，行号右对齐、弱化显示。
         let line_count = body.split('\n').count();
+        let expanded = self.env.active_code == Some(block_start)
+            || self.env.block_open.and_then(|open| open.get(&(self.env.source_base + block_start as u64))).copied().unwrap_or(false);
         let gutter = if self.env.code_line_numbers { (line_count.to_string().len() as f32 * 0.62 + 1.2) * metrics.code_size() } else { 0.0 };
+        let highlighted = highlight::code_block(body, lang);
         for (number, line) in body.split('\n').enumerate() {
+            if number >= 24 && !expanded && self.env.block_open.is_some() { break; }
             if gutter > 0.0 {
                 let label = ParaSpec::plain((number + 1).to_string(), InlineStyle { color: ColorRole::Marker, ..Default::default() }, Family::Mono, metrics.code_size(), metrics.code_line_height(), Wrap::Greedy);
                 let label = self.env.layout(&label, gutter, self.window);
@@ -1247,7 +1521,7 @@ impl Builder<'_> {
             }
             let spec = ParaSpec {
                 text: line.to_string(),
-                spans: highlight::code_line(line, lang),
+                spans: highlighted[number].clone(),
                 base: InlineStyle { color: ColorRole::CodeFg, ..Default::default() },
                 family: Family::Mono,
                 font_size: metrics.code_size(),
@@ -1267,9 +1541,22 @@ impl Builder<'_> {
             y += height;
             offset += line.len() + 1;
         }
+        if line_count > 24 && self.env.block_open.is_some() {
+            self.items.push(DisplayItem::Disclosure { x: x + pad, y, size: 16.0 * metrics.zoom, source: block_start, open: expanded });
+            let label = if expanded { "收起代码".to_string() } else { format!("展开其余 {} 行", line_count - 24) };
+            let spec = ParaSpec::plain(label, InlineStyle { color: ColorRole::Muted, ..Default::default() }, Family::Text, 12.0 * metrics.zoom, 22.0 * metrics.zoom, Wrap::Greedy);
+            let label = self.env.layout(&spec, width - pad * 3.0, self.window);
+            self.items.push(DisplayItem::Text { x: x + pad + 20.0 * metrics.zoom, y, layout: label, map: Vec::new() });
+            y += 24.0 * metrics.zoom;
+        }
         y += pad * 0.8;
         self.items.push(DisplayItem::Rect { x, y: top, w: width, h: y - top, paint: Paint::CodeBg, radius: 8.0, border: Some(Paint::CodeBorder) });
         self.items.push(DisplayItem::Text { x: x + pad, y: top, layout: label_layout, map: Vec::new() });
+        if lang != "mermaid" {
+            self.items.push(DisplayItem::CodeLanguage { x: x + pad - 4.0 * metrics.zoom, y: top,
+                w: (label_width + 22.0 * metrics.zoom).min((width - pad * 2.0 - 28.0 * metrics.zoom).max(16.0)),
+                h: header, source: block_start });
+        }
         let button = 22.0 * metrics.zoom;
         self.items.push(DisplayItem::CopyButton { x: x + width - button - 6.0 * metrics.zoom, y: top + 3.0 * metrics.zoom, size: button, text: Rc::from(body) });
         self.items.extend(lines);
@@ -1306,9 +1593,12 @@ impl Builder<'_> {
         let (key, state) = (self.env.embed)(EmbedKind::Math { display: true }, tex);
         if let EmbedState::Ready(info) = &state {
             let pad = 8.0 * metrics.zoom;
+            let top = self.y;
+            let first = self.items.len();
             let (x, w, h) = self.fit_wide(info.width, info.height);
             self.items.push(DisplayItem::Embed { x, y: self.y + pad, w, h, key, source });
             self.y += h + pad * 2.0;
+            self.wrap_horizontal(first, source..source + tex.len(), top, width, w);
             self.gap(metrics.paragraph_gap());
             return;
         }
@@ -1331,19 +1621,14 @@ impl Builder<'_> {
         self.gap(metrics.paragraph_gap());
     }
 
-    /// 宽内容（公式、图表）的摆放：能放下时在正文宽度内居中；过宽时先等比缩小，缩放下限 0.6，
-    /// 仍放不下的部分从正文左缘起向右延伸到编辑区右缘，再超出由编辑区裁剪（Web 版为横向滚动）。
+    /// 宽内容保持可读尺寸；超出正文的部分由同一节点的横向滚动容器承载。
     /// 返回 (x, 宽, 高)。
     fn fit_wide(&self, width: f32, height: f32) -> (f32, f32, f32) {
         let available = self.width - self.indent;
         if width <= available {
             return (self.indent + (available - width) / 2.0, width, height);
         }
-        let wide = (self.env.wide_width - self.indent).max(available);
-        let scale = (wide / width).clamp(0.6, 1.0);
-        let (w, h) = (width * scale, height * scale);
-        let x = if w <= wide { self.indent + (available - w).max(0.0) / 2.0 } else { self.indent };
-        (x.min(self.indent + (wide - w).max(0.0)), w, h)
+        (self.indent, width, height)
     }
 
     /// 小号提示文字（渲染失败原因等）。
@@ -1353,7 +1638,7 @@ impl Builder<'_> {
         layout_text(&spec, width.max(40.0), self.window)
     }
 
-    /// Mermaid 代码块：就绪时居中显示图（过宽时等比缩小）；渲染中显示占位框。
+    /// Mermaid 代码块：就绪时居中显示，过宽时在本节点内滚动；渲染中显示占位框。
     /// 返回 Ok 表示已按图表处理；Err 携带失败原因，调用方退回代码块并在标签中显示原因。
     fn mermaid(&mut self, text: &str, source: usize) -> Result<(), String> {
         let metrics = self.env.metrics;
@@ -1362,9 +1647,12 @@ impl Builder<'_> {
         match state {
             EmbedState::Ready(info) => {
                 let pad = 8.0 * metrics.zoom;
+                let top = self.y;
+                let first = self.items.len();
                 let (x, w, h) = self.fit_wide(info.width, info.height);
                 self.items.push(DisplayItem::Embed { x, y: self.y + pad, w, h, key, source });
                 self.y += h + pad * 2.0;
+                self.wrap_horizontal(first, source..source + text.len(), top, width, w);
                 Ok(())
             }
             EmbedState::Pending => {
@@ -1380,17 +1668,18 @@ impl Builder<'_> {
         }
     }
 
-    fn rule(&mut self) {
+    fn rule(&mut self, source: Range<usize>) {
         self.flush_paragraph();
         self.apply_gap();
         let zoom = self.env.metrics.zoom;
         self.items.push(DisplayItem::Rect { x: self.indent, y: self.y + 12.0 * zoom, w: self.width - self.indent, h: 1.0, paint: Paint::Border, radius: 0.0, border: None });
+        self.items.push(DisplayItem::BlockControls { x: self.indent, y: self.y, w: self.width - self.indent, h: 25.0 * zoom, source, kind: "rule" });
         self.y += 25.0 * zoom;
         self.gap(self.env.metrics.paragraph_gap());
     }
 
     /// HTML 块的一行：折叠块标签只保留标题行，`<img>` 渲染为图片，其余按原样弱化显示。
-    fn html_line(&mut self, html: &str, source: usize) {
+    fn html_line(&mut self, html: &str, source: usize, fragment: Option<&crate::nomo_mark::html_table::HtmlFragment>) {
         let line = html.trim_end_matches('\n');
         let trimmed = line.trim();
         let lower = trimmed.to_ascii_lowercase();
@@ -1400,8 +1689,28 @@ impl Builder<'_> {
         if lower == "<details>" || lower.starts_with("<details ") || lower == "</details>" {
             self.flush_paragraph();
             if self.controlled{
-                if lower.starts_with("</") {if self.details.pop().is_some(){self.indent-=18.0*self.env.metrics.zoom;}}
-                else{self.details.push(source);self.indent+=18.0*self.env.metrics.zoom;}
+                let em = self.env.metrics.body_size();
+                if lower.starts_with("</") {
+                    if self.details.pop().is_some() {
+                        self.indent -= em * 0.8 + 18.0 * self.env.metrics.zoom;
+                        self.width += em * 0.8;
+                        self.y += em * 0.5;
+                        if let Some((item, top)) = self.details_frames.pop() {
+                            if let DisplayItem::Rect { h, .. } = &mut self.items[item] { *h = self.y - top; }
+                        }
+                        self.gap(em);
+                    }
+                } else {
+                    self.apply_gap();
+                    let top = self.y;
+                    self.details_frames.push((self.items.len(), top));
+                    self.items.push(DisplayItem::Rect { x: self.indent, y: top, w: self.width - self.indent, h: 0.0,
+                        paint: Paint::Surface, radius: 6.0 * self.env.metrics.zoom, border: Some(Paint::Border) });
+                    self.details.push(source);
+                    self.indent += em * 0.8 + 18.0 * self.env.metrics.zoom;
+                    self.width -= em * 0.8;
+                    self.y += em * 0.5;
+                }
             }
             return;
         }
@@ -1409,9 +1718,24 @@ impl Builder<'_> {
         if lower == "<!-- toc -->" || lower == "<!-- /toc -->" {
             return;
         }
+        if self.controlled && trimmed.starts_with("<!--") && trimmed.ends_with("-->") {
+            if !trimmed.contains('\n') {
+                if let Some(content) = crate::nomo_mark::comments::content(trimmed) {
+                    let start = source + html.len() - html.trim_start().len();
+                    push_comment(&mut self.para, &content, start..start + trimmed.len(), self.font_size, self.env, self.window);
+                    return;
+                }
+            }
+            let content = trimmed.trim_start_matches("<!--").trim_end_matches("-->").trim();
+            self.block_comment(content, source..source + html.len());
+            return;
+        }
         if lower.starts_with("<p") && lower.contains("align=") && !lower.contains("<img") {
             self.flush_paragraph();
             self.html_align = html_attr(trimmed, "align");
+            self.html_inline(html, source, self.base_for_container());
+            self.flush_paragraph();
+            if lower.contains("</p>") { self.html_align = None; }
             return;
         }
         if lower == "</p>" {
@@ -1424,7 +1748,17 @@ impl Builder<'_> {
             if self.controlled {
                 self.apply_gap();
                 if let Some(opening)=self.details.last().copied(){self.items.push(DisplayItem::Disclosure{x:self.indent-18.0*self.env.metrics.zoom,y:self.y,size:16.0*self.env.metrics.zoom,source:opening,open:!self.closed_details.contains(&opening)});}
-                self.html_inline(html,source,style);
+                if let Some(fragment) = fragment {
+                    let base = self.base;
+                    self.base = style;
+                    self.html_fragment(fragment);
+                    self.base = base;
+                } else {
+                    self.html_inline(html,source,style);
+                    if self.para.is_empty() {
+                        if let Some(tag) = crate::nomo_mark::nomo_syntax::html_tag(html, 0) { self.empty_anchor(source + tag.end); }
+                    }
+                }
             }else{
                 let title = strip_tags(trimmed);
                 self.para.push(&format!("▾ {}", title.trim()), style, Some((source, false)));
@@ -1456,17 +1790,12 @@ impl Builder<'_> {
         self.apply_gap();
         let metrics = self.env.metrics;
         let available = max_width.map_or(self.width - self.indent, |width| width.resolve(self.width-self.indent,metrics.zoom).min(self.width - self.indent));
-        let local = !(url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:"));
-        let path = self.env.base_dir.filter(|_| local).map(|dir| {
-            let decoded = percent_decode(url);
-            let candidate = Path::new(&decoded);
-            if candidate.is_absolute() { candidate.to_path_buf() } else { dir.join(candidate) }
-        });
+        let path = crate::images::resolve_source(url, self.env.base_dir);
         let size = path.as_deref().and_then(|path| (self.env.image_size)(path));
         match (path, size) {
             (Some(path), Some((w, h))) if w > 0 && h > 0 => {
-                // 图片按原始像素的 1/2（视网膜屏逻辑尺寸）显示，且不超过可用宽度。
-                let natural = w as f32 / 2.0 * metrics.zoom;
+                // Store 返回原始像素；缩略图解码倍率不改变文档中的 CSS 尺寸。
+                let natural = w as f32 * metrics.zoom;
                 let display_w = if max_width.is_some() { available } else { natural.min(available) };
                 let display_h = display_w * h as f32 / w as f32;
                 let free = (self.width - self.indent - display_w).max(0.0);
@@ -1500,7 +1829,8 @@ impl Builder<'_> {
         let mut at=0;let mut inline=InlineState::default();
         while at<html.len(){
             if let Some(tag)=crate::nomo_mark::nomo_syntax::html_tag(html,at){
-                inline.apply_html(&html[at..tag.end]);at=tag.end;continue;
+                if inline.apply_html(&html[at..tag.end]) == Some(false) { self.line_break(source + at..source + tag.end); }
+                at=tag.end;continue;
             }
             let end=html[at..].find('<').filter(|p|*p>0).map_or_else(||html.len(),|p|at+p);
             let text=html_escape::decode_html_entities(&html[at..end]);
@@ -1509,7 +1839,69 @@ impl Builder<'_> {
             at=end;
         }
     }
+
+    fn html_fragment(&mut self, fragment: &crate::nomo_mark::html_table::HtmlFragment) {
+        use crate::nomo_mark::parse::InlineFormat;
+        self.flush_paragraph(); self.apply_gap();
+        let top = self.y;
+        let index = self.items.len();
+        let pad = 12.0 * self.env.metrics.zoom;
+        if fragment.card {
+            self.items.push(DisplayItem::Rect { x: self.indent, y: top, w: self.width - self.indent, h: 0.0,
+                paint: Paint::Surface, radius: 6.0 * self.env.metrics.zoom, border: Some(Paint::Border) });
+            self.indent += pad; self.width -= pad; self.y += pad;
+            let label = self.note_layout(&fragment.label, ColorRole::Muted, self.width - self.indent);
+            let h = label.height();
+            self.items.push(DisplayItem::Text { x: self.indent, y: self.y, layout: Rc::new(label), map: Vec::new() });
+            self.y += h + pad;
+        }
+        for cell in &fragment.cells {
+            self.html_align = cell.align.clone();
+            if cell.runs.iter().filter(|run| !run.text.trim().is_empty()).count() == 1 {
+                if let Some(crate::nomo_mark::html_table::InlineAtom::Image { align: Some(align), .. }) = cell.runs.iter().find_map(|run| run.atom.as_ref()) {
+                    self.html_align = Some(align.clone());
+                }
+            }
+            if cell.runs.is_empty() { self.empty_anchor(cell.content.start); }
+            for run in &cell.runs {
+                if run.text == "\n" && run.atom.is_none() { self.line_break(run.source.clone()); continue; }
+                let mut style = self.base;
+                for format in &run.formats {
+                    match format {
+                        InlineFormat::Strong => style.bold = true, InlineFormat::Emphasis => style.italic = true,
+                        InlineFormat::Strike => style.strike = true, InlineFormat::Underline => style.underline = true,
+                        InlineFormat::Highlight => style.bg = 1, InlineFormat::Superscript => style.shift = 1,
+                        InlineFormat::Subscript => style.shift = -1,
+                        InlineFormat::Code => { style.mono = true; style.code_bg = true; style.color = ColorRole::InlineCode; }
+                        InlineFormat::Link => { style.underline = true; style.color = ColorRole::Link; }
+                    }
+                }
+                if let Some(atom) = &run.atom { push_table_atom(&mut self.para, atom, run.source.clone(), style, self.env, self.window); }
+                else {
+                    self.para.push(&run.text, style, Some((run.source.start, self.source.get(run.source.clone()) == Some(run.text.as_str()))));
+                    if let Some(map) = self.para.map.last_mut() { map.source_end = run.source.end; }
+                }
+            }
+            self.flush_paragraph();
+            self.html_align = None;
+            self.gap(self.env.metrics.paragraph_gap());
+        }
+        if fragment.card {
+            self.indent -= pad; self.width += pad; self.y += pad;
+            if let DisplayItem::Rect { h, .. } = &mut self.items[index] { *h = self.y - top; }
+        }
+    }
     fn front_matter(&mut self,range:Range<usize>) {
+        if self.controlled {
+            let data = crate::nomo_mark::front_matter::read(&self.source[range.clone()]);
+            let title = if data.title.is_empty() { "文档属性" } else { &data.title };
+            let mut rows = Vec::new();
+            if !data.created.is_empty() { rows.push(format!("创建于 {}", data.created)); }
+            if !data.updated.is_empty() { rows.push(format!("更新于 {}", data.updated)); }
+            if data.extra > 0 { rows.push(format!("另有 {} 项属性", data.extra)); }
+            self.metadata_card(title, &data.status, &rows.join("  ·  "), &data.tags, data.warning, range);
+            return;
+        }
         let metrics = self.env.metrics;
         let pad = 12.0 * metrics.zoom;
         let width = self.width;
@@ -1532,89 +1924,252 @@ impl Builder<'_> {
         self.y = y;
     }
 
+    fn block_comment(&mut self, content: &str, range: Range<usize>) {
+        self.flush_paragraph(); self.apply_gap();
+        let zoom = self.env.metrics.zoom;
+        let top = self.y; let pad = 10.0 * zoom; let label_width = 48.0 * zoom;
+        let width = self.width - self.indent;
+        let text = if content.is_empty() { "填写注释…" } else { content };
+        let label = Rc::new(self.note_layout("注释", ColorRole::Success, label_width));
+        let spec = ParaSpec::plain(text.to_owned(), InlineStyle { color: ColorRole::Muted, ..Default::default() },
+            Family::Text, self.font_size * 0.9, self.line_height, Wrap::Greedy);
+        let layout = self.env.layout(&spec, (width - label_width - pad * 2.0 - 60.0 * zoom).max(32.0), self.window);
+        let height = layout.height().max(label.height()) + pad * 2.0;
+        self.items.push(DisplayItem::Rect { x: self.indent, y: top, w: width, h: height, paint: Paint::CodeBg, radius: 6.0 * zoom, border: Some(Paint::Border) });
+        self.items.push(DisplayItem::Text { x: self.indent + pad, y: top + pad, layout: label, map: Vec::new() });
+        self.items.push(DisplayItem::Text { x: self.indent + pad + label_width, y: top + pad, layout,
+            map: vec![MapSeg { text: 0..text.len(), source: range.start, source_end: range.end, exact: false }] });
+        self.items.push(DisplayItem::BlockControls { x: self.indent, y: top, w: width, h: height, source: range, kind: "comment" });
+        self.y += height; self.gap(self.env.metrics.paragraph_gap());
+    }
+
+    fn metadata_card(&mut self, title: &str, status: &str, metadata: &str, tags: &[String], warning: bool, range: Range<usize>) {
+        self.flush_paragraph(); self.apply_gap();
+        let top = self.y; let first = self.items.len(); let zoom = self.env.metrics.zoom;
+        let pad = 14.0 * zoom; let width = self.width - self.indent;
+        self.items.push(DisplayItem::Rect { x: self.indent, y: top, w: width, h: 0.0, paint: Paint::CodeBg, radius: 8.0 * zoom, border: Some(Paint::Border) });
+        let status_layout = (!status.is_empty()).then(|| Rc::new(self.note_layout(status, ColorRole::Accent, (width * 0.25).max(20.0))));
+        let status_w = status_layout.as_ref().map_or(0.0, |layout| layout.max_line_width() + pad);
+        let spec = ParaSpec::plain(format!("▤  {title}"), InlineStyle { bold: true, color: ColorRole::Heading, ..Default::default() },
+            Family::Text, self.font_size, self.line_height, Wrap::Greedy);
+        let heading = self.env.layout(&spec, (width - pad * 2.0 - status_w - 64.0 * zoom).max(32.0), self.window);
+        let row_h = heading.height().max(status_layout.as_ref().map_or(0.0, |layout| layout.height()));
+        self.items.push(DisplayItem::Text { x: self.indent + pad, y: top + pad, layout: heading, map: Vec::new() });
+        if let Some(layout) = status_layout {
+            let x = self.indent + width - pad - 64.0 * zoom - status_w;
+            self.items.push(DisplayItem::Rect { x, y: top + pad, w: status_w, h: layout.height(), paint: Paint::Surface, radius: 4.0 * zoom, border: Some(Paint::Border) });
+            self.items.push(DisplayItem::Text { x: x + pad * 0.5, y: top + pad, layout, map: Vec::new() });
+        }
+        self.y += pad + row_h;
+        if !metadata.is_empty() {
+            let layout = Rc::new(self.note_layout(metadata, ColorRole::Muted, (width - pad * 2.0).max(32.0)));
+            self.items.push(DisplayItem::Text { x: self.indent + pad, y: self.y + pad * 0.5, layout: layout.clone(), map: Vec::new() });
+            self.y += pad * 0.5 + layout.height();
+        }
+        if !tags.is_empty() {
+            self.y += pad * 0.5;
+            let mut x = self.indent + pad; let mut row = 0.0f32;
+            for tag in tags {
+                let layout = Rc::new(self.note_layout(tag, ColorRole::Muted, (width - pad * 3.0).max(20.0)));
+                let w = layout.max_line_width() + pad; let h = layout.height() + 4.0 * zoom;
+                if x > self.indent + pad && x + w > self.width - pad { self.y += row + 6.0 * zoom; x = self.indent + pad; row = 0.0; }
+                self.items.push(DisplayItem::Rect { x, y: self.y, w, h, paint: Paint::Surface, radius: 4.0 * zoom, border: Some(Paint::Border) });
+                self.items.push(DisplayItem::Text { x: x + pad * 0.5, y: self.y + 2.0 * zoom, layout, map: Vec::new() });
+                x += w + 6.0 * zoom; row = row.max(h);
+            }
+            self.y += row;
+        }
+        if warning {
+            let layout = Rc::new(self.note_layout("部分属性包含复杂值，请在编辑时查看原文", ColorRole::Warning, (width - pad * 2.0).max(32.0)));
+            self.items.push(DisplayItem::Text { x: self.indent + pad, y: self.y + 6.0 * zoom, layout: layout.clone(), map: Vec::new() });
+            self.y += layout.height() + 6.0 * zoom;
+        }
+        self.y += pad;
+        if let DisplayItem::Rect { h, .. } = &mut self.items[first] { *h = self.y - top; }
+        self.items.push(DisplayItem::BlockControls { x: self.indent, y: top, w: width, h: self.y - top, source: range, kind: "front-matter" });
+        self.gap(self.env.metrics.paragraph_gap());
+    }
+
+    fn toc(&mut self, range: Range<usize>) {
+        let zoom = self.env.metrics.zoom;
+        self.flush_paragraph(); self.gap(20.0 * zoom); self.apply_gap();
+        let top = self.y;
+        let pad = 18.0 * zoom;
+        let top_pad = 14.0 * zoom;
+        let width = self.width - self.indent;
+        let mut content = Vec::new();
+        let title = ParaSpec::plain("目录".into(), InlineStyle { bold: true, color: ColorRole::Heading, ..Default::default() },
+            Family::Text, 19.0 * zoom, 28.0 * zoom, Wrap::Greedy);
+        let title = self.env.layout(&title, width, self.window);
+        content.push(DisplayItem::Text { x: self.indent + pad, y: top + top_pad, layout: title.clone(), map: Vec::new() });
+        self.y = top + top_pad + title.height() + 8.0 * zoom;
+        content.push(DisplayItem::Rect { x: self.indent + pad, y: self.y, w: (width - pad * 2.0).max(0.0), h: 1.0, paint: Paint::Border, radius: 0.0, border: None });
+        self.y += 10.0 * zoom;
+        let mut entries = Parser::new(&self.source[range.clone()]).into_offset_iter();
+        let mut number = 0;
+        while let Some((event, span)) = entries.next() {
+            let Event::Start(Tag::Link { dest_url, .. }) = event else { continue; };
+            let mut label = String::new();
+            for (event, _) in entries.by_ref() {
+                match event { Event::End(TagEnd::Link) => break, Event::Text(text) | Event::Code(text) => label.push_str(&text), _ => {} }
+            }
+            number += 1;
+            let source = range.start + span.start;
+            let line = crate::nomo_mark::commands::line_start(self.source, source);
+            let indent = self.source[line..source].bytes().take_while(|b| *b == b' ').count() as f32 * 8.0 * zoom;
+            let x = self.indent + pad + indent.min((width - 100.0).max(0.0));
+            let spec = ParaSpec::plain(if indent > 0.0 { format!("• {label}") } else { label }, InlineStyle { color: ColorRole::Link, ..Default::default() },
+                Family::Text, 17.0 * zoom, 17.0 * 1.45 * zoom, Wrap::Greedy);
+            let label = self.env.layout(&spec, (self.width - x - 54.0).max(20.0), self.window);
+            let y = self.y;
+            let h = label.height().max(30.0 * zoom);
+            content.push(DisplayItem::Text { x, y, layout: label, map: vec![MapSeg { text: 0..spec.text.len(), source, source_end: range.start + span.end, exact: false }] });
+            let number_spec = ParaSpec::plain(number.to_string(), InlineStyle { color: ColorRole::Muted, ..Default::default() },
+                Family::Text, 13.0 * zoom, 17.0 * 1.45 * zoom, Wrap::Greedy);
+            let number_layout = self.env.layout(&number_spec, 36.0 * zoom, self.window);
+            content.push(DisplayItem::Text { x: self.width - pad - number_layout.max_line_width(), y, layout: number_layout, map: Vec::new() });
+            content.push(DisplayItem::TocLink { x, y, w: self.width - x - pad, h, source, target: dest_url.to_string() });
+            self.y += h + 8.0 * zoom;
+        }
+        if number == 0 {
+            let spec = ParaSpec::plain("文档暂无标题".into(), InlineStyle { color: ColorRole::Muted, ..Default::default() },
+                Family::Text, self.env.metrics.body_size() * 0.9, self.line_height, Wrap::Greedy);
+            let label = self.env.layout(&spec, width - pad * 2.0, self.window);
+            self.y += label.height();
+            content.push(DisplayItem::Text { x: self.indent + pad, y: top + pad + title.height() + 8.0, layout: label, map: Vec::new() });
+        }
+        self.y += 16.0 * zoom;
+        self.items.push(DisplayItem::Rect { x: self.indent, y: top, w: width, h: self.y - top, paint: Paint::TocCard, radius: 8.0 * zoom, border: Some(Paint::Border) });
+        self.items.extend(content);
+        self.items.push(DisplayItem::BlockControls { x: self.indent, y: top, w: width, h: 30.0, source: range, kind: "toc" });
+        self.gap(34.0 * zoom);
+    }
+
     fn html_table(&mut self,table:&crate::nomo_mark::html_table::HtmlTable,revealed:&[Range<usize>]) {
         use crate::nomo_mark::{parse::InlineFormat,table_widths::{self,CellMetrics}};
-        self.flush_paragraph();self.apply_gap();let first_item=self.items.len();let top=self.y;
-        let zoom=self.env.metrics.zoom;let font_size=14.0*zoom;let line_height=font_size*1.55;let pad_x=11.0*zoom;let pad_y=9.0*zoom;
+        self.flush_paragraph();self.apply_table_gap();let first_item=self.items.len();let top=self.y;
+        let zoom=self.env.metrics.zoom;let em=14.0*zoom;let line_height=em*1.55;let pad_x=11.0*zoom;let pad_y=9.0*zoom;
+        let border = zoom;
+        let viewport_width = (self.width - self.indent).max(1.0);
         let mut prepared=Vec::new();let mut measures=Vec::new();
         for cell in &table.cells {
-            let base=InlineStyle{bold:cell.header,color:if cell.header{ColorRole::Heading}else{ColorRole::Fg},..Default::default()};
+            let base=table_layout::header_style(InlineStyle::default(), cell.header);
+            let font_size = if cell.header { 13.0 } else { 14.0 } * zoom;
             let mut pieces:Vec<_>=cell.runs.iter().map(|run|(run.source.clone(),run.text.clone(),run.formats.clone(),run.atom.as_ref())).collect();
             for span in &cell.spans{for marker in [&span.open,&span.close]{if revealed.contains(marker){pieces.push((marker.clone(),self.source[marker.clone()].into(),Vec::new(),None));}}}
             pieces.sort_by_key(|(range,_,_,_)|range.start);
             let mut paragraphs=Vec::new();let mut para=ParaBuilder::new();
+            let mut empty_anchor=cell.content.start;
             for (range,text,formats,atom) in pieces {
-                if text=="\n" {if para.map.is_empty(){para.map.push(MapSeg{text:0..0,source:range.start,source_end:range.start,exact:true});}paragraphs.push(para);para=ParaBuilder::new();continue;}
+                if text=="\n" {
+                    if para.map.is_empty(){para.map.push(MapSeg{text:0..0,source:range.start,source_end:range.start,exact:true});}
+                    paragraphs.push(para);para=ParaBuilder::new();
+                    // 只为空行保留锚点，后续正文仍使用自身格式和源码映射。
+                    empty_anchor=range.end;
+                    continue;
+                }
                 let mut style=base;
                 for format in formats{match format{InlineFormat::Strong=>style.bold=true,InlineFormat::Emphasis=>style.italic=true,InlineFormat::Code=>{style.mono=true;style.code_bg=true;style.color=ColorRole::InlineCode;},InlineFormat::Strike=>style.strike=true,InlineFormat::Underline=>style.underline=true,InlineFormat::Highlight=>style.bg=1,InlineFormat::Superscript=>style.shift=1,InlineFormat::Subscript=>style.shift=-1,InlineFormat::Link=>{style.underline=true;style.color=ColorRole::Link;}}}
                 if let Some(atom) = atom {
-                    push_table_atom(&mut para, atom, range, style, self.env);
+                    push_table_atom(&mut para, atom, range, style, self.env, self.window);
                     continue;
                 }
                 if text.is_empty(){para.map.push(MapSeg{text:para.text.len()..para.text.len(),source:range.start,source_end:range.end,exact:true});}
                 else{let exact=self.source.get(range.clone())==Some(text.as_str());para.push(&text,style,Some((range.start,exact)));if let Some(map)=para.map.last_mut(){map.source_end=range.end;}}
             }
-            if para.map.is_empty(){para.map.push(MapSeg{text:0..0,source:cell.content.start,source_end:cell.content.start,exact:true});}paragraphs.push(para);
+            if para.map.is_empty(){para.map.push(MapSeg{text:0..0,source:empty_anchor,source_end:empty_anchor,exact:true});}paragraphs.push(para);
             let mut natural=0.0f32;let mut specs=Vec::new();
             let mut atomic = 0.0f32;
-            for para in paragraphs{let object_height=para.objects.iter().map(|o| o.ascent+o.descent).fold(line_height,f32::max);atomic=para.objects.iter().map(|o|o.width).fold(atomic,f32::max);let spec=ParaSpec{text:para.text,spans:para.spans,base,family:Family::Text,font_size,line_height:object_height,wrap:Wrap::Greedy,objects:para.objects};natural=natural.max(self.env.layout(&spec,100_000.0,self.window).max_line_width());specs.push((spec,para.map));}
+            for para in paragraphs {
+                let spec = ParaSpec { text:para.text, spans:para.spans, base, family:Family::Text,
+                    font_size, line_height:font_size*1.55, wrap:Wrap::Greedy, objects:para.objects };
+                let measured = table_layout::measure(&spec, &para.map, revealed, &para.table_images, self.env, self.window);
+                natural = natural.max(measured.0);
+                atomic = atomic.max(measured.1);
+                specs.push((spec, para.map));
+            }
             measures.push(CellMetrics{column:cell.column,span:cell.colspan,header:cell.header,natural,atomic,chrome:pad_x*2.0+zoom,explicit:cell.widths.iter().map(|width|*width as f32*zoom).collect()});
             prepared.push(specs);
         }
-        let widths=table_widths::allocate(&table_widths::constraints(table.columns,&measures,font_size),(self.env.wide_width-self.indent).max(self.width-self.indent));
-        let mut xs=vec![self.indent];for width in &widths{xs.push(xs.last().unwrap()+width);}
+        let widths=table_widths::allocate(&table_widths::constraints(table.columns,&measures,em),(viewport_width-border).max(0.0));
+        let mut xs=vec![self.indent+border];for width in &widths{xs.push(xs.last().unwrap()+width);}
         let mut row_heights=vec![line_height+pad_y*2.0;table.rows];let mut laid=Vec::new();
         for (cell,paragraphs) in table.cells.iter().zip(prepared){
             let width=widths[cell.column..cell.column+cell.colspan].iter().sum::<f32>();let mut height=0.0;let mut content=Vec::new();
-            for (spec,map) in paragraphs{let layout=self.env.layout(&spec,(width-pad_x*2.0).max(20.0),self.window);let offset=match cell.align.as_deref(){Some("center")=>(width-pad_x*2.0-layout.max_line_width()).max(0.0)/2.0,Some("right")=>(width-pad_x*2.0-layout.max_line_width()).max(0.0),_=>(0.0)};content.push((height,offset,layout.clone(),map));height+=layout.height();}
+            let content_width = (width - pad_x * 2.0 - border).max(1.0);
+            for (spec, map) in paragraphs {
+                let layout = table_layout::layout(&spec, content_width, self.env, self.window);
+                let image_align = (spec.text.trim() == OBJECT_CHAR.to_string()).then(|| cell.runs.iter().find_map(|run| {
+                    let crate::nomo_mark::html_table::InlineAtom::Image { align, .. } = run.atom.as_ref()? else { return None; };
+                    map.iter().any(|segment| segment.source == run.source.start).then(|| align.as_deref()).flatten()
+                })).flatten();
+                let free = (content_width - layout.max_line_width()).max(0.0);
+                let offset = match image_align.or(cell.align.as_deref()) { Some("center") => free / 2.0, Some("right") => free, _ => 0.0 };
+                height += layout.height();
+                content.push((height - layout.height(), offset, layout, map));
+            }
             if cell.rowspan==1{row_heights[cell.row]=row_heights[cell.row].max(height+pad_y*2.0);}laid.push((height,content));
         }
         for (cell,(height,_)) in table.cells.iter().zip(&laid){let available=row_heights[cell.row..cell.row+cell.rowspan].iter().sum::<f32>();if available<height+pad_y*2.0{row_heights[cell.row+cell.rowspan-1]+=height+pad_y*2.0-available;}}
         let mut ys=vec![self.y];for height in row_heights{ys.push(ys.last().unwrap()+height);}
+        let table_width = xs.last().unwrap() - self.indent;
+        self.items.push(DisplayItem::Rect { x:self.indent, y:top, w:table_width, h:ys.last().unwrap()-top,
+            paint:Paint::Surface, radius:0.0, border:Some(Paint::TableBorder) });
         let mut texts=Vec::new();
         for (cell,(_,content)) in table.cells.iter().zip(laid){
             let x=xs[cell.column];let y=ys[cell.row];let width=xs[cell.column+cell.colspan]-x;let height=ys[cell.row+cell.rowspan]-y;
             self.items.push(DisplayItem::Rect{x,y,w:width,h:height,paint:if cell.header{Paint::TableHeader}else{Paint::Surface},radius:0.0,border:Some(Paint::TableBorder)});
+            self.items.push(DisplayItem::TableCell { x, y, w: width, h: height, table: table.source.start,
+                row: cell.row, column: cell.column, rowspan: cell.rowspan, colspan: cell.colspan, source: cell.content.clone() });
             for (dy,dx,layout,map) in content{texts.push(DisplayItem::Text{x:x+pad_x+dx,y:y+pad_y+dy,layout,map});}
         }
         self.items.extend(texts);self.y=*ys.last().unwrap();
-        self.wrap_horizontal(first_item,table.source.clone(),top,self.width-self.indent,*xs.last().unwrap()-self.indent);
-        self.gap(self.env.metrics.paragraph_gap());
+        self.wrap_horizontal(first_item,table.source.clone(),top,viewport_width,table_width);
+        self.gap(20.0 * zoom);
     }
-    fn table(&mut self, table: TableData) {
-        self.apply_gap();
+    fn table(&mut self, table: TableData, revealed: &[Range<usize>]) {
+        self.apply_table_gap();
         let first_item=self.items.len();
         let metrics = self.env.metrics;
         let columns = table.rows.iter().map(|(_, cells)| cells.len()).max().unwrap_or(0).max(table.alignments.len());
         if columns == 0 {
             return;
         }
-        // 表格可越过正文宽度延伸到编辑区右缘（Web 版为横向滚动）。
-        let available = (self.env.wide_width - self.indent).max(self.width - self.indent);
+        // 与旧版滚动壳一致：扣除所在容器的内缩和表格外边框后分配列宽。
+        let border = if self.controlled { metrics.zoom } else { 0.0 };
+        let viewport_width = (self.width - self.indent).max(1.0);
+        let available = if self.controlled { (viewport_width - border).max(0.0) }
+            else { (self.env.wide_width - self.indent).max(viewport_width) };
         let pad_x = 11.0 * metrics.zoom;
         let pad_y = if self.controlled {9.0} else {8.0} * metrics.zoom;
         let font_size = 14.0 * metrics.zoom;
         let line_height = 14.0 * 1.55 * metrics.zoom;
         let spec_for = |cell: &ParaBuilder, header: bool| ParaSpec {
             text: cell.text.clone(),
-            spans: cell.spans.clone(),
-            base: InlineStyle { bold: header, color: if header { ColorRole::Heading } else { ColorRole::Fg }, ..Default::default() },
+            spans: cell.spans.iter().map(|(range, style)| (range.clone(),
+                if self.controlled { table_layout::header_style(*style, header) } else { *style })).collect(),
+            base: if self.controlled { table_layout::header_style(InlineStyle::default(), header) }
+                else { InlineStyle { bold: header, color: if header { ColorRole::Heading } else { ColorRole::Fg }, ..Default::default() } },
             family: Family::Text,
-            font_size,
-            line_height: cell.objects.iter().map(|object| object.ascent + object.descent).fold(line_height, f32::max),
+            font_size: if self.controlled && header { 13.0 * metrics.zoom } else { font_size },
+            line_height: if self.controlled && header { 13.0 * 1.55 * metrics.zoom } else { line_height },
             wrap: Wrap::Greedy,
             objects: cell.objects.clone(),
         };
-        // 列宽：按自然宽度分配；总宽超出时按比例压缩超出部分，每列保底为自身自然宽度与 120px 的较小者，
-        // 保证短表头不折行。
+        // NomoMark 使用共享语义约束；旧 Buffer 渲染入口保留原有分配方式。
         let mut natural = vec![40.0f32; columns];
         let mut cell_metrics=Vec::new();
         for (header, cells) in &table.rows {
             for (column, cell) in cells.iter().enumerate() {
-                let layout = self.env.layout(&spec_for(cell, *header), 10_000.0, self.window);
-                natural[column] = natural[column].max(layout.max_line_width() + pad_x * 2.0 + 2.0);
-                if self.controlled {cell_metrics.push(crate::nomo_mark::table_widths::CellMetrics{
-                    column,span:1,header:*header,natural:layout.max_line_width(),atomic:cell.objects.iter().map(|object| object.width).fold(0.0,f32::max),chrome:pad_x*2.0+metrics.zoom,explicit:Vec::new()});}
+                let spec = spec_for(cell, *header);
+                if self.controlled {
+                    let (natural, atomic) = table_layout::measure(&spec, &cell.map, revealed, &cell.table_images, self.env, self.window);
+                    cell_metrics.push(crate::nomo_mark::table_widths::CellMetrics {
+                        column, span:1, header:*header, natural, atomic, chrome:pad_x*2.0+border, explicit:Vec::new() });
+                } else {
+                    let layout = self.env.layout(&spec, 10_000.0, self.window);
+                    natural[column] = natural[column].max(layout.max_line_width() + pad_x * 2.0 + 2.0);
+                }
             }
         }
         let total: f32 = natural.iter().sum();
@@ -1629,24 +2184,27 @@ impl Builder<'_> {
             let scale = (available - floor_total).max(0.0) / (total - floor_total).max(1.0);
             natural.iter().zip(&floors).map(|(width, floor)| floor + (width - floor) * scale).collect()
         };
-        let table_width: f32 = widths.iter().sum();
+        let table_width: f32 = widths.iter().sum::<f32>() + border;
         let top = self.y;
         let mut y = top;
         let mut cells_out = Vec::new();
         let mut row_bounds = Vec::new();
-        for (header, cells) in &table.rows {
-            let mut row_height = line_height;
+        for (row, (header, cells)) in table.rows.iter().enumerate() {
+            let mut row_height = if self.controlled && *header { 13.0 * 1.55 * metrics.zoom } else { line_height };
             let mut laid = Vec::new();
-            let mut x = self.indent;
+            let mut x = self.indent + border;
             for column in 0..columns {
                 let width = widths[column];
                 if let Some(cell) = cells.get(column) {
-                    let layout = self.env.layout(&spec_for(cell, *header), (width - pad_x * 2.0).max(20.0), self.window);
+                    let content_width = (width - pad_x * 2.0 - border).max(1.0);
+                    let layout = if self.controlled { table_layout::layout(&spec_for(cell, *header), content_width, self.env, self.window) }
+                        else { self.env.layout(&spec_for(cell, *header), content_width.max(20.0), self.window) };
                     row_height = row_height.max(layout.height());
                     let text_width = layout.max_line_width();
-                    let offset = match table.alignments.get(column) {
-                        Some(Alignment::Center) => (width - pad_x * 2.0 - text_width).max(0.0) / 2.0,
-                        Some(Alignment::Right) => (width - pad_x * 2.0 - text_width).max(0.0),
+                    let image_align = (cell.text.trim() == OBJECT_CHAR.to_string()).then(|| cell.table_images.first().and_then(|image| image.align)).flatten();
+                    let offset = match image_align.as_ref().or_else(|| table.alignments.get(column)) {
+                        Some(Alignment::Center) => (content_width - text_width).max(0.0) / 2.0,
+                        Some(Alignment::Right) => (content_width - text_width).max(0.0),
                         _ => 0.0,
                     };
                     laid.push((x + pad_x + offset, layout, cell.map.clone()));
@@ -1655,6 +2213,16 @@ impl Builder<'_> {
             }
             let height = row_height + pad_y * 2.0;
             row_bounds.push((*header, y, height));
+            if self.controlled {
+                let mut x = self.indent + border;
+                for (column, cell) in cells.iter().enumerate() {
+                    if let (Some(start), Some(end)) = (cell.map.iter().map(|m| m.source).min(), cell.map.iter().map(|m| m.source_end).max()) {
+                        cells_out.push(DisplayItem::TableCell { x, y, w: widths[column], h: height, table: table.source.start,
+                            row, column, rowspan: 1, colspan: 1, source: start..end });
+                    }
+                    x += widths[column];
+                }
+            }
             for (x, layout, map) in laid {
                 cells_out.push(DisplayItem::Text { x, y: y + pad_y, layout, map });
             }
@@ -1670,33 +2238,35 @@ impl Builder<'_> {
                 self.items.push(DisplayItem::Rect { x: self.indent, y: row_y + height - 1.0, w: table_width, h: 1.0, paint: Paint::TableBorder, radius: 0.0, border: None });
             }
         }
-        let mut x = self.indent;
+        let mut x = self.indent + border;
         for width in &widths[..columns - 1] {
             x += width;
             self.items.push(DisplayItem::Rect { x, y: top, w: 1.0, h: y - top, paint: Paint::TableBorder, radius: 0.0, border: None });
         }
         self.items.extend(cells_out);
         self.y = y;
-        if self.controlled {self.wrap_horizontal(first_item,table.source,top,self.width-self.indent,table_width);}
-        self.gap(metrics.paragraph_gap());
+        if self.controlled {self.wrap_horizontal(first_item,table.source,top,viewport_width,table_width);}
+        self.gap(if self.controlled { 20.0 * metrics.zoom } else { metrics.paragraph_gap() });
     }
 
-    fn finish(mut self) -> BlockLayout {
+    fn finish(mut self, has_following_block: bool) -> BlockLayout {
         self.flush_paragraph();
+        // 跨窗口仍保留最后一个块的段距，但不把分隔行渲染成额外空段落。
+        if has_following_block { self.apply_gap(); }
         BlockLayout { height: self.y.max(1.0), items: self.items }
     }
     fn wrap_horizontal(&mut self,first:usize,source:Range<usize>,top:f32,width:f32,content_width:f32){
         if content_width<=width+0.5{return;}
         let mut items=self.items.split_off(first);
         for item in &mut items{match item{
-            DisplayItem::Text{x,y,..}|DisplayItem::Rect{x,y,..}|DisplayItem::Image{x,y,..}|DisplayItem::Checkbox{x,y,..}|DisplayItem::CopyButton{x,y,..}|DisplayItem::Disclosure{x,y,..}|DisplayItem::Embed{x,y,..}|DisplayItem::Horizontal{x,y,..}=>{*x-=self.indent;*y-=top;}
+            DisplayItem::CodeBody{x,y,..}|DisplayItem::CodeHeader{x,y,..}|DisplayItem::CodeLanguage{x,y,..}|DisplayItem::Text{x,y,..}|DisplayItem::Rect{x,y,..}|DisplayItem::Image{x,y,..}|DisplayItem::Checkbox{x,y,..}|DisplayItem::CopyButton{x,y,..}|DisplayItem::Disclosure{x,y,..}|DisplayItem::Embed{x,y,..}|DisplayItem::Horizontal{x,y,..}|DisplayItem::TableCell{x,y,..}|DisplayItem::CalloutHeader{x,y,..}|DisplayItem::BlockControls{x,y,..}|DisplayItem::TocLink{x,y,..}=>{*x-=self.indent;*y-=top;}
         }}
         let height=self.y-top;self.y+=8.0;
         self.items.push(DisplayItem::Horizontal{x:self.indent,y:top,w:width,h:height+8.0,content_width,source,offset:std::cell::Cell::new(0.0),layout:Box::new(BlockLayout{height,items})});
     }
 }
 
-fn percent_decode(url: &str) -> String {
+pub(crate) fn percent_decode(url: &str) -> String {
     let bytes = url.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;

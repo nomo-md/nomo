@@ -68,6 +68,8 @@ struct State {
     published: HashMap<String, u64>,
     building: HashMap<String, u64>,
     invalidations: HashMap<String, Option<Invalidation>>,
+    // 每个活动会话仅保留一个修订号；关闭/移交时释放，旧快照不能倒退索引。
+    revisions: HashMap<String, u64>,
 }
 struct Inner {
     store: Mutex<Store>,
@@ -149,6 +151,12 @@ impl StructureService {
         let _foreground = Foreground(&self.inner);
         self.cancel_executing(document_id, Some(snapshot.revision));
         let mut state = lock(&self.inner.state)?;
+        if let Some(&current) = state.revisions.get(document_id) {
+            if snapshot.revision < current {
+                return Err(TextDocumentError::revision_conflict(snapshot.revision, current));
+            }
+        }
+        state.revisions.insert(document_id.into(), snapshot.revision);
         for generation in [
             state.building.get(document_id),
             state.published.get(document_id),
@@ -300,8 +308,12 @@ impl StructureService {
         let Ok(mut state) = self.inner.state.lock() else {
             return;
         };
+        self.invalidate_locked(&mut state, document_id, release);
+    }
+    fn invalidate_locked(&self, state: &mut State, document_id: &str, release: bool) {
         let mut generations = vec![];
         if release {
+            state.revisions.remove(document_id);
             state.invalidations.remove(document_id);
             if let Ok(store) = self.inner.store.lock() {
                 if let Err(error) = store.release_views(document_id) {
@@ -336,22 +348,20 @@ impl StructureService {
     fn cancel_executing(&self, document: &str, keep_revision: Option<u64>) {
         if let Ok(executing) = self.inner.executing.lock() {
             if let Some(job) = executing.as_ref().filter(|job| job.identity.document_id == document
-                && keep_revision != Some(job.identity.revision)) {
+                && keep_revision.is_none_or(|revision| job.identity.revision < revision)) {
                 job.cancel.store(true, Ordering::Release);
             }
         }
     }
-    pub fn edited(&self, document_id: &str, edits: &[(u64, u64, u64)]) {
-        self.cancel_executing(document_id, None);
-        let previous = self
-            .inner
-            .state
-            .lock()
-            .ok()
-            .and_then(|state| state.invalidations.get(document_id).copied());
-        self.invalidate(document_id, false);
+    pub fn edited(&self, document_id: &str, revision: u64, edits: &[(u64, u64, u64)]) {
+        self.cancel_executing(document_id, Some(revision));
         if let Ok(mut state) = self.inner.state.lock() {
-            let merged = if previous == Some(None) {
+            if state.revisions.get(document_id).is_some_and(|current| *current > revision) { return; }
+            let previous = state.invalidations.get(document_id).copied();
+            // 修订门禁、取消与变更区间在同一锁内发布，避免旧请求消费半更新状态。
+            state.revisions.insert(document_id.into(), revision);
+            self.invalidate_locked(&mut state, document_id, false);
+            let merged = if edits.is_empty() || previous == Some(None) {
                 None
             } else {
                 Invalidation::merge(previous.flatten(), edits)

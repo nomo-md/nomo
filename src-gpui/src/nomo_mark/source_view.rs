@@ -74,9 +74,47 @@ pub fn lines(parsed: &ParsedWindow) -> Vec<SourceLine<'_>> {
     result
 }
 
+/// 同一代码节点连续着色，围栏与相邻节点重置状态；仅持有当前加载窗口的样式。
+pub fn line_spans(parsed: &ParsedWindow, lines: &[SourceLine<'_>], auxiliary: Option<&str>) -> Vec<crate::markdown::highlight::Spans> {
+    use crate::markdown::highlight;
+    let mut result = Vec::with_capacity(lines.len());
+    let mut at = 0;
+    while at < lines.len() {
+        let line = &lines[at];
+        if auxiliary.is_some() || line.context == LineContext::Code {
+            let language = auxiliary.unwrap_or(line.language);
+            let mut end = at + 1;
+            while end < lines.len() && (auxiliary.is_some() || (lines[end].context == LineContext::Code && lines[end].language == language)) { end += 1; }
+            let text = &parsed.source[line.range.start..lines[end - 1].range.end];
+            let highlighted = highlight::code_block(text, language);
+            result.extend(highlighted.iter().cloned());
+            at = end;
+        } else {
+            result.push(highlight::markdown_line(&parsed.source[line.range.clone()], line.context, line.language));
+            at += 1;
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fences_reset_lexical_state_without_changing_source_offsets() {
+        use crate::layout::ColorRole;
+        let parsed = super::super::parse::fixture("```rust\r\n/* 注释\r\n继续\r\n```\r\n\r\n```rust\r\nlet x = 1;\r\n```\r\n");
+        let source = lines(&parsed);
+        let spans = line_spans(&parsed, &source, None);
+        assert_eq!(source.len(), spans.len());
+        assert_eq!(spans[2][0].1.color, ColorRole::Comment);
+        assert!(spans[6].iter().any(|(range, style)| range == &(0..3) && style.color == ColorRole::Keyword));
+        for (line, spans) in source.iter().zip(spans) {
+            let text = &parsed.source[line.range.clone()];
+            assert!(spans.iter().all(|(range, _)| text.is_char_boundary(range.start) && text.is_char_boundary(range.end)));
+        }
+    }
+
     #[test]
     fn mixed_endings_keep_original_offsets_and_code_context() {
         let parsed = super::super::parse::fixture("# 标题\r\n\r\n```rust\r\nlet x = 1;\n```\r\n\n");

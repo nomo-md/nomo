@@ -13,10 +13,20 @@ pub struct EditorInteraction {
     /// 全局源码锚点上的临时展开状态，不改写 Details 的默认 open 属性。
     pub details_open: std::collections::BTreeMap<u64, bool>,
     pub horizontal_offsets: std::collections::BTreeMap<u64, f32>,
+    /// 当前驻留代码块的横纵滚动位置；随源码锚点重基、删除和窗口回收清理。
+    pub code_offsets: std::collections::BTreeMap<u64, (f32, f32)>,
     revealed: Vec<Range<usize>>,
     composition_anchor: Option<usize>,
 }
 impl EditorInteraction {
+    pub(super) fn map_code_offsets(&mut self, edits: &[super::protocol::SourceEdit]) {
+        self.code_offsets = std::mem::take(&mut self.code_offsets).into_iter()
+            .filter(|(at, _)| !edits.iter().any(|edit| edit.from_byte < *at && *at < edit.to_byte))
+            .map(|(at, value)| {
+                let before: Vec<_> = edits.iter().filter(|edit| edit.to_byte <= at && edit.from_byte < at).cloned().collect();
+                (super::commands::map_selection(super::protocol::DocumentSelection::caret(at), &before).head_byte, value)
+            }).collect();
+    }
     pub fn protected(&self) -> bool {
         self.composing || self.dragging || self.draft
     }

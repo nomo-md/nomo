@@ -15,6 +15,9 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
+#[path = "math_fallback.rs"]
+mod math_fallback;
+
 /// 位图缓存上限（BGRA 字节）。800 个块级公式在 2 倍分辨率下约占 60–90 MiB，留出余量。
 const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
 /// 单张位图的边长上限（设备像素），防止超大图表占用过多内存；超出时降低栅格倍率。
@@ -29,6 +32,17 @@ pub enum EmbedKind {
     /// `display` 为真时使用显示样式（块级公式），否则为行内样式。
     Math { display: bool },
     Mermaid,
+    /// 只有少量颜色值参与键，继续使用同一份有界位图缓存。
+    MermaidThemed(MermaidPalette),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct MermaidPalette { pub mode: u8, pub colors: [u32; 9] }
+
+impl EmbedKind {
+    pub fn with_palette(self, palette: MermaidPalette) -> Self {
+        if matches!(self, Self::Mermaid) { Self::MermaidThemed(palette) } else { self }
+    }
 }
 
 /// 一次渲染请求。`em_px` 为正文字号（逻辑像素），`color` 为公式前景色，`dark` 决定图表配色。
@@ -173,8 +187,9 @@ fn render(spec: &EmbedSpec) -> Result<(EmbedInfo, RenderImage, usize), String> {
             let (image, width, height, bytes) = rasterize(&svg, scale_to_em, false)?;
             Ok((EmbedInfo { width, height, depth: height * depth_ratio }, image, bytes))
         }
-        EmbedKind::Mermaid => {
-            let svg = mermaid_svg(&spec.source, spec.dark)?;
+        EmbedKind::Mermaid | EmbedKind::MermaidThemed(_) => {
+            let palette = if let EmbedKind::MermaidThemed(palette) = spec.kind { Some(palette) } else { None };
+            let svg = mermaid_svg_with_palette(&spec.source, spec.dark, palette, merman::OperationControl::new())?;
             let (image, width, height, bytes) = rasterize(&svg, scale_to_em, true)?;
             Ok((EmbedInfo { width, height, depth: 0.0 }, image, bytes))
         }
@@ -190,11 +205,13 @@ fn math_font() -> Result<&'static latex_rust::MathFont, String> {
 
 /// 公式转 SVG，并返回基线以下部分占总高度的比例。
 pub(crate) fn math_svg(source: &str, display: bool, color: [u8; 3]) -> Result<(String, f32), String> {
+    if source.len() > 64 * 1024 { return Err("公式超出 64 KiB 渲染预算；原文已保留".into()); }
     let font = math_font()?;
     let ast = latex_rust::parse(source.trim()).map_err(|error| format!("公式解析失败：{error}"))?;
     let style = if display { latex_rust::MathStyle::Display } else { latex_rust::MathStyle::Text };
     let em = latex_rust::Dim::from_i64(12);
-    let tree = latex_rust::layout_with_em_size_pt(&ast, font, style, &em).map_err(describe_math_error)?;
+    let fallback = math_fallback::MathFallback::default();
+    let tree = latex_rust::layout_with_glyph_fallback(&ast, font, style, &em, &|ch, style| fallback.glyph(ch, style)).map_err(describe_math_error)?;
     let as_f32 = |dim: &latex_rust::Dim| dim.to_svg_string().parse::<f32>().unwrap_or(0.0);
     let (height, depth) = (as_f32(&tree.height), as_f32(&tree.depth));
     let ratio = if height + depth > 0.0 { depth / (height + depth) } else { 0.0 };
@@ -209,8 +226,7 @@ pub(crate) fn math_svg(source: &str, display: bool, color: [u8; 3]) -> Result<(S
 fn describe_math_error(error: latex_rust::Error) -> String {
     let text = format!("{error:?}");
     if text.contains("MissingGlyph") {
-        // STIX Two Math 不含汉字等字形；`\text{中文}` 会走到这里。
-        format!("公式字体缺少字形（如 \\text 中的中文）：{text}")
+        format!("公式缺少可用字形（已尝试系统字体）：{text}")
     } else {
         format!("公式渲染失败：{text}")
     }
@@ -218,13 +234,24 @@ fn describe_math_error(error: latex_rust::Error) -> String {
 
 /// Mermaid 浅色 / 深色配置。浅色沿用 Mermaid 默认主题（与 Web 版一致），深色使用 Mermaid 的 dark 主题；
 /// 背景透明，由编辑器底色衬托。
-fn mermaid_engine(dark: bool) -> merman::Engine {
-    let config = merman::MermaidConfig::from_value(serde_json::json!({
-        "theme": if dark { "dark" } else { "default" },
+fn mermaid_engine(dark: bool, palette: Option<MermaidPalette>) -> merman::Engine {
+    let mode = palette.map_or(if dark { 1 } else { 0 }, |palette| palette.mode);
+    let mut value = serde_json::json!({
+        "theme": match mode { 1 => "dark", 2 => "base", _ => "default" },
         "darkMode": dark,
         "fontFamily": MERMAID_FONT_FAMILY,
-    }));
-    merman::Engine::new().with_site_config(config)
+    });
+    if let Some(palette) = palette.filter(|palette| palette.mode == 2) {
+        let colors = palette.colors.map(|color| format!("#{color:06x}"));
+        let [document, surface, fg, border, muted, rail, chrome, accent, heading] = &colors;
+        value["themeVariables"] = serde_json::json!({
+            "background": document, "primaryColor": surface, "primaryTextColor": fg, "primaryBorderColor": border,
+            "lineColor": muted, "secondaryColor": rail, "tertiaryColor": chrome, "mainBkg": surface,
+            "nodeBorder": accent, "clusterBkg": rail, "clusterBorder": border,
+            "edgeLabelBackground": document, "textColor": fg, "titleColor": heading,
+        });
+    }
+    merman::Engine::new().with_site_config(merman::MermaidConfig::from_value(value))
 }
 
 /// Mermaid 文字使用的字体：冬青黑体（含 W3/W6 字重，23 MB，位于常规系统字体目录）。
@@ -261,6 +288,7 @@ fn mermaid_fonts() -> Option<merman::svg::export::NativeFontContext> {
         .clone()
 }
 
+#[cfg(test)]
 fn mermaid_svg(source: &str, dark: bool) -> Result<String, String> {
     mermaid_svg_controlled(source, dark, merman::OperationControl::new())
 }
@@ -270,7 +298,17 @@ pub(crate) fn thumbnail_mermaid(source: &str, dark: bool) -> Result<String, Stri
     mermaid_svg_controlled(source, dark, merman::OperationControl::new().with_deadline(std::time::Duration::from_millis(150)))
 }
 
+/// 导出复用原生图表管线，单图限时且不进入编辑区位图缓存。
+pub(crate) fn export_mermaid(source: &str, dark: bool, palette: MermaidPalette) -> Result<String, String> {
+    if source.len() > 64 * 1024 { return Err("图表超过 64 KiB 导出预算".into()); }
+    mermaid_svg_with_palette(source, dark, Some(palette), merman::OperationControl::new().with_deadline(std::time::Duration::from_secs(3)))
+}
+
 fn mermaid_svg_controlled(source: &str, dark: bool, control: merman::OperationControl) -> Result<String, String> {
+    mermaid_svg_with_palette(source, dark, None, control)
+}
+
+fn mermaid_svg_with_palette(source: &str, dark: bool, palette: Option<MermaidPalette>, control: merman::OperationControl) -> Result<String, String> {
     use merman::svg::SvgPipeline;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -288,7 +326,7 @@ fn mermaid_svg_controlled(source: &str, dark: bool, control: merman::OperationCo
             ..Default::default()
         },
     );
-    match merman::Renderer::new().with_engine(mermaid_engine(dark)).render(request) {
+    match merman::Renderer::new().with_engine(mermaid_engine(dark, palette)).render(request) {
         Ok(merman::RenderOutput::Svg(Some(svg))) => Ok(svg.svg().to_string()),
         Ok(_) => Err("未识别的 Mermaid 图表类型".into()),
         Err(error) => Err(format!("Mermaid 渲染失败：{error}")),
@@ -424,9 +462,37 @@ mod tests {
     }
 
     #[test]
-    fn reports_missing_cjk_glyph_in_math() {
+    fn renders_cjk_text_with_system_font_outlines() {
         let spec = EmbedSpec { kind: EmbedKind::Math { display: false }, source: r"E = mc^2 \text{（质能方程）}".into(), em_px: 16.0, color: [0, 0, 0], dark: false };
-        let error = render(&spec).err().expect("应报缺字");
-        assert!(error.contains("缺少字形"), "{error}");
+        let (info, image, bytes) = render(&spec).expect("中文公式应使用可用系统字体");
+        assert!(info.width > 100.0 && info.height > 10.0 && bytes > 0, "{info:?}");
+        assert!(info.depth >= 0.0 && info.depth < info.height);
+        assert!(image.as_bytes(0).unwrap().chunks_exact(4).any(|pixel| pixel[3] != 0));
+        let (svg, _) = math_svg(&spec.source, false, [0, 0, 0]).unwrap();
+        assert!(svg.contains("<path") && !svg.contains("<text"));
+    }
+
+    #[test]
+    fn cjk_fraction_scripts_and_spaces_keep_real_metrics() {
+        let measure = |source: &str| {
+            render(&EmbedSpec { kind: EmbedKind::Math { display: true }, source: source.into(), em_px: 16.0, color: [32, 36, 40], dark: false }).unwrap().0
+        };
+        let base = measure(r"\text{中文}");
+        let fraction = measure(r"\frac{\text{中文}}{\text{分母}}");
+        let scripts = measure(r"\text{中文}_{\text{下}}^{\text{上}}");
+        let spaced = measure("\\text{中　文}");
+        assert!(fraction.height > base.height && fraction.depth > 0.0);
+        assert!(scripts.height > base.height && scripts.width > base.width);
+        assert!(spaced.width > base.width);
+        assert!(measure(r"\pmb{中文}").width >= base.width);
+        assert!(measure(r"\hat{\text{中}}").height > measure(r"\text{中}").height);
+    }
+
+    #[test]
+    fn math_still_reports_missing_fonts_and_unsupported_commands() {
+        let error = math_svg("\\text{\u{10ffff}}", false, [0, 0, 0]).unwrap_err();
+        assert!(error.contains("缺少可用字形"), "{error}");
+        assert!(math_svg(r"\nomoUnknownCommand{x}", false, [0, 0, 0]).is_err());
+        assert!(math_svg(&"x".repeat(64 * 1024 + 1), false, [0, 0, 0]).unwrap_err().contains("预算"));
     }
 }

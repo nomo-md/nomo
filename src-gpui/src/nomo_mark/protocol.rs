@@ -111,6 +111,8 @@ pub struct ParseContext {
     pub structural_boundary: bool,
     /// 超大或未完整解析的结构只提供有界原文，不把截断片段当成独立 Markdown。
     pub source_only: bool,
+    /// 当前完整结构窗口后还有正文；末尾分隔空行不是文档末尾的空段落。
+    pub has_following_block: bool,
     /// 首屏引用定义仍在索引中；局部语义照常显示，待定目标暂不开放交互。
     pub pending_references: bool,
     /// 仅当前窗口实际使用或候选的引用键，随窗口解析更新。
@@ -203,8 +205,20 @@ pub struct GeometryRect {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ControlEvent {
+    ContextMenuOpened,
+    ObjectExit { forward: bool },
+    FootnotePreview {
+        identity: WindowIdentity,
+        label: String,
+        tooltip: gpui::WeakEntity<super::footnote_preview::FootnotePreview>,
+    },
     QuickInsertChanged,
     QuickInsertChoose(super::quick_insert::QuickInsertAction),
+    InsertImages {
+        identity: WindowIdentity,
+        selection: DocumentSelection,
+        inputs: Vec<crate::image_import::ImageInput>,
+    },
     Submit(DocumentTransaction),
     /// 事务直接写入会话，确认后重取有界窗口，不在控件里扩张正文投影。
     SubmitRewindow(DocumentTransaction),

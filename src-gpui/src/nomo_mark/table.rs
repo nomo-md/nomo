@@ -20,6 +20,7 @@ pub struct Table {
 #[derive(Clone, Copy, Debug)]
 pub enum TableIntent {
     InsertRow { after: usize },
+    InsertRowBefore { row: usize },
     DeleteRow { row: usize },
     InsertColumn { at: usize },
     DeleteColumn { column: usize },
@@ -104,6 +105,15 @@ impl Table {
             inserted_text: text,
         };
         let mut edits = match intent {
+            TableIntent::InsertRowBefore { row } => {
+                let target = self.rows.get(row).ok_or(ControlError::InvalidRange)?;
+                let eol = line_ending(source, target.source.start);
+                let empty = format!("|{}{eol}", "  |".repeat(count));
+                if row == 0 {
+                    vec![edit(target.source.start..self.separator.source.end,
+                        format!("{empty}{}{}", &source[self.separator.source.clone()], &source[target.source.clone()]))]
+                } else { vec![edit(target.source.start..target.source.start, empty)] }
+            }
             TableIntent::InsertRow { after } => {
                 let row = self.rows.get(after).ok_or(ControlError::InvalidRange)?;
                 let at = if after == 0 {

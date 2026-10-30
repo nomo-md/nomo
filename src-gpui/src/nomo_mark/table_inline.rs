@@ -4,13 +4,13 @@ use pulldown_cmark::{Event, Tag, TagEnd};
 use std::ops::Range;
 
 pub(crate) fn html_cell<'a>(parsed: &'a ParsedWindow, range: &Range<usize>) -> Option<&'a html_table::Cell> {
-    parsed.html_tables.iter().find_map(|table| table.cell_at(range.start)).filter(|cell| range.end <= cell.content.end)
+    parsed.html_cell_at(range.start).filter(|cell| range.end <= cell.content.end)
 }
 
 pub(crate) fn validate_insertion(parsed: &ParsedWindow, range: &Range<usize>) -> Result<(), super::protocol::ControlError> {
     use super::{commands, protocol::{ControlError, SourceEdit}};
     let intersects = |table: &Range<usize>| if range.is_empty() { table.contains(&range.start) } else { table.start < range.end && range.start < table.end };
-    if parsed.html_tables.iter().any(|table| intersects(&table.source)) {
+    if parsed.html_tables.iter().any(|table| intersects(&table.source)) || parsed.html_fragments.iter().any(|fragment| intersects(&fragment.source)) {
         let cell = html_cell(parsed, range).ok_or_else(|| ControlError::Unsupported("请在单个表格单元格内插入行内对象".into()))?;
         if !commands::html_text_boundary(parsed, cell, range.start) || !commands::html_text_boundary(parsed, cell, range.end) {
             return Err(ControlError::Unsupported("行内对象不能截断 HTML 标记或实体".into()));
@@ -55,6 +55,7 @@ pub(crate) fn atomic_range_at(parsed: &ParsedWindow, at: usize) -> Option<Range<
     for (index, (event, range)) in parsed.events.iter().enumerate() {
         if range.start > at { continue; }
         match event {
+            Event::InlineMath(_) if range.contains(&at) => return Some(range.clone()),
             Event::HardBreak if range.contains(&at) => return Some(range.clone()),
             Event::InlineHtml(_) if range.contains(&at)
                 && super::nomo_syntax::html_tag(&parsed.source, range.start)
@@ -130,7 +131,7 @@ pub(crate) fn image<'a>(source: &str, events: &mut impl Iterator<Item = (Event<'
 }
 
 pub(crate) fn atom_at(parsed: &ParsedWindow, at: usize) -> Option<InlineRun> {
-    if let Some(run) = parsed.html_tables.iter().flat_map(|table| &table.cells).flat_map(|cell| &cell.runs)
+    if let Some(run) = parsed.html_cells().flat_map(|cell| &cell.runs)
         .find(|run| run.source.contains(&at) && run.atom.is_some())
     { return Some(run.clone()); }
     let cell = parsed.nodes.iter().find(|node| node.kind == "table-cell" && node.source.contains(&at))?;
@@ -142,7 +143,7 @@ pub(crate) fn atom_at(parsed: &ParsedWindow, at: usize) -> Option<InlineRun> {
             Event::Start(Tag::Image { dest_url, title, .. }) => {
                 let (image, source) = image(&parsed.source, &mut parsed.events[index + 1..].iter().cloned(), dest_url, title, range.clone());
                 if !source.contains(&at) { continue; }
-                let atom = InlineAtom::Image { src: image.src, alt: image.alt, width: super::image_properties::ImageWidth::parse(&image.width) };
+                let atom = InlineAtom::Image { src: image.src, alt: image.alt, width: super::image_properties::ImageWidth::parse(&image.width), align: Some(image.align) };
                 return Some(InlineRun { text: atom.display_text(), atom: Some(atom), source, formats: Vec::new(), link: None });
             }
             Event::InlineHtml(_) => {

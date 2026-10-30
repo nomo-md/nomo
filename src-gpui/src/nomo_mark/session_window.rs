@@ -69,6 +69,12 @@ impl WindowRequest {
 fn host_error(error: impl std::fmt::Display) -> ControlError {
     ControlError::HostFailure(error.to_string())
 }
+pub(super) fn structure_error(error: crate::text_document::TextDocumentError) -> ControlError {
+    match error.code {
+        "revision-conflict" | "structure-cancelled" | "structure-generation-expired" => ControlError::Stale,
+        _ => host_error(error),
+    }
+}
 
 impl NativeWindowPort {
     /// 读取索引分页，给原文结构补充分片几何；每个切分点至多探测一个 UTF-8/CRLF 边界。
@@ -81,7 +87,7 @@ impl NativeWindowPort {
         let mut bytes = 0usize;
         loop {
             request.check()?;
-            let page = self.manager.query_structure(&self.owner, index.clone(), StructureQuery::Blocks { from_byte: 0, to_byte: total, cursor }).map_err(host_error)?;
+            let page = self.manager.query_structure(&self.owner, index.clone(), StructureQuery::Blocks { from_byte: 0, to_byte: total, cursor }).map_err(structure_error)?;
             if page.fragment.is_some() {
                 return Err(ControlError::NeedsContext("结构元数据需要续取，保留当前可编辑窗口".into()));
             }
@@ -206,20 +212,21 @@ impl NativeWindowPort {
         let identity = self
             .manager
             .start_structure(&self.owner, &self.document_id, revision)
-            .map_err(host_error)?;
+            .map_err(structure_error)?;
         let started = Instant::now();
         loop {
             request.check()?;
             let progress = self
                 .manager
                 .query_structure(&self.owner, identity.clone(), StructureQuery::Progress)
-                .map_err(host_error)?;
+                .map_err(structure_error)?;
             match progress.state.as_str() {
                 "ready" => return Ok(identity),
                 "building" if through_byte.is_some_and(|through| {
                     progress.indexed_bytes >= through.min(progress.total_bytes)
                 }) => return Ok(identity),
-                "failed" | "cancelled" => {
+                "cancelled" => return Err(ControlError::Stale),
+                "failed" => {
                     return Err(host_error(progress.failure.unwrap_or(progress.state)));
                 }
                 _ => {}
@@ -285,7 +292,7 @@ impl NativeWindowPort {
                     cursor: None,
                 },
             )
-            .map_err(host_error)?;
+            .map_err(structure_error)?;
         if response.fragment.is_some() {
             return Err(ControlError::NeedsContext(
                 "原版结构项需要分页续取，当前窗口暂缓挂载".into(),
@@ -331,6 +338,7 @@ impl NativeWindowPort {
         }
         let context = ParseContext {
             structural_boundary: true,
+            has_following_block: to < status.byte_length,
             reference_keys: references.into_iter().collect(),
             ..Default::default()
         };
@@ -348,7 +356,7 @@ impl NativeWindowPort {
     /// 只补齐当前窗口的引用元数据；不等待完整索引，也不重新读取正文。
     pub(crate) fn refresh_references(&self, revision: u64, context: ParseContext, request: &WindowRequest) -> Result<ParseContext, ControlError> {
         request.check()?;
-        let index = self.manager.start_structure(&self.owner, &self.document_id, revision).map_err(host_error)?;
+        let index = self.manager.start_structure(&self.owner, &self.document_id, revision).map_err(structure_error)?;
         self.reference_context(revision, index, context, request)
     }
     fn reference_context(&self, revision: u64, index: StructureIdentity, mut context: ParseContext, request: &WindowRequest) -> Result<ParseContext, ControlError> {
@@ -365,8 +373,9 @@ impl NativeWindowPort {
                         keys: batch.to_vec(),
                     },
                 )
-                .map_err(host_error)?;
-            if matches!(response.state.as_str(), "failed" | "cancelled") {
+                .map_err(structure_error)?;
+            if response.state == "cancelled" { return Err(ControlError::Stale); }
+            if response.state == "failed" {
                 return Err(host_error(response.failure.unwrap_or(response.state)));
             }
             // 未扫描到定义不等于不存在；只暂停该引用的交互，不降级整个窗口。
@@ -397,9 +406,8 @@ impl NativeWindowPort {
         request: &WindowRequest,
     ) -> Result<u64, ControlError> {
         let index = self.ready_index(revision, request)?;
-        let (namespace, key) = anchor
-            .strip_prefix("fn-")
-            .map_or(("slug", anchor), |key| ("footnote", key));
+        let (namespace, key) = if let Some(key) = anchor.strip_prefix("fnref-") { ("footnoteReference", key) }
+            else { anchor.strip_prefix("fn-").map_or(("slug", anchor), |key| ("footnote", key)) };
         let response = self
             .manager
             .query_structure(
@@ -410,7 +418,7 @@ impl NativeWindowPort {
                     key: key.into(),
                 },
             )
-            .map_err(host_error)?;
+            .map_err(structure_error)?;
         response
             .items
             .first()
@@ -468,6 +476,79 @@ impl NativeWindowPort {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn enter_exit_windows_keep_source_selection_and_history() {
+        use crate::nomo_mark::{commands::{self, EditIntent}, parse::ParsedWindow};
+        let cases = [
+            ("empty-quote", "> ¦", "退出后"),
+            ("quote-before-content", "> ¦正文\n", "> \n> 退出后正文\n"),
+            ("quote", "> 正文\n> ¦\n\n后文", "> 正文\n\n退出后\n\n后文"),
+            ("empty-callout", "> [!NOTE]\n> ¦\n\n", "退出后\n\n"),
+            ("callout", "> [!NOTE]\n> 正文\n> ¦\n\n", "> [!NOTE]\n> 正文\n\n退出后\n\n"),
+            ("nested-quote", "> > 正文\n> > ¦", "> > 正文\n> \n> 退出后"),
+            ("empty-nested-quote", "> > ¦", "> 退出后"),
+            ("empty-nested-callout", "> > [!WARNING]\n> > ¦", "> 退出后"),
+            ("compact-nested-quote", ">> 正文\n>>¦", ">> 正文\n>\n>退出后"),
+            ("bullet", "- 正文\n- ¦", "- 正文\n\n退出后"),
+            ("ordered", "1. 正文\n2. ¦", "1. 正文\n\n退出后"),
+            ("task", "- [ ] ¦", "退出后"),
+            ("checked-task", "- [x] ¦", "退出后"),
+            ("quoted-task", "> - [ ] ¦", "> 退出后"),
+            ("nested-task", "- 正文\n  - [x] ¦", "- 正文\n- 退出后"),
+            ("details", "<details>\n<summary>标题</summary>\n\n¦\n</details>", "<details>\n<summary>标题</summary>\n\n\n</details>\n\n退出后"),
+            ("details-with-tail", "<details>\n<summary>标题</summary>\n\n¦\n</details>\n\n后文", "<details>\n<summary>标题</summary>\n\n\n</details>\n\n退出后后文"),
+            ("heading", "# 标题¦\n", "# 标题\n\n退出后\n"),
+            ("code-stays-inside", "```text\n¦\n```", "```text\n\n退出后\n```"),
+            ("table-stays-inside", "| a | b |\n| --- | --- |\n| ¦ | c |", "| a | b |\n| --- | --- |\n| <br>退出后 | c |"),
+        ];
+        for eol in ["\n", "\r\n"] {
+            for (name, marked, expected) in cases {
+                let marked = marked.replace('\n', eol);
+                let at = marked.find('¦').unwrap() as u64;
+                let source = marked.replace('¦', "");
+                let expected = expected.replace('\n', eol);
+                let root = std::env::temp_dir().join(format!("nomo-enter-exit-{}-{name}-{}", std::process::id(), eol.len()));
+                let port = NativeWindowPort::open(root.clone(), "enter-test".into(), None, Some(source)).unwrap();
+                let request = WindowRequest::default();
+                let mut revision = 0;
+                let mut selection = DocumentSelection::caret(at);
+                let mut after_exit = String::new();
+                for (step, intent) in [EditIntent::ParagraphBreak, EditIntent::Replace("退出后".into())].into_iter().enumerate() {
+                    let loaded = port.load_group(revision, selection.head_byte, None, &request).unwrap();
+                    let parsed = ParsedWindow::parse(loaded.input, name, 0, loaded.context).unwrap();
+                    let result = commands::apply_semantic(&parsed, selection, intent).unwrap();
+                    revision = port.submit(DocumentTransaction {
+                        base_revision: revision, operation_id: format!("{name}-{step}"), history_group_id: format!("{name}-{step}"),
+                        edits: result.edits, selection_before: selection, selection_after: result.selection, template_update: result.template_update,
+                    }).unwrap();
+                    selection = result.selection;
+                    if step == 0 { after_exit = port.read_window(revision, 0..port.status().unwrap().byte_length).unwrap().text; }
+                }
+                let text = port.read_window(revision, 0..port.status().unwrap().byte_length).unwrap().text;
+                assert_eq!(text, expected, "{name}, EOL={eol:?}");
+                assert!(matches!(port.read_window(revision - 1, 0..0), Err(ControlError::Stale)));
+                let cancelled = WindowRequest::default();
+                cancelled.cancel();
+                assert!(matches!(port.load_group(revision, selection.head_byte, None, &cancelled), Err(ControlError::Stale)));
+                let groups = port.window_groups(revision, &[], &request).unwrap();
+                assert_eq!(groups.first().unwrap().from, 0, "{name}");
+                assert_eq!(groups.last().unwrap().to, text.len() as u64, "{name}");
+                for group in groups {
+                    let loaded = port.load_group(revision, group.from, Some(group.to), &request).unwrap();
+                    assert_eq!(loaded.input.text, text[group.from as usize..group.to as usize], "{name}");
+                }
+                let (undone, before) = port.history(revision, false).unwrap();
+                assert_eq!(port.read_window(undone, 0..port.status().unwrap().byte_length).unwrap().text, after_exit, "undo {name}");
+                port.load_group(undone, before.unwrap().head_byte, None, &request).unwrap();
+                let (redone, after) = port.history(undone, true).unwrap();
+                assert_eq!(after, Some(selection), "redo caret {name}");
+                assert_eq!(port.read_window(redone, 0..port.status().unwrap().byte_length).unwrap().text, expected, "redo {name}");
+                port.close(true).unwrap();
+                drop(port);
+                let _ = std::fs::remove_dir_all(root);
+            }
+        }
+    }
     #[test]
     fn published_groups_cover_real_session_and_retain_changed_window() {
         let root=std::env::temp_dir().join(format!("nomo-viewport-groups-{}",std::process::id()));

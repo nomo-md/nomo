@@ -60,7 +60,7 @@ impl NativeWindowPort {
                 range.start,
                 range.end,
             )
-            .map_err(convert_error)?;
+            .map_err(super::session_window::structure_error)?;
         Ok(DocumentWindow {
             inline_templates: w.inline_templates,
             document_id: w.document_id,
@@ -126,7 +126,7 @@ impl NativeWindowPort {
     }
     /// 同步捕获已完成目录派生的修订，避免后台保存与后续输入交错。
     pub(crate) fn capture_for_save(&self, revision: u64) -> Result<SnapshotHandle, ControlError> {
-        let snapshot = self.manager.capture(&self.owner, &self.document_id).map_err(convert_error)?;
+        let snapshot = self.manager.capture_for_save(&self.owner, &self.document_id).map_err(convert_error)?;
         if snapshot.revision != revision {
             self.manager.release(&self.owner, &snapshot.snapshot_id).map_err(convert_error)?;
             return Err(ControlError::Stale);
@@ -153,7 +153,7 @@ impl NativeWindowPort {
     pub fn save_to(&self, target: PathBuf) -> Result<u64, ControlError> {
         let snapshot = self
             .manager
-            .capture(&self.owner, &self.document_id)
+            .capture_for_save(&self.owner, &self.document_id)
             .map_err(convert_error)?;
         let saved = self
             .manager
@@ -164,7 +164,7 @@ impl NativeWindowPort {
         Ok(saved.revision)
     }
     pub(crate) fn save_current(&self, snapshot_before_save: bool) -> Result<u64, ControlError> {
-        let snapshot = self.manager.capture(&self.owner, &self.document_id).map_err(convert_error)?;
+        let snapshot = self.manager.capture_for_save(&self.owner, &self.document_id).map_err(convert_error)?;
         let saved = self.manager.save_current(&self.owner, &snapshot.snapshot_id, snapshot_before_save);
         let released = self.manager.release(&self.owner, &snapshot.snapshot_id);
         let saved = saved.map_err(convert_error)?;

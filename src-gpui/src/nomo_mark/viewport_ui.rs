@@ -7,14 +7,14 @@ use crate::nomo_mark::resident_budget::{Cost, ResidentLease};
 
 pub(super) struct Mounted {
     pub view: Entity<NomoMark>,
-    _subscription: Subscription,
+    pub(super) _subscription: Subscription,
     pub height: f32,
 }
 pub(super) struct Viewport {
     pub mounts: Vec<Mounted>,
     pub groups: Vec<Group>,
     pub heights: Heights,
-    budget: ResidentLease,
+    pub(super) budget: ResidentLease,
     reserved: Cost,
     pub(super) saved_scroll: gpui::Point<gpui::Pixels>,
     pub(super) request: WindowRequest,
@@ -62,17 +62,7 @@ impl DocumentHost {
             else { 0.0 };
         if !delta.is_finite() { return; }
         if actual.is_some() && caret_top >= 0.0 && caret_bottom <= height && delta.abs() < 0.5 {
-            let top = (-f32::from(self.panes[pane].scroll.offset().y) - 32.0).max(0.0);
-            let visible_ready = self.panes[pane].viewport.groups.is_empty() ||
-                (self.panes[pane].viewport.heights.at(top)..=self.panes[pane].viewport.heights.at(top + height)).all(|index| {
-                    let group = &self.panes[pane].viewport.groups[index];
-                    self.panes[pane].viewport.failed.contains_key(&group.from) || self.panes[pane].viewport.mounts.iter().any(|mount| {
-                        let mounted = mount.view.read(cx);
-                        let id = &mounted.host.parsed.identity;
-                        id.from_byte == group.from && id.to_byte == group.to
-                            && mounted.measured_height().is_some_and(|height| (height - mount.height).abs() < 0.5)
-                    })
-                });
+            let visible_ready=self.pane_visible_ready(pane,cx);
             // 输入确认后还会重取结构和邻窗；它们完成前不能把临时占位布局当作最终位置。
             if view.host.pending_count() == 0 && view.measured_height().is_some()
                 && !self.panes[pane].viewport.dirty && !self.panes[pane].viewport.loading && visible_ready {
@@ -85,6 +75,22 @@ impl DocumentHost {
         self.panes[pane].scroll.set_offset(gpui::point(before.x, requested));
         self.schedule_pane(pane, 16, cx);
         cx.notify();
+    }
+    pub(super) fn pane_visible_ready(&self, pane:usize, cx:&Context<Self>) -> bool {
+        let state=&self.panes[pane];
+        if state.viewport.dirty || state.viewport.loading {return false;}
+        if state.viewport.groups.is_empty() {return true;}
+        let top=(-f32::from(state.scroll.offset().y)-32.0).max(0.0);
+        let height=f32::from(state.scroll.bounds().size.height);
+        (state.viewport.heights.at(top)..=state.viewport.heights.at(top+height)).all(|index| {
+            let group=&state.viewport.groups[index];
+            state.viewport.failed.contains_key(&group.from) || state.viewport.mounts.iter().any(|mount| {
+                let view=mount.view.read(cx);
+                let id=&view.host.parsed.identity;
+                id.from_byte==group.from && id.to_byte==group.to
+                    && view.measured_height().is_some_and(|height|(height-mount.height).abs()<0.5)
+            })
+        })
     }
     pub(super) fn pause_pane(&mut self, pane: usize, cx:&Context<Self>) {
         self.panes[pane].viewport.request.cancel(); self.panes[pane].viewport.request=WindowRequest::default();
@@ -146,6 +152,7 @@ impl DocumentHost {
         self.panes[pane].viewport.references_due=Instant::now();
         self.panes[pane].viewport.reserved=Cost::default();
         self.panes[pane].viewport.dirty=true;
+        self.panes[pane].load_error=None;
         self.panes[pane].viewport.failed.clear();
         // 只有活动控件拥有乐观输入。其他窗口按已确认补丁移动占位，重新查询依赖。
         // 引用定义可能影响远处窗口，不能以范围不相交推断其语义仍然有效。
@@ -250,18 +257,28 @@ impl DocumentHost {
     }
     fn refresh_groups(&mut self, pane: usize, cx: &mut Context<Self>) {
         self.panes[pane].viewport.loading=true;
-        let identity=self.panes[pane].control.read(cx).host.parsed.identity.clone();
+        let control=self.panes[pane].control.clone();
+        let identity=control.read(cx).host.parsed.identity.clone();
+        let revision=identity.revision;
         let port=self.port.clone();
         let request=self.panes[pane].viewport.request.clone();
         let generation=self.panes[pane].viewport.generation;
         let pane_id=self.panes[pane].id;
         let retained=vec![(identity.from_byte,identity.to_byte)];
-        let task=cx.background_executor().spawn(async move {port.window_groups(identity.revision,&retained,&request)});
+        let task=cx.background_executor().spawn(async move {port.window_groups(revision,&retained,&request)});
         cx.spawn(async move |this,cx| {
             let result=task.await;
             let _=this.update(cx,|host,cx| {
                 if !host.pane_request_current(pane,pane_id,generation) { return; }
                 host.panes[pane].viewport.loading=false;
+                // 输入已在本地投影、但提交尚未确认时，Pane 代数还没有前进。
+                // 旧查询不能把新的选区/边界重新装载回旧修订。
+                if host.panes[pane].control != control || control.read(cx).host.parsed.identity != identity
+                    || host.status().revision != revision {
+                    host.panes[pane].viewport.dirty=true;
+                    host.schedule_pane(pane,crate::nomo_mark::session_window::policy().quiet_ms,cx);
+                    return;
+                }
                 match result {
                     Ok(groups)=> {
                         let id=&host.panes[pane].control.read(cx).host.parsed.identity;
@@ -273,7 +290,8 @@ impl DocumentHost {
                             let selection=host.panes[pane].control.read(cx).host.selection;
                             host.refresh_pane_at(pane,byte,Some(selection),cx); return;
                         }
-                        let old_top=(-f32::from(host.panes[pane].scroll.offset().y)-32.0).max(0.0);
+                        let old_scroll=(-f32::from(host.panes[pane].scroll.offset().y)).max(0.0);
+                        let old_top=(old_scroll-32.0).max(0.0);
                         let (anchor,offset)=if host.panes[pane].viewport.groups.is_empty() {(id.from_byte,old_top)} else {let index=host.panes[pane].viewport.heights.at(old_top);(host.panes[pane].viewport.groups[index].from,old_top-host.panes[pane].viewport.heights.top(index))};
                         // 刷新结构索引不等于所有窗口几何失效。回收控件后仍保留已测高度，
                         // 否则每次输入都会把屏外窗口退回估值，长文档阅读位置随之跳变。
@@ -288,7 +306,8 @@ impl DocumentHost {
                         host.panes[pane].viewport.dirty=false;
                         if let Some(index)=host.panes[pane].viewport.groups.iter().position(|g|g.contains(anchor)) {
                             let top=host.panes[pane].viewport.heights.top(index)+offset;
-                            host.panes[pane].scroll.set_offset(gpui::point(px(0.0),px(-top)));
+                            // 高度树不含纸面顶边距；重建索引时保留已滚过的边距。
+                            host.panes[pane].scroll.set_offset(gpui::point(px(0.0),px(-(top+old_scroll.min(32.0)))));
                             host.panes[pane].viewport.last_top=top;
                             let now=host.panes[pane].viewport.started.elapsed().as_secs_f64()*1000.0;
                             host.panes[pane].viewport.demand.reset(top,now);
@@ -296,9 +315,15 @@ impl DocumentHost {
                         host.schedule_pane(pane, 16,cx);
                     }
                     Err(error)=> {
-                        host.panes[pane].viewport.dirty=false;
-                        host.panes[pane].load_error=Some(error.to_string());
-                        host.report(error,cx);
+                        if error == ControlError::Stale {
+                            // 旧索引被后续编辑取代；保留当前输入窗口并重新查询当前修订。
+                            host.panes[pane].viewport.dirty=true;
+                            host.schedule_pane(pane, crate::nomo_mark::session_window::policy().quiet_ms, cx);
+                        } else {
+                            host.panes[pane].viewport.dirty=false;
+                            host.panes[pane].load_error=Some(error.to_string());
+                            host.report(error,cx);
+                        }
                     }
                 }
                 cx.notify();
@@ -307,7 +332,9 @@ impl DocumentHost {
     }
     fn mount_group(&mut self, pane: usize, group:Group, cx:&mut Context<Self>) {
         self.panes[pane].viewport.loading=true;
-        let revision=self.panes[pane].control.read(cx).host.parsed.identity.revision;
+        let control=self.panes[pane].control.clone();
+        let identity=control.read(cx).host.parsed.identity.clone();
+        let revision=identity.revision;
         let generation=self.panes[pane].viewport.generation;
         let pane_id=self.panes[pane].id;
         let request=self.panes[pane].viewport.request.clone();
@@ -325,6 +352,13 @@ impl DocumentHost {
                 if !host.pane_request_current(pane,pane_id,generation) { return; }
                 host.panes[pane].viewport.loading=false;
                 host.panes[pane].viewport.reserved=Cost::default();
+                if host.panes[pane].control != control || control.read(cx).host.parsed.identity != identity
+                    || host.status().revision != revision {
+                    host.panes[pane].viewport.dirty=true;
+                    host.update_pane_cost(pane,cx);
+                    host.schedule_pane(pane,crate::nomo_mark::session_window::policy().quiet_ms,cx);
+                    return;
+                }
                 let result=result.and_then(|loaded| {
                     if loaded.input.from_byte!=from || loaded.input.to_byte!=to {return Err(ControlError::NeedsContext("结构窗口边界已变化".into()));}
                     WindowHostAdapter::new(loaded.input,format!("pane-{pane_id}-{}-{generation}",group.id),generation,loaded.context)
@@ -341,6 +375,12 @@ impl DocumentHost {
                         host.panes[pane].viewport.demand.prepared(started.elapsed().as_secs_f64()*1000.0);
                     }
                     Err(error)=> {
+                        if error == ControlError::Stale {
+                            host.panes[pane].viewport.dirty=true;
+                            host.update_pane_cost(pane,cx);
+                            host.schedule_pane(pane, crate::nomo_mark::session_window::policy().quiet_ms, cx);
+                            return;
+                        }
                         host.panes[pane].viewport.failed.insert(group.from,error.to_string());
                         if let Ok(index)=host.panes[pane].viewport.groups.binary_search_by_key(&group.from,|group|group.from) {
                             let height=(host.panes[pane].viewport.heights.top(index+1)-host.panes[pane].viewport.heights.top(index)).max(96.0);
@@ -398,7 +438,7 @@ impl DocumentHost {
     }
     fn pane_mount(&self, view:Entity<NomoMark>, cx:&Context<Self>) -> gpui::AnyElement {
         div().child(view.clone()).capture_any_mouse_down(cx.listener(move |host,event:&gpui::MouseDownEvent,window,cx| {
-            if event.button==gpui::MouseButton::Left && !host.promote(&view,cx) {
+            if matches!(event.button, gpui::MouseButton::Left | gpui::MouseButton::Right) && !host.promote(&view,cx) {
                 window.focus(&host.control.focus_handle(cx), cx);cx.stop_propagation();
             }
         })).into_any_element()

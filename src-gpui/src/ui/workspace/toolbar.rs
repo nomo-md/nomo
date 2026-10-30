@@ -90,9 +90,9 @@ fn toolbar_mode_button(id: &'static str, name: IconName, active: bool, theme: &T
             .group_hover(id, |style| style.text_color(theme.accent_strong)))
 }
 
-pub(super) fn diagram_template(kind: crate::ui::chrome::DiagramKind) -> &'static str {
+pub(super) fn diagram_template(kind: crate::ui::chrome::DiagramKind, default_type: &str) -> &'static str {
     use crate::ui::chrome::DiagramKind;
-    let index = match kind { DiagramKind::Blank=>0, DiagramKind::Flowchart=>1, DiagramKind::Sequence=>2, DiagramKind::Class=>3, DiagramKind::State=>4, DiagramKind::Pie=>5, DiagramKind::Gantt=>6, DiagramKind::EntityRelationship=>7 };
+    let index = match kind { DiagramKind::Default => 1 + crate::nomo_mark::quick_insert::default_diagram_index(default_type), DiagramKind::Blank=>0, DiagramKind::Flowchart=>1, DiagramKind::Sequence=>2, DiagramKind::Class=>3, DiagramKind::State=>4, DiagramKind::Pie=>5, DiagramKind::Gantt=>6, DiagramKind::EntityRelationship=>7 };
     DIAGRAMS[index].2
 }
 
@@ -147,7 +147,8 @@ impl Workspace {
         type Action = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
         let tool = |id: &'static str, name: IconName, tip: &'static str, active: bool, action: Action, cx: &mut Context<Self>| {
             let key = if id == "outline" { if active { "outline_hide" } else { "outline_show" } } else { id };
-            let tip = locale.tooltip(key, tip);
+            let tip = if id == "codeblock" { format!("{} {}", locale.text(key), crate::ui::shortcuts::current("insert-code-block", cx)) }
+                else { locale.tooltip(key, tip) };
             toolbar_button(id, name, active, theme)
                 .tooltip(tooltip(tip))
                 .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| action(workspace, window, cx)))
@@ -165,7 +166,7 @@ impl Workspace {
             toolbar_button("link", IconName::Link, self.popover.as_ref().is_some_and(|p| p.link.is_some()), theme)
                 .relative().child(trigger_marker(self.toolbar_popup_anchors[LINK_ANCHOR].clone()))
                 .relative().children(self.popover.as_ref().is_some_and(|p| p.link.is_some()).then(|| trigger_marker(self.toolbar_trigger_bounds.clone())))
-                .tooltip(tooltip(locale.tooltip("link", "⌘K")))
+                .tooltip(tooltip(format!("{} {}", locale.text("link"), crate::ui::shortcuts::current("menu-link", cx))))
                 .on_click(cx.listener(|w, event: &ClickEvent, win, cx| w.open_editor_popover_at(EditorPopoverKind::Link, Some(event.position()), win, cx))).into_any_element(),
             tool("inline-comment", IconName::MessageSquare, "行内注释", false, |w, win, cx| w.open_inline_comment(win, cx), cx),
             tool("quote", IconName::Quote, "引用", false, |w, win, cx| w.with_document(win, cx, |b, cx| b.toggle_line_prefix("> ", cx)), cx),
@@ -194,7 +195,7 @@ impl Workspace {
         ];
         let mode_segment = |id: &'static str, name: IconName, _label: &'static str, tip: &'static str, target: EditorMode, cx: &mut Context<Self>| {
             toolbar_mode_button(id, name, mode == target, theme)
-                .tooltip(tooltip(locale.tooltip(id, tip)))
+                .tooltip(tooltip(if id == "mode-source" { format!("{} {}", locale.text(id), crate::ui::shortcuts::current("toggle-source", cx)) } else { locale.tooltip(id, tip) }))
                 .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| workspace.set_mode(target, window, cx)))
         };
         let target = match mode { EditorMode::Semantic => 0.0, EditorMode::Source => 34.0, EditorMode::Split => 68.0 };
@@ -296,8 +297,6 @@ impl Workspace {
             .justify_between()
             .px(px(16.0))
             .bg(theme.surface)
-            .border_b_1()
-            .border_color(theme.border.opacity(0.52))
             .tab_group()
             .child(div().relative().flex_1().min_w_0()
                 .child(div().id("toolbar-actions").w_full().flex().items_center().gap(px(4.0)).overflow_x_scroll().track_scroll(&self.toolbar_scroll)
@@ -337,7 +336,8 @@ impl Workspace {
             };
             (Some(document.downgrade()), Some(target))
         };
-        let selected = usize::from(kind == ToolbarPopupKind::Math && target.as_ref().is_some_and(|t| !t.is_semantic()));
+        let selected = if kind == ToolbarPopupKind::Diagram { 1 + crate::nomo_mark::quick_insert::default_diagram_index(&cx.global::<Settings>().string("defaultDiagramType")) }
+            else { usize::from(kind == ToolbarPopupKind::Math && target.as_ref().is_some_and(|t| !t.is_semantic())) };
         self.popover = None;
         let anchor = self.toolbar_popup_anchors[kind.anchor_index()].get();
         self.toolbar_trigger_bounds.set(anchor);

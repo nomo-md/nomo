@@ -396,6 +396,13 @@ impl AddedStore {
         Ok(Self { path, persistent: true, inner: Mutex::new(AddedInner { file: Some(file), len }) })
     }
 
+    /// 恢复发现阶段只读校验，不创建或修改追加文件。
+    pub(super) fn open_read_only(path: PathBuf) -> TextDocumentResult<Self> {
+        let file = File::open(&path)?;
+        let len = file.metadata()?.len();
+        Ok(Self { path, persistent: true, inner: Mutex::new(AddedInner { file: Some(file), len }) })
+    }
+
     pub(super) fn append(&self, bytes: &[u8]) -> TextDocumentResult<u64> {
         let mut inner = self
             .inner

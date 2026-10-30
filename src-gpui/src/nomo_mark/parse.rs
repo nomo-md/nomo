@@ -42,6 +42,7 @@ pub struct ParsedWindow {
     pub context: ParseContext,
     pub details: Vec<super::dialect::DetailsBlock>,
     pub html_tables: Vec<super::html_table::HtmlTable>,
+    pub html_fragments: Vec<super::html_table::HtmlFragment>,
     /// 原文中额外空行对应的可编辑空段落锚点；普通块间分隔换行不额外占行。
     pub blank_paragraphs: Vec<usize>,
 }
@@ -107,7 +108,7 @@ impl ParsedWindow {
             return Self {
                 identity, source, context,
                 events: Vec::new(), inline: Vec::new(), nodes: Vec::new(),
-                details: Vec::new(), html_tables: Vec::new(), blank_paragraphs: Vec::new(),
+                details: Vec::new(), html_tables: Vec::new(), html_fragments: Vec::new(), blank_paragraphs: Vec::new(),
             };
         }
         // 宿主索引与局部定义沿用同一大小写及空白折叠，避免已补齐的目标仍无法解析。
@@ -276,6 +277,7 @@ impl ParsedWindow {
             }
         }
         let mut html_tables = Vec::new();
+        let mut html_fragments = Vec::new();
         for (event, range) in &events {
             if matches!(event, Event::Start(Tag::HtmlBlock)) {
                 if let Some(table) = super::html_table::HtmlTable::parse(&source, range.clone()) {
@@ -283,9 +285,19 @@ impl ParsedWindow {
                     html_tables.push(table);
                 }
             }
+            if matches!(event, Event::Start(Tag::HtmlBlock) | Event::Html(_)) {
+                if let Some(fragments) = super::html_table::HtmlFragment::parse_all(&source, range.clone()) {
+                    for fragment in fragments {
+                        if !html_fragments.iter().any(|other: &super::html_table::HtmlFragment| other.source.start <= fragment.source.start && fragment.source.end <= other.source.end) {
+                            inline.extend(fragment.cells.iter().flat_map(|cell| cell.spans.clone()));
+                            html_fragments.push(fragment);
+                        }
+                    }
+                }
+            }
         }
         inline.sort_by_key(|span| (span.open.start, std::cmp::Reverse(span.close.end)));
-        let blank_paragraphs = blank_paragraphs(&source, &events);
+        let blank_paragraphs = blank_paragraphs(&source, &events, context.has_following_block);
         Self {
             identity,
             source,
@@ -295,12 +307,23 @@ impl ParsedWindow {
             context,
             details,
             html_tables,
+            html_fragments,
             blank_paragraphs,
         }
     }
 
+    pub fn html_cells(&self) -> impl Iterator<Item = &super::html_table::Cell> {
+        self.html_tables.iter().flat_map(|table| &table.cells)
+            .chain(self.html_fragments.iter().flat_map(|fragment| &fragment.cells))
+    }
+
+    pub fn html_cell_at(&self, at: usize) -> Option<&super::html_table::Cell> {
+        self.html_cells().find(|cell| cell.content.start <= at && at <= cell.content.end)
+    }
+
     pub fn estimated_bytes(&self) -> usize {
         self.source.len()
+            + self.html_fragments.iter().map(super::html_table::HtmlFragment::estimated_bytes).sum::<usize>()
             + self.context.reference_keys.capacity() * std::mem::size_of::<String>()
             + self.context.reference_keys.iter().map(String::capacity).sum::<usize>()
             + self.context.unresolved_references.capacity() * std::mem::size_of::<Range<usize>>()
@@ -499,6 +522,7 @@ impl ParsedWindow {
         let mut blanks = self.blank_paragraphs.iter().copied().peekable();
         let mut depth = 0usize;
         let mut covered = 0usize;
+        let mut quotes: Vec<(usize, usize)> = Vec::new();
         let append = |at: usize, output: &mut Vec<_>| {
             output.push((Event::Start(Tag::Paragraph), at..at));
             let end = at + self.source[at..].bytes().take_while(|byte| matches!(byte, b' ' | b'\t')).count();
@@ -508,6 +532,21 @@ impl ParsedWindow {
             output.push((Event::End(TagEnd::Paragraph), at..at));
         };
         for (event, range) in input {
+            if matches!(event, Event::End(TagEnd::BlockQuote(_))) {
+                if let Some((_, tail)) = quotes.pop() {
+                    // Markdown 不为只有 > 前缀的空行产生段落事件；落点必须留在引用内部。
+                    let end = tail + self.source[tail..range.end].trim_end_matches(['\r', '\n']).len();
+                    let line = self.source[tail..end].rsplit('\n').next().unwrap_or("");
+                    if line.contains('>') && line.bytes().all(|byte| matches!(byte, b'>' | b' ' | b'\t')) {
+                        append(end, &mut output);
+                    }
+                }
+            } else if let Some((quote_depth, tail)) = quotes.last_mut() {
+                if depth == *quote_depth { *tail = range.end; }
+            }
+            if matches!(event, Event::Start(Tag::BlockQuote(_))) {
+                quotes.push((depth + 1, range.start));
+            }
             if depth == 0 {
                 while blanks.peek().is_some_and(|at| *at <= range.start) {
                     append(blanks.next().unwrap(), &mut output);
@@ -540,7 +579,7 @@ impl ParsedWindow {
     }
 }
 
-fn blank_paragraphs(source: &str, events: &[(Event<'static>, Range<usize>)]) -> Vec<usize> {
+fn blank_paragraphs(source: &str, events: &[(Event<'static>, Range<usize>)], has_following_block: bool) -> Vec<usize> {
     let mut roots = Vec::new();
     let mut depth = 0usize;
     for (event, range) in events {
@@ -606,10 +645,20 @@ fn blank_paragraphs(source: &str, events: &[(Event<'static>, Range<usize>)]) -> 
         if roots.is_empty() {
             result.push(0);
         }
-        // 已有块的首个终止换行在 root 内；剩余首个换行后就是下一段落。
-        let skip = if roots.is_empty() { 1 } else { 0 };
-        for i in (skip..lines.len()).step_by(2) {
-            result.push(lines[i]);
+        if has_following_block {
+            // 非末窗口的尾部仍是块间分隔，和同一窗口内两个根块之间的规则一致。
+            let skip = if roots.is_empty() { 0 } else { 1 };
+            for i in (skip..lines.len()).step_by(2) {
+                if i + 1 < lines.len() {
+                    result.push(if i == 0 { end } else { lines[i - 1] });
+                }
+            }
+        } else {
+            // 已有块的首个终止换行在 root 内；文档末尾保留下一段落的真实光标。
+            let skip = if roots.is_empty() { 1 } else { 0 };
+            for i in (skip..lines.len()).step_by(2) {
+                result.push(lines[i]);
+            }
         }
         append_spaced_lines(end..source.len(), &mut result);
     }
@@ -669,6 +718,7 @@ fn html_format(html: &str) -> Option<(InlineFormat, bool)> {
         .split([' ', '\t', '>'])
         .next()?;
     let format = match name {
+        "a" => InlineFormat::Link,
         "strong" | "b" => InlineFormat::Strong,
         "em" | "i" => InlineFormat::Emphasis,
         "code" => InlineFormat::Code,
@@ -681,7 +731,7 @@ fn html_format(html: &str) -> Option<(InlineFormat, bool)> {
     };
     Some((format, close))
 }
-fn expand_script_text(
+pub(crate) fn expand_script_text(
     source: &str,
     range: Range<usize>,
     output: &mut Vec<(Event<'static>, Range<usize>)>,

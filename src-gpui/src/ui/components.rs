@@ -260,12 +260,12 @@ pub enum ButtonKind {
 /// 文字按钮，可带前置图标。
 pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, leading: Option<IconName>, kind: ButtonKind, theme: &Theme) -> Stateful<Div> {
     let (background, foreground, border) = match kind {
-        ButtonKind::Primary => (theme.accent, theme.on_accent, None),
+        ButtonKind::Primary => (theme.accent_fill, theme.on_accent, None),
         ButtonKind::Secondary | ButtonKind::Disabled => (theme.surface, theme.fg, Some(theme.border)),
         ButtonKind::Ghost => (gpui::transparent_black(), theme.fg, None),
     };
     let hover = match kind {
-        ButtonKind::Primary => theme.accent_strong,
+        ButtonKind::Primary => super::motion::color(theme.accent_fill, theme.fg, 0.12),
         _ => theme.hover,
     };
     div()
@@ -305,7 +305,7 @@ pub fn segment(id: impl Into<ElementId>, name: IconName, label: &'static str, ac
         .rounded(px(5.0))
         .text_size(px(12.0))
         .text_color(color)
-        .when(active, |el| el.bg(theme.accent))
+        .when(active, |el| el.bg(theme.accent_fill))
         .when(!active, |el| el.hover(|style| style.bg(theme.hover)))
         .cursor_pointer()
         .child(icon(name, 14.0, color))
@@ -319,7 +319,7 @@ pub fn segmented(theme: &Theme) -> Div {
 
 /// 浮层卡片（大纲、搜索面板等）：表面色、细边框、圆角与阴影。
 pub fn floating_card(id: impl Into<ElementId>, theme: &Theme) -> Stateful<Div> {
-    div().id(id).absolute().rounded(px(10.0)).bg(theme.surface).border_1().border_color(theme.border).shadow_lg()
+    div().id(id).absolute().rounded(px(10.0)).bg(theme.surface).border_1().border_color(theme.border).shadow(vec![theme.floating_shadow.clone()])
 }
 
 /// 悬停提示：调用方用 `.tooltip(tooltip("文字"))` 挂到任意可交互元素上。
@@ -349,10 +349,7 @@ impl Render for Tooltip {
 }
 
 fn settings_raised_shadow(theme: &Theme) -> Vec<gpui::BoxShadow> {
-    vec![gpui::BoxShadow { inset: false,
-        color: gpui::rgba(if theme.dark { 0x0000002e } else { 0x16202c14 }).into(),
-        offset: gpui::point(px(0.0), px(1.0)), blur_radius: px(4.0), spread_radius: px(0.0),
-    }]
+    vec![theme.raised_shadow.clone()]
 }
 
 /// 设置开关：42×24 胶囊。进度由视图的短时动效提供，不持有状态或定时器。
@@ -375,14 +372,14 @@ pub fn switch(id: impl Into<ElementId>, progress: f32, theme: &Theme) -> Statefu
 pub fn text_segment(id: impl Into<ElementId>, label: impl Into<SharedString>, active: bool, enabled: bool, theme: &Theme) -> Stateful<Div> {
     div()
         .id(id)
-        .h(px(34.0))
+        .h(px(theme.control_height))
         .min_w(px(0.0))
         .flex_1()
         .px(px(4.0))
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(4.0))
+        .rounded(px(theme.radius_sm))
         .text_size(px(13.0))
         .font_weight(FontWeight(650.0))
         .whitespace_nowrap()
@@ -491,12 +488,12 @@ pub fn select(
     let trigger = div()
         .id(id)
         .w(px(width))
-        .h(px(34.0))
+        .h(px(theme.control_height))
         .px(px(10.0))
         .flex()
         .items_center()
         .justify_between()
-        .rounded(px(4.0))
+        .rounded(px(theme.radius_sm))
         .border_1()
         .border_color(if open { theme.accent } else { theme.border })
         .bg(theme.surface)
@@ -531,11 +528,11 @@ pub fn select(
                 .p(px(4.0))
                 .flex()
                 .flex_col()
-                .rounded(px(8.0))
-                .bg(theme.surface)
+                .rounded(px(theme.radius_md))
+                .bg(theme.dropdown_bg)
                 .border_1()
-                .border_color(theme.border)
-                .shadow_lg()
+                .border_color(theme.dropdown_border)
+                .shadow(vec![theme.floating_shadow.clone()])
                 .occlude()
                 .children(options),
             reduced,

@@ -15,6 +15,7 @@ impl NomoMark {
 
     pub(super) fn page(&mut self, down: bool, extend: bool, window: &Window, cx: &mut Context<Self>) {
         if self.keyboard_protected() { return; }
+        if self.move_in_code(down, extend, true, cx) { return; }
         if self.windowed_navigation {
             cx.emit(ControlEvent::VerticalNavigation { identity: self.host.parsed.identity.clone(), down, extend_selection: extend, page: true });
             return;

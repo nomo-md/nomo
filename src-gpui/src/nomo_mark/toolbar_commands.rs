@@ -5,7 +5,7 @@ use crate::text_document::StructureQuery;
 
 #[derive(Clone, Copy)]
 enum Tool { Footnote, Toc }
-fn error(value: impl std::fmt::Display) -> ControlError { ControlError::HostFailure(value.to_string()) }
+use crate::nomo_mark::session_window::structure_error as error;
 
 fn next_number(value: &str) -> String {
     let mut bytes = value.as_bytes().to_vec();

@@ -118,6 +118,7 @@ struct RowCtx<'a> {
     /// 公式前景色与图表配色依据。
     math_color: [u8; 3],
     dark: bool,
+    mermaid: crate::embeds::MermaidPalette,
 }
 
 pub struct EditorView {
@@ -365,7 +366,7 @@ impl EditorView {
             };
             let em_px = ctx.metrics.body_size();
             let embed = |kind: EmbedKind, source: &str| {
-                let spec = EmbedSpec { kind, source: source.to_string(), em_px, color: ctx.math_color, dark: ctx.dark };
+                let spec = EmbedSpec { kind: kind.with_palette(ctx.mermaid), source: source.to_string(), em_px, color: ctx.math_color, dark: ctx.dark };
                 let key = spec.key();
                 match ctx.embeds.state(key) {
                     Some(state) => (key, state),
@@ -386,6 +387,13 @@ impl EditorView {
                 wide_width,
                 code_line_numbers: ctx.code_line_numbers,
                 inline_code: ctx.inline_code,
+                block_open: None,
+                source_base: 0,
+                active_code: None,
+                comment_edit: None,
+                math_edit: None,
+                object_edit: None,
+                empty_comment: "空注释",
             };
             let layout = layout_block(&text, width, &env, window);
             let bytes = layout.estimated_bytes();
@@ -486,11 +494,11 @@ impl EditorView {
         let top = f32::from(bounds.origin.y);
 
         let buffer_entity = self.buffer.clone();
-        let (math_color, dark) = {
+        let (math_color, dark, mermaid) = {
             let theme = cx.global::<Theme>();
             let color = gpui::Rgba::from(theme.fg);
             let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-            ([byte(color.r), byte(color.g), byte(color.b)], theme.dark)
+            ([byte(color.r), byte(color.g), byte(color.b)], theme.dark, theme.mermaid)
         };
         let missing;
         let embed_missing;
@@ -510,7 +518,7 @@ impl EditorView {
                 embeds: cx.global::<EmbedStore>(),
                 embed_missing: RefCell::new(Vec::new()),
                 math_color,
-                dark,
+                dark, mermaid,
             };
             let count = self.row_count(buffer);
             let last = count - 1;
@@ -730,7 +738,7 @@ impl EditorView {
                             }
                         }
                         Part::Block { start, end, layout, .. } => {
-                            crate::nomo_mark::paint::paint_block(layout, point(px(ox), px(top)), clip.clone(), theme, store, window, cx);
+                            crate::nomo_mark::paint::paint_block(layout, point(px(ox), px(top)), clip.clone(), None, &[], theme, store, window, cx);
                             let first = search.matches.partition_point(|range| range.end < *start);
                             for range in search.matches[first..].iter().take_while(|range| range.start <= *end) {
                                 let rel = (range.start.saturating_sub(*start)) as usize..(range.end.min(*end) - start) as usize;

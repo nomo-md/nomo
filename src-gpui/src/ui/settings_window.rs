@@ -21,6 +21,8 @@ use std::time::Duration;
 
 #[path = "settings_pages.rs"]
 mod pages;
+#[path = "settings_shortcuts.rs"]
+mod shortcut_fields;
 use pages::{display_value, item_is_visible, readonly_input, section_heading, unavailable_action};
 
 const COMPACT_WIDTH: f32 = 760.0;
@@ -72,9 +74,15 @@ pub struct SettingsWindow {
     toggles: HashMap<&'static str, ScalarMotion>,
     fields: HashMap<&'static str, Entity<TextField>>,
     /// 仅当前文本设置的校验结果，不缓存系统字体列表。
+    shortcut_errors: HashMap<&'static str, String>,
     font_errors: HashMap<&'static str, &'static str>,
     scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
+    image_test: Option<crate::image_import::ImportCancellation>,
+    image_test_message: Option<String>,
+}
+impl Drop for SettingsWindow {
+    fn drop(&mut self) { if let Some(cancel) = &self.image_test { cancel.cancel(); } }
 }
 
 impl Focusable for SettingsWindow {
@@ -88,8 +96,9 @@ impl SettingsWindow {
             #[cfg(target_os = "windows")]
             caption_focus: window_chrome::CaptionFocus::new(cx),
             category: 0, open_select: None, dragging: None,
-            toggles: HashMap::new(), fields: HashMap::new(), font_errors: HashMap::new(),
+            toggles: HashMap::new(), fields: HashMap::new(), font_errors: HashMap::new(), shortcut_errors: HashMap::new(),
             scroll: ScrollHandle::new(), _subscriptions: Vec::new(),
+            image_test: None, image_test_message: None,
         }
     }
 
@@ -239,6 +248,31 @@ impl SettingsWindow {
                     .when(!busy,|el|el.on_click(cx.listener(|_,_,window,cx|super::updates::check(window,cx,false))))
                     .when(busy,|el|el.opacity(0.55)).into_any_element()
             },
+            Control::Action(label) if key == "imageConnectionTest" => {
+                let busy = self.image_test.is_some();
+                div().flex().flex_col().gap(px(6.0)).child(
+                    button("image-connection-test", if busy { "正在检查…" } else { label }, None,
+                        if busy { ButtonKind::Disabled } else { ButtonKind::Secondary }, theme)
+                        .when(!busy, |el| el.on_click(cx.listener(|view, _, _, cx| {
+                            let value = cx.global::<Settings>().value("imageHandlingSettings");
+                            let settings = crate::image_import::ImageSettings::read(&value);
+                            let cancel = crate::image_import::ImportCancellation::default();
+                            view.image_test = Some(cancel.clone()); view.image_test_message = None;
+                            let task = cx.background_executor().spawn(async move { crate::image_import::test_connection(settings, cancel) });
+                            cx.spawn(async move |this, cx| {
+                                let result = task.await;
+                                let _ = this.update(cx, |view, cx| {
+                                    view.image_test = None;
+                                    if cx.global::<Settings>().value("imageHandlingSettings") == value {
+                                        view.image_test_message = Some(result.map_or_else(|error| error, |_| "连接成功".into()));
+                                    }
+                                    cx.notify();
+                                });
+                            }).detach(); cx.notify();
+                        }))))
+                    .children(self.image_test_message.clone().map(|message| div().text_size(px(12.0)).text_color(theme.muted).child(message)))
+                    .into_any_element()
+            },
             Control::Action(label) => unavailable_action(key, label, theme).into_any_element(),
             Control::Info => div().px(px(9.0)).py(px(5.0)).rounded_full().border_1().border_color(theme.border)
                 .text_size(px(13.0)).text_color(theme.muted).child("后续版本支持").into_any_element(),
@@ -248,7 +282,7 @@ impl SettingsWindow {
 
     fn render_item(&mut self, item: &'static Item, theme: &Theme, viewport: gpui::Size<gpui::Pixels>, cx: &mut Context<Self>) -> AnyElement {
         if matches!(item.control, Control::ThemePicker) { return self.render_theme_picker(theme, viewport, cx); }
-        if matches!(item.control, Control::Shortcuts) { return self.render_shortcuts(theme, viewport); }
+        if matches!(item.control, Control::Shortcuts) { return self.render_shortcuts(theme, viewport, cx); }
         let compact = f32::from(viewport.width) <= COMPACT_WIDTH;
         let note = match &item.support {
             Support::Full => None,

@@ -13,7 +13,9 @@ pub(crate) fn outline_content_column(width: f32, outline_visible: bool, width_pe
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct ReadingAnchor { byte: u64, fraction: f32, revision: Option<u64>, view_only: bool }
+enum ReadingEdge { Top, Bottom }
+#[derive(Clone, Copy)]
+pub(super) struct ReadingAnchor { byte: u64, fraction: f32, revision: Option<u64>, view_only: bool, edge: Option<ReadingEdge> }
 
 pub(super) struct Pane {
     pub id: u64,
@@ -26,13 +28,15 @@ pub(super) struct Pane {
     pub load_error: Option<String>,
     reading_restore: Option<ReadingAnchor>,
     sync_requested: bool,
+    // 只在模式切换首帧使用，完成 prepaint 后释放。
+    layout_width: Option<f32>,
 }
 impl Pane {
     pub fn new(control: Entity<NomoMark>, subscription: Subscription, mode: ViewMode) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self { id:NEXT.fetch_add(1,Ordering::Relaxed), control:control.clone(), mode,
             viewport:viewport_ui::Viewport::new(control,subscription), scroll:gpui::ScrollHandle::new(),
-            reveal_selection:false, stale:false, load_error:None, reading_restore:None, sync_requested:false }
+            reveal_selection:false, stale:false, load_error:None, reading_restore:None, sync_requested:false, layout_width:None }
     }
 }
 
@@ -112,12 +116,80 @@ impl DocumentHost {
         let bounds=self.panes[pane].scroll.bounds();
         let height=f32::from(bounds.size.height);
         if height<=0.0 {return None;}
+        // 位于真正的文首/文末时跟随边缘，不能用中部锚点把尾行挤出视口。
+        if self.panes[pane].scroll.offset().y>=px(-0.5) && self.visible_source_bounds(pane,0,cx).is_some() {
+            return Some(ReadingAnchor {byte:0,fraction:0.0,revision:None,view_only:false,edge:Some(ReadingEdge::Top)});
+        }
+        if self.visible_source_bounds(pane,self.total_bytes,cx).is_some() {
+            return Some(ReadingAnchor {byte:self.total_bytes,fraction:1.0,revision:None,view_only:false,edge:Some(ReadingEdge::Bottom)});
+        }
         let y=f32::from(bounds.origin.y)+height*0.3;
         self.panes[pane].viewport.mounts.iter().find_map(|mount| {
             mount.view.read(cx).source_at_screen_y(y).map(|(byte,line_y)|ReadingAnchor {
-                byte, fraction:((line_y-f32::from(bounds.origin.y))/height).clamp(0.0,1.0), revision:None, view_only:false
+                byte, fraction:((line_y-f32::from(bounds.origin.y))/height).clamp(0.0,1.0), revision:None, view_only:false, edge:None
             })
         })
+    }
+    fn visible_source_bounds(&self, pane:usize, byte:u64, cx:&Context<Self>) -> Option<gpui::Bounds<gpui::Pixels>> {
+        let viewport=self.panes[pane].scroll.bounds();
+        self.panes[pane].viewport.mounts.iter().find_map(|mount| {
+            let (_,bounds)=mount.view.read(cx).caret_bounds(byte)?;
+            (bounds.top()>=viewport.top()-px(0.5) && bounds.bottom()<=viewport.bottom()+px(0.5)).then_some(bounds)
+        })
+    }
+    /// 只比较撤销前后已经加载的片段；不复制正文，也不猜测跨窗口的字节映射。
+    pub(super) fn history_reading_anchor(&self, loaded:&super::super::session_window::LoadedWindow, selection:Option<DocumentSelection>, cx:&Context<Self>) -> Option<ReadingAnchor> {
+        let pane=self.active_pane;
+        let mut anchor=self.reading_anchor(pane,cx)?;
+        let before=self.control.read(cx);
+        let old=&before.host.parsed;
+        if old.identity.from_byte!=loaded.input.from_byte {return None;}
+        let a=old.source.as_ref();
+        let b=loaded.input.text.as_str();
+        let mut prefix=a.bytes().zip(b.bytes()).take_while(|(a,b)|a==b).count();
+        while !a.is_char_boundary(prefix) || !b.is_char_boundary(prefix) {prefix-=1;}
+        let mut suffix=a.as_bytes()[prefix..].iter().rev().zip(b.as_bytes()[prefix..].iter().rev()).take_while(|(a,b)|a==b).count();
+        while !a.is_char_boundary(a.len()-suffix) || !b.is_char_boundary(b.len()-suffix) {suffix-=1;}
+        let restored=selection?.head_byte.checked_sub(loaded.input.from_byte)? as usize;
+        if restored>b.len() {return None;}
+        let target=if restored<=prefix {restored} else if restored>=b.len()-suffix {a.len()-(b.len()-restored)} else {prefix};
+        // 撤销目标原本不可见时仍沿用文档导航，不能为了保留阅读位置隐藏实际修改。
+        self.visible_source_bounds(pane,old.identity.from_byte+target as u64,cx)?;
+        if anchor.edge.is_none() {
+            // 公式等对象恢复高度时优先固定上方未改动的可见文字，避免跟随对象下方内容挪动画面。
+            let viewport=self.panes[pane].scroll.bounds();
+            let height=f32::from(viewport.size.height);
+            for fraction in [0.0,0.08] {
+                let y=f32::from(viewport.top())+height*fraction;
+                let located=self.panes[pane].viewport.mounts.iter().find_map(|mount|mount.view.read(cx).source_at_screen_y(y));
+                if let Some((byte,line_y))=located {
+                    if old.identity.from_byte<=byte && byte<=old.identity.from_byte+prefix as u64
+                        && self.visible_source_bounds(pane,byte,cx).is_some() {
+                        anchor.byte=byte;
+                        anchor.fraction=((line_y-f32::from(viewport.top()))/height).clamp(0.0,1.0);
+                        break;
+                    }
+                }
+            }
+        }
+        anchor.byte=match anchor.edge {
+            Some(ReadingEdge::Top)=>0,
+            Some(ReadingEdge::Bottom)=>loaded.total_bytes,
+            None=> {
+                let local=anchor.byte.checked_sub(old.identity.from_byte)? as usize;
+                if local<=prefix {anchor.byte}
+                else if local>=a.len()-suffix && local<=a.len()
+                    && b.len() as i128-a.len() as i128==loaded.total_bytes as i128-self.total_bytes as i128 {
+                    loaded.input.from_byte+(b.len()-(a.len()-local)) as u64
+                } else {return None;}
+            }
+        };
+        anchor.revision=Some(loaded.input.revision);
+        Some(anchor)
+    }
+    pub(super) fn restore_history_reading(&mut self, anchor:ReadingAnchor) {
+        self.panes[self.active_pane].reading_restore=Some(anchor);
+        self.panes[self.active_pane].reveal_selection=false;
     }
     /// 缩放前只记录已挂载窗口的阅读位置，不读取全文或创建新 Pane。
     pub(crate) fn prepare_zoom(&mut self, pointer: Option<gpui::Point<gpui::Pixels>>, cx: &mut Context<Self>) {
@@ -132,7 +204,7 @@ impl DocumentHost {
             let anchor = self.panes[pane].viewport.mounts.iter().find_map(|mount| {
                 mount.view.read(cx).source_at_screen_y(y).map(|(byte, line_y)| ReadingAnchor {
                     byte, fraction: ((line_y - f32::from(bounds.origin.y)) / height).clamp(0.0, 1.0),
-                    revision: None, view_only: true,
+                    revision: None, view_only: true, edge:None,
                 })
             });
             self.panes[pane].reading_restore = self.panes[pane].reading_restore.or(anchor);
@@ -203,7 +275,7 @@ impl DocumentHost {
                 if host.status().revision != revision { return; }
                 let resolved = match result {
                     Ok(resolved) => resolved,
-                    Err(ControlError::Stale) => return,
+                    Err(ControlError::Stale) => { host.schedule_pane(pane, 150, cx); return; },
                     Err(error) => {
                         host.panes[pane].viewport.references_failed = true;
                         host.report(error, cx);
@@ -237,6 +309,11 @@ impl DocumentHost {
         }).detach();
     }
     pub(super) fn refresh_stale_pane(&mut self, pane:usize, cx:&mut Context<Self>) {
+        if pane == self.active_pane && self.panes[pane].reveal_selection {
+            let selection = self.control.read(cx).host.selection;
+            self.refresh_pane_at(pane, selection.head_byte.min(self.total_bytes), Some(selection), cx);
+            return;
+        }
         let anchor=self.panes[pane].reading_restore.or_else(||self.reading_anchor(pane,cx));
         let byte=anchor.map_or(self.control.read(cx).host.selection.head_byte,|a|a.byte).min(self.total_bytes);
         self.refresh_pane_at(pane,byte,None,cx);
@@ -280,6 +357,10 @@ impl DocumentHost {
                         host.panes[pane].stale=false;host.reset_pane(pane,cx);
                         if resolving_references && pane==host.active_pane {host.schedule_metadata(cx);}
                     }
+                    Err(ControlError::Stale)=>{
+                        host.panes[pane].stale=true;
+                        host.schedule_pane(pane,crate::nomo_mark::session_window::policy().quiet_ms,cx);
+                    }
                     Err(error)=>{host.panes[pane].stale=true;host.panes[pane].load_error=Some(error.to_string());host.report(error,cx);}
                 }
                 cx.notify();
@@ -289,12 +370,18 @@ impl DocumentHost {
     pub(crate) fn change_mode(&mut self, mode:EditorMode, cx:&mut Context<Self>) -> Result<(),ControlError> {
         self.ready(cx)?;
         let anchor=self.reading_anchor(self.active_pane,cx);
+        let width=self.panes.iter().map(|pane|f32::from(pane.scroll.bounds().size.width)).sum::<f32>()+if self.panes.len()==2 {8.0}else{0.0};
         if mode==EditorMode::Split {
             if self.panes.len()==2 {return Ok(());}
             let existing_mode=self.panes[0].mode;
             let other_mode=if existing_mode==ViewMode::Source {ViewMode::Semantic}else{ViewMode::Source};
-            // 只复制当前已加载结构片段；完整正文和历史仍由同一 NativeWindowPort 管理。
-            let view=self.control.read(cx);
+            // 从阅读锚点所在的已挂载片段创建新栏；活动光标可能仍在远处的旧片段。
+            let revision=self.control.read(cx).host.parsed.identity.revision;
+            let seed=anchor.and_then(|anchor| self.panes[self.active_pane].viewport.mounts.iter().find(|mount| {
+                let id=&mount.view.read(cx).host.parsed.identity;
+                id.revision==revision && id.from_byte<=anchor.byte && (anchor.byte<id.to_byte || anchor.byte==self.total_bytes && anchor.byte==id.to_byte)
+            })).map(|mount| &mount.view).unwrap_or(&self.control);
+            let view=seed.read(cx);
             let identity=&view.host.parsed.identity;
             let input=self.port.read_window(identity.revision,identity.from_byte..identity.to_byte)?;
             let context=WindowContext::Resolved(view.host.parsed.context.clone());
@@ -302,13 +389,44 @@ impl DocumentHost {
             let window_id=format!("split-{}-{}",identity.window_id,NEXT_WINDOW.fetch_add(1,Ordering::Relaxed));
             let adapter=WindowHostAdapter::new(input,window_id,0,context)?;
             let base_dir=view.base_dir.clone();
-            let selected=view.host.selection;
-            let control=cx.new(|cx| {let mut view=NomoMark::new(adapter,cx);view.mode=other_mode;view.base_dir=base_dir;view.workspace_hosted=self.embedded;view.host.set_readonly(true);view.host.selection=selected;view});
+            let selected=self.control.read(cx).host.selection;
+            let control=cx.new(|cx| {let mut view=NomoMark::new(adapter,cx);view.mode=other_mode;view.base_dir=base_dir;view.workspace_hosted=self.embedded;view.windowed_navigation=self.production;view.host.set_readonly(true);view.host.selection=selected;view});
             let subscription=cx.subscribe(&control,Self::event);
             let mut pane=Pane::new(control,subscription,other_mode);
             pane.reading_restore=anchor;
+            let current=&self.panes[self.active_pane];
+            let mut neighbors=Vec::new();
+            if !current.viewport.dirty && !current.viewport.groups.is_empty() {
+                // 复用同修订的已发布分组；新栏不能先把尾部短片段当作整篇文档。
+                pane.viewport.groups=current.viewport.groups.clone();
+                pane.viewport.heights=super::super::viewport_model::Heights::new(pane.viewport.groups.iter().map(|group|group.estimate));
+                pane.viewport.dirty=false;
+                if !current.viewport.budget.pressured() {
+                    let visible=current.scroll.bounds();
+                    for mount in current.viewport.mounts.iter().filter(|mount|mount.view!=*seed).filter(|mount| {
+                        mount.view.read(cx).content_bounds().is_some_and(|bounds|bounds.bottom()>visible.top() && bounds.top()<visible.bottom())
+                    }).take(2) {
+                        let view=mount.view.read(cx);
+                        let id=&view.host.parsed.identity;
+                        if id.revision!=revision {continue;}
+                        let input=self.port.read_window(revision,id.from_byte..id.to_byte)?;
+                        let bytes=input.text.len();
+                        let context=WindowContext::Resolved(view.host.parsed.context.clone());
+                        let id=format!("split-{}-{}",id.window_id,NEXT_WINDOW.fetch_add(1,Ordering::Relaxed));
+                        neighbors.push((WindowHostAdapter::new(input,id,0,context)?,view.base_dir.clone(),bytes));
+                    }
+                }
+            }
             self.panes.push(pane);
-            self.reset_pane(1,cx);
+            self.update_pane_cost(1,cx);
+            // 最多提前创建两个原本可见的邻窗，受既有共享预算约束；屏外预取仍交给调度器。
+            for (adapter,base_dir,bytes) in neighbors {
+                if !self.panes[1].viewport.budget.reserve(super::super::resident_budget::Cost {views:1,source:bytes,layout:0},false) {break;}
+                let view=cx.new(|cx| {let mut view=NomoMark::new(adapter,cx);view.mode=other_mode;view.base_dir=base_dir;view.workspace_hosted=self.embedded;view.windowed_navigation=self.production;view.host.set_readonly(true);view.host.selection=selected;view});
+                let subscription=cx.subscribe(&view,Self::event);
+                self.panes[1].viewport.mounts.push(viewport_ui::Mounted {view,_subscription:subscription,height:32.0});
+                self.update_pane_cost(1,cx);
+            }
         } else {
             // 离开双栏立即回收另一栏的窗口、请求及预算，不留下隐藏的重复渲染。
             self.pause_viewport(cx);
@@ -324,6 +442,14 @@ impl DocumentHost {
         }
         self.panes[self.active_pane].reading_restore=anchor;
         self.panes[self.active_pane].reveal_selection=false;
+        if width>0.0 {
+            let source_first=cx.global::<Settings>().split_source_first;
+            for pane in &mut self.panes {
+                pane.layout_width=Some(if mode!=EditorMode::Split {width}
+                    else if (pane.mode==ViewMode::Source)==source_first {width*self.split_ratio}
+                    else {width*(1.0-self.split_ratio)-8.0});
+            }
+        }
         self.schedule_viewport(16,cx);
         cx.notify();Ok(())
     }
@@ -335,6 +461,28 @@ impl DocumentHost {
         }
         if self.panes[pane].stale || (self.panes[pane].viewport.loading && !anchor.view_only) || self.panes[pane].load_error.is_some() {return;}
         let bounds=self.panes[pane].scroll.bounds();
+        if let Some(edge)=anchor.edge {
+            let ready=self.panes[pane].viewport.mounts.iter().any(|mount| {
+                let view=mount.view.read(cx);
+                let id=&view.host.parsed.identity;
+                (match edge {ReadingEdge::Top=>id.from_byte==0,ReadingEdge::Bottom=>id.to_byte==self.total_bytes})
+                    && view.measured_height().is_some_and(|height|(height-mount.height).abs()<0.5)
+            });
+            if !ready {
+                if !self.panes[pane].viewport.dirty && !self.panes[pane].viewport.mounts.iter().any(|mount| {
+                    let id=&mount.view.read(cx).host.parsed.identity;
+                    id.from_byte<=anchor.byte && anchor.byte<=id.to_byte
+                }) {self.refresh_pane_at(pane,anchor.byte.min(self.total_bytes),None,cx);}
+                return;
+            }
+            let old=self.panes[pane].scroll.offset();
+            let target=match edge {ReadingEdge::Top=>px(0.0),ReadingEdge::Bottom=>-self.panes[pane].scroll.max_offset().y.max(px(0.0))};
+            if f32::from(target-old.y).abs()>0.5 {
+                self.panes[pane].scroll.set_offset(gpui::point(old.x,target));
+                self.schedule_pane(pane,16,cx);cx.notify();
+            } else if self.pane_visible_ready(pane,cx) {self.panes[pane].reading_restore=None;}
+            return;
+        }
         let located=self.panes[pane].viewport.mounts.iter().find_map(|mount| {
             let view=mount.view.read(cx);
             view.caret_bounds(anchor.byte).map(|(_,caret)|(caret,view.measured_height().is_some()))
@@ -348,13 +496,14 @@ impl DocumentHost {
             if f32::from(target-old.y).abs()>0.5 {
                 self.panes[pane].scroll.set_offset(gpui::point(old.x,target));
                 self.schedule_pane(pane,16,cx);cx.notify();
-            } else if measured && (!self.panes[pane].viewport.dirty || anchor.view_only) {self.panes[pane].reading_restore=None;}
+            } else if measured && (self.pane_visible_ready(pane,cx) || anchor.view_only) {self.panes[pane].reading_restore=None;}
         } else if !self.panes[pane].viewport.dirty && !anchor.view_only {
             self.refresh_pane_at(pane,anchor.byte.min(self.total_bytes),None,cx);
         }
     }
     fn pane_prepainted(&mut self, pane:usize, cx:&mut Context<Self>) {
         if self.hidden || self.closed || pane>=self.panes.len() {return;}
+        self.panes[pane].layout_width=None;
         if pane == self.active_pane {
             let bounds = self.panes[pane].scroll.bounds();
             let height = f32::from(bounds.size.height);
@@ -388,7 +537,7 @@ impl DocumentHost {
         }
         self.cancel_pane_follow(pane, cx);
         self.panes[pane].reveal_selection = false;
-        self.panes[pane].reading_restore = Some(ReadingAnchor { byte, fraction: 0.08, revision:Some(revision), view_only:false });
+        self.panes[pane].reading_restore = Some(ReadingAnchor { byte, fraction: 0.08, revision:Some(revision), view_only:false, edge:None });
         self.request_pane_sync(pane);
         self.schedule_pane(pane, 16, cx);
         cx.notify();
@@ -420,14 +569,17 @@ impl DocumentHost {
         });
         if let Some(view) = candidate {
             if self.promote(&view, cx) {
-                view.update(cx, |view, cx| view.place_caret_at(event.position, window, cx));
+                view.update(cx, |view, cx| {
+                    if event.button == gpui::MouseButton::Right { view.open_context_menu(event.position, window, cx); }
+                    else { view.place_caret_at(event.position, window, cx); }
+                });
             }
         }
     }
     fn render_pane(&self, pane:usize, cx:&Context<Self>) -> gpui::AnyElement {
         let host=cx.entity().downgrade();
         let id=self.panes[pane].id;
-        let width=f32::from(self.panes[pane].scroll.bounds().size.width);
+        let width=self.panes[pane].layout_width.unwrap_or_else(||f32::from(self.panes[pane].scroll.bounds().size.width));
         let settings=cx.global::<Settings>();
         let avoid=outline_content_column(width,!self.mini_layout && self.panes.len()==1 && settings.show_outline,settings.content_width_percent);
         let document_body=div().children(self.pane_children(pane,cx))
@@ -469,6 +621,9 @@ impl DocumentHost {
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |host, event, window, cx| {
                 host.paper_mouse_down(pane, event, window, cx);
             }))
+            .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |host, event, window, cx| {
+                host.paper_mouse_down(pane, event, window, cx);
+            }))
             .on_scroll(cx.listener(move |host,_,_,cx| {
                 host.cancel_pane_follow(pane,cx);
                 host.panes[pane].reveal_selection=false;host.panes[pane].reading_restore=None;
@@ -485,7 +640,54 @@ impl DocumentHost {
         div().size_full().flex().flex_col().children(error).children(source_notice)
             .child(div().relative().flex_1().min_h_0().child(content).child(zoom_capture)).into_any_element()
     }
-    pub(super) fn render_panes(&mut self, cx:&mut Context<Self>) -> gpui::AnyElement {
+    /// 模式切换和历史恢复都在首帧布局前定位；只测量当前驻留窗口。
+    fn prepare_reading_layouts(&mut self, window:&mut Window, cx:&mut Context<Self>) {
+        for pane in 0..self.panes.len() {
+            let Some(anchor)=self.panes[pane].reading_restore else {continue;};
+            let width=self.panes[pane].layout_width;
+            let history=width.is_none() && self.panes[pane].viewport.groups.is_empty()
+                && self.panes[pane].control.read(cx).content_bounds().is_none();
+            if width.is_none() && !history {continue;}
+            let bounds=self.panes[pane].scroll.bounds();
+            let height=if bounds.size.height>px(0.0) {f32::from(bounds.size.height)}
+                else {self.panes.iter().map(|pane|f32::from(pane.scroll.bounds().size.height)).fold(0.0_f32,f32::max)};
+            if height<=0.0 {continue;}
+            let settings=cx.global::<Settings>();
+            let content_width=width.map(|width| {
+                let content=if self.mini_layout {width-2.0*(width*0.05).clamp(18.0,30.0)}
+                    else if self.panes.len()==2 {width-64.0}
+                    else if settings.show_outline && width>900.0 {(width*settings.content_width_percent).min((width-224.0-(width*0.035).clamp(32.0,160.0)).max(0.0))}
+                    else {width*settings.content_width_percent};
+                (content*window.scale_factor()).round()/window.scale_factor()
+            });
+            let views:Vec<_>=self.panes[pane].viewport.mounts.iter().map(|mount|mount.view.clone()).collect();
+            let mut located=None;
+            for view in views {
+                if let Some((stamp,content_height,y))=view.update(cx,|view,cx|view.prepare_reading_layout(content_width,anchor.byte,window,cx)) {
+                    self.pane_height(pane,&view,&stamp,content_height,cx);
+                    if let Some(y)=y {located=Some((stamp.identity.from_byte,y));}
+                }
+            }
+            let total=if self.panes[pane].viewport.groups.is_empty() {self.panes[pane].viewport.mounts.first().map_or(0.0,|mount|mount.height)}
+                else {self.panes[pane].viewport.heights.total()};
+            let (padding_top,padding_bottom)=if self.mini_layout {(48.0,56.0)}else{(32.0,32.0)};
+            let max=(total+padding_top+padding_bottom-height).max(0.0);
+            let top=match anchor.edge {
+                Some(ReadingEdge::Top)=>0.0,
+                Some(ReadingEdge::Bottom)=>max,
+                None=> {
+                    let Some((from,y))=located else {continue;};
+                    let prefix=self.panes[pane].viewport.groups.iter().position(|group|group.from==from)
+                        .map_or(0.0,|index|self.panes[pane].viewport.heights.top(index));
+                    (padding_top+prefix+y-height*anchor.fraction).clamp(0.0,max)
+                }
+            };
+            self.panes[pane].scroll.set_offset(gpui::point(px(0.0),px(-top)));
+            self.update_pane_cost(pane,cx);
+        }
+    }
+    pub(super) fn render_panes(&mut self, window:&mut Window, cx:&mut Context<Self>) -> gpui::AnyElement {
+        self.prepare_reading_layouts(window,cx);
         if self.panes.len()==1 {return div().flex_1().min_h_0().child(self.render_pane(0,cx)).into_any_element();}
         let source_first=cx.global::<Settings>().split_source_first;
         let left=self.panes.iter().position(|p|(p.mode==ViewMode::Source)==source_first).unwrap_or(0);

@@ -11,6 +11,27 @@ pub struct DetailsBlock {
     pub body: Range<usize>,
     pub default_open: bool,
 }
+impl DetailsBlock {
+    /// summary 保留完整标签供结构解析使用；输入落点只能位于标签内。
+    pub fn title(&self, source: &str) -> Range<usize> {
+        let Some(open) = nomo_syntax::html_tag(source, self.summary.start)
+            .filter(|tag| tag.name == "summary" && !tag.closing) else { return self.summary.start..self.summary.start; };
+        let end = source[open.end..self.summary.end].to_ascii_lowercase().rfind("</summary")
+            .map_or(open.end, |at| open.end + at);
+        open.end..end
+    }
+
+    pub fn unwrapped(&self, source: &str) -> String {
+        let eol = super::commands::line_ending(source, self.source.start);
+        let title = source[self.title(source)].trim();
+        let body = source[self.body.clone()].trim_matches(['\r', '\n']);
+        match (title.is_empty(), body.is_empty()) {
+            (true, _) => body.to_owned(),
+            (_, true) => title.to_owned(),
+            _ => format!("{title}{eol}{eol}{body}"),
+        }
+    }
+}
 pub fn events(
     source: &str,
     offset: usize,

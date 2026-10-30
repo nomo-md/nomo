@@ -262,6 +262,7 @@ impl WindowHostAdapter {
             horizontal.insert(mapped, offset);
         }
         self.interaction.horizontal_offsets = horizontal;
+        self.interaction.map_code_offsets(&edits);
         self.serial += 1;
         let transaction = DocumentTransaction {
             template_update,
@@ -357,6 +358,7 @@ impl WindowHostAdapter {
         self.interaction.horizontal_offsets = std::mem::take(&mut self.interaction.horizontal_offsets).into_iter()
             .filter(|(at, _)| !edits.iter().any(|edit| edit.from_byte < *at && *at < edit.to_byte))
             .map(|(at, value)| (super::commands::map_selection(DocumentSelection::caret(at), &edits).head_byte, value)).collect();
+        self.interaction.map_code_offsets(&edits);
         self.serial += 1;
         self.pending.push_back(DocumentTransaction {
             template_update: None,
@@ -542,6 +544,9 @@ impl WindowHostAdapter {
             horizontal.insert(map(at)?, offset);
         }
         self.interaction.horizontal_offsets = horizontal;
+        let mut code = std::collections::BTreeMap::new();
+        for (&at, &offset) in &self.interaction.code_offsets { code.insert(map(at)?, offset); }
+        self.interaction.code_offsets = code;
         identity.from_byte = from;
         identity.to_byte = to;
         identity.revision = revision;
@@ -600,11 +605,14 @@ impl WindowHostAdapter {
     }
     fn prune_view_state(&mut self) {
         let base = self.parsed.identity.from_byte;
+        self.interaction.code_offsets.retain(|at, (x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0
+            && self.parsed.nodes.iter().any(|node| node.kind == "code" && base + node.source.start as u64 == *at));
         self.interaction.details_open.retain(|at, _| {
             self.parsed
                 .details
                 .iter()
                 .any(|block| base + block.source.start as u64 == *at)
+                || self.parsed.nodes.iter().any(|node| node.kind == "code" && base + node.source.start as u64 == *at)
         });
         let mut tables = std::collections::BTreeSet::new();
         tables.extend(

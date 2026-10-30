@@ -1,6 +1,11 @@
 [workspace]
 members = ["src-gpui"]
+exclude = ["vendor/latex-rust"]
 resolver = "3"
+
+[patch.crates-io]
+# 固定 3.0.1 的小范围扩展：宿主提供缺失字形的度量和路径，仍沿用原 TeX 排版。
+latex-rust = { path = "vendor/latex-rust" }
 
 [workspace.package]
 version = "0.6.2"

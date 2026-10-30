@@ -30,7 +30,7 @@
 | 状态统计与缩放 | `components/StatusBar.svelte`、`styles/editor-outline.css:250`：编辑区右下浮动控件，right 16px/bottom 14px；写作指标菜单、阅读时间、80–160% 缩放弹层、Markdown 检查状态/问题列表/跳转 | `ui/workspace.rs::render_status`、`text_document/writing_stats`、`ui/settings_schema.rs` | 当前全宽 28px 底栏，展示路径/行列/模式/固定 UTF-8/缩放按钮；缺对应浮动外观、指标菜单、检查器。必须统计完整文档或完整选区，区分 pending/error；编码不可硬编码假报。校验中英文/选区/多窗口语料及错误重试 | 全文统计构建通过；其余待实现/验证 |
 | 设置窗口 | `components/SettingsWindow.svelte`：8 分区、212px 导航、即时生效；字体校验/建议、主题预览与导入导出、自定义快捷键、文件与窗口、图片策略、检查/插入等 | `ui/settings_window.rs`、`ui/settings_schema.rs`、`settings.rs`、`theme.rs` | 当前 200px 导航并新增独立快捷键页；多个 Support::None 项及整类被隐藏、主题仅默认、语言仅中文。逐项接控件/宿主后恢复基准设置与真实支持范围；不能将旧“隐藏未支持项”视为复刻完成。验收即时应用、持久化、旧 JSON 未知键保留、无效值及重开 | 待实现 |
 | 页面弹窗/面板 | `components/UnsavedConfirmDialog.svelte`（392px）、`ExternalChangeDialog.svelte`（560px）、`FolderOpenDialog.svelte`（420px）、`CloseWindowBehaviorDialog.svelte`、`ConfirmDialog.svelte`、链接／Emoji 与更新系列组件 | `ui/dialogs.rs`、`dialogs/secondary.rs`、`toast.rs`、`workspace/application_dialogs.rs`、`tray.rs`、`updates.rs`；控件保留局部对象弹层 | 保存／删除／Toast 及第二阶段外部变更、恢复、打开位置、Windows 关闭策略、更新界面已接通；保留窗口化会话与系统文件选择器。具体实机范围、资源上限及未验证项见 `docs/native-build.md` 的两阶段验收记录；链接／Emoji 等局部编辑面板不计入本次第二阶段验收 | 两阶段已实现；Windows 已列场景通过，其他 DPI／跨平台待验 |
-| 对比、窗口及文件相关操作 | `components/ComparisonWorkspace.svelte`、`ComparisonPane.svelte`、`App.svelte::createComparison/resizeComparison`；标签组合成两个文档对比、20–80% 拖动分隔、交换/解除；新窗口、窗口间标签、mini/置顶；`services/exportService.ts` 和 `wordExportService.ts` 真正执行 HTML/PDF/Word 导出 | 当前 Workspace 无对应对比/mini/多窗口管理/导出入口 | 主分支确有功能，不能沿旧 Roadmap 的“另行设计/暂下线”遗漏。与“同一文档源码/语义双栏”分开登记；依赖会话、窗口生命周期、原生导出实现。验收各窗活动文档隔离、关闭/保存、对比交换及导出完整正文与资源 | 待实现 |
+| 对比、窗口及文件相关操作 | `components/ComparisonWorkspace.svelte`、`ComparisonPane.svelte`、`App.svelte::createComparison/resizeComparison`；标签组合成两个文档对比、20–80% 拖动分隔、交换/解除；新窗口、窗口间标签、mini/置顶；`services/exportService.ts` 和 `wordExportService.ts` 真正执行 HTML/PDF/Word 导出 | 导出：`document_export.rs`、`ui/workspace/export.rs`；其余分项见下方各阶段记录 | 主分支确有功能，不能沿旧 Roadmap 的“另行设计/暂下线”遗漏。与“同一文档源码/语义双栏”分开登记；依赖会话、窗口生命周期、原生导出实现。验收各窗活动文档隔离、关闭/保存、对比交换及导出完整正文与资源 | 待实现 |
 | 主题、字体与响应式 | `styles/theme.css`、`app-responsive.css`、`services/themeRegistry.ts`：UI 14/13/12px、控件 28/34/38px、圆角 4/8/12px；Windows 正文 Segoe UI/Microsoft YaHei、等宽 Cascadia Code/JetBrains Mono/Consolas；多配色与深浅色 | `theme.rs`、`settings.rs`、`ui/components.rs`、全部 render 函数 | 当前单一自有配色、正文默认 Microsoft YaHei、等宽 Consolas，不能假定视觉一致。需固定同主题/字体/窗口/DPI 截图比较；大纲窄容器行为、菜单避边、弹层最大高、工具栏横滚都需逐项对齐。透明/模糊等平台差异先调查代价与实际效果再决策 | 待实现 |
 
 主分支存在明确占位的菜单项（例如 `AppTitleBar.svelte` 中 `comingSoon(...)` 的段落前后插入、部分图片/行内公式入口），应复刻其真实禁用/提示行为并与可执行入口区分，不将它们描述成主分支已有完成的功能。图表、导出、对比等上表项目已找到实际回调或服务实现，不能按占位处理。
@@ -130,3 +130,10 @@
 - **授权实机修复**：切换后主动同步 GPUI 视口，修复窄窗沿用原宽度；控制条改为捕获鼠标几何进出，避免原生拖动区遮挡悬停；文档顶部保持顶部，中段沿用阅读锚点；隐藏大纲暂停查询、保留有界分页和列表位置；最大化切换期间临时关闭 DWM 位图拉伸，避免重影。
 - 100% DPI 下已操作空白／长文档、四标签和富内容文档，核对输入撤销重做保存、拖动／最小尺寸、返回按钮、关闭返回及双栏恢复。最终 Release 另复验明暗主题、最大化恢复和 20 轮普通窗口往返，哈希与分构建证据见 `verification.json`；保留验收窗口供用户试用。
 - 20 轮期间用户同时执行公式插入／连续撤销，出现一次修订冲突提示，尚未修复；不据此宣称编辑器全部通过。未测真实 IME、跨屏 DPI、减少动态效果、外部变更小窗提示及完整三轮性能对照；采样不代表帧率、泄漏或永久内存上限。
+
+
+### 2026-10-30 原生文档导出
+
+- HTML、PDF 和可编辑 Word 的正式菜单入口已接通，HTML 默认 `Ctrl+Shift+E`、PDF 默认 `Ctrl+Shift+P`，均可沿用旧快捷键偏好修改。固定快照、原文／历史隔离、关闭取消及原子发布共用一条宿主链路。
+- PDF 嵌入中文字体、分页、书签及表格表头；Word 使用原生段落／列表／表格／脚注。公式、图表和本地图片可以嵌入，网络图片与不支持的媒体保留文字／链接并提示。边界、依赖和预算见 [第五阶段开发记录](../docs/nomo-mark.md#分阶段接通第五阶段原生-pdfword-导出2026-10-30)。
+- 默认／开发入口编译及 7 项经用户授权新增的导出测试通过；独立解析两份 PDF 和两份 DOCX，验证中文正文、120 行表格跨 5 页不丢尾部、内嵌媒体、合并表格、链接和脚注部件。真实文件选择器、桌面阅读器显示、IME、DPI 和性能基准尚未验收；不将自动化结果记为视觉对照通过。

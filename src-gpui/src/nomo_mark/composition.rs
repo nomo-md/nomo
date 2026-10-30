@@ -1,4 +1,4 @@
-//! 跨窗口选区的临时组字。只保存有界预编辑文字，确认前不删除原选区或写入会话。
+//! 选区改写与跨窗口输入的临时组字。只保存有界预编辑文字，确认前不删除原选区或写入会话。
 use super::*;
 use crate::layout::{ParaSpec, TextLayout, Wrap};
 
@@ -94,26 +94,51 @@ impl NomoMark {
         cx.notify();
     }
     pub(super) fn finish_external_composition(&mut self, commit: bool, cx: &mut Context<Self>) -> bool {
-        let Some(composition) = self.external_composition.as_ref() else { return false; };
+        match self.try_finish_external_composition(commit, cx) {
+            Ok(finished) => finished,
+            Err(error) => { self.error(error, cx); true }
+        }
+    }
+    pub(super) fn try_finish_external_composition(&mut self, commit: bool, cx: &mut Context<Self>) -> Result<bool, ControlError> {
+        let Some(composition) = self.external_composition.as_ref() else { return Ok(false); };
         if commit {
-            let range = composition.selection.range();
-            let after = DocumentSelection::caret(range.start + composition.text.len() as u64);
+            let selection = composition.selection;
+            let range = selection.range();
+            let local = local_range(&self.host.parsed.source, self.host.parsed.identity.from_byte, range.clone()).is_ok();
+            let result = if let Some(result) = self.selected_cells_edit(&EditIntent::Replace(composition.text.clone())) { result }
+            else if local {
+                let intent = EditIntent::Replace(composition.text.clone());
+                if self.effective_mode() == ViewMode::Semantic {
+                    commands::apply_semantic(&self.host.parsed, selection, intent)
+                } else {
+                    commands::apply(&self.host.parsed, selection, intent)
+                }
+            } else {
+                Ok(commands::EditResult {
+                    selection: DocumentSelection::caret(range.start + composition.text.len() as u64),
+                    edits: vec![SourceEdit { from_byte: range.start, to_byte: range.end, inserted_text: composition.text.clone() }],
+                    template_update: None,
+                })
+            };
             let group = format!("{}:composition:{}", self.host.parsed.identity.window_id, self.history_serial);
-            if let Err(error) = self.host.queue_rewindow(vec![SourceEdit {
-                from_byte: range.start, to_byte: range.end, inserted_text: composition.text.clone(),
-            }], after, &group, None) {
-                self.error(error, cx);
-                return true;
-            }
+            let queued = result.and_then(|result| {
+                if !local || self.host.projected_window_bytes(&result.edits)? > super::super::session_window::policy().group_bytes as usize {
+                    self.host.queue_rewindow(result.edits, result.selection, &group, result.template_update)
+                } else {
+                    self.host.queue_template_edit(result.edits, result.selection, &group, result.template_update)
+                }
+            });
+            queued?;
+            self.cell_selection = None;
         }
         self.external_composition = None;
         self.composition_templates.clear();
         self.host.interaction.end_composition();
         self.history_serial += 1;
         cx.emit(ControlEvent::CompositionChanged { identity: self.host.parsed.identity.clone(), active: false });
-        if commit { self.submit(cx); }
+        if commit { self.invalidate(); self.submit(cx); }
         cx.notify();
-        true
+        Ok(true)
     }
     pub(super) fn layout_external_composition(&mut self, width: f32, window: &Window, cx: &mut Context<Self>) {
         let Some(composition) = self.external_composition.as_mut() else { return; };

@@ -21,7 +21,7 @@ impl PopupAnchor {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum PopupPlacement { BelowLeft, BelowRight, AboveRight, Right }
+pub(crate) enum PopupPlacement { BelowLeft, BelowRight, AboveLeft, AboveRight, Right }
 
 const GAP: f32 = 6.0;
 const MARGIN: f32 = 8.0;
@@ -119,12 +119,12 @@ fn popup_origin(
     gap: Pixels,
 ) -> Point<Pixels> {
     let (x, y) = match placement {
-        PopupPlacement::BelowLeft | PopupPlacement::BelowRight | PopupPlacement::AboveRight => {
+        PopupPlacement::BelowLeft | PopupPlacement::BelowRight | PopupPlacement::AboveLeft | PopupPlacement::AboveRight => {
             let x = if matches!(placement, PopupPlacement::BelowRight | PopupPlacement::AboveRight) {
                 anchor.right() - measured.width
             } else { anchor.left() };
             // 不能直接向窗口内平移，否则弹层会盖回触发按钮。
-            let go_above = if matches!(placement, PopupPlacement::AboveRight) {
+            let go_above = if matches!(placement, PopupPlacement::AboveLeft | PopupPlacement::AboveRight) {
                 measured.height <= above || above >= below
             } else { measured.height > below && above > below };
             let y = if go_above { anchor.top() - gap - measured.height }

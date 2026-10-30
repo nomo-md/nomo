@@ -28,10 +28,9 @@ pub enum ChromeCapability {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiagramKind { Blank, Flowchart, Sequence, Class, State, Pie, Gantt, EntityRelationship }
+pub enum DiagramKind { Default, Blank, Flowchart, Sequence, Class, State, Pie, Gantt, EntityRelationship }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExportFormat { Html, Pdf, Word }
+pub(crate) use crate::document_export::Format as ExportFormat;
 
 /// 这四项在固定 master 本身调用 comingSoon，保留相同业务语义。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,7 +194,7 @@ impl Chrome {
         MenuItem::new(label, shortcut, MenuAction::Emit(event), self.capable(capability) && (!needs_document || self.state.has_document))
     }
 
-    fn items(&self, menu: Menu, maximized: bool) -> Vec<MenuItem> {
+    fn items(&self, menu: Menu, maximized: bool, cx: &App) -> Vec<MenuItem> {
         use ChromeCapability as C;
         use ChromeCommand as Cmd;
         use ChromeEvent as E;
@@ -204,13 +203,14 @@ impl Chrome {
         let separator = MenuItem::separator;
         let action = |label: &'static str, shortcut: &'static str, action: fn() -> Box<dyn Action>, enabled: bool| MenuItem::new(label, shortcut, A::Dispatch(action), enabled);
         let event = |label, shortcut, value, capability, document| self.event_item(label, shortcut, value, capability, document);
-        match menu {
+        let mut entries = match menu {
             Menu::File => vec![
                 action("新建 Markdown", "Ctrl + N", || Box::new(action::NewFile), true),
                 event("新窗口", "Ctrl + Shift + N", E::NewWindow, C::NewWindow, false), separator(),
                 action("打开文件...", "Ctrl + O", || Box::new(action::OpenFile), true),
                 action("打开文件夹...", "Ctrl + Shift + O", || Box::new(action::OpenFolder), true),
-                MenuItem::submenu(Menu::Recent), separator(),
+                MenuItem::submenu(Menu::Recent),
+                action("恢复未保存文档...", "", || Box::new(action::RecoverDocuments), true), separator(),
                 action("保存", "Ctrl + S", || Box::new(action::Save), doc),
                 action("另存为...", "Ctrl + Shift + S", || Box::new(action::SaveAs), doc), separator(),
                 MenuItem::submenu(Menu::Export), separator(),
@@ -234,12 +234,12 @@ impl Chrome {
                 action("引用", "Ctrl + Shift + Q", || Box::new(action::Quote), doc),
                 event("提示块", "Ctrl + Shift + A", E::Command(Cmd::Callout), C::Callout, true),
                 event("折叠块", "", E::Command(Cmd::Details), C::Details, true),
-                event("行内注释", "", E::Command(Cmd::BlockComment), C::BlockComment, true),
+                event("块注释", "", E::Command(Cmd::BlockComment), C::BlockComment, true),
                 action("有序列表", "Ctrl + Shift + [", || Box::new(action::OrderedList), doc),
                 action("无序列表", "Ctrl + Shift + ]", || Box::new(action::BulletList), doc),
                 action("任务列表", "Ctrl + Shift + X", || Box::new(action::TaskList), doc), separator(),
-                event("上插段落", "Ctrl + Shift + Enter", E::Unavailable(UnavailableFeature::ParagraphBefore), C::UnavailableNotice, true),
-                event("下插段落", "Ctrl + Enter", E::Unavailable(UnavailableFeature::ParagraphAfter), C::UnavailableNotice, true), separator(),
+                action("上插段落", "Ctrl + Shift + Enter", || Box::new(crate::nomo_mark::view::ParagraphBefore), doc),
+                action("下插段落", "Ctrl + Enter", || Box::new(crate::nomo_mark::view::ParagraphAfter), doc), separator(),
                 MenuItem::submenu(Menu::Diagram),
                 event("脚注", "", E::Command(Cmd::Footnote), C::Footnote, true),
                 action("水平分割线", "Ctrl + Shift + H", || Box::new(action::Rule), doc),
@@ -283,7 +283,7 @@ impl Chrome {
                 MenuItem::new("导出 Word", "", A::Emit(E::Export(ExportFormat::Word)), doc && self.capable(C::ExportWord) && !self.state.word_export_busy),
             ],
             Menu::Diagram => {
-                let mut entries = vec![event("空白图表", "mermaid", E::Command(Cmd::Diagram(DiagramKind::Blank)), C::Diagrams, true), separator()];
+                let mut entries = vec![event("默认图表", "", E::Command(Cmd::Diagram(DiagramKind::Default)), C::Diagrams, true), event("空白图表", "mermaid", E::Command(Cmd::Diagram(DiagramKind::Blank)), C::Diagrams, true), separator()];
                 for (label, shortcut, kind) in [
                     ("流程图", "flowchart", DiagramKind::Flowchart), ("时序图", "sequenceDiagram", DiagramKind::Sequence),
                     ("类图", "classDiagram", DiagramKind::Class), ("状态图", "stateDiagram", DiagramKind::State),
@@ -308,7 +308,23 @@ impl Chrome {
                 MenuItem::new(if maximized { "还原" } else { "最大化" }, "", A::Maximize, true), separator(),
                 MenuItem::new("关闭窗口", "Alt + F4", A::Emit(E::CloseWindow), true),
             ],
+        };
+        for entry in &mut entries {
+            let command: Option<Box<dyn Action>> = match &entry.action {
+                A::Dispatch(action) => {
+                    let command = action();
+                    Some(if command.name() == action::ModeSource.name() { Box::new(action::ToggleSource) } else { command })
+                }
+                A::Emit(E::Export(ExportFormat::Html)) => Some(Box::new(action::ExportHtml)),
+                A::Emit(E::Export(ExportFormat::Pdf)) => Some(Box::new(action::ExportPdf)),
+                A::Emit(E::TablePicker) => Some(Box::new(action::Table)),
+                A::Emit(E::LinkPicker) => Some(Box::new(action::Link)),
+                A::Emit(E::Command(Cmd::ClearFormatting)) => Some(Box::new(action::ClearFormatting)),
+                _ => None,
+            };
+            if let Some(label) = command.as_ref().and_then(|command| super::shortcuts::action_label(command.as_ref(), cx)) { entry.shortcut = label.into(); }
         }
+        entries
     }
 
     fn open(&mut self, menu: Menu, window: &mut Window, cx: &mut Context<Self>) {
@@ -344,7 +360,7 @@ impl Chrome {
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(menu) = self.menu else { return; };
         let active = self.submenu.unwrap_or(menu);
-        let entries = self.items(active, window.is_maximized());
+        let entries = self.items(active, window.is_maximized(), cx);
         let current = if self.submenu.is_some() { self.subselected } else { self.selected };
         match event.keystroke.key.as_str() {
             "escape" => {
@@ -387,7 +403,7 @@ impl Chrome {
         let theme = Theme::ui(cx);
         let compact = window.viewport_size().height <= px(700.0);
         let selected = if nested { self.subselected } else { self.selected };
-        let entries = self.items(menu, window.is_maximized());
+        let entries = self.items(menu, window.is_maximized(), cx);
         let mut rows = Vec::with_capacity(entries.len());
         for (index, entry) in entries.into_iter().enumerate() {
             if entry.separator {
@@ -401,7 +417,7 @@ impl Chrome {
             let mut row = div().id(("chrome-menu-item", index)).relative().flex().items_center().gap(px(8.0))
                 .min_h(px(if compact { 27.0 } else { 31.0 })).px(px(16.0)).py(px(if compact { 4.0 } else { 6.0 }))
                 .flex_none().text_size(px(13.0)).line_height(px(19.0)).text_color(color)
-                .when(highlighted && enabled, |el| el.bg(theme.accent))
+                .when(highlighted && enabled, |el| el.bg(theme.accent_fill))
                 .when(enabled, |el| el.cursor_pointer())
                 .when(!enabled, |el| el.opacity(0.55).tooltip(tooltip("当前不可用")))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -438,8 +454,8 @@ impl Chrome {
         }
         div().id(if nested { "chrome-submenu" } else { "chrome-menu" }).w(px(MENU_WIDTH))
             .max_h((window.viewport_size().height - px(16.0)).max(px(0.0))).py(px(4.0))
-            .flex().flex_col().rounded(px(8.0)).bg(theme.surface).border_1().border_color(theme.border)
-            .shadow_lg().occlude().overflow_y_scroll()
+            .flex().flex_col().rounded(px(theme.radius_md)).bg(theme.dropdown_bg).border_1().border_color(theme.dropdown_border)
+            .shadow(vec![theme.floating_shadow.clone()]).occlude().overflow_y_scroll()
             .track_scroll(if nested { &self.submenu_scroll } else { &self.menu_scroll })
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
@@ -468,7 +484,7 @@ impl Render for Chrome {
         let mut root = div().id("nomo-chrome").track_focus(&self.focus).key_context("NomoChrome")
             .relative().children(animate_theme.then(crate::ui::motion::theme_frame))
             .h(px(TITLEBAR_HEIGHT)).w_full().flex_none().flex().items_center().gap(px(6.0)).pl(px(8.0))
-            .bg(theme.rail_bg).text_color(theme.fg).text_size(px(13.0)).occlude()
+            .bg(theme.titlebar_bg).text_color(theme.titlebar_fg).text_size(px(13.0)).occlude()
             .when(cfg!(target_os = "macos") && !window.is_fullscreen(), |el| el.pl(px(88.0)))
             .on_key_down(cx.listener(Self::on_key))
             .when(!cfg!(target_os = "windows"), |el| el.on_mouse_down(MouseButton::Left, cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
@@ -543,7 +559,7 @@ impl Render for Chrome {
         }
         if self.state.can_show_home {
             right = right.child(self.icon_button("chrome-home", IconName::Home, &theme)
-                .tooltip(tooltip(if cfg!(target_os = "macos") { "返回主页 · ⌘⇧H" } else { "返回主页 · Ctrl+Shift+H" }))
+                .tooltip(tooltip(if cfg!(target_os = "macos") { "返回主页 · ⌘⌥⇧H" } else { "返回主页 · Ctrl+Alt+Shift+H" }))
                 .on_click(cx.listener(|this, _, window, cx| { this.dismiss(window, cx); window.dispatch_action(Box::new(action::ShowHome), cx); })));
         }
         right = right.child(self.icon_button("chrome-theme", if theme.dark { IconName::Sun } else { IconName::Moon }, &theme)

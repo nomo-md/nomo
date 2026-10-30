@@ -1,5 +1,58 @@
 //! 文本剪贴板写入须先确认成功，剪切才允许删除原文。
 use gpui::App;
+#[cfg(target_os = "windows")]
+#[path = "clipboard_rich.rs"]
+mod rich;
+
+pub(crate) fn write_png(bytes: Vec<u8>, cx: &App) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    { let _ = cx; rich::write_png(&bytes) }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+        if cx.read_from_clipboard().is_some_and(|item| item.into_entries().any(|entry| matches!(entry, gpui::ClipboardEntry::Image(_)))) {
+            Ok(())
+        } else { Err("图片剪贴板写入失败".into()) }
+    }
+}
+
+pub(crate) fn read_images(cx: &App) -> Result<Option<Vec<crate::image_import::ImageInput>>, String> {
+    #[cfg(target_os = "windows")]
+    { let _ = cx; rich::read_images() }
+    #[cfg(not(target_os = "windows"))]
+    {
+        use crate::image_import::{self, ImageInput};
+        let Some(item) = cx.read_from_clipboard() else { return Ok(None); };
+        let mut inputs = Vec::new();
+        for entry in item.into_entries() {
+            match entry {
+                gpui::ClipboardEntry::Image(image) => {
+                    let extension = match image.format { gpui::ImageFormat::Png => "png", gpui::ImageFormat::Jpeg => "jpg",
+                        gpui::ImageFormat::Gif => "gif", gpui::ImageFormat::Webp => "webp", gpui::ImageFormat::Bmp => "bmp", _ => continue };
+                    inputs.push(ImageInput::Bytes { name: format!("pasted-image.{extension}"), bytes: image.bytes.into() });
+                }
+                gpui::ClipboardEntry::ExternalPaths(paths) => inputs.extend(paths.0.into_iter().filter(|p| image_import::supported(p)).map(ImageInput::File)),
+                _ => {}
+            }
+        }
+        image_import::validate_inputs(&inputs)?;
+        Ok((!inputs.is_empty()).then_some(inputs))
+    }
+}
+
+pub(crate) fn write_rich(text: &str, html: &str, cx: &App) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    { let _ = cx; rich::write(text, html) }
+    #[cfg(not(target_os = "windows"))]
+    { let _ = html; write_text(text, cx) }
+}
+pub(crate) fn read_html() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    { rich::read() }
+    #[cfg(not(target_os = "windows"))]
+    { None }
+}
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn write_text(text: &str, cx: &App) -> Result<(), String> {

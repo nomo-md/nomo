@@ -33,6 +33,7 @@ pub struct TextField {
     clear_button: bool,
     settings_mono: bool,
     emoji_search_style: bool,
+    code_language_style: bool,
     invalid: bool,
 }
 
@@ -61,6 +62,7 @@ impl TextField {
             clear_button: false,
             settings_mono: false,
             emoji_search_style: false,
+            code_language_style: false,
             invalid: false,
         }
     }
@@ -87,6 +89,10 @@ impl TextField {
     pub fn set_popover_style(&mut self, cx:&mut Context<Self>) {
         self.popover_style=true;
         cx.notify();
+    }
+    pub fn set_code_language_style(&mut self) {
+        self.code_language_style = true;
+        self.settings_mono = true;
     }
     pub fn set_settings_style(&mut self) {
         self.popover_style = true;
@@ -209,7 +215,8 @@ impl TextField {
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         let offset = match (&self.last_layout, self.last_bounds) {
-            (Some(layout), Some(bounds)) => layout.closest_index_for_x(event.position.x - bounds.left()),
+            // 占位文字和过期布局不属于当前内容，不能用于生成编辑选区。
+            (Some(layout), Some(bounds)) if layout.text.as_ref() == self.content.as_str() => layout.closest_index_for_x(event.position.x - bounds.left()),
             _ => self.content.len(),
         };
         self.move_to(offset, cx);
@@ -297,8 +304,9 @@ impl EntityInputHandler for TextField {
     }
 
     fn character_index_for_point(&mut self, position: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        if self.content.is_empty() { return Some(0); }
         let bounds = self.last_bounds?;
-        let layout = self.last_layout.as_ref()?;
+        let layout = self.last_layout.as_ref().filter(|layout| layout.text.as_ref() == self.content.as_str())?;
         let index = layout.index_for_x(position.x - bounds.left())?;
         Some(self.utf8_to_utf16(index))
     }
@@ -315,13 +323,14 @@ impl Render for TextField {
             .key_context("TextField")
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)
-            .h(px(if self.popover_style {34.0}else{26.0}))
-            .px(px(if self.emoji_search_style {0.0}else if self.popover_style {10.0}else{8.0}))
+            .h(px(if self.code_language_style {30.0}else if self.popover_style {34.0}else{26.0}))
+            .px(px(if self.emoji_search_style {0.0}else if self.popover_style || self.code_language_style {10.0}else{8.0}))
             .when(self.clear_button, |el| el.pr(px(30.0)))
             .rounded(px(if self.popover_style {4.0}else{6.0}))
             .bg(if self.emoji_search_style {theme.rail_bg}else if self.popover_style && !self.settings_style {theme.app_bg}else{theme.surface})
             .border_1()
             .border_color(border)
+            .when(self.code_language_style, |field| field.border_0().rounded_none().bg(theme.surface))
             .flex()
             .items_center()
             .overflow_hidden()
@@ -403,7 +412,7 @@ impl Element for FieldElement {
             .collect(),
             None => vec![base],
         };
-        let line = window.text_system().shape_line(text, px(if field.popover_style {14.0}else{13.0}), &runs, None);
+        let line = window.text_system().shape_line(text, px(if field.code_language_style {12.0}else if field.popover_style {14.0}else{13.0}), &runs, None);
         let selected = field.selected.clone();
         let (selection, cursor) = if selected.is_empty() || field.content.is_empty() {
             let x = if field.content.is_empty() { px(0.0) } else { line.x_for_index(field.cursor()) };

@@ -44,6 +44,7 @@ pub fn default_value(key: &str) -> Value {
     match key {
         "themeMode" => json!("system"),
         "colorThemeId" => json!("nomo-default"),
+        "shortcutPreferences" => crate::ui::shortcuts::defaults(),
         "uiFontFamily" | "documentFontFamily" | "monoFontFamily" => json!(""),
         "interfaceLanguage" => json!("system"),
         "editorMode" => json!("semantic"),
@@ -209,6 +210,17 @@ impl Settings {
 
     /// `persist` 为假时只更新内存（滑杆拖动过程中），拖动结束再以 `persist = true` 写入文件。
     pub fn set_with(cx: &mut App, key: &str, value: Value, persist: bool) {
+        if let Some(field) = key.strip_prefix("shortcutPreferences.") {
+            let mut shortcuts = cx.global::<Settings>().value("shortcutPreferences");
+            if persist {
+                if let Some(stored) = read_config().and_then(|config| config.pointer("/app/settings/shortcutPreferences/value_json").and_then(Value::as_str).and_then(|raw| serde_json::from_str::<Value>(raw).ok())) {
+                    if stored.is_object() { shortcuts = stored; }
+                }
+            }
+            if !shortcuts.is_object() { shortcuts = crate::ui::shortcuts::defaults(); }
+            shortcuts[field] = value;
+            return Self::set_with(cx, "shortcutPreferences", shortcuts, persist);
+        }
         if let Some(field)=key.strip_prefix("imageHandlingSettings.") {
             let mut image=cx.global::<Settings>().value("imageHandlingSettings");
             // 与其他版本共用配置；局部修改不能覆盖其刚写入的上传或清理字段。
@@ -236,11 +248,12 @@ impl Settings {
         if !changed {
             return;
         }
+        if key == "shortcutPreferences" { crate::ui::reload_key_bindings(cx); crate::set_menus(cx); }
         // 影响排版结果的设置需要让文本与块布局缓存失效。
         if matches!(key, "documentFontFamily" | "monoFontFamily" | "codeBlockLineNumbersVisible" | "inlineCodeRenderingEnabled") {
             layout::bump_generation();
         }
-        if key == "themeMode" {
+        if matches!(key, "themeMode" | "colorThemeId") {
             // 窗口事件回调内窗口仍被借用，等当前事件结束后再读取系统外观。
             cx.defer(|cx| {
                 let appearance = cx.windows().first().and_then(|window| window.update(cx, |_, window, _| window.appearance()).ok());

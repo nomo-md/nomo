@@ -211,8 +211,9 @@ impl MarkdownDocumentSessionManager {
         session.active_group = Some((group.clone(), group));
         session.ack.insert(request.operation.clone(), (fingerprint, status.clone())); session.ack_order.push_back(request.operation);
         if session.ack_order.len() > 128 { if let Some(old) = session.ack_order.pop_front() { session.ack.remove(&old); } }
+        self.structure.edited(&status.document_id, status.revision, &[(changed_from, changed_to, changed_inserted)]);
         drop(session);
-        self.writing_stats.invalidate(&status.document_id, false); self.structure.edited(&status.document_id, &[(changed_from, changed_to, changed_inserted)]); self.search.invalidate(&status.document_id, None);
+        self.writing_stats.invalidate(&status.document_id, false); self.search.invalidate(&status.document_id, None);
         Ok(OutlineMoveResult { byte: selection.map_or(insertion, |s| s.head_byte), status })
     }
 }

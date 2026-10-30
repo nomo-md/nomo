@@ -5,7 +5,7 @@
 //! 语义视图把 generation 纳入含图片块的布局缓存键，从而在尺寸就绪后重排。
 
 use gpui::{App, Global, RenderImage};
-use image::{Frame, ImageDecoder, imageops::FilterType};
+use image::{AnimationDecoder, Frame, ImageDecoder, imageops::FilterType};
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Cursor, Read};
@@ -20,6 +20,9 @@ pub(crate) const MAX_INPUT_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) const MAX_INPUT_PIXELS: u64 = 16 * 1024 * 1024;
 pub(crate) const MAX_DECODE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_BITMAP_PIXELS: u64 = 4 * 1024 * 1024;
+const MAX_ANIMATION_FRAMES: usize = 256;
+const MAX_ANIMATION_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_SVG_BYTES: usize = 2 * 1024 * 1024;
 const MAX_DECODERS: usize = 2;
 const MAX_QUEUED: usize = 64;
 const MAX_ENTRIES: usize = 512;
@@ -40,7 +43,7 @@ enum Entry {
     Queued,
     Loading,
     /// `used` 用 Cell 记录访问时钟，使绘制阶段只需共享借用即可更新 LRU 顺序。
-    Ready { image: Arc<RenderImage>, width: u32, height: u32, bytes: usize, used: Cell<u64>, version: u64 },
+    Ready { image: Arc<RenderImage>, width: u32, height: u32, bytes: usize, used: Cell<u64>, version: u64, started: std::time::Instant },
     Failed { reason: Failure, used: Cell<u64>, version: u64 },
 }
 
@@ -114,6 +117,18 @@ impl ImageStore {
         }
     }
 
+    /// 只有实际绘制到视口的动画才请求下一帧；无后台计时器，淘汰即释放全部帧。
+    pub fn frame(&self, path: &Path, window: &mut gpui::Window, cx: &App) -> usize {
+        let Some(Entry::Ready { image, started, .. }) = self.entries.get(path) else { return 0; };
+        if image.frame_count() < 2 || crate::ui::popup::reduced_motion(cx) { return 0; }
+        let delay = |index| { let (n, d) = image.delay(index).numer_denom_ms(); (u64::from(n) / u64::from(d.max(1))).max(20) };
+        let total: u64 = (0..image.frame_count()).map(delay).sum();
+        let mut elapsed = (started.elapsed().as_millis() % u128::from(total)) as u64;
+        window.request_animation_frame();
+        for index in 0..image.frame_count() { let ms = delay(index); if elapsed < ms { return index; } elapsed -= ms; }
+        0
+    }
+
     pub fn is_pending_or_known(&self, path: &Path) -> bool {
         self.entries.contains_key(path) || Self::metadata_cost(path) > MAX_METADATA_BYTES || self.failures.contains_key(&Self::path_key(path))
     }
@@ -158,7 +173,7 @@ impl ImageStore {
             Some((image, width, height, bytes)) => {
                 self.failures.remove(&Self::path_key(&path));
                 self.bytes += bytes;
-                self.entries.insert(path, Entry::Ready { image, width, height, bytes, used: Cell::new(self.clock.get()), version: self.generation });
+                self.entries.insert(path, Entry::Ready { image, width, height, bytes, used: Cell::new(self.clock.get()), version: self.generation, started: std::time::Instant::now() });
                 while self.bytes > MAX_CACHE_BYTES {
                     if !self.evict_oldest(&mut retired) { break; }
                 }
@@ -213,12 +228,51 @@ fn start_pending(cx: &mut App) {
     }
 }
 
+pub(crate) fn resolve_source(source: &str, base: Option<&Path>) -> Option<PathBuf> {
+    if let Ok(url) = url::Url::parse(source) {
+        if matches!(url.scheme(), "http" | "https") { return Some(PathBuf::from(url.as_str())); }
+        if url.scheme() == "file" { return url.to_file_path().ok(); }
+    }
+    if source.contains("://") || source.starts_with("data:") { return None; }
+    let decoded = crate::markdown::render::percent_decode(source);
+    let path = Path::new(&decoded);
+    if path.is_absolute() { Some(path.into()) } else { base.map(|base| base.join(path)) }
+}
+
+async fn download(source: &str) -> Result<Vec<u8>, Failure> {
+    let client = reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(15)).redirect(reqwest::redirect::Policy::limited(3))
+        .build().map_err(|_| Failure::Read)?;
+    let mut response = client.get(source).send().await.map_err(|_| Failure::Read)?
+        .error_for_status().map_err(|_| Failure::Read)?;
+    if response.content_length().is_some_and(|length| length > MAX_INPUT_BYTES) { return Err(Failure::Budget); }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| Failure::Read)? {
+        if bytes.len() as u64 + chunk.len() as u64 > MAX_INPUT_BYTES { return Err(Failure::Budget); }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 fn decode(path: &Path) -> Result<Decoded, Failure> {
-    let file = std::fs::File::open(path).map_err(|_| Failure::Read)?;
-    if file.metadata().map_err(|_| Failure::Read)?.len() > MAX_INPUT_BYTES { return Err(Failure::Budget); }
-    let mut encoded = Vec::new();
-    file.take(MAX_INPUT_BYTES + 1).read_to_end(&mut encoded).map_err(|_| Failure::Read)?;
+    let source = path.to_string_lossy();
+    let encoded = if source.starts_with("http://") || source.starts_with("https://") {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| Failure::Read)?
+            .block_on(download(&source))?
+    } else {
+        let file = std::fs::File::open(path).map_err(|_| Failure::Read)?;
+        if file.metadata().map_err(|_| Failure::Read)?.len() > MAX_INPUT_BYTES { return Err(Failure::Budget); }
+        let mut bytes = Vec::new();
+        file.take(MAX_INPUT_BYTES + 1).read_to_end(&mut bytes).map_err(|_| Failure::Read)?;
+        bytes
+    };
     if encoded.len() as u64 > MAX_INPUT_BYTES { return Err(Failure::Budget); }
+    if encoded.starts_with(b"GIF87a") || encoded.starts_with(b"GIF89a") {
+        return decode_gif(encoded);
+    }
+    if std::str::from_utf8(&encoded).is_ok_and(|text| text.trim_start_matches('\u{feff}').trim_start().starts_with('<')) {
+        return decode_svg(&encoded);
+    }
     let mut reader = image::ImageReader::new(Cursor::new(encoded)).with_guessed_format().map_err(|_| Failure::Decode)?;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(MAX_DECODE_BYTES);
@@ -241,6 +295,68 @@ fn decode(path: &Path) -> Result<Decoded, Failure> {
     let bytes = buffer.len();
     let render = RenderImage::new(vec![Frame::new(buffer)]);
     Ok((Arc::new(render), width, height, bytes))
+}
+
+fn decode_gif(encoded: Vec<u8>) -> Result<Decoded, Failure> {
+    let error = |error| if matches!(error, image::ImageError::Limits(_)) { Failure::Budget } else { Failure::Decode };
+    let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(encoded)).map_err(error)?;
+    let (width, height) = decoder.dimensions();
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels == 0 || pixels > MAX_INPUT_PIXELS || width > 32_768 || height > 32_768 { return Err(Failure::Budget); }
+    let mut limits = image::Limits::default(); limits.max_alloc = Some(MAX_DECODE_BYTES);
+    limits.max_image_width = Some(32_768); limits.max_image_height = Some(32_768);
+    decoder.set_limits(limits).map_err(|_| Failure::Budget)?;
+    let scale = (MAX_DECODE_WIDTH as f64 / width.max(height) as f64).min((MAX_BITMAP_PIXELS as f64 / pixels as f64).sqrt()).min(1.0);
+    let (w, h) = ((width as f64 * scale).max(1.0) as u32, (height as f64 * scale).max(1.0) as u32);
+    let mut frames = Vec::new(); let mut bytes = 0usize;
+    for frame in decoder.into_frames() {
+        if frames.len() >= MAX_ANIMATION_FRAMES || bytes.saturating_add(w as usize * h as usize * 4) > MAX_ANIMATION_BYTES { return Err(Failure::Budget); }
+        let frame = frame.map_err(error)?;
+        let delay = frame.delay();
+        let mut buffer = frame.into_buffer();
+        if buffer.dimensions() != (w, h) { buffer = image::imageops::resize(&buffer, w, h, FilterType::Triangle); }
+        for pixel in buffer.chunks_exact_mut(4) { pixel.swap(0, 2); }
+        bytes += buffer.len();
+        frames.push(Frame::from_parts(buffer, 0, 0, delay));
+    }
+    if frames.is_empty() { return Err(Failure::Decode); }
+    Ok((Arc::new(RenderImage::new(frames)), width, height, bytes))
+}
+
+fn svg_tree(encoded: &[u8]) -> Result<resvg::usvg::Tree, Failure> {
+    if encoded.len() > MAX_SVG_BYTES { return Err(Failure::Budget); }
+    let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (data_refused, path_refused) = (refused.clone(), refused.clone());
+    let options = resvg::usvg::Options { fontdb: crate::embeds::font_database(),
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_data: Box::new(move |_, _, _| { data_refused.store(true, std::sync::atomic::Ordering::Relaxed); None }),
+            resolve_string: Box::new(move |_, _| { path_refused.store(true, std::sync::atomic::Ordering::Relaxed); None }),
+        }, ..Default::default() };
+    let tree = resvg::usvg::Tree::from_data(encoded, &options).map_err(|_| Failure::Decode)?;
+    let size = tree.size();
+    if refused.load(std::sync::atomic::Ordering::Relaxed) { return Err(Failure::Decode); }
+    if size.width() > 32_768.0 || size.height() > 32_768.0 || size.width() * size.height() > MAX_INPUT_PIXELS as f32 { return Err(Failure::Budget); }
+    Ok(tree)
+}
+
+pub(crate) fn validate_svg(encoded: &[u8]) -> Result<(), String> {
+    svg_tree(encoded).map(|_| ()).map_err(|reason| reason.message().to_owned())
+}
+
+fn decode_svg(encoded: &[u8]) -> Result<Decoded, Failure> {
+    let tree = svg_tree(encoded)?;
+    let size = tree.size();
+    let (width, height) = (size.width().ceil() as u32, size.height().ceil() as u32);
+    let scale = (MAX_DECODE_WIDTH as f32 / size.width().max(size.height()))
+        .min((MAX_BITMAP_PIXELS as f32 / (size.width() * size.height())).sqrt()).min(2.0);
+    let (w, h) = ((size.width() * scale).floor().max(1.0) as u32, (size.height() * scale).floor().max(1.0) as u32);
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).ok_or(Failure::Budget)?;
+    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    let mut data = pixmap.take();
+    for pixel in data.chunks_exact_mut(4) { pixel.swap(0, 2); }
+    let bytes = data.len();
+    let buffer = image::RgbaImage::from_raw(w, h, data).ok_or(Failure::Decode)?;
+    Ok((Arc::new(RenderImage::new(vec![Frame::new(buffer)])), width, height, bytes))
 }
 
 #[cfg(test)]

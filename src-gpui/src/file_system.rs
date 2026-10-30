@@ -10,6 +10,15 @@ pub(crate) fn write_file_atomically_with(
     path: &Path,
     write: impl FnOnce(&mut std::fs::File) -> Result<(), String>,
 ) -> Result<(), String> {
+    write_file_atomically_checked(path, write, || Ok(()))
+}
+
+/// 导出可在临时文件同步完成后、替换目标前再次检查取消状态。
+pub(crate) fn write_file_atomically_checked(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> Result<(), String>,
+    before_replace: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     let parent = path
         .parent()
         .filter(|value| !value.as_os_str().is_empty())
@@ -34,6 +43,10 @@ pub(crate) fn write_file_atomically_with(
     }
     drop(temp_file);
 
+    if let Err(error) = before_replace() {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
     if let Err(error) = replace_file(&temp_path, path) {
         let _ = fs::remove_file(&temp_path);
         return Err(format!("保存文件失败：{error}"));

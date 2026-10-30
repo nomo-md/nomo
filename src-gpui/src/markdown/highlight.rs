@@ -1,7 +1,4 @@
-//! 轻量高亮：Markdown 源码行着色与代码块词法着色。
-//!
-//! 都是逐行、无跨行状态的近似实现（跨行注释、多行字符串不识别），换来零依赖和可预测的成本；
-//! 跨行上下文（是否在围栏或公式内）由块索引提供。
+//! Markdown 行内标记与有状态代码高亮；围栏范围由当前窗口块索引提供。
 
 use crate::layout::{ColorRole, InlineStyle};
 use std::ops::Range;
@@ -18,7 +15,11 @@ pub enum LineContext {
     FrontMatter,
 }
 
-type Spans = Vec<(Range<usize>, InlineStyle)>;
+pub type Spans = Vec<(Range<usize>, InlineStyle)>;
+#[path = "code_highlight.rs"]
+mod code;
+pub use code::code_block;
+pub(crate) use code::code_block_uncached;
 
 fn style(color: ColorRole) -> InlineStyle {
     InlineStyle { color, ..Default::default() }
@@ -202,65 +203,9 @@ pub fn inline_spans(text: &str, offset: usize) -> Spans {
     spans
 }
 
-const KEYWORDS: &[&str] = &[
-    "as", "async", "await", "break", "case", "catch", "class", "const", "continue", "def", "default", "defer", "do",
-    "elif", "else", "enum", "export", "extends", "false", "fn", "for", "from", "func", "function", "go", "if", "impl",
-    "import", "in", "interface", "let", "loop", "match", "mod", "module", "mut", "new", "nil", "None", "null", "package",
-    "pub", "return", "self", "Self", "static", "struct", "super", "switch", "this", "throw", "trait", "true", "True",
-    "False", "try", "type", "typeof", "use", "var", "void", "where", "while", "with", "yield", "lambda", "public",
-    "private", "protected", "int", "string", "bool", "select", "SELECT", "FROM", "WHERE", "and", "or", "not", "echo",
-    "then", "fi", "done", "local", "unsafe", "dyn", "ref", "move", "crate", "extern", "goto", "sizeof", "char", "float",
-    "double", "long", "unsigned", "include", "define", "assert", "del", "global", "pass", "raise", "except", "finally",
-    "is", "instanceof", "of", "readonly", "declare", "namespace", "abstract", "final", "override", "virtual",
-];
-
-/// 代码行的词法着色：注释、字符串、数字、关键字与标点。
+/// 单行调用仍走同一语言引擎；完整代码块应使用 `code_block` 保留跨行状态。
 pub fn code_line(line: &str, lang: &str) -> Spans {
-    let bytes = line.as_bytes();
-    let hash_comment = matches!(lang, "python" | "py" | "sh" | "bash" | "zsh" | "shell" | "ruby" | "rb" | "yaml" | "yml" | "toml" | "perl" | "r" | "makefile" | "dockerfile" | "powershell" | "ps1");
-    let dash_comment = matches!(lang, "sql" | "lua" | "haskell" | "hs");
-    let mut spans = Spans::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        let rest = &line[index..];
-        if rest.starts_with("//") || (hash_comment && byte == b'#') || (dash_comment && rest.starts_with("--")) || rest.starts_with("/*") {
-            spans.push((index..line.len(), InlineStyle { italic: true, ..style(ColorRole::Comment) }));
-            break;
-        }
-        if byte == b'"' || byte == b'\'' || byte == b'`' {
-            let mut end = index + 1;
-            while end < bytes.len() && bytes[end] != byte {
-                end += if bytes[end] == b'\\' { 2 } else { 1 };
-            }
-            let end = (end + 1).min(bytes.len());
-            spans.push((index..end, style(ColorRole::Str)));
-            index = end;
-            continue;
-        }
-        if byte.is_ascii_digit() && (index == 0 || !bytes[index - 1].is_ascii_alphanumeric() && bytes[index - 1] != b'_') {
-            let end = index + bytes[index..].iter().take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'.' || **byte == b'_').count();
-            spans.push((index..end, style(ColorRole::Number)));
-            index = end;
-            continue;
-        }
-        if byte.is_ascii_alphabetic() || byte == b'_' {
-            let end = index + bytes[index..].iter().take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_').count();
-            let word = &line[index..end];
-            if KEYWORDS.contains(&word) {
-                spans.push((index..end, style(ColorRole::Keyword)));
-            } else if bytes.get(end) == Some(&b'(') || bytes.get(end) == Some(&b'!') {
-                spans.push((index..end, style(ColorRole::Number)));
-            }
-            index = end;
-            continue;
-        }
-        if byte.is_ascii_punctuation() {
-            spans.push((index..index + 1, style(ColorRole::Punct)));
-        }
-        index += line[index..].chars().next().map_or(1, char::len_utf8);
-    }
-    spans
+    code_block(line, lang).first().cloned().unwrap_or_default()
 }
 
 #[cfg(test)]

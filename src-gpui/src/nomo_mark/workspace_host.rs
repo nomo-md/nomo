@@ -6,10 +6,12 @@ use std::path::PathBuf;
 
 pub(super) struct Metadata {
     pub status: MarkdownStatus,
+    pub save_dialog: super::save_dialog::SaveDialog,
+    pub front_matter_entry: Option<(WindowIdentity, bool)>,
 }
 impl Metadata {
     pub fn new(status: MarkdownStatus) -> Self {
-        Self { status }
+        Self { status, save_dialog: Default::default(), front_matter_entry: None }
     }
 }
 
@@ -137,6 +139,21 @@ impl DocumentHost {
         }
         Ok(())
     }
+    pub(crate) fn has_composition(&self, cx: &App) -> bool {
+        self.control.read(cx).has_composition(cx)
+    }
+    pub(crate) fn finish_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<bool, ControlError> {
+        if self.closed { return Err(ControlError::Detached); }
+        if self.saving || self.navigating || self.close_prompt { return Ok(false); }
+        if !self.control.update(cx, |view, cx| view.finish_input(window, cx))? { return Ok(false); }
+        for mount in self.panes.iter().flat_map(|pane| &pane.viewport.mounts) {
+            if mount.view != self.control && !mount.view.update(cx, |view, cx| view.finish_input(window, cx))? {
+                return Ok(false);
+            }
+        }
+        self.ready(cx)?;
+        Ok(true)
+    }
     pub(crate) fn set_active(
         &mut self,
         active: bool,
@@ -163,10 +180,47 @@ impl DocumentHost {
         cx: &mut Context<Self>,
     ) -> Result<(NativeWindowPort, crate::text_document::markdown_session::SnapshotHandle), ControlError> {
         self.ready(cx)?;
+        self.clean_empty_templates(cx)?;
         let snapshot = self.port.capture_for_save(self.status().revision)?;
         self.saving = true;
         cx.notify();
         Ok((self.port.clone(), snapshot))
+    }
+    fn clean_empty_templates(&mut self, cx: &mut Context<Self>) -> Result<(), ControlError> {
+        let revision = self.status().revision;
+        let ranges = self.port.manager.empty_template_ranges(&self.port.owner, &self.port.document_id, revision)
+            .map_err(|e| ControlError::HostFailure(e.to_string()))?;
+        if ranges.is_empty() { return Ok(()); }
+        let edits = ranges.into_iter().map(|r| SourceEdit { from_byte: r.start, to_byte: r.end, inserted_text: String::new() }).collect::<Vec<_>>();
+        let selection = self.selection(cx);
+        let after = super::super::commands::map_selection(selection, &edits);
+        let id = format!("empty-templates-{}-{}", self.port.document_id, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+        let revision = self.port.submit(DocumentTransaction { base_revision: revision, operation_id: id.clone(), history_group_id: id,
+            edits: edits.clone(), selection_before: selection, selection_after: after, template_update: None })?;
+        let install = (|| -> Result<(), ControlError> { for pane in 0..self.panes.len() {
+            let control = self.panes[pane].control.clone();
+            let parsed = control.read(cx).host.parsed.clone();
+            let old = control.read(cx).host.selection;
+            let bounds = super::super::commands::map_selection(DocumentSelection {
+                anchor_byte: parsed.identity.from_byte, head_byte: parsed.identity.to_byte }, &edits);
+            let input = self.port.read_window(revision, bounds.range())?;
+            let selected = super::super::commands::map_selection(old, &edits);
+            control.update(cx, |view, cx| {
+                view.update_window(input, parsed.identity.view_generation + 1, WindowContext::Resolved(parsed.context.clone()), cx)?;
+                view.restore_selection(selected, cx);
+                Ok::<_, ControlError>(())
+            })?;
+            self.pane_edited(pane, &edits, cx);
+        } Ok(()) })();
+        self.refresh_status(cx);
+        if let Err(error) = install {
+            self.invalidate_other_panes(cx);
+            self.panes[self.active_pane].stale = true;
+            self.load_at(after.head_byte, Some(after), cx);
+            return Err(error);
+        }
+        self.schedule_metadata(cx);
+        Ok(())
     }
     pub(crate) fn finish_save(
         &mut self,
@@ -195,6 +249,7 @@ impl DocumentHost {
         cx: &mut Context<Self>,
     ) -> Result<(), ControlError> {
         self.quick.cancel();
+        self.metadata.front_matter_entry = None;
         self.ready(cx)?;
         self.pause_viewport(cx);
         self.request.cancel();
@@ -331,6 +386,12 @@ impl DocumentHost {
         self.ready(cx)?;
         self.control.update(cx, |view, cx| view.begin_inline_comment(window, cx))
     }
+    pub(crate) fn begin_block_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), ControlError> {
+        self.ready(cx)?;
+        let parsed = &self.control.read(cx).host.parsed;
+        let range = crate::nomo_mark::mapping::local_range(&parsed.source, parsed.identity.from_byte, self.selection(cx).range())?;
+        self.control.update(cx, |view, cx| view.begin_quick_object(range, crate::nomo_mark::widgets::ObjectKind::InsertBlockComment, window, cx))
+    }
     pub(crate) fn begin_inline_math(&mut self, target: &EditTarget, window: &mut Window, cx: &mut Context<Self>) -> Result<(), ControlError> {
         self.validate_target(target, cx)?;
         self.control.update(cx, |view, cx| view.begin_inline_math(window, cx))
@@ -419,6 +480,7 @@ impl DocumentHost {
 impl Render for DocumentHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.process_quick_insert(window,cx);
+        self.open_pending_front_matter(window, cx);
         #[cfg(feature = "nomo-mark-demo")]
         if !self.embedded {
             let body=self.render_development(window,cx).into_any_element();
@@ -465,6 +527,6 @@ impl Render for DocumentHost {
         let overlay=self.quick_insert_overlay(cx);
         div().size_full().relative().flex().flex_col().bg(Theme::ui(cx).surface)
             .children(animate_theme.then(crate::ui::motion::theme_frame))
-            .children(error_bar).child(self.render_panes(cx)).children(overlay).into_any_element()
+            .children(error_bar).child(self.render_panes(window,cx)).children(overlay).into_any_element()
     }
 }

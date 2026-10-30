@@ -97,6 +97,7 @@ pub(super) struct DiskHistory {
     order: VecDeque<u64>,
     used: usize,
     capacity: usize,
+    read_limit: u64,
 }
 
 impl DiskHistory {
@@ -112,7 +113,11 @@ impl DiskHistory {
             order: VecDeque::new(),
             used: 0,
             capacity: HOT_HISTORY_BYTES,
+            read_limit: u64::MAX,
         })
+    }
+    pub(super) fn open_read_only(path: &Path) -> TextDocumentResult<Self> {
+        Ok(Self { file: File::open(path)?, hot: HashMap::new(), order: VecDeque::new(), used: 0, capacity: 0, read_limit: 8 * 1024 * 1024 })
     }
     pub(super) fn append(&mut self, record: &HistoryRecord) -> TextDocumentResult<u64> {
         let bytes = serde_json::to_vec(record)
@@ -159,7 +164,7 @@ impl DiskHistory {
         let mut length = [0u8; 8];
         self.file.read_exact(&mut length)?;
         let length = u64::from_le_bytes(length);
-        if length > file_length - offset - 8 || length > usize::MAX as u64 {
+        if length > file_length - offset - 8 || length > usize::MAX as u64 || length > self.read_limit {
             return Err(TextDocumentError::new(
                 "history-corrupt",
                 "历史记录未完整写入",
@@ -212,9 +217,13 @@ impl DiskHistory {
         base: PieceTree,
         head: Option<u64>,
     ) -> TextDocumentResult<PieceTree> {
+        self.replay_cancelled(base,head,&std::sync::atomic::AtomicBool::new(false))
+    }
+    pub(super) fn replay_cancelled(&mut self,base:PieceTree,head:Option<u64>,cancel:&std::sync::atomic::AtomicBool)->TextDocumentResult<PieceTree> {
         let mut chain = Vec::new();
         let mut cursor = head;
         while let Some(offset) = cursor {
+            super::markdown_search::check_cancel(cancel)?;
             let record = self.read(offset)?;
             if record
                 .previous_event
@@ -225,11 +234,15 @@ impl DiskHistory {
                     "历史记录存在循环",
                 ));
             }
+            if self.read_limit != u64::MAX && chain.len() >= 65536 {
+                return Err(TextDocumentError::new("recovery-budget", "恢复历史较长，请手动选择恢复后检查内容"));
+            }
             chain.push(offset);
             cursor = record.previous_event;
         }
         let mut tree = base;
         for offset in chain.into_iter().rev() {
+            super::markdown_search::check_cancel(cancel)?;
             tree = apply_tree_edits(tree, &self.read(offset)?.edits)?;
         }
         Ok(tree)

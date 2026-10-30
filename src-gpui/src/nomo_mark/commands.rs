@@ -13,6 +13,9 @@ pub enum EditIntent {
     ToggleInline(InlineFormat),
     ClearFormatting,
     Heading(u8),
+    AdjustHeading { increase: bool },
+    ToggleRule,
+    IndentWith { outdent: bool, unit: String },
     LinePrefix(String),
     Indent { outdent: bool },
     Newline,
@@ -43,12 +46,19 @@ pub fn apply_semantic(
     selection: DocumentSelection,
     intent: EditIntent,
 ) -> Result<EditResult, ControlError> {
+    if let Some(result) = super::code_blocks::apply(parsed, selection, &intent) {
+        return result;
+    }
     let large_text = matches!(&intent, EditIntent::Replace(text) if text.len() > super::session_window::policy().group_bytes as usize);
     let base = parsed.identity.from_byte;
     let range = local_range(&parsed.source, base, selection.range())?;
+    if let Some(result) = super::editing_rules::semantic(parsed, selection, &intent) {
+        return Ok(result);
+    }
     if range.is_empty() && matches!(&intent, EditIntent::Backspace | EditIntent::Delete) {
         let at = if matches!(&intent, EditIntent::Backspace) { range.start.checked_sub(1) } else { Some(range.start) };
-        if let Some(source) = at.and_then(|at| super::table_inline::atomic_range_at(parsed, at)) {
+        if let Some(source) = at.and_then(|at| super::table_inline::atomic_range_at(parsed, at)
+            .or_else(|| super::comments::at(parsed, at).map(|(range, _)| range))) {
             return Ok(EditResult { template_update: None, edits: vec![SourceEdit {
                 from_byte: base + source.start as u64, to_byte: base + source.end as u64, inserted_text: String::new(),
             }], selection: DocumentSelection::caret(base + source.start as u64) });
@@ -60,15 +70,19 @@ pub fn apply_semantic(
             return apply(parsed, selection, EditIntent::Replace(escaped));
         }
     }
+    if matches!(&intent, EditIntent::Newline | EditIntent::ParagraphBreak | EditIntent::SoftBreak)
+        && super::table_inline::markdown_cell(parsed, &range)
+    {
+        // GFM 单元格内的真实换行会拆开表格行，统一复用段内换行标记。
+        return apply(parsed, selection, EditIntent::SoftBreak);
+    }
     if matches!(&intent, EditIntent::InsertCodeBlock(_) | EditIntent::InsertMathBlock | EditIntent::InsertDiagram(_)) {
         if let Some(result) = super::semantic_selection::wrap_formatted(parsed, selection, range.clone(), &intent)? {
             return Ok(result);
         }
     }
     let Some(cell) = parsed
-        .html_tables
-        .iter()
-        .find_map(|table| table.cell_at(range.start))
+        .html_cell_at(range.start)
         .filter(|cell| range.end <= cell.content.end)
     else {
         if let Some(result) = super::list_commands::apply(parsed, selection, &intent) {
@@ -77,7 +91,9 @@ pub fn apply_semantic(
         if let Some(result) = delete_paragraph_boundary(parsed, range, &intent) {
             return Ok(result);
         }
-        return apply(parsed, selection, intent);
+        let result = apply(parsed, selection, intent)?;
+        validate_html_edits(parsed, &result.edits)?;
+        return Ok(result);
     };
     let result = |range: Range<usize>, text: String, caret: usize| EditResult {
         template_update: None,
@@ -97,6 +113,9 @@ pub fn apply_semantic(
             Ok(result(range.clone(), "<br>".into(), range.start + 4))
         }
         EditIntent::ParagraphBreak => {
+            if parsed.html_fragments.iter().any(|fragment| fragment.source.start <= range.start && range.end <= fragment.source.end) {
+                return Ok(result(range.clone(), "<br>".into(), range.start + 4));
+            }
             let active: Vec<_> = cell
                 .spans
                 .iter()
@@ -224,18 +243,14 @@ pub fn html_replacement(
     text: &str,
 ) -> Result<(String, usize), ControlError> {
     let cell = parsed
-        .html_tables
-        .iter()
-        .find_map(|table| table.cell_at(range.start))
+        .html_cell_at(range.start)
         .filter(|cell| range.end <= cell.content.end)
         .ok_or(ControlError::InvalidRange)?;
     let mut inserted = html_escape::encode_text(text).into_owned();
     let caret = range.start + inserted.len();
     let large_text = text.len() > super::session_window::policy().group_bytes as usize;
-    if large_text {
-        if !html_text_boundary(parsed, cell, range.start) || !html_text_boundary(parsed, cell, range.end) {
-            return Err(ControlError::Unsupported("大段替换不能截断 HTML 标记或实体；原文已保留".into()));
-        }
+    if !html_text_boundary(parsed, cell, range.start) || !html_text_boundary(parsed, cell, range.end) {
+        return Err(ControlError::Unsupported("替换不能截断 HTML 标记或实体；原文已保留".into()));
     }
     // 大文本已经转义，只用占位文字验证标签结构，避免临时拼出并解析扩张后的整张表。
     let mut probe = large_text.then(|| "x".to_string());
@@ -271,6 +286,22 @@ pub fn validate_html_edits(
     edits: &[SourceEdit],
 ) -> Result<(), ControlError> {
     let base = parsed.identity.from_byte;
+    for fragment in &parsed.html_fragments {
+        let whole = base + fragment.source.start as u64..base + fragment.source.end as u64;
+        let touched: Vec<_> = edits.iter().filter(|edit| edit.from_byte < whole.end && whole.start < edit.to_byte
+            || edit.from_byte == edit.to_byte && whole.start < edit.from_byte && edit.from_byte < whole.end).collect();
+        if touched.is_empty() || touched.iter().any(|edit| edit.from_byte <= whole.start && whole.end <= edit.to_byte) { continue; }
+        if touched.iter().any(|edit| edit.from_byte < whole.start || whole.end < edit.to_byte) {
+            return Err(ControlError::Unsupported("选区不能截断 HTML 容器；原文已保留".into()));
+        }
+        let mut text = parsed.source[fragment.source.clone()].to_string();
+        for edit in touched.into_iter().rev() {
+            text.replace_range((edit.from_byte - whole.start) as usize..(edit.to_byte - whole.start) as usize, &edit.inserted_text);
+        }
+        if super::html_table::HtmlFragment::parse(&text, 0..text.len()).is_none() {
+            return Err(ControlError::Unsupported("此操作会破坏 HTML 标签或实体；原文已保留".into()));
+        }
+    }
     for table in &parsed.html_tables {
         let inside: Vec<_> = edits
             .iter()
@@ -323,6 +354,9 @@ pub fn apply(
         selection: DocumentSelection::caret(base + caret as u64),
     };
     match intent {
+        EditIntent::AdjustHeading { increase } => super::editing_rules::adjust_heading(parsed, selection, increase),
+        EditIntent::ToggleRule => super::editing_rules::toggle_rule(parsed, selection),
+        EditIntent::IndentWith { outdent, unit } => super::editing_rules::indent(parsed, selection, outdent, &unit),
         EditIntent::Replace(text) => {
             let caret = range.start + text.len();
             Ok(replace(range, text, caret))
@@ -423,11 +457,7 @@ pub fn apply(
                 let (a, b) = format.markers();
                 (a.to_string(), b.to_string())
             };
-            let in_html_cell = parsed.html_tables.iter().any(|table| {
-                table
-                    .cell_at(range.start)
-                    .is_some_and(|cell| range.end <= cell.content.end)
-            });
+            let in_html_cell = parsed.html_cell_at(range.start).is_some_and(|cell| range.end <= cell.content.end);
             if in_html_cell {
                 let tag = match format {
                     InlineFormat::Strong => "strong",
@@ -664,13 +694,45 @@ pub fn apply(
             } else {
                 continuation(before)
             };
+            let empty_tail = source[range.end..].split('\n').next().unwrap_or("").trim().is_empty();
+            if !literal && range.is_empty() && empty_tail {
+                let mut cursor = before.len() - before.trim_start_matches([' ', '\t']).len();
+                let mut last_quote = None;
+                while before.as_bytes().get(cursor) == Some(&b'>') {
+                    last_quote = Some(cursor);
+                    cursor += 1;
+                    cursor += before[cursor..].len() - before[cursor..].trim_start_matches([' ', '\t']).len();
+                }
+                if let Some(last_quote) = last_quote.filter(|_| cursor == before.len()) {
+                    let outer = &before[..last_quote];
+                    let continuing = parsed.nodes.iter()
+                        .filter(|node| node.kind == "quote" && node.source.start <= range.start && range.start <= node.source.end)
+                        .min_by_key(|node| node.source.len())
+                        .is_some_and(|node| node.source.start < start);
+                    // 已有引用正文必须保留一个空行，否则下一次输入会成为引用的懒续行。
+                    // 嵌套引用每次只退出最内层，并保留外层前缀。
+                    let text = if continuing { format!("{outer}{ending}{outer}") } else { outer.into() };
+                    let caret = start + text.len();
+                    return Ok(replace(start..range.end, text, caret));
+                }
+            }
             if !literal
+                && empty_tail
                 && structural_prefix_len(before)
                     .is_some_and(|length| before[length..].trim().is_empty())
             {
                 return Ok(replace(start..range.end, String::new(), start));
             }
             let text = if matches!(intent, EditIntent::ParagraphBreak)
+                && !literal
+                && prefix.contains('>')
+                && prefix.trim_matches([' ', '\t', '>']).is_empty()
+                && before.strip_prefix(prefix.as_str()).is_some_and(|text| !text.trim().is_empty())
+            {
+                // 引用内 Enter 仍是段落边界；单换行会在输入后变成上一段的 SoftBreak。
+                // 正文起点只新增一个空行，避免在前面重复插入空段。
+                format!("{ending}{prefix}{ending}{prefix}")
+            } else if matches!(intent, EditIntent::ParagraphBreak)
                 && !literal
                 && structural_prefix_len(before).is_none()
             {
@@ -721,7 +783,7 @@ pub fn apply(
         EditIntent::InsertCodeBlock(language) => {
             insert_wrapped_block(parsed, selection, range, Some(&language), "", true)
         }
-        EditIntent::InsertMathBlock => insert_wrapped_block(parsed, selection, range, None, "E = mc^2", true),
+        EditIntent::InsertMathBlock => insert_wrapped_block(parsed, selection, range, None, "", true),
         EditIntent::InsertDetails => insert_details(parsed, range),
         EditIntent::InsertDiagram(template) => insert_wrapped_block(parsed, selection, range, Some("mermaid"), &template, false),
         EditIntent::InsertBlockAt { block, caret } => {
@@ -755,7 +817,7 @@ pub fn apply(
                 2usize.saturating_sub(before_breaks)
             });
             let after = eol.repeat(if after_source.is_empty() {
-                0
+                2
             } else {
                 2usize.saturating_sub(after_breaks)
             });
@@ -837,7 +899,7 @@ fn insert_details(parsed: &ParsedWindow, range: Range<usize>) -> Result<EditResu
     let before_breaks = before_source[before_source.trim_end_matches(['\r', '\n']).len()..].bytes().filter(|byte| *byte == b'\n').count();
     let after_breaks = after_source[..after_source.len() - after_source.trim_start_matches(['\r', '\n']).len()].bytes().filter(|byte| *byte == b'\n').count();
     let before = if before_source.is_empty() { String::new() } else { eol.repeat(2usize.saturating_sub(before_breaks)) };
-    let after = if after_source.is_empty() { String::new() } else { eol.repeat(2usize.saturating_sub(after_breaks)) };
+    let after = eol.repeat(2usize.saturating_sub(after_breaks));
     let header = format!("<details>{eol}<summary></summary>{eol}{eol}");
     let selected = &source[range.clone()];
     let ending = if selected.ends_with('\n') { "" } else { eol };
@@ -891,7 +953,7 @@ fn insert_wrapped_block(
     let after_breaks = after_source[..after_source.len() - after_source.trim_start_matches(['\r', '\n']).len()]
         .bytes().filter(|byte| *byte == b'\n').count();
     let before = eol.repeat(if before_source.is_empty() { 0 } else { 2usize.saturating_sub(before_breaks) });
-    let after = eol.repeat(if after_source.is_empty() { 0 } else { 2usize.saturating_sub(after_breaks) });
+    let after = eol.repeat(2usize.saturating_sub(after_breaks));
     let selected = &source[range.clone()];
     let body = if selected.is_empty() { default_body } else { selected };
     if language.is_none() && body.contains("$$") { return Err(ControlError::Unsupported("选区包含公式块围栏；原文已保留".into())); }
@@ -980,7 +1042,7 @@ pub fn line_ending(source: &str, at: usize) -> &str {
         "\n"
     }
 }
-fn selected_lines(source: &str, range: Range<usize>) -> Vec<Range<usize>> {
+pub(super) fn selected_lines(source: &str, range: Range<usize>) -> Vec<Range<usize>> {
     let mut start = line_start(source, range.start);
     let mut lines = Vec::new();
     loop {

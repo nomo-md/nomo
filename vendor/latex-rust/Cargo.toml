@@ -1,0 +1,20 @@
+[package]
+name = "latex-rust"
+version = "3.0.1"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+description = "Nomo's vendored latex-rust 3.0.1 with host glyph fallback"
+repository = "https://github.com/jscarr64/latex-rust"
+
+[features]
+default = ["std"]
+std = []
+png = ["dep:tiny-skia"]
+egui = ["dep:egui", "dep:epaint"]
+
+[dependencies]
+skrifa = "=0.39.0"
+tiny-skia = { version = "0.11", optional = true }
+egui = { version = "=0.36.2", optional = true }
+epaint = { version = "=0.36.2", optional = true }

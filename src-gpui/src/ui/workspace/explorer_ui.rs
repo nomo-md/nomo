@@ -90,7 +90,6 @@ impl Workspace {
                     if index == 0 {
                         let path = root_path.clone();
                         let hover_path = path.clone();
-                        let root_tip = path.as_ref().map(|path| super::explorer_actions::display_tree_path(path)).unwrap_or_else(|| "打开文件夹".into());
                         let root_hover = path.as_ref().is_some_and(|path| hovered.as_ref() == Some(path) || search_path.as_ref() == Some(path));
                         let chevron = if root_loading {
                             tree_spinner("tree-root-spinner", theme.accent, reduce_motion)
@@ -103,7 +102,6 @@ impl Workspace {
                             .rounded(px(4.0)).text_size(px(15.0)).text_color(theme.fg)
                             .font_weight(FontWeight::SEMIBOLD).hover(|style| style.bg(theme.hover))
                             .when(search_path.as_ref() == path.as_ref() && search_path.is_some(), |el| el.bg(theme.sidebar_active))
-                            .tooltip(tooltip(root_tip))
                             .child(div().w(px(16.0)).flex_none().child(chevron)).child(icon(IconName::FolderOpen, 14.0, theme.accent))
                             .child(div().flex_1().min_w(px(0.0)).overflow_hidden().child(TreeLabel::new(root_name.clone(), "", theme.search_match)))
                             .children(controls)
@@ -158,7 +156,6 @@ impl Workspace {
                     let active = active_path.is_some() && matches_path(active_path.as_deref());
                     let preview = preview_path.is_some() && matches_path(preview_path.as_deref());
                     let path = row.entry.path.clone();
-                    let path_tip = super::explorer_actions::display_tree_path(&path);
                     let hover_path = path.clone();
                     let menu_path = path.clone();
                     let is_dir = row.entry.is_dir;
@@ -190,7 +187,6 @@ impl Workspace {
                         .rounded(px(4.0)).cursor_pointer().text_color(if active { theme.accent } else { theme.fg })
                         .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
                         .when(active || search_path.as_ref() == Some(&path), |el| el.bg(theme.sidebar_active))
-                        .tooltip(tooltip(path_tip))
                         .hover(|style| style.bg(gpui::rgba(0x80808014)))
                         .children(chevron).child(file_icon)
                         .child(label)

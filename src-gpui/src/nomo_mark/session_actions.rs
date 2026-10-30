@@ -70,7 +70,7 @@ impl DocumentHost {
             v.update_window(loaded.input, generation, loaded.context, cx)?;
             v.windowed_navigation = windowed;
             v.host.set_readonly(false);
-            v.select(selection.unwrap_or(DocumentSelection::caret(at)), cx);
+            v.restore_session_selection(selection.unwrap_or(DocumentSelection::caret(at)), cx);
             Ok::<_, ControlError>(())
         })?;
         self.panes[self.active_pane].stale = false;
@@ -81,19 +81,41 @@ impl DocumentHost {
         self.message = format!("原版窗口会话 · 索引代数 {}", loaded.index.index_generation);
         self.reset_viewport(cx);
         self.document_changed(cx);
+        self.selection_changed(cx);
         Ok(())
     }
     pub(super) fn action_failed(&mut self, error: ControlError, cx: &mut Context<Self>) {
+        if error == ControlError::Stale && self.closed { return; }
         // 历史/全局编辑可能已提交、但后续片段尚不可提供。旧视图必须继续只读。
-        let current = self.port.status().ok().map(|s| s.revision);
+        let status = self.port.status().ok();
+        let current = status.as_ref().map(|s| s.revision);
         let stale = self.panes[self.active_pane].stale
             || current != Some(self.control.read(cx).host.parsed.identity.revision);
         self.panes[self.active_pane].stale = stale;
-        self.panes[self.active_pane].load_error = Some(error.to_string());
         self.control.update(cx, |v, _| {
             v.host.set_readonly(stale)
         });
         self.document_changed(cx);
+        if error == ControlError::Stale && self.production {
+            if let Some(status) = status {
+                self.total_bytes = status.byte_length;
+                self.panes[self.active_pane].load_error = None;
+                self.panes[self.active_pane].viewport.dirty = true;
+                if stale {
+                    // 提交可能已成功，只重取窗口；恢复会话中的落点，不重复执行编辑。
+                    if let Some(selection) = status.selection {
+                        self.control.update(cx, |view, cx| view.restore_selection(DocumentSelection {
+                            anchor_byte: selection.anchor_byte, head_byte: selection.head_byte,
+                        }, cx));
+                    }
+                    self.panes[self.active_pane].reveal_selection = true;
+                }
+                self.schedule_viewport(crate::nomo_mark::session_window::policy().quiet_ms, cx);
+                cx.notify();
+                return;
+            }
+        }
+        self.panes[self.active_pane].load_error = Some(error.to_string());
         self.report(error, cx);
         self.schedule_viewport(16,cx);
     }
@@ -345,24 +367,32 @@ impl DocumentHost {
         if !self.ready_for_session_action(cx) {
             return;
         }
-        let fallback = self.control.read(cx).host.selection.head_byte;
+        let view=self.control.read(cx);
+        let fallback=view.host.selection.head_byte;
+        let retained=view.host.parsed.identity.from_byte..view.host.parsed.identity.to_byte;
         let request = self.begin_session_action(cx);
         let port = self.port.clone();
         let task = cx.background_executor().spawn(async move {
             let (revision, selection) = port.history(port.status()?.revision, redo)?;
             let byte = selection.map_or(fallback, |s| s.head_byte);
-            let loaded = port.load_group(revision, byte, None, &request)?;
+            // 撤销仍落在当前窗口时先保留原结构起点；直接从光标加载会裁掉前面的可见内容。
+            let at=if retained.start<=byte && byte<=retained.end {retained.start}else{byte};
+            let loaded=port.load_group(revision,at,None,&request)?;
+            let loaded=if loaded.input.from_byte<=byte && byte<=loaded.input.to_byte {loaded}
+                else {port.load_group(revision,byte,None,&request)?};
             Ok::<_, ControlError>((loaded, selection))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |host, cx| {
                 host.navigating = false;
-                if let Err(error) =
-                    result.and_then(|(loaded, selection)| host.install(loaded, selection, cx))
-                {
-                    host.action_failed(error, cx);
-                }
+                let result=result.and_then(|(loaded, selection)| {
+                    let anchor=host.history_reading_anchor(&loaded,selection,cx);
+                    host.install(loaded,selection,cx)?;
+                    if let Some(anchor)=anchor {host.restore_history_reading(anchor);}
+                    Ok(())
+                });
+                if let Err(error)=result {host.action_failed(error,cx);}
                 cx.notify();
             });
         })
@@ -495,18 +525,25 @@ impl DocumentHost {
         }
         let revision = self.control.read(cx).host.parsed.identity.revision;
         let port = self.port.clone();
-        self.begin_session_action(cx);
+        let semantic = self.control.read(cx).mode == ViewMode::Semantic && !self.control.read(cx).host.parsed.context.source_only;
+        let markdown = cx.global::<crate::settings::Settings>().copy_markdown_syntax;
+        let request = self.begin_session_action(cx);
         let task = cx
             .background_executor()
-            .spawn(async move { port.copy_range(revision, selection.range()) });
+            .spawn(async move {
+                if semantic { super::super::clipboard_content::from_session(&port, revision, selection.range(), markdown, &request) }
+                else { port.copy_range(revision, selection.range()).map(|text| super::super::clipboard_content::Payload { text, html: String::new() }) }
+            });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |host, cx| {
                 host.navigating = false;
                 host.control.update(cx, |v, _| v.host.set_readonly(false));
                 match result {
-                    Ok(text) => {
-                        match crate::clipboard::write_text(&text, cx) {
+                    Ok(payload) => {
+                        let written = if semantic { crate::clipboard::write_rich(&payload.text, &payload.html, cx) }
+                            else { crate::clipboard::write_text(&payload.text, cx) };
+                        match written {
                             Ok(()) if cut => host.global_edit(selection, EditIntent::Replace(String::new()), cx),
                             Ok(()) => host.message = "完整选区已复制".into(),
                             Err(error) => host.action_failed(ControlError::HostFailure(error), cx),

@@ -2,14 +2,24 @@
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{fs::{self, File, OpenOptions}, io::{Read, Write}, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}}};
+#[path = "image_upload.rs"]
+mod upload;
+pub(crate) use upload::test_connection;
 
 pub(crate) fn defaults()->Value {json!({"imageInsertStrategy":"copy-assets","autoDeleteUnusedLocalImages":false,"uploadProvider":"picgo","picgoServerUrl":"http://127.0.0.1:36677/upload","picgoCoreCommand":"picgo","picgoCoreConfigPath":"","defaultImageWidth":"","defaultImageAlign":"none"})}
 
 #[derive(Clone)]
-pub(crate) struct ImageSettings {pub strategy:String,pub width:String,pub align:String}
+pub(crate) struct ImageSettings {
+    pub strategy:String,pub width:String,pub align:String,
+    pub provider:String,pub server:String,pub command:String,pub config:String,
+}
 impl ImageSettings {
     pub fn read(value:&Value)->Self {
         Self {strategy:value.get("imageInsertStrategy").and_then(Value::as_str).unwrap_or("copy-assets").into(),
+            provider:value.get("uploadProvider").and_then(Value::as_str).unwrap_or("picgo").into(),
+            server:value.get("picgoServerUrl").and_then(Value::as_str).unwrap_or("http://127.0.0.1:36677/upload").into(),
+            command:value.get("picgoCoreCommand").and_then(Value::as_str).unwrap_or("picgo").into(),
+            config:value.get("picgoCoreConfigPath").and_then(Value::as_str).unwrap_or("").into(),
             width:value.get("defaultImageWidth").and_then(Value::as_str).and_then(normalize_width).unwrap_or_default(),
             align:value.get("defaultImageAlign").and_then(Value::as_str).filter(|v|matches!(*v,"none"|"left"|"center"|"right")).unwrap_or("none").into()}
     }
@@ -33,7 +43,79 @@ impl ImportCancellation {
 pub(crate) struct ImportedImage {pub src:String,pub alt:String}
 pub(crate) struct ImportBatch {pub images:Vec<ImportedImage>,pub failed:usize,pub errors:Vec<String>}
 
-fn supported(path:&Path)->bool {path.extension().and_then(|s|s.to_str()).is_some_and(|s|matches!(s.to_ascii_lowercase().as_str(),"png"|"jpg"|"jpeg"|"gif"|"webp"|"bmp"))}
+/// 剪贴板字节只在一次导入期间共享，不放入文档状态或常驻缓存。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ImageInput {
+    File(PathBuf),
+    Bytes { name: String, bytes: Arc<[u8]> },
+}
+pub(crate) const MAX_BATCH_FILES: usize = 32;
+pub(crate) const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
+
+pub(crate) fn validate_inputs(inputs: &[ImageInput]) -> Result<(), String> {
+    if inputs.len() > MAX_BATCH_FILES { return Err("一次最多导入 32 张图片".into()); }
+    let bytes = inputs.iter().try_fold(0usize, |total, input| match input {
+        ImageInput::Bytes { bytes, .. } if bytes.len() as u64 > crate::images::MAX_INPUT_BYTES =>
+            Err("图片超过 32 MiB 输入预算".to_string()),
+        ImageInput::Bytes { bytes, .. } => total.checked_add(bytes.len()).ok_or("图片输入过大".into()),
+        ImageInput::File(_) => Ok(total),
+    })?;
+    if bytes > MAX_BATCH_BYTES { return Err("一次粘贴最多接收 64 MiB 图片数据".into()); }
+    Ok(())
+}
+
+/// 临时目录只保存本次收到的图片；逐项释放，不递归清理未知文件。
+pub(crate) struct InputFiles { pub paths: Vec<PathBuf>, directory: Option<PathBuf>, owned: Vec<PathBuf> }
+impl Drop for InputFiles {
+    fn drop(&mut self) {
+        for path in &self.owned { let _ = fs::remove_file(path); }
+        if let Some(directory) = &self.directory { let _ = fs::remove_dir(directory); }
+    }
+}
+pub(crate) fn materialize(inputs: Vec<ImageInput>, cancel: &ImportCancellation) -> Result<InputFiles, String> {
+    validate_inputs(&inputs)?;
+    let mut files = InputFiles { paths: Vec::new(), directory: None, owned: Vec::new() };
+    for (index, input) in inputs.into_iter().enumerate() {
+        cancel.check()?;
+        match input {
+            ImageInput::File(path) => files.paths.push(path),
+            ImageInput::Bytes { name, bytes } => {
+                if files.directory.is_none() {
+                    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+                    let directory = std::env::temp_dir().join(format!("nomo-image-input-{}-{stamp}", std::process::id()));
+                    fs::create_dir(&directory).map_err(|e| format!("创建图片临时目录失败：{e}"))?;
+                    files.directory = Some(directory);
+                }
+                let name = safe_segment(&name);
+                let path = files.directory.as_ref().unwrap().join(format!("{index}-{name}"));
+                let mut file = OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| e.to_string())?;
+                files.owned.push(path.clone());
+                for chunk in bytes.chunks(64 * 1024) { cancel.check()?; file.write_all(chunk).map_err(|e| e.to_string())?; }
+                file.sync_all().map_err(|e| e.to_string())?;
+                files.paths.push(path);
+            }
+        }
+    }
+    Ok(files)
+}
+
+pub(crate) fn import_inputs(inputs: Vec<ImageInput>, document: &Path, settings: &ImageSettings, cancel: &ImportCancellation) -> Result<ImportBatch, String> {
+    let files = materialize(inputs, cancel)?;
+    if settings.strategy == "upload" {
+        let mut batch = ImportBatch { images: Vec::new(), failed: 0, errors: Vec::new() };
+        for path in &files.paths {
+            cancel.check()?;
+            match validate_image(path).and_then(|_| upload::upload(path, settings, cancel)) {
+                Ok(src) => batch.images.push(ImportedImage { src, alt: path.file_name().unwrap_or_default().to_string_lossy().into() }),
+                Err(error) => { cancel.check()?; batch.failed += 1; if batch.errors.len() < 4 { batch.errors.push(error); } }
+            }
+        }
+        return Ok(batch);
+    }
+    import(files.paths.clone(), document, settings, cancel)
+}
+
+pub(crate) fn supported(path:&Path)->bool {path.extension().and_then(|s|s.to_str()).is_some_and(|s|matches!(s.to_ascii_lowercase().as_str(),"png"|"jpg"|"jpeg"|"gif"|"webp"|"bmp"|"svg"))}
 fn markdown_src(prefix:&str,name:&str)->String {
     let encode=|part:&str|part.bytes().map(|byte|if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte){(byte as char).to_string()}else{format!("%{byte:02X}")}).collect::<String>();
     let prefix=prefix.split('/').map(encode).collect::<Vec<_>>().join("/");
@@ -56,11 +138,17 @@ fn safe_segment(value:&str)->String {
 struct IncompleteCopy {path:PathBuf,complete:bool}
 impl Drop for IncompleteCopy {fn drop(&mut self){if !self.complete{let _=fs::remove_file(&self.path);}}}
 
-fn import_one(path:&Path,directory:&Path,prefix:&str,cancel:&ImportCancellation)->Result<ImportedImage,String> {
-    cancel.check()?;
-    if !supported(path){return Err("仅支持 PNG、JPEG、GIF、WebP 和 BMP 图片".into());}
+fn validate_image(path: &Path) -> Result<(), String> {
+    if !supported(path){return Err("仅支持 PNG、JPEG、GIF、WebP、BMP 和 SVG 图片".into());}
     let metadata=fs::metadata(path).map_err(|e|format!("无法读取图片：{e}"))?;
     if !metadata.is_file() || metadata.len()==0 || metadata.len()>crate::images::MAX_INPUT_BYTES{return Err("图片为空或超过 32 MiB 输入预算".into());}
+    if path.extension().and_then(|s| s.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("svg")) {
+        use std::io::Read;
+        let mut encoded = Vec::new();
+        fs::File::open(path).map_err(|e| e.to_string())?.take(crate::images::MAX_SVG_BYTES as u64 + 1)
+            .read_to_end(&mut encoded).map_err(|e| e.to_string())?;
+        return crate::images::validate_svg(&encoded);
+    }
     let mut reader=image::ImageReader::open(path).map_err(|e|e.to_string())?.with_guessed_format().map_err(|e|e.to_string())?;
     let mut limits=image::Limits::default();limits.max_alloc=Some(crate::images::MAX_DECODE_BYTES);limits.max_image_width=Some(32768);limits.max_image_height=Some(32768);reader.limits(limits);
     let decoder=reader.into_decoder().map_err(|e|format!("图片格式不支持或内容损坏：{e}"))?;
@@ -68,6 +156,13 @@ fn import_one(path:&Path,directory:&Path,prefix:&str,cancel:&ImportCancellation)
     let (width,height)=decoder.dimensions();
     if width==0 || height==0 || width>32768 || height>32768 || u64::from(width)*u64::from(height)>crate::images::MAX_INPUT_PIXELS || decoder.total_bytes()>crate::images::MAX_DECODE_BYTES {return Err("图片超过现有尺寸或解码资源预算".into());}
     drop(decoder);
+    Ok(())
+}
+
+fn import_one(path:&Path,directory:&Path,prefix:&str,cancel:&ImportCancellation)->Result<ImportedImage,String> {
+    cancel.check()?;
+    validate_image(path)?;
+    let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
     let hash=fingerprint(path,cancel)?;
     let alt=path.file_name().and_then(|n|n.to_str()).unwrap_or("image").to_string();
     for entry in fs::read_dir(directory).map_err(|e|e.to_string())? {

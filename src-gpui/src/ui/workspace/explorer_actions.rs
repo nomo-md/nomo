@@ -273,7 +273,10 @@ fn broadcast_tree_rename(app: &mut App, paths: &[(PathBuf, PathBuf)], warning: O
             for opening in &mut workspace.opening {
                 if let Some(path) = &mut opening.path { remap_tree_path(path, paths); }
             }
-            if let Some((path, _, _)) = &mut workspace.deferred_open { remap_tree_path(path, paths); }
+            if let Some((path, _, _, _)) = &mut workspace.deferred_open { remap_tree_path(path, paths); }
+            for request in &mut workspace.open_requests.pending {
+                if let Some(path) = &mut request.path { remap_tree_path(path, paths); }
+            }
             workspace.apply_tree_rename(paths, cx);
             if changed {
                 workspace.sync_tree_selection(false, cx);

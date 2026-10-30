@@ -36,7 +36,10 @@ impl NomoMark {
     pub(super) fn open_quick_insert(&mut self,range:Range<usize>,trigger:&str,cx:&mut Context<Self>) {
         if !quick_insert::can_trigger(&self.host.parsed,range.start){return;}
         self.menu_open=false;self.slash_range=None;self.emoji_mode=false;
-        self.quick_insert=Some(QuickInsertSession::new(&self.host.parsed,range,trigger.into()));
+        let mut session = QuickInsertSession::new(&self.host.parsed,range,trigger.into());
+        let diagram = quick_insert::default_diagram_index(&cx.global::<Settings>().string("defaultDiagramType"));
+        if let Some(index) = quick_insert::CATEGORIES.iter().position(|category| category.key == "quick_diagram") { session.variants[index] = diagram; }
+        self.quick_insert = Some(session);
         cx.emit(ControlEvent::QuickInsertChanged);cx.notify();
     }
     pub(super) fn request_quick_insert(&mut self,cx:&mut Context<Self>)->bool {

@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 pub(crate) struct ToolbarLocale(&'static str);
 
 impl ToolbarLocale {
+    pub fn code(self) -> &'static str { self.0 }
     pub fn is_chinese(self) -> bool { self.0 == "zh-CN" || self.0 == "zh-TW" }
     pub fn current(cx: &App) -> Self {
         let preference = cx.global::<Settings>().string("interfaceLanguage");
@@ -40,6 +41,14 @@ impl ToolbarLocale {
                 format!("{} {suffix}", self.text(key))
             }
         }
+    }
+
+    pub fn context_text(self, key: &'static str) -> &'static str {
+        static MENUS: OnceLock<serde_json::Value> = OnceLock::new();
+        let values = MENUS.get_or_init(|| serde_json::from_str(include_str!("../../resources/context-menu-locales.json"))
+            .expect("bundled context menu translations"));
+        values.get(self.0).and_then(|language| language.get(key)).and_then(|value| value.as_str())
+            .or_else(|| values.get("zh-CN").and_then(|language| language.get(key)).and_then(|value| value.as_str())).unwrap_or(key)
     }
 
     pub fn error(self, error: &crate::nomo_mark::protocol::ControlError) -> String {

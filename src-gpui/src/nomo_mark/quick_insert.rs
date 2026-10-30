@@ -44,6 +44,11 @@ pub(crate) const DIAGRAMS: &[(&str, &str, &str)] = &[
     ("实体关系图","erDiagram","erDiagram\n  USER ||--o{ DOCUMENT : owns\n  DOCUMENT ||--o{ ASSET : references\n  USER {\n    string id\n    string name\n  }\n  DOCUMENT {\n    string id\n    string title\n  }"),
 ];
 
+/// 未识别旧配置沿用流程图；不会改写存储值。
+pub(crate) fn default_diagram_index(kind: &str) -> usize {
+    DIAGRAMS.iter().position(|(_, key, _)| *key == kind).unwrap_or(0)
+}
+
 #[derive(Clone)]
 pub(crate) struct QuickInsertSession {
     pub identity: WindowIdentity,
@@ -141,7 +146,7 @@ pub(crate) fn apply(parsed: &ParsedWindow, range: Range<usize>, action: QuickIns
             A::Code(language)=>EditIntent::InsertCodeBlock(language.into()),
             A::Details=>EditIntent::InsertDetails,
             A::Diagram(index)=>EditIntent::InsertDiagram(DIAGRAMS[index].2.into()),
-            A::Divider=>EditIntent::InsertBlock("---".into()),
+            A::Divider=>EditIntent::ToggleRule,
             _=>return Err(ControlError::Unsupported("此项目需要选择器确认".into())),
         };
         let block=matches!(action,A::Table(..)|A::Code(_)|A::Details|A::Diagram(_)|A::Divider);

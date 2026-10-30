@@ -1,0 +1,477 @@
+glyph	category	kind	latex	description
+α	Greek	Symbol	\alpha	Greek Alphabet (Lowercase/Uppercase)
+β	Greek	Symbol	\beta	Greek Alphabet (Lowercase/Uppercase)
+γ	Greek	Symbol	\gamma	Greek Alphabet (Lowercase/Uppercase)
+δ	Greek	Symbol	\delta	Greek Alphabet (Lowercase/Uppercase)
+ϵ	Greek	Symbol	\epsilon	Greek Alphabet (Lowercase/Uppercase)
+ζ	Greek	Symbol	\zeta	Greek Alphabet (Lowercase/Uppercase)
+η	Greek	Symbol	\eta	Greek Alphabet (Lowercase/Uppercase)
+θ	Greek	Symbol	\theta	Greek Alphabet (Lowercase/Uppercase)
+ι	Greek	Symbol	\iota	Greek Alphabet (Lowercase/Uppercase)
+κ	Greek	Symbol	\kappa	Greek Alphabet (Lowercase/Uppercase)
+λ	Greek	Symbol	\lambda	Greek Alphabet (Lowercase/Uppercase)
+μ	Greek	Symbol	\mu	Greek Alphabet (Lowercase/Uppercase)
+ν	Greek	Symbol	\nu	Greek Alphabet (Lowercase/Uppercase)
+ξ	Greek	Symbol	\xi	Greek Alphabet (Lowercase/Uppercase)
+ο	Greek	Symbol	\omicron	Greek Alphabet (Lowercase/Uppercase)
+π	Greek	Symbol	\pi	Greek Alphabet (Lowercase/Uppercase)
+ρ	Greek	Symbol	\rho	Greek Alphabet (Lowercase/Uppercase)
+σ	Greek	Symbol	\sigma	Greek Alphabet (Lowercase/Uppercase)
+τ	Greek	Symbol	\tau	Greek Alphabet (Lowercase/Uppercase)
+υ	Greek	Symbol	\upsilon	Greek Alphabet (Lowercase/Uppercase)
+ϕ	Greek	Symbol	\phi	Greek Alphabet (Lowercase/Uppercase)
+χ	Greek	Symbol	\chi	Greek Alphabet (Lowercase/Uppercase)
+ψ	Greek	Symbol	\psi	Greek Alphabet (Lowercase/Uppercase)
+ω	Greek	Symbol	\omega	Greek Alphabet (Lowercase/Uppercase)
+Γ	Greek	Symbol	\Gamma	Greek capital Gamma
+Δ	Greek	Symbol	\Delta	Greek capital Delta
+Θ	Greek	Symbol	\Theta	Greek capital Theta
+Λ	Greek	Symbol	\Lambda	Greek capital Lambda
+Ξ	Greek	Symbol	\Xi	Greek capital Xi
+Π	Greek	Symbol	\Pi	Greek capital Pi
+Σ	Greek	Symbol	\Sigma	Greek capital Sigma
+Υ	Greek	Symbol	\Upsilon	Greek capital Upsilon
+Φ	Greek	Symbol	\Phi	Greek capital Phi
+Ψ	Greek	Symbol	\Psi	Greek capital Psi
+Ω	Greek	Symbol	\Omega	Greek capital Omega
+ε	Greek	Symbol	\varepsilon	Greek variant epsilon
+ϑ	Greek	Symbol	\vartheta	Greek variant theta
+ϖ	Greek	Symbol	\varpi	Greek variant pi
+ϱ	Greek	Symbol	\varrho	Greek variant rho
+ς	Greek	Symbol	\varsigma	Greek variant sigma
+φ	Greek	Symbol	\varphi	Greek variant phi
+ϰ	Greek	Symbol	\varkappa	Greek variant kappa
+×	General	Symbol	\times	Operations
+÷	General	Symbol	\div	Operations
+⋅	General	Symbol	\cdot	Operations
+±	General	Symbol	\pm	Plus-minus / Minus-plus
+∓	General	Symbol	\mp	Plus-minus / Minus-plus
+∑	General	Symbol	\sum	Sum, Product, Coproduct
+∏	General	Symbol	\prod	Sum, Product, Coproduct
+∐	General	Symbol	\coprod	Sum, Product, Coproduct
+∫	Calculus	Operator	\int	Integrals (Single to Volume/Contour)
+∬	Calculus	Operator	\iint	Integrals (Single to Volume/Contour)
+∭	Calculus	Operator	\iiint	Integrals (Single to Volume/Contour)
+∮	Calculus	Operator	\oint	Integrals (Single to Volume/Contour)
+∂	Calculus	Operator	\partial	Partial derivative, Gradient/Nabla
+∇	Calculus	Operator	\nabla	Partial derivative, Gradient/Nabla
+→	General	Symbol	\to	Arrows
+←	General	Symbol	\leftarrow	Arrows
+↔	General	Symbol	\leftrightarrow	Arrows
+⇒	General	Symbol	\Rightarrow	Implies / Equivalence arrows
+↦	General	Symbol	\mapsto	Maps to / Long arrow
+⟶	General	Symbol	\longrightarrow	Maps to / Long arrow
+≈	General	Symbol	\approx	Similarity and Approximations
+∼	General	Symbol	\sim	Similarity and Approximations
+≃	General	Symbol	\simeq	Similarity and Approximations
+≡	General	Symbol	\equiv	Congruence and Equivalence
+≅	General	Symbol	\cong	Congruence and Equivalence
+≢	General	Symbol	\not\equiv	Congruence and Equivalence
+≤	General	Symbol	\leq	Inequalities
+≥	General	Symbol	\geq	Inequalities
+≪	General	Symbol	\ll	Inequalities
+≫	General	Symbol	\gg	Inequalities
+∈	Relations & Logic	Operator	\in	Set Theory (Membership & Subsets)
+∉	Relations & Logic	Operator	\notin	Set Theory (Membership & Subsets)
+⊂	Relations & Logic	Operator	\subset	Set Theory (Membership & Subsets)
+⊃	Relations & Logic	Operator	\supset	Set Theory (Membership & Subsets)
+⊆	Relations & Logic	Operator	\subseteq	Subset/Superset variations
+⊇	Relations & Logic	Operator	\supseteq	Subset/Superset variations
+⊊	Relations & Logic	Operator	\subsetneq	Subset/Superset variations
+∪	Relations & Logic	Operator	\cup	Set Operations (Union, Intersect, Diff)
+∩	Relations & Logic	Operator	\cap	Set Operations (Union, Intersect, Diff)
+∖	Relations & Logic	Operator	\setminus	Set Operations (Union, Intersect, Diff)
+∅	Relations & Logic	Operator	\emptyset	Empty set
+∅	Relations & Logic	Operator	\varnothing	Empty set (Alternative)
+∀	General	Symbol	\forall	Quantifiers
+∃	General	Symbol	\exists	Quantifiers
+∄	General	Symbol	\nexists	Quantifiers
+∧	Relations & Logic	Operator	\land	Logic Operators (AND, OR, NOT)
+∨	Relations & Logic	Operator	\lor	Logic Operators (AND, OR, NOT)
+¬	Relations & Logic	Operator	\neg	Logic Operators (AND, OR, NOT)
+⟹	Relations & Logic	Operator	\implies	Logical implication / equivalence
+⟺	Relations & Logic	Operator	\iff	Logical implication / equivalence
+∞	General	Symbol	\infty	Infinity
+ℵ0	General	Symbol	\aleph_0	Infinity and Aleph null
+⊥	General	Symbol	\perp	Perpendicular, Parallel
+∥	General	Symbol	\parallel	Perpendicular, Parallel
+∠	Geometry	Symbol	\angle	Geometry (Angle, Triangle, Square)
+△	Geometry	Symbol	\triangle	Geometry (Angle, Triangle, Square)
+□	Geometry	Symbol	\square	Geometry (Angle, Triangle, Square)
+[ ]̄	Accents & Vectors	Modifier	\bar{}	Accents (Bar, Hat, Tilde)
+[ ]̂	Accents & Vectors	Modifier	\hat{}	Accents (Bar, Hat, Tilde)
+[ ]̃	Accents & Vectors	Modifier	\tilde{}	Accents (Bar, Hat, Tilde)
+[ ]⃗	Calculus	Operator	\vec{}	Vectors and Time Derivatives
+[ ]̇	Calculus	Operator	\dot{}	Vectors and Time Derivatives
+[ ]̈	Calculus	Operator	\ddot{}	Vectors and Time Derivatives
+[ ]/[ ]	Algebra	Container	\frac{}{}	Fractions
+√[ ]	Algebra	Container	\sqrt{}	Square and Nth Roots
+ⁿ√[ ]	Algebra	Container	\sqrt[{}]{}	Square and Nth Roots
+∑	Calculus	Operator	\sum_{}^{}	Summations with Bounds
+∫	Calculus	Operator	\int_{}^{}	Definite Integrals with Bounds
+lim	Calculus	Operator	\lim_{{} \to {}}	Limits
+([ ]/[ ])	Delimiters	Container	\left( \frac{}{} \right)	Scalable Parentheses / Brackets
+[ ] [ ] ; [ ] [ ]	Matrices	Container	\begin{matrix} {} & {} \\ {} & {} \end{matrix}	Basic Matrix
+([ ] [ ] ; [ ] [ ])	Matrices	Container	\begin{pmatrix} {} & {} \\ {} & {} \end{pmatrix}	Matrix with Parentheses
+|[ ] [ ] ; [ ] [ ]|	Matrices	Container	\begin{vmatrix} {} & {} \\ {} & {} \end{vmatrix}	Determinant Matrix
++	General	Symbol	+	Plus
+−	General	Symbol	-	Minus
+∗	General	Symbol	\ast	Asterisk
+⋆	General	Symbol	\star	Star
+∘	General	Symbol	\circ	Function composition (circle)
+•	General	Symbol	\bullet	Bullet
+=	General	Symbol	=	Equals
+≠	General	Symbol	\neq	Not equal
+∝	General	Symbol	\propto	Proportional to
+<	General	Symbol	<	Less than
+>	General	Symbol	>	Greater than
+ℵ	General	Symbol	\aleph	Aleph
+ℏ	General	Symbol	\hbar	Reduced Planck constant (H-bar)
+ℜ	General	Symbol	\Re	Real part
+ℑ	General	Symbol	\Im	Imaginary part
+℘	General	Symbol	\wp	Weierstrass p
+(	General	Symbol	(	Left parenthesis
+)	General	Symbol	)	Right parenthesis
+[	Delimiters	Container	[	Left square bracket
+]	Delimiters	Container	]	Right square bracket
+{	General	Symbol	\{	Left curly brace
+}	General	Symbol	\}	Right curly brace
+⟨	Geometry	Symbol	\langle	Left angle bracket
+⟩	Geometry	Symbol	\rangle	Right angle bracket
+‖	General	Symbol	\|	Vertical bar
+⌊	General	Symbol	\lfloor	Left floor
+⌋	General	Symbol	\rfloor	Right floor
+⌈	General	Symbol	\lceil	Left ceiling
+⌉	General	Symbol	\rceil	Right ceiling
+≮	General	Symbol	\nless	Not less than
+≯	General	Symbol	\ngtr	Not greater than
+≰	General	Symbol	\nleq	Not less than or equal to
+≱	General	Symbol	\ngeq	Not greater than or equal to
+≁	General	Symbol	\nsim	Not similar to
+≇	General	Symbol	\ncong	Not congruent to
+⇀	General	Symbol	\rightharpoonup	Right harpoon up
+⇁	General	Symbol	\rightharpoondown	Right harpoon down
+↼	General	Symbol	\leftharpoonup	Left harpoon up
+↽	General	Symbol	\leftharpoondown	Left harpoon down
+⇌	General	Symbol	\rightleftharpoons	Chemical equilibrium arrow / Right harpoon up over left harpoon down
+ℶ	General	Symbol	\beth	Beth (Requires amssymb)
+ℷ	General	Symbol	\gimel	Gimel (Requires amssymb)
+ℸ	General	Symbol	\daleth	Daleth (Requires amssymb)
+⊤	General	Symbol	\top	Top
+⊢	General	Symbol	\vdash	Right tack
+⊣	General	Symbol	\dashv	Left tack
+⊨	General	Symbol	\models	Models
+ℓ	General	Symbol	\ell	Cursive l
+ı	General	Symbol	\imath	Dotless i
+ȷ	General	Symbol	\jmath	Dotless j
+♭	General	Symbol	\flat	Flat
+♮	General	Symbol	\natural	Natural
+♯	General	Symbol	\sharp	Sharp
+∴	General	Symbol	\therefore	Therefore
+∵	General	Symbol	\because	Because
+≍	General	Symbol	\asymp	Equivalent
+⋈	General	Symbol	\bowtie	Bowtie
+⋉	General	Symbol	\ltimes	Left semidirect product (Requires amssymb)
+⋊	General	Symbol	\rtimes	Right semidirect product (Requires amssymb)
+⊏	Relations & Logic	Operator	\sqsubset	Square subset (Requires amssymb)
+⊐	Relations & Logic	Operator	\sqsupset	Square superset (Requires amssymb)
+⊑	Relations & Logic	Operator	\sqsubseteq	Square subset or equal (Requires amssymb)
+⊒	Relations & Logic	Operator	\sqsupseteq	Square superset or equal (Requires amssymb)
+⊕	General	Symbol	\oplus	Direct sum (circled plus)
+⊖	General	Symbol	\ominus	Circled minus
+⊗	General	Symbol	\otimes	Tensor product (circled times)
+⊘	General	Symbol	\oslash	Circled slash
+⊙	General	Symbol	\odot	Circled dot
+†	General	Symbol	\dagger	Dagger
+‡	General	Symbol	\ddagger	Double dagger
+⨿	General	Symbol	\amalg	Amalgamation
+△	Geometry	Symbol	\bigtriangleup	Big triangle up
+▽	Geometry	Symbol	\bigtriangledown	Big triangle down
+◁	Geometry	Symbol	\triangleleft	Left triangle
+▷	Geometry	Symbol	\triangleright	Right triangle
+⊴	Geometry	Symbol	\unlhd	Left triangle or equal (Requires amssymb)
+⊵	Geometry	Symbol	\unrhd	Right triangle or equal (Requires amssymb)
+◇	General	Symbol	\Diamond	Diamond (Requires amssymb)
+□	General	Symbol	\Box	Box (Requires amssymb)
+℧	General	Symbol	\mho	Mho (Requires amssymb)
+Å	General	Symbol	\mathring{A}	Angstrom
+°C	General	Symbol	{}^\circ C	Celsius
+°	General	Symbol	{}^\circ	Degree
+$	General	Symbol	\$	Dollar sign
+£	General	Symbol	\text{£}	Pound sign
+€	General	Symbol	\text{€}	Euro sign
+¥	General	Symbol	\text{¥}	Yen sign
+¢	General	Symbol	\text{¢}	Cent sign
+%	General	Symbol	\%	Percent
+&	General	Symbol	\&	Ampersand
+#	General	Symbol	\#	Hash
+_	General	Symbol	\_	Underscore
+\	General	Symbol	\backslash	Backslash
+↑	General	Symbol	\uparrow	Up arrow
+↓	General	Symbol	\downarrow	Down arrow
+↕	General	Symbol	\updownarrow	Up down arrow
+↗	General	Symbol	\nearrow	North east arrow
+↘	General	Symbol	\searrow	South east arrow
+↙	General	Symbol	\swarrow	South west arrow
+↖	General	Symbol	\nwarrow	North west arrow
+↩	General	Symbol	\hookleftarrow	Hook left arrow
+↪	General	Symbol	\hookrightarrow	Hook right arrow
+ℰ	General	Symbol	\mathcal{E}	Euler's number (script E) / Emf / Lagrangian density
+ℱ	General	Symbol	\mathcal{F}	Fourier transform (script F)
+ℒ	General	Symbol	\mathcal{L}	Laplace transform (script L) / Lagrangian
+ℋ	General	Symbol	\mathcal{H}	Hamiltonian (script H)
+ℤ	General	Symbol	\mathbb{Z}	Integers (Blackboard bold Z) (Requires amsfonts)
+ℝ	General	Symbol	\mathbb{R}	Real numbers (Blackboard bold R) (Requires amsfonts)
+ℂ	General	Symbol	\mathbb{C}	Complex numbers (Blackboard bold C) (Requires amsfonts)
+ℚ	General	Symbol	\mathbb{Q}	Rational numbers (Blackboard bold Q) (Requires amsfonts)
+ℕ	General	Symbol	\mathbb{N}	Natural numbers (Blackboard bold N) (Requires amsfonts)
+⟨·|	General	Symbol	\langle \cdot \|	Bra notation (Quantum Mechanics)
+|·⟩	General	Symbol	\| \cdot \rangle	Ket notation (Quantum Mechanics)
+·†	General	Symbol	{\cdot}^\dagger	Dagger / Hermitian conjugate
+𝔽	General	Symbol	\mathbb{F}	Field (Blackboard Bold) (Requires amsfonts)
+𝕂	General	Symbol	\mathbb{K}	Field / Constant (Blackboard Bold) (Requires amsfonts)
+ℙ	General	Symbol	\mathbb{P}	Probability operator (Requires amsfonts)
+𝔼	General	Symbol	\mathbb{E}	Expectation operator (Requires amsfonts)
+𝕀	General	Symbol	\mathbb{I}	Indicator function (Requires amsfonts)
+⊠	General	Symbol	\boxtimes	Box times (Exterior tensor product) (Requires amssymb)
+⊞	General	Symbol	\boxplus	Box plus (Requires amssymb)
+⋀	General	Symbol	\bigwedge	Wedge product (Large)
+⋁	General	Symbol	\bigvee	Vee product (Large)
+[ ]̂	Accents & Vectors	Modifier	\widehat{}	Wide hat accent
+[ ]̃	Accents & Vectors	Modifier	\widetilde{}	Wide tilde accent
+⏟	General	Symbol	\underbrace{}_{}	Underbrace with label
+⏞	General	Symbol	\overbrace{}^{}	Overbrace with label
+[ ]̌	Accents & Vectors	Modifier	\check{}	Check / Caron accent
+[ ]̆	Accents & Vectors	Modifier	\breve{}	Breve accent
+⊓	General	Symbol	\sqcap	Square cap
+⊔	General	Symbol	\sqcup	Square cup
+∧	General	Symbol	\wedge	Logical and / wedge
+∨	General	Symbol	\vee	Logical or / vee
+◯	General	Symbol	\bigcirc	Big circle
+≀	General	Symbol	\wr	Wreath product
+⊲	Geometry	Symbol	\lhd	Left triangle (relation)
+⊳	Geometry	Symbol	\rhd	Right triangle (relation)
+≐	General	Symbol	\doteq	Equals with dot
+≺	General	Symbol	\prec	Precedes
+≻	General	Symbol	\succ	Succeeds
+≼	General	Symbol	\preceq	Precedes or equal
+≽	General	Symbol	\succeq	Succeeds or equal
+∋	Relations & Logic	Operator	\ni	Contains as member
+∣	General	Symbol	\mid	Divides / mid
+⨝	General	Symbol	\Join	Join
+⌣	General	Symbol	\smile	Smile
+⌢	General	Symbol	\frown	Frown
+≬	General	Symbol	\between	Between
+:	General	Symbol	\colon	Colon (relation)
+⊀	General	Symbol	\nprec	Not precedes
+⊁	General	Symbol	\nsucc	Not succeeds
+⊬	General	Symbol	\nvdash	Not nvdash
+⊭	General	Symbol	\nvDash	Not nvDash
+⊮	General	Symbol	\nVdash	Not nVdash
+⊯	General	Symbol	\nVDash	Not nVDash
+→	General	Symbol	\rightarrow	Right arrow
+⇐	General	Symbol	\Leftarrow	Left double arrow
+⇔	General	Symbol	\Leftrightarrow	Left right double arrow
+⟵	General	Symbol	\longleftarrow	Long left arrow
+⟷	General	Symbol	\longleftrightarrow	Long left right arrow
+⟸	General	Symbol	\Longleftarrow	Long left double arrow
+⟹	General	Symbol	\Longrightarrow	Long right double arrow
+⟺	General	Symbol	\Longleftrightarrow	Long left right double arrow
+⇑	General	Symbol	\Uparrow	Up double arrow
+⇓	General	Symbol	\Downarrow	Down double arrow
+⇕	General	Symbol	\Updownarrow	Up down double arrow
+⇋	General	Symbol	\leftrightharpoons	Left harpoon over right
+⟼	General	Symbol	\longmapsto	Long maps to
+←	General	Symbol	\gets	Gets / left arrow
+⟸	Relations & Logic	Operator	\impliedby	Implied by
+…	General	Symbol	\ldots	Horizontal ellipsis
+⋯	General	Symbol	\cdots	Centered ellipsis
+⋮	General	Symbol	\vdots	Vertical ellipsis
+⋱	General	Symbol	\ddots	Diagonal ellipsis
+⋰	General	Symbol	\iddots	Up-right diagonal ellipsis
+…	General	Symbol	\dotsc	Dots with commas
+⋯	General	Symbol	\dotsb	Dots with binary ops
+⋯	General	Symbol	\dotsm	Dots with multiplication
+⋯	General	Symbol	\dotsi	Dots with integrals
+…	General	Symbol	\dotso	Dots other
+⊥	General	Symbol	\bot	Bottom
+¬	Relations & Logic	Operator	\lnot	Logical not
+∡	Geometry	Symbol	\measuredangle	Measured angle
+∢	Geometry	Symbol	\sphericalangle	Spherical angle
+■	Geometry	Symbol	\blacksquare	Black square
+⋄	General	Symbol	\diamond	Diamond operator
+◆	General	Symbol	\blackdiamond	Black diamond
+♣	General	Symbol	\clubsuit	Club suit
+♢	General	Symbol	\diamondsuit	Diamond suit
+♡	General	Symbol	\heartsuit	Heart suit
+♠	General	Symbol	\spadesuit	Spade suit
+′	General	Symbol	\prime	Prime
+‵	General	Symbol	\backprime	Back prime
+√	General	Symbol	\surd	Surd / radical
+✓	General	Symbol	\checkmark	Check mark
+✠	General	Symbol	\maltese	Maltese cross
+§	General	Symbol	\S	Section sign
+¶	General	Symbol	\P	Pilcrow
+†	General	Symbol	\dag	Dagger alias
+‡	General	Symbol	\ddag	Double dagger alias
+|	General	Symbol	\vert	Vertical bar
+‖	General	Symbol	\Vert	Double vertical bar
+|	Delimiters	Symbol	\lvert	Left vert
+|	Delimiters	Symbol	\rvert	Right vert
+‖	Delimiters	Symbol	\lVert	Left Vert
+‖	Delimiters	Symbol	\rVert	Right Vert
+⋃	General	Operator	\bigcup	Big union
+⋂	General	Operator	\bigcap	Big intersection
+⨆	General	Operator	\bigsqcup	Big square union
+⨁	General	Operator	\bigoplus	Big circled plus
+⨂	General	Operator	\bigotimes	Big circled times
+⨄	General	Operator	\biguplus	Big union plus
+⨀	General	Operator	\bigodot	Big circled dot
+∯	Calculus	Operator	\oiint	Double contour integral
+[ ]	General	Container	\xrightarrow{}	Extensible right arrow with label
+[ ]	General	Container	\xleftarrow{}	Extensible left arrow with label
+∔	AMS	Symbol	\dotplus	Dot plus
+⋋	AMS	Symbol	\leftthreetimes	Left three times
+⋌	AMS	Symbol	\rightthreetimes	Right three times
+⊚	AMS	Symbol	\circledcirc	Circled circ
+⊛	AMS	Symbol	\circledast	Circled asterisk
+⊝	AMS	Symbol	\circleddash	Circled dash
+⊟	AMS	Symbol	\boxminus	Boxed minus
+⊡	AMS	Symbol	\boxdot	Boxed dot
+⊺	AMS	Symbol	\intercal	Intercal
+⋇	AMS	Symbol	\divideontimes	Division times
+⋎	AMS	Symbol	\curlyvee	Curly vee
+⋏	AMS	Symbol	\curlywedge	Curly wedge
+⊼	AMS	Symbol	\barwedge	Bar wedge
+⊻	AMS	Symbol	\veebar	Vee bar
+⩞	AMS	Symbol	\doublebarwedge	Double bar wedge
+⋒	AMS	Symbol	\Cap	Double cap
+⋓	AMS	Symbol	\Cup	Double cup
+⋅	AMS	Symbol	\centerdot	Center dot
+≦	AMS	Symbol	\leqq	Less or equal (double)
+≧	AMS	Symbol	\geqq	Greater or equal (double)
+⩽	AMS	Symbol	\leqslant	Less equal slanted
+⩾	AMS	Symbol	\geqslant	Greater equal slanted
+⪕	AMS	Symbol	\eqslantless	Equal slant less
+⪖	AMS	Symbol	\eqslantgtr	Equal slant greater
+≲	AMS	Symbol	\lesssim	Less similar
+≳	AMS	Symbol	\gtrsim	Greater similar
+⪅	AMS	Symbol	\lessapprox	Less approx
+⪆	AMS	Symbol	\gtrapprox	Greater approx
+≊	AMS	Symbol	\approxeq	Approximate equal
+⋖	AMS	Symbol	\lessdot	Less with dot
+⋗	AMS	Symbol	\gtrdot	Greater with dot
+⋘	AMS	Symbol	\lll	Very much less
+⋙	AMS	Symbol	\ggg	Very much greater
+≶	AMS	Symbol	\lessgtr	Less greater
+≷	AMS	Symbol	\gtrless	Greater less
+⋚	AMS	Symbol	\lesseqgtr	Less equal greater
+⋛	AMS	Symbol	\gtreqless	Greater equal less
+⪋	AMS	Symbol	\lesseqqgtr	Less eq eq greater
+⪌	AMS	Symbol	\gtreqqless	Greater eq eq less
+≑	AMS	Symbol	\doteqdot	Equals with two dots
+≒	AMS	Symbol	\fallingdotseq	Falling dots equal
+≓	AMS	Symbol	\risingdotseq	Rising dots equal
+≖	AMS	Symbol	\eqcirc	Equal with circle
+≗	AMS	Symbol	\circeq	Circle equal
+≜	AMS	Symbol	\triangleq	Triangle equal
+∽	AMS	Symbol	\backsim	Reverse similar
+⋍	AMS	Symbol	\backsimeq	Reverse similar equal
+⫅	AMS	Symbol	\subseteqq	Subset eq extra
+⫆	AMS	Symbol	\supseteqq	Superset eq extra
+⋐	AMS	Symbol	\Subset	Double subset
+⋑	AMS	Symbol	\Supset	Double superset
+≼	AMS	Symbol	\preccurlyeq	Precedes curly eq
+≽	AMS	Symbol	\succcurlyeq	Succeeds curly eq
+⋞	AMS	Symbol	\curlyeqprec	Curly eq precedes
+⋟	AMS	Symbol	\curlyeqsucc	Curly eq succeeds
+≾	AMS	Symbol	\precsim	Precedes similar
+≿	AMS	Symbol	\succsim	Succeeds similar
+⪷	AMS	Symbol	\precapprox	Precedes approx
+⪸	AMS	Symbol	\succapprox	Succeeds approx
+⊊	AMS	Symbol	\varsubsetneq	Variant subset neq
+⊋	AMS	Symbol	\varsupsetneq	Variant superset neq
+⫋	AMS	Symbol	\subsetneqq	Subset neq extra
+⫌	AMS	Symbol	\supsetneqq	Superset neq extra
+⊨	AMS	Symbol	\vDash	Double vertical dash
+⊩	AMS	Symbol	\Vdash	Forces
+⊪	AMS	Symbol	\Vvdash	Triple vertical dash
+⌣	AMS	Symbol	\smallsmile	Small smile
+⌢	AMS	Symbol	\smallfrown	Small frown
+≏	AMS	Symbol	\bumpeq	Bump equal
+≎	AMS	Symbol	\Bumpeq	Geometrically equivalent
+≂	AMS	Symbol	\eqsim	Minus tilde
+⋔	AMS	Symbol	\pitchfork	Pitchfork
+⊲	AMS	Symbol	\vartriangleleft	Normal subgroup
+⊳	AMS	Symbol	\vartriangleright	Contains as normal
+⊴	AMS	Symbol	\trianglelefteq	Normal subgroup eq
+⊵	AMS	Symbol	\trianglerighteq	Contains as normal eq
+⊈	AMS	Symbol	\nsubseteq	Not subset eq
+⊉	AMS	Symbol	\nsupseteq	Not superset eq
+∤	AMS	Symbol	\nmid	Does not divide
+∦	AMS	Symbol	\nparallel	Not parallel
+⋪	AMS	Symbol	\ntriangleleft	Not triangle left
+⋫	AMS	Symbol	\ntriangleright	Not triangle right
+⋬	AMS	Symbol	\ntrianglelefteq	Not triangle left eq
+⋭	AMS	Symbol	\ntrianglerighteq	Not triangle right eq
+↚	AMS	Symbol	\nleftarrow	Not left arrow
+↛	AMS	Symbol	\nrightarrow	Not right arrow
+⇍	AMS	Symbol	\nLeftarrow	Not left double arrow
+⇏	AMS	Symbol	\nRightarrow	Not right double arrow
+↮	AMS	Symbol	\nleftrightarrow	Not left right arrow
+⇎	AMS	Symbol	\nLeftrightarrow	Not left right double
+⇠	AMS	Symbol	\dashleftarrow	Dashed left arrow
+⇢	AMS	Symbol	\dashrightarrow	Dashed right arrow
+⇇	AMS	Symbol	\leftleftarrows	Two left arrows
+⇉	AMS	Symbol	\rightrightarrows	Two right arrows
+⇆	AMS	Symbol	\leftrightarrows	Left over right arrows
+⇄	AMS	Symbol	\rightleftarrows	Right over left arrows
+⇚	AMS	Symbol	\Lleftarrow	Left triple arrow
+⇛	AMS	Symbol	\Rrightarrow	Right triple arrow
+↞	AMS	Symbol	\twoheadleftarrow	Two-head left arrow
+↠	AMS	Symbol	\twoheadrightarrow	Two-head right arrow
+↢	AMS	Symbol	\leftarrowtail	Left arrow with tail
+↣	AMS	Symbol	\rightarrowtail	Right arrow with tail
+↫	AMS	Symbol	\looparrowleft	Left loop arrow
+↬	AMS	Symbol	\looparrowright	Right loop arrow
+↶	AMS	Symbol	\curvearrowleft	Curve arrow left
+↷	AMS	Symbol	\curvearrowright	Curve arrow right
+↺	AMS	Symbol	\circlearrowleft	Circle arrow left
+↻	AMS	Symbol	\circlearrowright	Circle arrow right
+↰	AMS	Symbol	\Lsh	Left up corner arrow
+↱	AMS	Symbol	\Rsh	Right up corner arrow
+⇈	AMS	Symbol	\upuparrows	Two up arrows
+⇊	AMS	Symbol	\downdownarrows	Two down arrows
+↿	AMS	Symbol	\upharpoonleft	Up harpoon left
+↾	AMS	Symbol	\upharpoonright	Up harpoon right
+⇃	AMS	Symbol	\downharpoonleft	Down harpoon left
+⇂	AMS	Symbol	\downharpoonright	Down harpoon right
+⊸	AMS	Symbol	\multimap	Multimap
+⇝	AMS	Symbol	\rightsquigarrow	Right squiggle arrow
+↭	AMS	Symbol	\leftrightsquigarrow	Left right squiggle
+⇝	AMS	Symbol	\leadsto	Leads to
+↾	AMS	Symbol	\restriction	Restriction
+ϝ	AMS	Symbol	\digamma	Digamma
+ℏ	AMS	Symbol	\hslash	Hslash
+▲	AMS	Symbol	\blacktriangle	Black triangle
+▼	AMS	Symbol	\blacktriangledown	Black triangle down
+◀	AMS	Symbol	\blacktriangleleft	Black triangle left
+▶	AMS	Symbol	\blacktriangleright	Black triangle right
+△	AMS	Symbol	\vartriangle	White triangle
+▽	AMS	Symbol	\triangledown	White triangle down
+◊	AMS	Symbol	\lozenge	Lozenge
+⧫	AMS	Symbol	\blacklozenge	Black lozenge
+Ⓢ	AMS	Symbol	\circledS	Circled S
+★	AMS	Symbol	\bigstar	Black star
+╱	AMS	Symbol	\diagup	Diagonal up
+╲	AMS	Symbol	\diagdown	Diagonal down
+∣	AMS	Symbol	\shortmid	Short mid
+∥	AMS	Symbol	\shortparallel	Short parallel
+∤	AMS	Symbol	\nshortmid	Not short mid
+∦	AMS	Symbol	\nshortparallel	Not short parallel
+Ⅎ	AMS	Symbol	\Finv	Turned F
+⅁	AMS	Symbol	\Game	Turned G
+𝕜	AMS	Symbol	\Bbbk	Blackboard k
+ð	AMS	Symbol	\eth	Eth
+∁	AMS	Symbol	\complement	Complement
+∍	AMS	Symbol	\backepsilon	Back epsilon

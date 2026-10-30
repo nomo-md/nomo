@@ -7,6 +7,12 @@ pub mod parse;
 pub mod protocol;
 // 只复用原版的纯语法边界函数，不链接或重建全局结构索引。
 pub mod commands;
+pub(crate) mod code_blocks;
+pub(crate) mod comments;
+mod editing_rules;
+pub(crate) mod footnote_preview;
+pub(crate) mod front_matter;
+pub(crate) mod clipboard_content;
 #[cfg(feature = "nomo-mark-demo")]
 pub mod demo;
 pub mod document_host;
