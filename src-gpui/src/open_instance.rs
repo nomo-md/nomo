@@ -94,7 +94,8 @@ unsafe extern "system" fn receive(window:HWND,message:u32,wparam:WPARAM,lparam:L
             WM_NCCREATE=>{
                 let create=&*(lparam as *const CREATESTRUCTW);
                 SetWindowLongPtrW(window,GWLP_USERDATA,create.lpCreateParams as isize);
-                1
+                // 默认初始化保存窗口名称，第二实例才能按类名和名称找到通信入口。
+                DefWindowProcW(window,message,wparam,lparam)
             }
             WM_COPYDATA=>{
                 if lparam==0 {return 0;}

@@ -148,7 +148,15 @@ fn main() {
             cx.set_global(instance);
             cx.spawn(async move |cx| {
                 while let Some(paths)=receiver.recv().await {
-                    cx.update(|cx|open_paths(paths,cx));
+                    cx.update(|cx| {
+                        // 无参数再次启动明确创建主页窗口；平台 reopen 仍保留唤醒语义。
+                        if paths.is_empty() {
+                            open_workspace(Vec::new(),cx);
+                            cx.activate(true);
+                        } else {
+                            open_paths(paths,cx);
+                        }
+                    });
                 }
             }).detach();
         }

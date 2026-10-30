@@ -5,7 +5,7 @@
 | 职责 | 主入口 | 边界 |
 |---|---|---|
 | 根构建、版本、锁文件 | `Cargo.toml`、`Cargo.lock` | 单成员 workspace；唯一产品版本；根 target |
-| 启动、菜单、平台打开事件 | `src-gpui/src/main.rs`、`open_instance.rs` | 默认 Workspace 与 feature 开发入口；系统打开路由、Windows 同数据目录／会话的有界实例消息转交 |
+| 启动、菜单、平台打开事件 | `src-gpui/src/main.rs`、`open_instance.rs` | 默认 Workspace 与 feature 开发入口；系统打开路由、Windows 同数据目录／会话的有界实例消息转交，无参数再次启动在原进程新建窗口 |
 | 文档主页与最近记录 | `src-gpui/src/ui/home.rs`、`home/library.rs`、`home/thumbnail.rs` | 无文件启动进入主页；本地文件夹入口、最近列表、虚拟网格和有界页首缩略图；与编辑页共用外壳面板、侧栏宽度和主页导航行，不创建编辑会话 |
 | 默认应用外壳 | `src-gpui/src/ui/workspace.rs`、`workspace/toolbar.rs`、`workspace_surface.rs` | 多标签、连体边框与阴影、文件树、模式、工具栏、搜索、自动保存 |
 | 编辑收尾与文档切换 | `src-gpui/src/ui/workspace/document_transition.rs`、`nomo_mark/workspace_host.rs`、`nomo_mark/object_ui.rs` | 组字和对象草稿收尾、确认后继续切换或关闭；单个待执行意图、临时订阅，无正文镜像或轮询 |
