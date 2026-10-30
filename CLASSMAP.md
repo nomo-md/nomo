@@ -23,7 +23,7 @@
 | 跨行代码高亮 | `src-gpui/src/markdown/code_highlight.rs`、`highlight.rs`、`nomo_mark/source_view.rs` | syntect／two-face 原生语法，代码卡片与源码视图共用；按需语法库、8 MiB／120 项 LRU 和局部解析预算 |
 | 表格宽度与内容适配 | `src-gpui/src/nomo_mark/table_widths.rs`、`src-gpui/src/markdown/table_layout.rs` | 共享列宽约束、纯语义测量、表头字体与图片缩放；只作用于当前窗口布局，不写回自动列宽 |
 | 代码块原位编辑与语言选择 | `src-gpui/src/nomo_mark/code_blocks.rs`、`code_ui.rs`、`src-gpui/src/markdown/code_layout.rs` | 主会话局部输入与围栏保护；旧版卡片、固定行号与块内双向滚动、头部复制反馈／展开／语言选择；无代码草稿或独立历史 |
-| 行内注释标签与原位编辑 | `src-gpui/src/nomo_mark/comments.rs`、`object_ui.rs` | 原版绿色短标签、12 字预览、正文及表格内原位输入；局部草稿按会话确认，IME 收尾后提交，关闭释放输入控件 |
+| 行内注释标签与原位编辑 | `src-gpui/src/nomo_mark/comments.rs`、`object_ui.rs` | 跟随主题主色的短标签、12 字预览、正文及表格内原位输入；局部草稿按会话确认，IME 收尾后提交，关闭释放输入控件 |
 | HTML 容器与属性卡片 | `src-gpui/src/nomo_mark/html_table.rs`、`front_matter.rs`、`object_ui.rs` | 安全 HTML 文本及实体映射、Details 标题边界；Front Matter 字段摘要、块注释完整预览与原位草稿；仅解析当前窗口，不重写未知属性 |
 | 文字布局与 KP | `src-gpui/src/layout.rs`、`kp.rs` | GPUI 塑形、上一帧段落弱引用复用、换行与可见选区几何 |
 | 图片／公式／图表 | `src-gpui/src/images.rs`、`embeds.rs`、`cache.rs` | 本地／HTTP(S) 图片解码预检、有限任务队列、失败与位图预算、CPU／atlas 淘汰；全屏查看复用现有图片和公式／图表 Store |

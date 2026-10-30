@@ -1680,7 +1680,7 @@ impl NomoMark {
             for (line, spans) in source_lines.into_iter().zip(source_spans) {
                 let text = &self.host.parsed.source[line.range.clone()];
                 let mut spec = if let Some(em) = self.auxiliary_comment {
-                    crate::layout::ParaSpec::plain(text.into(), crate::layout::InlineStyle { color: if self.auxiliary_math { crate::layout::ColorRole::Fg } else { crate::layout::ColorRole::Success }, ..Default::default() },
+                    crate::layout::ParaSpec::plain(text.into(), crate::layout::InlineStyle { color: if self.auxiliary_math { crate::layout::ColorRole::Fg } else { crate::layout::ColorRole::AccentStrong }, ..Default::default() },
                         Family::Mono, em * metrics.zoom, em * metrics.zoom * 1.15, crate::layout::Wrap::Greedy)
                 } else { crate::layout::ParaSpec::plain(text.into(), Default::default(), Family::Mono,
                     metrics.source_size(), metrics.source_line_height(), crate::layout::Wrap::Greedy) };
@@ -1890,7 +1890,7 @@ impl NomoMark {
             }
             if self.focus.is_focused(window) && self.external_composition.is_none() && selected.is_empty() {
                 if let Some((_, caret)) = self.caret_bounds(selected.start) {
-                    paint_box(caret, if self.auxiliary_comment.is_some() && !self.auxiliary_math { theme.success } else { theme.caret }, 0.0, None, window);
+                    paint_box(caret, if self.auxiliary_comment.is_some() && !self.auxiliary_math { theme.accent } else { theme.caret }, 0.0, None, window);
                 }
             }
             self.paint_external_composition(&theme, window);

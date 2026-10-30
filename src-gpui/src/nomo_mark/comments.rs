@@ -63,7 +63,7 @@ pub(crate) fn preview(content: &str, empty: &str) -> String {
 }
 
 fn text_layout(text: &str, font_size: f32, window: &Window) -> crate::layout::TextLayout {
-    let spec = crate::layout::ParaSpec::plain(text.into(), crate::layout::InlineStyle { color: crate::layout::ColorRole::Success, ..Default::default() },
+    let spec = crate::layout::ParaSpec::plain(text.into(), crate::layout::InlineStyle { color: crate::layout::ColorRole::AccentStrong, ..Default::default() },
         Family::Mono, font_size, font_size * 1.15, crate::layout::Wrap::Greedy);
     crate::layout::layout_text(&spec, 1_000_000.0, window)
 }
@@ -94,9 +94,9 @@ pub(crate) fn object(content: &str, empty: &str, editing: bool, font_size: f32, 
 }
 
 pub(crate) fn colors(theme: &Theme) -> (Hsla, Hsla) {
-    // 与 color-mix(in srgb, success 12%/42%, surface/code-border) 一致。
-    (crate::ui::motion::color(theme.surface, theme.success, 0.12),
-        crate::ui::motion::color(theme.code_border, theme.success, 0.42))
+    // 每帧从当前主题主色派生，展示态与编辑态共用背景和边框。
+    (crate::ui::motion::color(theme.surface, theme.accent, 0.12),
+        crate::ui::motion::color(theme.code_border, theme.accent, 0.42))
 }
 
 pub(crate) fn paint(key: &InlineAsset, bounds: Bounds<Pixels>, theme: &Theme, window: &mut Window) {
