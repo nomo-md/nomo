@@ -124,7 +124,12 @@ fn main() {
         ui::reload_key_bindings(cx);
         ui::dialogs::init(cx);
         cx.on_action(|_: &workspace::Quit,cx|quit_workspaces(cx));
-        cx.on_window_closed(|cx,_|{ui::updates::prune_closed_windows(cx);finish_quit(cx);}).detach();
+        cx.on_window_closed(|cx,_|{
+            // 结束本轮关闭通知后再联动设置窗口，让它也完整走过关闭与释放回调。
+            cx.defer(ui::settings_window::close_if_orphaned);
+            ui::updates::prune_closed_windows(cx);
+            finish_quit(cx);
+        }).detach();
         cx.on_action(|_: &workspace::OpenSettings, cx| ui::settings_window::open(cx));
         set_menus(cx);
 

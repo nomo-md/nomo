@@ -46,6 +46,21 @@ fn eid(prefix: &str, key: &str) -> gpui::ElementId {
 struct SettingsWindowHandle(Option<WindowHandle<SettingsWindow>>);
 impl Global for SettingsWindowHandle {}
 
+pub(crate) fn close_if_orphaned(cx: &mut App) {
+    let Some(handle) = cx.try_global::<SettingsWindowHandle>().and_then(|state| state.0) else { return; };
+    let windows = cx.windows();
+    if !windows.contains(&handle.into()) {
+        cx.global_mut::<SettingsWindowHandle>().0 = None;
+        return;
+    }
+    // 设置由所有主窗口共享；正式工作区和开发窗口全部关闭后才释放设置。
+    if windows.len() > 1 { return; }
+    match handle.update(cx, |_, window, _| window.remove_window()) {
+        Ok(()) => cx.global_mut::<SettingsWindowHandle>().0 = None,
+        Err(error) => eprintln!("关闭设置窗口失败：{error}"),
+    }
+}
+
 pub fn open(cx: &mut App) {
     if let Some(handle) = cx.try_global::<SettingsWindowHandle>().and_then(|handle| handle.0) {
         if handle.update(cx, |_, window, _| window.activate_window()).is_ok() { return; }
