@@ -27,6 +27,14 @@ cargo run --locked --features nomo-mark-demo --bin nomo -- --nomo-mark-demo
 cargo run --locked --features nomo-mark-demo --bin nomo -- --nomo-mark /path/to/document.md
 ```
 
+One-command Windows packaging, with PowerShell 7 installed:
+
+```powershell
+pwsh -File scripts/package-windows.ps1
+```
+
+The script initializes the x64 MSVC/Windows SDK environment, builds Release, and writes the installer and portable ZIP to `.artifacts/packages/`.
+
 See [CLASSMAP](CLASSMAP.md), [NomoMark notes](docs/nomo-mark.md) and [build instructions](docs/native-build.md) for ownership, entrypoints and verification.
 
 The product name remains Nomo, the binary is `nomo`, and the identifier remains `com.nomo.desktop`. Existing configuration fields and platform directories are preserved; uninstalling does not remove user documents or settings.

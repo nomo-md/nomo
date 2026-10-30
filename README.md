@@ -25,6 +25,14 @@ cargo check --locked --bin nomo
 cargo build --locked --release --bin nomo
 ```
 
+Windows 一键打包（已安装 PowerShell 7 时）：
+
+```powershell
+pwsh -File scripts/package-windows.ps1
+```
+
+脚本自动加载 x64 MSVC／Windows SDK 环境，编译 Release 并在 `.artifacts/packages/` 生成安装包和便携 ZIP。
+
 NomoMark 开发入口：
 
 ```sh

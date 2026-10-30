@@ -24,6 +24,8 @@ install -m644 scripts/packaging/nomo.desktop "$payload/usr/share/applications/co
 install -m644 LICENSE "$payload/usr/share/doc/nomo/copyright"
 install -m644 src-gpui/assets/icons/LICENSE "$payload/usr/share/doc/nomo/LICENSE-Lucide"
 install -m644 src-gpui/assets/licenses/LICENSE-STIX "$payload/usr/share/doc/nomo/LICENSE-STIX"
+install -m644 src-gpui/assets/licenses/LICENSE-Rendering "$payload/usr/share/doc/nomo/LICENSE-Rendering"
+install -m644 src-gpui/assets/licenses/LICENSE-Export "$payload/usr/share/doc/nomo/LICENSE-Export"
 install -m644 sample.md "$payload/usr/share/nomo/samples/"
 install -m644 assets/128x128.png "$payload/usr/share/nomo/samples/assets/"
 for entry in '32:32x32.png' '128:128x128.png' '256:128x128@2x.png'; do
