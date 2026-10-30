@@ -965,7 +965,8 @@ fn insert_wrapped_block(
     } else {
         (format!("$${eol}"), "$$".to_string())
     };
-    let ending = if body.ends_with('\n') { "" } else { eol };
+    // 空公式只保留围栏之间的一次换行；空行会把两个 $$ 解析成独立段落。
+    let ending = if body.ends_with('\n') || (language.is_none() && body.is_empty()) { "" } else { eol };
     if body.len().saturating_add(opening.len()).saturating_add(ending.len()).saturating_add(closing.len()) > crate::text_document::MAX_SEMANTIC_BYTES {
         return Err(ControlError::NeedsContext("转换后的块超过语义窗口预算；选区原文已保留".into()));
     }

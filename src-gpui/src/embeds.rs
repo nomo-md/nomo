@@ -59,7 +59,8 @@ impl EmbedSpec {
     pub fn key(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.kind.hash(&mut hasher);
-        self.source.hash(&mut hasher);
+        // 围栏解析和局部草稿保留的首尾换行不同，但它们使用同一份渲染结果。
+        self.source.trim().hash(&mut hasher);
         self.em_px.to_bits().hash(&mut hasher);
         self.color.hash(&mut hasher);
         self.dark.hash(&mut hasher);
@@ -181,15 +182,16 @@ pub fn request(specs: Vec<EmbedSpec>, cx: &mut App) {
 
 fn render(spec: &EmbedSpec) -> Result<(EmbedInfo, RenderImage, usize), String> {
     let scale_to_em = spec.em_px / BASE_EM_PX;
+    let source = spec.source.trim();
     match spec.kind {
         EmbedKind::Math { display } => {
-            let (svg, depth_ratio) = math_svg(&spec.source, display, spec.color)?;
+            let (svg, depth_ratio) = math_svg(source, display, spec.color)?;
             let (image, width, height, bytes) = rasterize(&svg, scale_to_em, false)?;
             Ok((EmbedInfo { width, height, depth: height * depth_ratio }, image, bytes))
         }
         EmbedKind::Mermaid | EmbedKind::MermaidThemed(_) => {
             let palette = if let EmbedKind::MermaidThemed(palette) = spec.kind { Some(palette) } else { None };
-            let svg = mermaid_svg_with_palette(&spec.source, spec.dark, palette, merman::OperationControl::new())?;
+            let svg = mermaid_svg_with_palette(source, spec.dark, palette, merman::OperationControl::new())?;
             let (image, width, height, bytes) = rasterize(&svg, scale_to_em, true)?;
             Ok((EmbedInfo { width, height, depth: 0.0 }, image, bytes))
         }

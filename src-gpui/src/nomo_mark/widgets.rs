@@ -105,6 +105,11 @@ impl BlockFrame {
     pub fn join(&self, body: &str) -> Result<String, ControlError> {
         let mut prefix = self.prefix.clone();
         let mut suffix = self.suffix.clone();
+        if self.kind == ObjectKind::BlockMath && body.is_empty() && prefix.ends_with('\n') {
+            // 清空已有公式后仍保持一个可识别的空块，不留下分隔段落的空行。
+            if suffix.starts_with("\r\n") { suffix.drain(..2); }
+            else if suffix.starts_with('\n') { suffix.remove(0); }
+        }
         if self.marker.is_none() && prefix.ends_with('\n') && !body.is_empty() && !body.ends_with('\n') && suffix.starts_with("$$") {
             suffix.insert_str(0, if prefix.ends_with("\r\n") { "\r\n" } else { "\n" });
         }

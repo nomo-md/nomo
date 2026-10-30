@@ -169,18 +169,23 @@ impl NomoMark {
                     }
         }
         if self.host.presentation != Presentation::Editable || self.host.interaction.protected() { return Some(overlay.into_any_element()); }
-        for (source, x, y, w) in layout.embed_rects() {
-            let Some(node) = parsed.nodes.iter().find(|n| n.kind == "code" && n.source.contains(&source)) else { continue; };
-            if !parsed.source[node.source.clone()].lines().next().is_some_and(|line| line.trim().ends_with("mermaid")) { continue; }
+        let zoom = cx.global::<Settings>().metrics().zoom;
+        for item in &layout.items {
+            let DisplayItem::BlockControls { x, y, w, source, kind: "diagram-toolbar", .. } = item else { continue; };
+            let Some(node) = parsed.nodes.iter().find(|n| n.kind == "code" && n.source.contains(&source.start)) else { continue; };
             let range = node.source.clone();
-            overlay = overlay.child(div().id(("diagram-fullscreen", range.start)).absolute().left(px((x + w - 30.0).max(x))).top(px(y))
-                .size(px(28.0)).rounded(px(4.0)).bg(theme.surface).hover(|s| s.bg(theme.hover)).cursor_pointer().tooltip(tooltip("放大查看"))
-                .child(gpui::svg().path("icons/maximize.svg").size(px(16.0)).text_color(theme.muted)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |view, _, window, cx| view.open_diagram_viewer(range.clone(), window, cx))));
+            overlay = overlay.child(div().id(("diagram-toolbar", range.start)).absolute().left(px(*x)).top(px(*y)).w(px(*w))
+                .h(px(32.0 * zoom)).flex().justify_end()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(div().id(("diagram-fullscreen", range.start)).size(px(32.0 * zoom)).flex_shrink_0()
+                    .flex().items_center().justify_center().rounded(px(3.0 * zoom)).border_1().border_color(theme.border)
+                    .bg(theme.surface).hover(|s| s.bg(theme.hover)).cursor_pointer().tooltip(tooltip("放大查看"))
+                    .child(gpui::svg().path("icons/maximize.svg").size(px(16.0 * zoom)).text_color(theme.muted))
+                    .on_click(cx.listener(move |view, _, window, cx| view.open_diagram_viewer(range.clone(), window, cx)))));
         }
         for item in &layout.items {
             let DisplayItem::BlockControls { x, y, w, source, kind, .. } = item else { continue; };
-            if *kind == "rule" { continue; }
+            if matches!(*kind, "rule" | "diagram-toolbar") { continue; }
             let mut buttons = div().absolute().left(px(x + w - 62.0)).top(px(y + 8.0)).flex().gap(px(4.0));
             for (action, label, glyph) in [(0, "编辑", IconName::SquarePen), (1, "删除", IconName::Trash2)] {
                 if *kind == "toc" && action == 0 { continue; }

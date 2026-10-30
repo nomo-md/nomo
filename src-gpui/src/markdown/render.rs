@@ -81,22 +81,6 @@ pub struct BlockLayout {
 }
 
 impl BlockLayout {
-    pub fn embed_rects(&self) -> Vec<(usize, f32, f32, f32)> {
-        let mut result = Vec::new();
-        for item in &self.items {
-            match item {
-                DisplayItem::Embed { x, y, w, source, .. } => result.push((*source, *x, *y, *w)),
-                DisplayItem::Horizontal { x, y, w, offset, layout, .. } => {
-                    for (source, ix, iy, iw) in layout.embed_rects() {
-                        let left = (ix - offset.get()).max(0.0); let right = (ix + iw - offset.get()).min(*w);
-                        if right > left { result.push((source, x + left, y + iy, right - left)); }
-                    }
-                }
-                _ => {}
-            }
-        }
-        result
-    }
     pub fn math_input_rect(&self) -> Option<(f32, f32, f32, f32)> {
         for item in &self.items {
             match item {
@@ -1475,7 +1459,7 @@ impl Builder<'_> {
         self.apply_gap();
         let mut failure = None;
         if lang == "mermaid" {
-            match self.mermaid(text, text_start) {
+            match self.mermaid(text, text_start, block_start) {
                 Ok(()) => {
                     self.gap(self.env.metrics.paragraph_gap());
                     return;
@@ -1590,6 +1574,17 @@ impl Builder<'_> {
         self.apply_gap();
         let metrics = self.env.metrics;
         let width = self.width - self.indent;
+        if tex.trim().is_empty() {
+            // 空公式保留可点击的输入落点，不向排版引擎请求空位图。
+            let note = Rc::new(self.note_layout("输入公式…", ColorRole::Muted, width));
+            let h = note.height();
+            self.items.push(DisplayItem::Text { x: self.indent + (width - note.max_line_width()) / 2.0,
+                y: self.y + 8.0 * metrics.zoom, layout: note,
+                map: vec![MapSeg { text: 0.."输入公式…".len(), source, source_end: source + tex.len(), exact: false }] });
+            self.y += h + 16.0 * metrics.zoom;
+            self.gap(metrics.paragraph_gap());
+            return;
+        }
         let (key, state) = (self.env.embed)(EmbedKind::Math { display: true }, tex);
         if let EmbedState::Ready(info) = &state {
             let pad = 8.0 * metrics.zoom;
@@ -1640,10 +1635,17 @@ impl Builder<'_> {
 
     /// Mermaid 代码块：就绪时居中显示，过宽时在本节点内滚动；渲染中显示占位框。
     /// 返回 Ok 表示已按图表处理；Err 携带失败原因，调用方退回代码块并在标签中显示原因。
-    fn mermaid(&mut self, text: &str, source: usize) -> Result<(), String> {
+    fn mermaid(&mut self, text: &str, source: usize, block_start: usize) -> Result<(), String> {
         let metrics = self.env.metrics;
         let width = self.width - self.indent;
         let (key, state) = (self.env.embed)(EmbedKind::Mermaid, text);
+        if self.controlled && !matches!(&state, EmbedState::Failed(_)) {
+            // 工具栏属于节点容器，不随位图居中或横向滚动移动，也不遮住图表内容。
+            let height = 40.0 * metrics.zoom;
+            self.items.push(DisplayItem::BlockControls { x: self.indent, y: self.y, w: width, h: height,
+                source: block_start..source + text.len(), kind: "diagram-toolbar" });
+            self.y += height;
+        }
         match state {
             EmbedState::Ready(info) => {
                 let pad = 8.0 * metrics.zoom;

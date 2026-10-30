@@ -96,6 +96,7 @@ pub struct NomoMark {
     emoji_requested: bool,
     pub(super) auxiliary_input: bool,
     pub(super) auxiliary_block: bool,
+    pub(super) auxiliary_embed: bool,
     pub(super) auxiliary_language: Option<String>,
     pub(super) auxiliary_comment: Option<f32>,
     pub(super) auxiliary_math: bool,
@@ -157,6 +158,7 @@ impl NomoMark {
             emoji_requested: false,
             auxiliary_input: false,
             auxiliary_block: false,
+            auxiliary_embed: false,
             auxiliary_language: None,
             auxiliary_comment: None,
             auxiliary_math: false,
@@ -392,6 +394,7 @@ impl NomoMark {
     }
     pub fn command(&mut self, intent: EditIntent, cx: &mut Context<Self>) {
         self.dismiss_quick_insert(cx);
+        let enter_math = matches!(intent, EditIntent::InsertMathBlock) && self.effective_mode() == ViewMode::Semantic;
         let range = self.host.selection.range();
         let identity = &self.host.parsed.identity;
         let boundary_delete = range.is_empty()
@@ -428,6 +431,7 @@ impl NomoMark {
                 );
                 match self.queue_result(result, &group, cx) {
                     Ok(()) => {
+                        if enter_math { self.pending_block_entry = Some(true); }
                         self.update_completion(cx);
                         self.preferred_x = None;
                     }
@@ -1034,7 +1038,7 @@ impl NomoMark {
             for item in &layout.items {
                 match item {
                     DisplayItem::BlockControls { x: ix, y: iy, w, h, source, kind, .. }
-                        if *kind != "toc" && x >= *ix && x <= ix + w && y >= *iy && y <= iy + h => {
+                        if !matches!(*kind, "toc" | "diagram-toolbar") && x >= *ix && x <= ix + w && y >= *iy && y <= iy + h => {
                         let range = source.clone();
                         if *kind == "rule" {
                             let base = self.host.parsed.identity.from_byte;
@@ -1653,7 +1657,9 @@ impl NomoMark {
         self.active_code().hash(&mut configuration);
         self.comment_edit().hash(&mut configuration);
         self.math_edit().hash(&mut configuration);
-        self.object_edit_height(cx).map(f32::to_bits).hash(&mut configuration);
+        self.object_edit_height(window, cx).map(f32::to_bits).hash(&mut configuration);
+        self.object_range().hash(&mut configuration);
+        self.auxiliary_embed.hash(&mut configuration);
         self.auxiliary_math.hash(&mut configuration);
         self.auxiliary_comment.map(f32::to_bits).hash(&mut configuration);
         if self.auxiliary_comment.is_some() { self.host.selection.head_byte.hash(&mut configuration); }
@@ -1675,13 +1681,15 @@ impl NomoMark {
             let mut items = Vec::new();
             let mut y = 0.0;
             let source_lines = super::source_view::lines(&self.host.parsed);
-            let source_spans = if self.auxiliary_comment.is_some() { vec![Vec::new(); source_lines.len()] }
+            let source_spans = if self.auxiliary_comment.is_some() || self.auxiliary_embed { vec![Vec::new(); source_lines.len()] }
                 else { super::source_view::line_spans(&self.host.parsed, &source_lines, self.auxiliary_language.as_deref()) };
             for (line, spans) in source_lines.into_iter().zip(source_spans) {
                 let text = &self.host.parsed.source[line.range.clone()];
                 let mut spec = if let Some(em) = self.auxiliary_comment {
                     crate::layout::ParaSpec::plain(text.into(), crate::layout::InlineStyle { color: if self.auxiliary_math { crate::layout::ColorRole::Fg } else { crate::layout::ColorRole::AccentStrong }, ..Default::default() },
                         Family::Mono, em * metrics.zoom, em * metrics.zoom * 1.15, crate::layout::Wrap::Greedy)
+                } else if self.auxiliary_embed { crate::layout::ParaSpec::plain(text.into(), Default::default(), Family::Mono,
+                    13.0 * metrics.zoom, 19.5 * metrics.zoom, crate::layout::Wrap::Greedy)
                 } else { crate::layout::ParaSpec::plain(text.into(), Default::default(), Family::Mono,
                     metrics.source_size(), metrics.source_line_height(), crate::layout::Wrap::Greedy) };
                 if self.auxiliary_comment.is_none() { spec.spans = spans; }
@@ -1733,7 +1741,7 @@ impl NomoMark {
                 active_code: self.active_code(),
                 comment_edit: self.comment_edit(),
                 math_edit: self.math_edit(),
-                object_edit: self.object_edit_height(cx).map(|height| (self.object_range().unwrap(), height)),
+                object_edit: self.object_edit_height(window, cx).map(|height| (self.object_range().unwrap(), height)),
                 empty_comment: crate::ui::toolbar_i18n::ToolbarLocale::current(cx).text("empty_comment"),
                 embed: &embed,
             };
@@ -2222,6 +2230,13 @@ impl Render for NomoMark {
             if let Some(redo) = self.pending_comment_history.take() { cx.emit(if redo { ControlEvent::Redo } else { ControlEvent::Undo }); }
             if let Some(forward) = self.pending_block_entry.take() {
                 self.enter_block_at(self.local_cursor(), !forward, window, cx);
+            }
+        }
+        // 块内控件依赖当前布局；不能先用上一帧的几何定位，再在 prepaint 中搬回原位。
+        if self.object.is_some() || self.layout_key.is_none() || self.layout.as_ref().is_some_and(|layout|
+            layout.items.iter().any(|item| matches!(item, DisplayItem::BlockControls { kind: "diagram-toolbar", .. }))) {
+            if let Some(bounds) = self.bounds {
+                self.prepare_layout(f32::from(bounds.size.width), window, cx);
             }
         }
         let theme = cx.global::<Theme>().clone();
