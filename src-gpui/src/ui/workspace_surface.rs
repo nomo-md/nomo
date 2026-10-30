@@ -155,7 +155,7 @@ impl WorkspaceSurface {
         self.0.borrow_mut().clear();
     }
 
-    /// 单文档时隐藏标签栏：清除标签位置，使轮廓退化为普通圆角面板。
+    /// 隐藏标签栏时清除标签位置，使轮廓退化为普通圆角面板。
     pub fn set_rail_hidden(&self, hidden: bool) {
         let mut state = self.0.borrow_mut();
         state.rail_hidden = hidden;

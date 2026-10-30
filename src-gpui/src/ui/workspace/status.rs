@@ -1,5 +1,4 @@
-//! 编辑区顶部信息行（保存状态 · 统计 · 缩放），与正文列左对齐、不随文档滚动；
-//! 仅保存浮层交互，不持有文档、正文或统计任务。
+//! 原版右下角缩放与统计；仅保存浮层交互，不持有文档、正文或统计任务。
 use super::*;
 use crate::ui::{components::status_slider, popup::status_popup, toolbar_i18n::ToolbarLocale};
 use gpui::{BoxShadow, Bounds, Div, EntityId, KeyDownEvent, Pixels, Stateful, point, relative, rgba};
@@ -32,6 +31,7 @@ pub(super) struct StatusUi {
     slider_hover: bool,
     last_zoom: Option<i64>,
     pulse: Option<Instant>,
+    stats: StatsTransition,
 }
 
 impl StatusUi {
@@ -46,7 +46,60 @@ impl StatusUi {
             slider_motion: ScalarMotion::default(),
             selected: 0, keyboard_selection: false, dragging: false, slider_hover: false,
             last_zoom: None, pulse: None,
+            stats: StatsTransition::default(),
         }
+    }
+}
+
+/// 只暂存两个计数；位数按当前文档和统计类型的最大值预留，选区变短不挤动缩放按钮。
+#[derive(Default)]
+struct StatsTransition {
+    metric: Option<usize>,
+    value: Option<u64>,
+    selected: bool,
+    digits: usize,
+    outgoing: Option<(u64, Instant)>,
+}
+
+impl StatsTransition {
+    fn update(&mut self, metric: usize, value: Option<u64>, full: Option<u64>, selected: bool, reduced: bool) {
+        if self.metric != Some(metric) {
+            *self = Self { metric: Some(metric), ..Self::default() };
+        }
+        if reduced || value.is_none() || self.outgoing.is_some_and(|(_, started)| started.elapsed() >= Duration::from_millis(160)) {
+            self.outgoing = None;
+        }
+        // 同一选区范围内的刷新只替换目标值，不重启动画；反向切换覆盖旧过渡，不排队。
+        if self.selected != selected {
+            self.outgoing = if reduced || self.value == value { None }
+                else { self.value.zip(value).map(|(previous, _)| (previous, Instant::now())) };
+        }
+        self.value = value;
+        self.selected = selected;
+        for count in [value, full].into_iter().flatten() {
+            self.digits = self.digits.max(count.checked_ilog10().unwrap_or(0) as usize + 1);
+        }
+    }
+
+    fn render(&self, label: String, unit: &'static str) -> Div {
+        let Some(value) = self.value else { return div().child(label); };
+        let mut number = div().relative()
+            .child(div().opacity(0.0).child("0".repeat(self.digits)));
+        let mut opacity = 1.0;
+        let mut offset = 0.0;
+        if let Some((previous, started)) = self.outgoing {
+            let progress = (started.elapsed().as_secs_f32() / 0.16).min(1.0);
+            let incoming = motion::ease(((progress - 0.15) / 0.85).clamp(0.0, 1.0));
+            let outgoing = motion::ease((progress / 0.72).min(1.0));
+            let distance = if self.selected { 3.0 } else { -3.0 };
+            opacity = incoming;
+            offset = distance * (1.0 - incoming);
+            number = number.child(div().absolute().right_0().top(px(-distance * outgoing))
+                .opacity(1.0 - outgoing).child(previous.to_string()));
+        }
+        div().flex().items_center()
+            .child(number.child(div().absolute().right_0().top(px(offset)).opacity(opacity).child(value.to_string())))
+            .child(unit)
     }
 }
 
@@ -123,8 +176,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// `left` 为正文列相对编辑区的左边距（px），信息行文字与正文首字对齐。
-    pub(super) fn render_status_controls(&mut self, theme: &Theme, left: f32, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_status_controls(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if let Some(document) = self.document() { document.update(cx, |host, cx| host.sync_stats_visibility(cx)); }
         let document = self.document().map(|doc| doc.entity_id());
         let visible = document.is_some() && cx.global::<Settings>().stats_visible;
@@ -140,6 +192,7 @@ impl Workspace {
             self.status_ui.motion = [ScalarMotion::default(); 2];
             self.status_ui.last_zoom = None;
             self.status_ui.pulse = None;
+            self.status_ui.stats = StatsTransition::default();
             for anchor in &self.status_ui.anchors { anchor.set(None); }
             if focused {
                 if let Some(document) = self.document() { window.focus(&document.focus_handle(cx), cx); }
@@ -152,13 +205,15 @@ impl Workspace {
         let metric = METRICS.iter().position(|m| m.0 == settings.stats_metric).unwrap_or(1);
         let doc = self.document()?;
         let host = doc.read(cx);
+        let metric_value = |stats: &crate::text_document::DocumentStats| [stats.lines, stats.words, stats.visible_chars, stats.chars][metric];
+        let value = host.stats().map(metric_value);
         let label = if host.stats_failed() && host.stats().is_none() { locale.text("status_unavailable").to_owned() }
             else {
-                let value = host.stats().map(|stats| [stats.lines, stats.words, stats.visible_chars, stats.chars][metric].to_string())
-                    .unwrap_or_else(|| "—".into());
+                let value = value.map(|value| value.to_string()).unwrap_or_else(|| "—".into());
                 format!("{value}{}", locale.text(METRICS[metric].3))
             };
         let reduced = self.explorer.reduce_motion;
+        self.status_ui.stats.update(metric, value, host.full_stats().map(metric_value), host.stats_are_selected(), reduced);
         if self.status_ui.last_zoom.is_some_and(|previous| previous != percent) {
             self.status_ui.pulse = Some(Instant::now());
         }
@@ -190,21 +245,14 @@ impl Workspace {
             || self.status_ui.step_motion.iter().any(ScalarMotion::running)
             || self.status_ui.slider_motion.running()
             || self.status_ui.pulse.is_some()
+            || self.status_ui.stats.outgoing.is_some()
             || (!reduced && self.status_ui.open.is_some() && self.status_ui.opened.elapsed() < Duration::from_millis(140));
-        let dirty = doc.read(cx).is_dirty(cx);
-        let separator = || div().flex_none().opacity(0.6).child("·");
-        // 触发器自带 8px 内边距，整体左移同样距离使文字与正文首字对齐。
-        let controls = div().w_full().h(px(32.0)).flex_none().flex().items_center().gap(px(2.0))
-            .pl(px((left - 8.0).max(8.0))).text_size(px(12.0)).text_color(theme.muted)
+        let controls = div().absolute().right(px(16.0)).bottom(px(14.0))
+            .flex().items_center().gap(px(8.0))
             .children(animate.then(motion::theme_frame))
-            .child(div().flex_none().px(px(8.0)).flex().items_center().gap(px(6.0))
-                .children(dirty.then(|| div().size(px(6.0)).rounded_full().bg(theme.accent)))
-                .child(if dirty { "有未保存的修改" } else { "已保存" }))
-            .child(separator())
-            .child(self.status_trigger(Panel::Stats, label, 1.0, theme, cx))
-            .child(separator())
-            .child(self.status_trigger(Panel::Zoom, format!("{percent}%"), scale, theme, cx));
-        Some(controls.into_any_element())
+            .child(self.status_trigger(Panel::Zoom, format!("{percent}%"), scale, theme, cx))
+            .child(self.status_trigger(Panel::Stats, label, 1.0, theme, cx));
+        Some(gpui::deferred(controls).with_priority(3).into_any_element())
     }
 
     fn status_trigger(&self, panel: Panel, label: String, scale: f32, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -213,22 +261,32 @@ impl Workspace {
         let locale = ToolbarLocale::current(cx);
         let mono = crate::theme::font_for(crate::theme::Family::Mono, false, false).family;
         let bounds = self.status_ui.anchors[index].clone();
+        let background = motion::color(motion::color(theme.surface, theme.rail_bg, 0.06), theme.surface, hover);
+        let border = motion::color(theme.border.opacity(0.82), motion::color(theme.border, theme.accent, 0.3), hover);
+        let unit = locale.text(METRICS[self.status_ui.stats.metric.unwrap_or(1)].3);
+        let reserved = if panel == Panel::Stats && self.status_ui.stats.value.is_some() {
+            format!("{}{unit}", "0".repeat(self.status_ui.stats.digits))
+        } else { label.clone() };
+        let content = if panel == Panel::Stats { self.status_ui.stats.render(label, unit) }
+            else { div().child(label) };
         // 外层保留稳定命中区域，内层缩放不会挤动相邻按钮或重新定位弹层。
-        div().id(("status-trigger", index)).relative()
+        div().id(("status-trigger", index)).relative().min_w(px(if index == 0 { 52.0 } else { 58.0 }))
             .role(gpui::Role::Button).aria_label(locale.text(if index == 0 { "status_zoom" } else { "status_word_count" }))
             .aria_expanded(self.status_ui.open == Some(panel))
-            .h(px(24.0)).px(px(8.0)).flex_none().rounded(px(4.0)).cursor_pointer()
-            .font_family(mono).text_size(px(12.0))
+            .h(px(28.0)).px(px(10.0)).flex_none().rounded(px(8.0)).cursor_pointer()
+            .font_family(mono).font_weight(FontWeight::MEDIUM).text_size(px(13.0))
             .track_focus(&self.status_ui.triggers[index]).tab_index(0)
             .focus_visible(|style| style.shadow(vec![BoxShadow { inset: false,
                 color: theme.accent.opacity(0.45), offset: point(px(0.0), px(0.0)),
                 blur_radius: px(0.0), spread_radius: px(3.0) }]))
             .tooltip(tooltip(locale.text(if index == 0 { "status_zoom" } else { "status_word_count" })))
-            .child(div().opacity(0.0).whitespace_nowrap().child(label.clone()))
+            .child(div().opacity(0.0).whitespace_nowrap().child(reserved))
             .child(div().absolute().top_0().left_0().size_full().flex().items_center().justify_center()
-                .child(div().w(relative(scale)).h(px(24.0 * scale)).flex().items_center().justify_center()
-                    .rounded(px(4.0)).bg(theme.hover.opacity(hover)).text_size(px(12.0 * scale))
-                    .text_color(motion::color(theme.muted, theme.fg, hover)).whitespace_nowrap().child(label)))
+                .child(div().relative().top(px(if self.explorer.reduce_motion { 0.0 } else { -hover }))
+                    .w(relative(scale)).h(px(28.0 * scale)).flex().items_center().justify_center()
+                    .rounded(px(8.0 * scale)).border_1().border_color(border).bg(background)
+                    .shadow(vec![shadow(theme, hover, false)]).text_size(px(13.0 * scale))
+                    .text_color(motion::color(theme.heading, theme.fg, hover)).whitespace_nowrap().child(content)))
             .child(gpui::canvas(move |value, _, _| { bounds.set(Some(value)); }, |_, _, _, _| {})
                 .absolute().top_0().left_0().size_full())
             .on_hover(cx.listener(move |workspace, hovered, _, cx| {

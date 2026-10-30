@@ -79,6 +79,12 @@ impl DocumentHost {
     pub(crate) fn stats(&self) -> Option<&DocumentStats> {
         self.queries.selected_stats.as_ref().or(self.queries.stats.as_ref())
     }
+    pub(crate) fn full_stats(&self) -> Option<&DocumentStats> {
+        self.queries.stats.as_ref()
+    }
+    pub(crate) fn stats_are_selected(&self) -> bool {
+        self.queries.selected_stats.is_some()
+    }
     pub(crate) fn stats_failed(&self) -> bool {
         self.queries.stats_failed
     }
@@ -136,9 +142,18 @@ impl DocumentHost {
         let revision = self.status().revision;
         let selection = self.selection(cx);
         let selection = (!selection.range().is_empty()).then_some(selection);
-        if selection != self.queries.stats_selection || self.queries.stats_revision != Some(revision) { self.queries.selected_stats = None; }
-        if (self.queries.stats_revision == Some(revision) && self.queries.stats_selection == selection)
-            || (self.queries.stats_requested_revision == Some(revision) && self.queries.stats_requested_selection == selection) { return; }
+        // 拖选和编辑期间保留最近一次选区结果，只有取消选择才立即恢复全文统计。
+        if selection.is_none() { self.queries.selected_stats = None; }
+        if self.queries.stats_revision == Some(revision) && self.queries.stats_selection == selection
+            && (selection.is_none() || self.queries.selected_stats.is_some()) {
+            // 快速回到已缓存的范围时，也必须取消中途发出的请求，避免迟到结果覆盖当前范围。
+            if self.queries.stats_requested_revision.is_some()
+                && (self.queries.stats_requested_revision != Some(revision) || self.queries.stats_requested_selection != selection) {
+                self.cancel_stats();
+            }
+            return;
+        }
+        if self.queries.stats_requested_revision == Some(revision) && self.queries.stats_requested_selection == selection { return; }
         // 首屏先让引用上下文恢复；已有统计刷新不再依赖局部窗口的引用查询。
         if self.queries.stats.is_none() && self.control.read(cx).host.parsed.context.pending_references { return; }
         self.queries.metadata_request.cancel();
@@ -181,9 +196,12 @@ impl DocumentHost {
             });
             let result = task.await;
             let _ = this.update(cx, |host, cx| {
+                let current_selection = host.selection(cx);
+                let current_selection = (!current_selection.range().is_empty()).then_some(current_selection);
                 if host.hidden || host.closed || !host.queries.stats_enabled
                     || host.queries.serial != serial
                     || host.status().revision != revision
+                    || current_selection != selection
                 {
                     return;
                 }

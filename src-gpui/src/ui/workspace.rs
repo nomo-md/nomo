@@ -1697,13 +1697,9 @@ impl Render for Workspace {
         let mode = self.tab().map(|tab| tab.mode);
         if mode.is_none() { self.outline_ui.clear_document(); }
         let status=self.document().map(|document|document.read(cx).status().clone());
-        // 只有一个文档时隐藏标签栏，面板直接贴近标题栏，文档名改由标题栏居中显示。
-        let show_tabs = !self.home_visible && !mini && self.tabs.len() > 1;
+        // 编辑页始终保留标签栏，单个文档也通过标签显示名称与修改状态。
+        let show_tabs = !self.home_visible && !mini;
         self.surface.set_rail_hidden(!show_tabs);
-        let document_title = (!show_tabs && !self.home_visible && !mini).then(|| self.tab()).flatten().map(|tab| {
-            let document = tab.document.read(cx);
-            (SharedString::from(document.title()), document.is_dirty(cx))
-        });
         let recent = self.library.read(cx).snapshot.recent.iter().take(10).map(|entry| crate::ui::chrome::ChromeRecentEntry {
             path: entry.path.clone(), label: home::entry_name(&entry.path), folder: false, missing: false,
         }).collect();
@@ -1714,20 +1710,12 @@ impl Render for Workspace {
             sidebar_visible:settings.show_sidebar, toolbar_visible:settings.show_toolbar,
             outline_visible:settings.show_outline,split_available:true,
             toolbar_shortcut: crate::ui::shortcuts::current("toggle-toolbar", cx).into(),
-            recent, document_title,
+            recent,
             capabilities:vec![ChromeCapability::Recent,ChromeCapability::NewWindow,ChromeCapability::HeadingLevels,ChromeCapability::HeadingAdjustment,ChromeCapability::ClearFormatting,ChromeCapability::LinkPicker,ChromeCapability::TablePicker,ChromeCapability::MathInline,ChromeCapability::Callout,ChromeCapability::Details,ChromeCapability::InlineComment,ChromeCapability::BlockComment,ChromeCapability::FrontMatter,ChromeCapability::Diagrams,ChromeCapability::Footnote,ChromeCapability::Toc,ChromeCapability::UnavailableNotice,ChromeCapability::ResetOutlinePosition]
                 .into_iter().chain([ChromeCapability::ExportHtml, ChromeCapability::ExportPdf, ChromeCapability::ExportWord].into_iter().filter(|_| self.export_job.is_none())).chain((cfg!(windows) && status.is_some() && !window.is_fullscreen()).then_some(ChromeCapability::Mini)).collect(),
             ..Default::default()
         },cx));
         let tabs = show_tabs.then(|| self.render_tabs(&theme, cx).into_any_element());
-        // 信息行与正文首字对齐：沿用正文列避开悬浮大纲的规则，双栏时正文铺满编辑区。
-        let editor_width = self.outline_ui.bounds.get().map_or(f32::from(window.viewport_size().width), |bounds| f32::from(bounds.size.width));
-        let status_left = match mode {
-            Some(EditorMode::Split) => 24.0,
-            _ => crate::nomo_mark::document_host::outline_content_column(editor_width, settings.show_outline, settings.content_width_percent)
-                .map_or((editor_width - editor_width * settings.content_width_percent) / 2.0, |(left, _)| left),
-        };
-        let mut status = if mini { None } else { self.render_status_controls(&theme, status_left, window, cx) };
         let sidebar = if self.home_visible || mini { None } else { self.render_sidebar_animated(settings.show_sidebar, &theme, window, cx) };
         let main: AnyElement = if self.home_visible {
             let count = self.tabs.len();
@@ -1772,7 +1760,6 @@ impl Render for Workspace {
                     .flex()
                     .flex_col()
                     .children(toolbar)
-                    .children(status.take())
                     .child(div().relative().flex_1().min_h(px(0.0)).children((!mini).then_some(outline_measure)).child(editors).children(outline).children(search).children(split_guide).children(reveal_toolbar))
                     .into_any_element()
             }
@@ -1783,6 +1770,7 @@ impl Render for Workspace {
         let outline_drag_preview = self.render_outline_drag_preview(&theme);
         let toast = self.toast.clone().filter(|_|!window.has_active_prompt()).map(|toast| gpui::deferred(toast).with_priority(9));
         let update_notice=if window.has_active_prompt(){None}else{crate::ui::updates::render_notice(window,cx).map(|notice|gpui::deferred(notice).with_priority(10))};
+        let status = if mini { None } else { self.render_status_controls(&theme, window, cx) };
         let status_popup = self.render_status_popup(&theme, cx);
         let mini_bar = self.render_mini_bar(cx);
         div()
@@ -1927,7 +1915,8 @@ impl Render for Workspace {
                                     .overflow_hidden()
                                     .child(main),
                             )
-                            .child(self.surface.outline(theme)),
+                            .child(self.surface.outline(theme))
+                            .children(status),
                     ).into_any_element()
                 },
             )
