@@ -148,6 +148,7 @@ fn fragment_cells(source: &str, node: &Element, cells: &mut Vec<Cell>) -> Option
             if !source[content.clone()].trim().is_empty() {
                 let mut runs = Vec::new(); let mut spans = Vec::new();
                 for child in pending.iter() { inline(source, child, &[], None, &mut runs, &mut spans)?; }
+                trim_image_padding(source, &mut runs);
                 cells.push(Cell { source: content.clone(), content, row: cells.len(), column: 0, rowspan: 1, colspan: 1,
                     header: false, widths: Vec::new(), align: node.attrs.get("align").cloned(), runs, spans });
             }
@@ -166,10 +167,30 @@ fn fragment_cells(source: &str, node: &Element, cells: &mut Vec<Cell>) -> Option
     let mut runs = Vec::new();
     let mut spans = Vec::new();
     for child in &node.children { inline(source, child, &[], None, &mut runs, &mut spans)?; }
+    trim_image_padding(source, &mut runs);
     cells.push(Cell { source: node.source.clone(), content: node.content.clone(), row: cells.len(), column: 0,
         rowspan: 1, colspan: 1, header: false, widths: Vec::new(), align: node.attrs.get("align").cloned(), runs, spans });
     Some(())
 }
+// 居中等图片属性写入会在 <p> 内加入换行和缩进。这些源码空白不占视觉行，
+// 否则行内图片抬高段落行高时，前后的空行也会各占一张图片的高度。
+// 仅忽略独立图片周围的原始空白；保留 <br>、空白实体和混排文字的源码映射。
+fn trim_image_padding(source: &str, runs: &mut Vec<InlineRun>) {
+    if runs.iter().filter(|run| matches!(run.atom, Some(InlineAtom::Image { .. }))).count() != 1 {
+        return;
+    }
+    let image_only = runs.iter().all(|run| match &run.atom {
+        Some(InlineAtom::Image { .. }) => true,
+        Some(_) => false,
+        None => run.formats.is_empty() && run.link.is_none()
+            && source.get(run.source.clone()) == Some(run.text.as_str())
+            && run.text.bytes().all(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)),
+    });
+    if image_only {
+        runs.retain(|run| run.atom.is_some());
+    }
+}
+
 struct Element {
     name: String,
     attrs: BTreeMap<String, String>,
