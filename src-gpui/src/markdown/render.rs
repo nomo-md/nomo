@@ -1744,9 +1744,9 @@ impl Builder<'_> {
         }
         if lower.starts_with("<summary") {
             self.flush_paragraph();
+            let summary_start = self.items.len();
             let style = InlineStyle { bold: true, color: ColorRole::Heading, ..self.base_for_container() };
             if self.controlled {
-            let summary_start = self.items.len();
                 self.apply_gap();
                 if let Some(opening)=self.details.last().copied(){self.items.push(DisplayItem::Disclosure{x:self.indent-18.0*self.env.metrics.zoom,y:self.y,size:16.0*self.env.metrics.zoom,source:opening,open:!self.closed_details.contains(&opening)});}
                 if let Some(fragment) = fragment {
@@ -1765,8 +1765,6 @@ impl Builder<'_> {
                 self.para.push(&format!("▾ {}", title.trim()), style, Some((source, false)));
             }
             self.flush_paragraph();
-            self.gap(self.env.metrics.paragraph_gap() * 0.5);
-            return;
             if let Some((DisplayItem::Disclosure { y, size, .. }, title_items)) = self.items[summary_start..].split_first_mut() {
                 // 箭头跟随标题首行的实际行高，换行标题不按整个段落高度居中。
                 if let Some((line_y, line_height)) = title_items.iter().find_map(|item| match item {
@@ -1776,6 +1774,8 @@ impl Builder<'_> {
                     *y = line_y + (line_height - *size) * 0.5;
                 }
             }
+            self.gap(self.env.metrics.paragraph_gap() * 0.5);
+            return;
         }
         if let Some(at) = lower.find("<img") {
             if let Some(src) = html_attr(&trimmed[at..], "src") {
