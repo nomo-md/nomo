@@ -18,3 +18,17 @@ logs/
 .DS_Store
 Thumbs.db
 /video/
+
+# 本机构建配置与开发工具状态
+/.cargo/config.toml
+/.claude/launch.json
+/.claude/screenshots/
+/.codegraph/
+
+# 旧前端工程的依赖、构建产物与生成代码
+/.pnpm-store/
+/node_modules/
+/dist/
+/src/paraglide/
+/src/lib/desktop/runtime/bindings.gen.ts
+/src-tauri/gen/schemas/

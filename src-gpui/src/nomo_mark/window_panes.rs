@@ -3,13 +3,26 @@ use super::*;
 use crate::settings::{EditorMode, Settings};
 use std::{sync::atomic::{AtomicU64, Ordering}, time::{Duration, Instant}};
 
-/// 单栏且显示悬浮大纲时正文列的左边距与宽度（px）：正文避开右侧大纲卡片；
-/// `None` 表示正文按比例居中。编辑区顶部信息行用同一结果与正文左对齐。
-pub(crate) fn outline_content_column(width: f32, outline_visible: bool, width_percent: f32) -> Option<(f32, f32)> {
+/// 在大纲左侧的可用区域内按比例居中正文。返回左边距与正文宽度（逻辑像素）。
+fn outline_content_column(width: f32, outline_visible: bool, width_percent: f32) -> Option<(f32, f32)> {
     if !outline_visible || width <= 900.0 { return None; }
-    let safe = 224.0 + (width * 0.035).clamp(32.0, 160.0);
-    let content_width = (width * width_percent).min((width - safe).max(0.0));
-    Some((((width - content_width) / 2.0).min((width - safe - content_width).max(0.0)), content_width))
+    let outline_space = 224.0 + (width * 0.035).clamp(32.0, 160.0);
+    let available = width - outline_space;
+    let content = available * width_percent;
+    Some(((available - content) / 2.0, content))
+}
+
+#[test]
+fn outline_content_column_preserves_margins_at_high_widths() {
+    let mut previous = 0.0;
+    for percent in 86..=90 {
+        let (left, content) = outline_content_column(1600.0, true, percent as f32 / 100.0).unwrap();
+        assert!(content > previous && left >= 66.0);
+        assert!((2.0 * left + content - 1320.0).abs() < 0.01);
+        previous = content;
+    }
+    assert_eq!(outline_content_column(900.0, true, 0.9), None);
+    assert_eq!(outline_content_column(1600.0, false, 0.9), None);
 }
 
 #[derive(Clone, Copy)]
@@ -818,8 +831,8 @@ impl DocumentHost {
             let content_width=width.map(|width| {
                 let content=if self.mini_layout {width-2.0*(width*0.05).clamp(18.0,30.0)}
                     else if self.panes.len()==2 {width-64.0}
-                    else if settings.show_outline && width>900.0 {(width*settings.content_width_percent).min((width-224.0-(width*0.035).clamp(32.0,160.0)).max(0.0))}
-                    else {width*settings.content_width_percent};
+                    else {outline_content_column(width, settings.show_outline, settings.content_width_percent)
+                        .map_or(width * settings.content_width_percent, |(_, content)| content)};
                 (content*window.scale_factor()).round()/window.scale_factor()
             });
             let views:Vec<_>=self.panes[pane].viewport.mounts.iter().map(|mount|mount.view.clone()).collect();
