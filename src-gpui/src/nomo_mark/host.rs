@@ -179,7 +179,9 @@ impl WindowHostAdapter {
         if let Some(error) = &self.failure {
             return Err(ControlError::HostFailure(error.clone()));
         }
-        if edits.is_empty() {
+        if edits.is_empty() && template_update.is_none() {
+            local_range(&self.parsed.source, self.parsed.identity.from_byte, after.range())?;
+            self.selection = after;
             return Ok(());
         }
         let base = self.parsed.identity.from_byte;

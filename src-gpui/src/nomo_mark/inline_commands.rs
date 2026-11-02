@@ -185,16 +185,21 @@ impl Changes {
     }
 }
 
-fn remove_selected(changes: &mut Changes, span: &InlineSpan, range: &Range<usize>) {
+fn remove_selected(changes: &mut Changes, span: &InlineSpan, range: &Range<usize>, markers: &[Range<usize>]) {
+    // 嵌套格式的定界符不属于未选中的正文，不能为它们重建空 HTML 包裹。
+    let has_text = |range: Range<usize>| {
+        let next = markers.partition_point(|marker| marker.end <= range.start);
+        !range.is_empty() && !markers.get(next).is_some_and(|marker| marker.start <= range.start && range.end <= marker.end)
+    };
     changes.remove(span);
-    if range.start > span.content.start {
+    if has_text(span.content.start..range.start.min(span.content.end)) {
         changes.wrap_at_order(
             span.content.start..range.start.min(span.content.end),
             html_pair(span.format),
             span.open.start,
         );
     }
-    if range.end < span.content.end {
+    if has_text(range.end.max(span.content.start)..span.content.end) {
         changes.wrap_at_order(
             range.end.max(span.content.start)..span.content.end,
             html_pair(span.format),
@@ -282,8 +287,11 @@ fn merge_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
     merged
 }
 
-fn regions_formatted(parsed: &ParsedWindow, regions: &[Range<usize>], format: InlineFormat) -> bool {
-    let markers = merge_ranges(parsed.inline.iter().flat_map(|span| [span.open.clone(), span.close.clone()]).collect());
+fn marker_ranges(parsed: &ParsedWindow) -> Vec<Range<usize>> {
+    merge_ranges(parsed.inline.iter().flat_map(|span| [span.open.clone(), span.close.clone()]).collect())
+}
+
+fn regions_formatted(parsed: &ParsedWindow, regions: &[Range<usize>], format: InlineFormat, markers: &[Range<usize>]) -> bool {
     let formatted = merge_ranges(parsed.inline.iter().filter(|span| span.format == format).map(|span| span.content.clone()).collect());
     let contains = |ranges: &[Range<usize>], at: usize| {
         let index = ranges.partition_point(|range| range.end <= at);
@@ -293,7 +301,7 @@ fn regions_formatted(parsed: &ParsedWindow, regions: &[Range<usize>], format: In
         let mut has_content = false;
         let covered = parsed.source[range.clone()].char_indices().all(|(offset, _)| {
             let at = range.start + offset;
-            if contains(&markers, at) { return true; }
+            if contains(markers, at) { return true; }
             has_content = true;
             contains(&formatted, at)
         });
@@ -303,7 +311,7 @@ fn regions_formatted(parsed: &ParsedWindow, regions: &[Range<usize>], format: In
 
 pub(crate) fn selection_formatted(parsed: &ParsedWindow, selection: DocumentSelection, format: InlineFormat) -> Result<Option<bool>, ControlError> {
     let regions = selection_regions(parsed, selection, Some(format))?;
-    Ok((!regions.is_empty()).then(|| regions_formatted(parsed, &regions, format)))
+    Ok((!regions.is_empty()).then(|| regions_formatted(parsed, &regions, format, &marker_ranges(parsed))))
 }
 
 pub fn selected(parsed: &ParsedWindow, selection: DocumentSelection, format: Option<InlineFormat>) -> Result<EditResult, ControlError> {
@@ -313,7 +321,8 @@ pub fn selected(parsed: &ParsedWindow, selection: DocumentSelection, format: Opt
 pub(crate) fn selected_with_toggle(parsed: &ParsedWindow, selection: DocumentSelection, format: Option<InlineFormat>, remove: Option<bool>) -> Result<EditResult, ControlError> {
     let base = parsed.identity.from_byte;
     let regions = selection_regions(parsed, selection, format)?;
-    let all_formatted = format.is_some_and(|format| remove.unwrap_or_else(|| regions_formatted(parsed, &regions, format)));
+    let markers = marker_ranges(parsed);
+    let all_formatted = format.is_some_and(|format| remove.unwrap_or_else(|| regions_formatted(parsed, &regions, format, &markers)));
     let mut changes = Changes::default();
     for range in regions {
         if format.is_none() || all_formatted {
@@ -330,7 +339,7 @@ pub(crate) fn selected_with_toggle(parsed: &ParsedWindow, selection: DocumentSel
                     changes.literal_edits.extend(release_code(parsed, span));
                     continue;
                 }
-                remove_selected(&mut changes, span, &range);
+                remove_selected(&mut changes, span, &range, &markers);
             }
         } else if let Some(format) = format {
             if let Some(other) = opposite(format) {
@@ -339,7 +348,7 @@ pub(crate) fn selected_with_toggle(parsed: &ParsedWindow, selection: DocumentSel
                     .iter()
                     .filter(|s| s.format == other && s.intersects(&range))
                 {
-                    remove_selected(&mut changes, span, &range);
+                    remove_selected(&mut changes, span, &range, &markers);
                 }
             }
             let mut range = range;

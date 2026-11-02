@@ -66,7 +66,7 @@ pub(super) fn semantic(parsed: &ParsedWindow, selection: DocumentSelection, inte
         if in_summary && matches!(intent, EditIntent::Newline | EditIntent::ParagraphBreak | EditIntent::SoftBreak) {
             let first = parsed.nodes.iter().filter(|n| n.source.start >= block.body.start && n.source.end <= block.body.end && matches!(n.kind, "paragraph" | "heading" | "code"))
                 .min_by_key(|n| n.source.start);
-            return Some(move_to(parsed, first.map_or(block.body.start, |n| {
+            return Some(move_to(parsed, first.map_or_else(|| block.empty_body_caret(source).unwrap_or(block.body.start), |n| {
                 if n.kind == "code" { source[n.source.clone()].find('\n').map_or(n.source.start, |p| n.source.start + p + 1) } else { n.source.start }
             })));
         }

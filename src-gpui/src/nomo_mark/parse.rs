@@ -570,7 +570,12 @@ impl ParsedWindow {
                 Event::End(_) => depth = depth.saturating_sub(1),
                 _ => {}
             }
+            let empty_body = if matches!(event, Event::Html(_)) {
+                self.details.binary_search_by_key(&range.start, |block| block.summary.start).ok()
+                    .and_then(|index| self.details[index].empty_body_caret(&self.source))
+            } else { None };
             output.push((event, range));
+            if let Some(at) = empty_body { append(at, &mut output); }
         }
         for at in blanks {
             append(at, &mut output);
@@ -896,6 +901,38 @@ mod tests {
                 expected.len()
             );
         }
+    }
+
+    #[test]
+    fn editing_empty_child_lists_keeps_real_source_and_excludes_code_and_plain_text() {
+        for (source, items) in [
+            ("- Parent\n  - ", 2),
+            ("- Parent\r\n  1. ", 2),
+            ("- Parent\n  12. ", 2),
+            ("> - Parent\n>   - ", 2),
+            ("- Parent\n  - \n    - ", 3),
+            ("- Parent\n  - \n- Tail", 3),
+        ] {
+            let parsed = fixture(source);
+            assert_eq!(&*parsed.source, source);
+            assert_eq!(parsed.nodes.iter().filter(|node| node.kind == "item").count(), items, "{source:?}");
+            assert!(!parsed.events.iter().any(|(event, _)| matches!(event, Event::Text(text) if text.contains('x'))));
+            assert!(parsed.events.iter().any(|(event, span)| matches!(event, Event::Text(text) if text.is_empty()) && span.is_empty()));
+        }
+        for source in ["plain\n  - ", "~~~\n- Parent\n  - \n~~~", "- Parent\n  ~~~md\n  - \n  ~~~"] {
+            let parsed = fixture(source);
+            assert!(!parsed.events.iter().any(|(event, _)| matches!(event, Event::Text(text) if text.is_empty())), "{source:?}");
+        }
+        let source = "- Parent\n  - \n\n# 中文\n\n[链接](https://example.test)";
+        let parsed = fixture(source);
+        let heading = parsed.nodes.iter().find(|node| node.kind == "heading").unwrap();
+        assert_eq!(heading.source.start, source.find("# 中文").unwrap());
+        let link = parsed.inline.iter().find(|span| span.format == InlineFormat::Link).unwrap();
+        assert_eq!(&source[link.content.clone()], "链接");
+        let source = "<details>\n<summary>Title</summary>\n\n- Parent\n  - \n\n</details>\n\nTail";
+        let parsed = fixture(source);
+        assert_eq!(parsed.nodes.iter().filter(|node| node.kind == "item").count(), 2);
+        assert_eq!(&source[parsed.details[0].source.clone()].trim(), &source[..source.find("\n\nTail").unwrap()].trim());
     }
     #[test]
     fn host_reference_context_resolves_without_prefixing_or_moving_source() {

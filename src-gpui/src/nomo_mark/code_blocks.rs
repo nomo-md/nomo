@@ -1,6 +1,6 @@
 //! 代码块原位编辑：只处理当前窗口的围栏和局部补丁，历史仍由文档会话持有。
 use super::{commands::{self, EditIntent, EditResult}, mapping::local_range, parse::ParsedWindow, protocol::*};
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
 
 pub(crate) const LANGUAGES: &[(&str, &str, &[&str])] = &[
     ("Plain Text", "text", &["plaintext", "txt"]), ("JavaScript", "javascript", &["js"]),
@@ -34,6 +34,7 @@ pub(super) struct FencedCode {
     pub body: Range<usize>,
     closing: Option<Range<usize>>,
     container: Range<usize>,
+    header_only: bool,
 }
 
 impl FencedCode {
@@ -41,7 +42,7 @@ impl FencedCode {
         let node = parsed.nodes.iter().find(|node| node.kind == "code" && node.source.start <= at && at <= node.source.end)?;
         let source = &*parsed.source;
         let raw = &source[node.source.clone()];
-        let first_end = raw.find('\n')?;
+        let first_end = raw.find('\n').unwrap_or(raw.len());
         let first = raw[..first_end].trim_end_matches('\r');
         let indent = first.len() - first.trim_start().len();
         let marker = *first.as_bytes().get(indent)?;
@@ -52,7 +53,7 @@ impl FencedCode {
         let info = &first[indent + count..];
         let language_start = opening.end + info.len() - info.trim_start().len();
         let language_end = language_start + info.trim_start().split_whitespace().next().unwrap_or("").len();
-        let mut body_start = node.source.start + first_end + 1;
+        let mut body_start = (node.source.start + first_end + 1).min(node.source.end);
         let trimmed_end = node.source.start + raw.trim_end_matches(['\r', '\n']).len();
         let last_start = commands::line_start(source, trimmed_end);
         let last = &source[last_start..trimmed_end];
@@ -68,6 +69,8 @@ impl FencedCode {
         } else if let Some(close) = &closing { body_start = close.start; body_start } else { node.source.end };
         let container = closing.as_ref().map(|close| commands::line_start(source, close.start)..close.start)
             .unwrap_or_else(|| {
+                // 首个 Enter 前正文尚不存在；容器前缀只能取开围栏之前的部分。
+                if first_end == raw.len() { return commands::line_start(source, opening.start)..opening.start; }
                 let first_text = parsed.events.iter().find_map(|(event, span)| {
                     (matches!(event, pulldown_cmark::Event::Text(_)) && body_start <= span.start && span.start <= body_end).then_some(span.start)
                 }).unwrap_or(body_start);
@@ -76,11 +79,26 @@ impl FencedCode {
         if body_start < body_end && source[body_start..body_end].starts_with(&source[container.clone()]) {
             body_start += container.len();
         }
-        Some(Self { source: node.source.start, opening, language: language_start..language_end, body: body_start..body_end, closing, container })
+        Some(Self { source: node.source.start, opening, language: language_start..language_end, body: body_start..body_end, closing, container, header_only: first_end == raw.len() })
     }
 
     fn contains(&self, range: &Range<usize>) -> bool {
-        self.body.start <= range.start && range.end <= self.body.end
+        !self.header_only && self.body.start <= range.start && range.end <= self.body.end
+    }
+
+    fn continuation_prefix<'a>(&self, source: &'a str) -> Cow<'a, str> {
+        let prefix = &source[self.container.clone()];
+        if self.header_only && prefix.bytes().any(|b| !matches!(b, b'>' | b' ' | b'\t')) {
+            // 第一行可能以列表项开头；续行保留缩进宽度，不再生成列表标记。
+            Cow::Owned(prefix.chars().map(|c| if matches!(c, '>' | '\t') { c } else { ' ' }).collect())
+        } else { Cow::Borrowed(prefix) }
+    }
+
+    pub(super) fn closing_suffix(&self, source: &str) -> Option<String> {
+        if self.closing.is_some() { return None; }
+        let eol = commands::line_ending(source, self.body.end);
+        let separator = if source[..self.body.end].ends_with('\n') { "" } else { eol };
+        Some(format!("{separator}{}{}", self.continuation_prefix(source), &source[self.opening.clone()]))
     }
 }
 
@@ -142,6 +160,11 @@ pub(super) fn apply(parsed: &ParsedWindow, selection: DocumentSelection, intent:
         | EditIntent::SoftBreak | EditIntent::Backspace | EditIntent::Delete | EditIntent::IndentWith { .. }) { return None; }
     let range = local_range(&parsed.source, parsed.identity.from_byte, selection.range()).ok()?;
     let code = FencedCode::at(parsed, range.start)?;
+    if code.header_only && range.is_empty() && range.start == code.body.start
+        && matches!(intent, EditIntent::Newline | EditIntent::ParagraphBreak | EditIntent::SoftBreak) {
+        let text = format!("{}{}", commands::line_ending(&parsed.source, range.start), code.continuation_prefix(&parsed.source));
+        return Some(commands::apply(parsed, selection, EditIntent::Replace(text)));
+    }
     if !code.contains(&range) { return None; }
     let source = &*parsed.source;
     let base = parsed.identity.from_byte;

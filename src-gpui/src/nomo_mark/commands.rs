@@ -840,11 +840,18 @@ pub fn apply(
                 .unwrap_or(range.start..range.start);
             let at = if before { block.start } else { block.end };
             let eol = line_ending(source, at);
-            let text = eol.repeat(2);
+            // 未闭合围栏直到文件末尾都属于代码；块后插段必须先显式闭合。
+            let closing = if before { None } else {
+                super::code_blocks::FencedCode::at(parsed, range.start)
+                    .filter(|code| code.body.end == at)
+                    .and_then(|code| code.closing_suffix(source))
+            };
+            let closing_len = closing.as_ref().map_or(0, String::len);
+            let text = format!("{}{eol}{eol}", closing.unwrap_or_default());
             let caret = if before {
                 at
             } else if at < source.len() {
-                at + eol.len()
+                at + closing_len + eol.len()
             } else {
                 at + text.len()
             };

@@ -1,5 +1,5 @@
 //! 列表命令按解析后的 item/list 祖先操作，避免把子项当作独立文本行缩进。
-//! 仅生成局部补丁；类型、任务状态和未选中的源码仍由原版会话保存。
+//! 仅生成局部补丁；组外源码、文档状态和历史仍由主会话保存。
 use super::{
     commands::{self, EditIntent, EditResult},
     parse::ParsedWindow,
@@ -47,6 +47,9 @@ fn item(parsed: &ParsedWindow, node: usize) -> Option<Item> {
             break;
         }
     }
+    // 同一物理行也可能嵌套列表；节点起点才是本层标记的下界。
+    pos = pos.max(n.source.start - start);
+    pos += line[pos..].len() - line[pos..].trim_start_matches([' ', '\t']).len();
     let marker = start + pos;
     let raw = &line[pos..];
     let digits = raw.bytes().take_while(u8::is_ascii_digit).count();
@@ -75,11 +78,15 @@ fn item(parsed: &ParsedWindow, node: usize) -> Option<Item> {
             body += 1;
         }
     }
+    let mut end = n.source.end;
+    if end > 0 && source.as_bytes()[end - 1] != b'\n' {
+        end += source[end..].bytes().take_while(|byte| matches!(byte, b' ' | b'\t')).count();
+    }
     Some(Item {
         node,
         list,
         start,
-        end: n.source.end,
+        end: end.max(body),
         indent_at,
         marker,
         marker_end,
@@ -94,7 +101,9 @@ fn containing(parsed: &ParsedWindow, at: usize) -> Option<Item> {
         .iter()
         .enumerate()
         .rev()
-        .find(|(_, n)| n.kind == "item" && n.source.start <= at && at <= n.source.end)
+        .find(|(_, n)| n.kind == "item" && n.source.start <= at
+            && (at <= n.source.end || (n.source.end > 0 && parsed.source.as_bytes()[n.source.end - 1] != b'\n'
+                && parsed.source[n.source.end..at].bytes().all(|byte| matches!(byte, b' ' | b'\t')))))
         .and_then(|(i, _)| item(parsed, i))
         .filter(|item| {
             let start = commands::line_start(&parsed.source, at);
@@ -110,6 +119,82 @@ fn siblings(parsed: &ParsedWindow, list: usize) -> Vec<Item> {
         .filter_map(|(i, _)| item(parsed, i))
         .collect()
 }
+
+/// 键盘入口与列表命令共用包含末尾落点的判断，不能退回替换选区的普通 Tab。
+pub(super) fn tab(
+    parsed: &ParsedWindow,
+    selection: DocumentSelection,
+    backwards: bool,
+) -> Option<Result<EditResult, ControlError>> {
+    if !backwards {
+        if let Some(result) = complete_prefix(parsed, selection) {
+            return Some(result);
+        }
+    }
+    let range = match super::mapping::local_range(&parsed.source, parsed.identity.from_byte, selection.range()) {
+        Ok(range) => range,
+        Err(_) => return Some(Err(ControlError::NeedsContext("跨窗口列表缩进需要完整结构；选区已保留".into()))),
+    };
+    let touches = containing(parsed, range.start).is_some() || containing(parsed, range.end).is_some()
+        || parsed.nodes.iter().any(|node| node.kind == "item" && range.start < node.source.end && node.source.start < range.end);
+    if !touches { return None; }
+    Some(apply(parsed, selection, &EditIntent::Indent { outdent: backwards })
+        .unwrap_or_else(|| Ok(result(selection, Vec::new()))))
+}
+
+fn shortcut_prefix(text: &str) -> Option<String> {
+    let text = text.trim_matches([' ', '\t']);
+    let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+    let marker_end = if text.starts_with(['-', '+', '*']) { 1 }
+        else if (1..=9).contains(&digits) && text.as_bytes().get(digits) == Some(&b'.') { digits + 1 }
+        else { return None; };
+    let tail = &text[marker_end..];
+    let task = tail.trim_start_matches([' ', '\t']);
+    if !task.is_empty() && (tail == task || !matches!(task, "[ ]" | "[x]" | "[X]")) { return None; }
+    let marker = if digits > 0 { &text[..marker_end] } else { "-" };
+    Some(if task.is_empty() { format!("{marker} ") } else { format!("{marker} {} ", task.to_ascii_lowercase()) })
+}
+
+/// 空格与 Tab 共用前缀转换；一次事务移除临时外壳，避免产生同一行的空父项。
+pub(super) fn complete_prefix(
+    parsed: &ParsedWindow,
+    selection: DocumentSelection,
+) -> Option<Result<EditResult, ControlError>> {
+    let range = super::mapping::local_range(&parsed.source, parsed.identity.from_byte, selection.range()).ok()?;
+    if !range.is_empty() { return None; }
+    let at = range.start;
+    let source = &parsed.source;
+    if !source[..at].ends_with(['-', '+', '*', '.', ']']) { return None; }
+    let start = commands::line_start(source, at);
+    // 普通词间空格直接返回，不为每次输入扫描窗口内的语义节点。
+    if at != line_end(source, at) || source[..at].ends_with([' ', '\t'])
+        || source[start..at].bytes().any(|byte| !byte.is_ascii_digit() && !b" \t>-.+*[]xX".contains(&byte))
+    { return None; }
+    if parsed.nodes.iter().any(|node| matches!(node.kind, "code" | "table" | "html") && node.source.start <= at && at <= node.source.end)
+        || parsed.inline.iter().any(|span| span.format == super::parse::InlineFormat::Code && span.open.start <= at && at <= span.close.end)
+    { return None; }
+    let outer = parsed.nodes.iter().enumerate()
+        .filter(|(_, node)| node.kind == "item" && node.source.start <= at && at <= node.source.end)
+        .filter_map(|(node, _)| item(parsed, node))
+        .filter(|entry| entry.start == start)
+        .min_by_key(|entry| entry.marker);
+    let from = outer.as_ref().map_or(start, |entry| entry.indent_at);
+    if let Some(prefix) = shortcut_prefix(&source[from..at]) {
+        let prefix = format!("{}{prefix}", &source[from..at][..source[from..at].len() - source[from..at].trim_start_matches([' ', '\t']).len()]);
+        return Some(Ok(result(selection, vec![edit(parsed, from..at, prefix)])));
+    }
+    let outer = outer?;
+    if outer.task || !source[at..outer.end].trim().is_empty() { return None; }
+    let prefix = shortcut_prefix(source.get(outer.body..at)?)?;
+    let peers = siblings(parsed, outer.list);
+    let index = peers.iter().position(|entry| entry.node == outer.node)?;
+    let indent = if index > 0 {
+        let previous = &peers[index - 1];
+        outer.marker - outer.indent_at + previous.marker_end - previous.marker
+    } else { outer.marker - outer.indent_at };
+    let replacement = format!("{}{prefix}", " ".repeat(indent));
+    Some(Ok(result(selection, vec![edit(parsed, outer.indent_at..at, replacement)])))
+}
 fn edit(parsed: &ParsedWindow, range: Range<usize>, text: String) -> SourceEdit {
     SourceEdit {
         from_byte: parsed.identity.from_byte + range.start as u64,
@@ -118,11 +203,18 @@ fn edit(parsed: &ParsedWindow, range: Range<usize>, text: String) -> SourceEdit 
     }
 }
 fn result(selection: DocumentSelection, mut edits: Vec<SourceEdit>) -> EditResult {
-    edits.sort_by_key(|e| (e.from_byte, e.to_byte));
     edits.retain(|e| e.from_byte != e.to_byte || !e.inserted_text.is_empty());
+    edits.sort_by_key(|e| (e.from_byte, e.to_byte));
+    let mut merged: Vec<SourceEdit> = Vec::with_capacity(edits.len());
+    for edit in edits {
+        if let Some(previous) = merged.last_mut().filter(|previous| previous.from_byte == edit.from_byte && previous.to_byte == edit.from_byte) {
+            previous.to_byte = edit.to_byte;
+            previous.inserted_text.push_str(&edit.inserted_text);
+        } else { merged.push(edit); }
+    }
     EditResult {
-        selection: commands::map_selection(selection, &edits),
-        edits,
+        selection: commands::map_selection(selection, &merged),
+        edits: merged,
         template_update: None,
     }
 }
@@ -170,6 +262,129 @@ fn shifted_lines(
     Ok(())
 }
 
+/// 标记宽度变化时同步移动后续段落和子树；未缩进的 Markdown 懒续行保持原样。
+fn reindent_tail(
+    parsed: &ParsedWindow,
+    it: &Item,
+    mut from: usize,
+    delta: isize,
+    edits: &mut Vec<SourceEdit>,
+) {
+    if delta == 0 { return; }
+    let source = &parsed.source;
+    let quote = &source[it.start..it.indent_at];
+    let content_indent = it.marker_end - it.indent_at;
+    while from < it.end {
+        let end = line_end(source, from);
+        let line = &source[from..end];
+        if let Some(body) = line.strip_prefix(quote) {
+            let spaces = body.bytes().take_while(|byte| *byte == b' ').count();
+            if spaces >= content_indent && !body.trim().is_empty() {
+                let at = from + quote.len();
+                edits.push(if delta > 0 { edit(parsed, at..at, " ".repeat(delta as usize)) }
+                    else { edit(parsed, at..at + delta.unsigned_abs(), String::new()) });
+            }
+        }
+        from = source[end..].find('\n').map_or(source.len(), |offset| end + offset + 1);
+    }
+}
+
+/// 拆分列表项时先闭合左侧格式，再在新项恢复右侧格式；光标仍使用原文坐标。
+fn split_item(
+    parsed: &ParsedWindow,
+    it: &Item,
+    selection: DocumentSelection,
+    mut range: Range<usize>,
+) -> Result<EditResult, ControlError> {
+    let source = &parsed.source;
+    if !range.is_empty() && parsed.nodes.iter().any(|node| matches!(node.kind, "item" | "list" | "code" | "table" | "html")
+        && range.start < node.source.start && node.source.start < range.end)
+    {
+        return Err(ControlError::NeedsContext("列表选区跨越子结构，需要完整结构操作；选区已保留".into()));
+    }
+    let base = parsed.identity.from_byte;
+    let mut visible = it.body;
+    while visible < it.end {
+        let marker = parsed.context.inline_templates.iter().flat_map(|template| [
+            template.from_byte..template.open_end_byte, template.close_start_byte..template.to_byte,
+        ]).find(|marker| marker.start == base + visible as u64 && marker.end > marker.start);
+        if let Some(marker) = marker { visible = (marker.end - base) as usize; }
+        else if let Some(ch) = source[visible..it.end].chars().next().filter(|ch| ch.is_whitespace()) { visible += ch.len_utf8(); }
+        else { break; }
+    }
+    if visible == it.end {
+        let mut lifted = lift(parsed, std::slice::from_ref(it), selection, true)?;
+        let end = it.body + source[it.body..it.end].trim_end_matches(['\r', '\n']).len();
+        if end > it.body { lifted.edits.push(edit(parsed, it.body..end, String::new())); }
+        return Ok(result(selection, lifted.edits));
+    }
+    let mut prefix = source[it.start..it.body].to_string();
+    if it.task {
+        let at = it.marker_end - it.start + 1;
+        prefix.replace_range(at..at + 1, " ");
+    }
+    let offset = it.marker - it.start;
+    let digits = prefix[offset..].bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 0 {
+        let peers = siblings(parsed, it.list);
+        let index = peers.iter().position(|entry| entry.node == it.node).ok_or(ControlError::InvalidRange)?;
+        let first = &peers[0];
+        let first_digits = source[first.marker..].bytes().take_while(u8::is_ascii_digit).count();
+        let first_number = source[first.marker..first.marker + first_digits].parse::<u64>().map_err(|_| ControlError::InvalidRange)?;
+        let number = first_number.saturating_add(index as u64).saturating_add(1);
+        prefix.replace_range(offset..offset + digits, &number.to_string());
+    }
+    // 可见文字边缘的光标不能把隐藏的起止标记留在另一项中。
+    if range.is_empty() {
+        loop {
+            let old = range.start;
+            if let Some(span) = parsed.inline.iter().rev().find(|span| !span.content.is_empty() && span.content.end == old) {
+                range = span.close.end..span.close.end;
+            } else if let Some(span) = parsed.inline.iter().find(|span| !span.content.is_empty() && span.content.start == old) {
+                range = span.open.start..span.open.start;
+            }
+            if old == range.start { break; }
+        }
+    } else {
+        loop {
+            let old = range.clone();
+            for span in &parsed.inline {
+                if range.start == span.content.start { range.start = span.open.start; }
+                if range.end == span.content.end { range.end = span.close.end; }
+            }
+            if old == range { break; }
+        }
+    }
+    for span in &parsed.inline {
+        for marker in [&span.open, &span.close] {
+            if [range.start, range.end].iter().any(|at| marker.start < *at && *at < marker.end) {
+                return Err(ControlError::NeedsContext("列表回车不能截断行内格式标记；原文已保留".into()));
+            }
+        }
+    }
+    let mut inserted = String::new();
+    for span in parsed.inline.iter().rev().filter(|span| span.content.start < range.start && range.start < span.content.end) {
+        inserted.push_str(&source[span.close.clone()]);
+    }
+    inserted.push_str(commands::line_ending(source, range.start));
+    inserted.push_str(&prefix);
+    for span in parsed.inline.iter().filter(|span| span.content.start < range.end && range.end < span.content.end) {
+        inserted.push_str(&source[span.open.clone()]);
+    }
+    let mut right = range.end;
+    while let Some(span) = parsed.inline.iter().find(|span| span.open.start == right && span.open.end > right) {
+        right = span.open.end;
+    }
+    let caret = parsed.identity.from_byte + (range.start + inserted.len() + right - range.end) as u64;
+    let next = source[range.end..].find('\n').map_or(it.end, |offset| range.end + offset + 1);
+    let delta = prefix.len() as isize - (it.body - it.start) as isize;
+    let mut edits = vec![edit(parsed, range, inserted)];
+    reindent_tail(parsed, it, next, delta, &mut edits);
+    let mut result = result(selection, edits);
+    result.selection = DocumentSelection::caret(caret);
+    Ok(result)
+}
+
 fn lift(
     parsed: &ParsedWindow,
     selected: &[Item],
@@ -197,6 +412,8 @@ fn lift(
             let parent_marker = &parsed.source[parent.marker..parent.marker_end];
             let marker_end = it.marker_end;
             edits.push(edit(parsed, it.marker..marker_end, parent_marker.into()));
+            let next = parsed.source[it.start..].find('\n').map_or(it.end, |offset| it.start + offset + 1);
+            reindent_tail(parsed, it, next, parent_marker.len() as isize - (marker_end - it.marker) as isize, &mut edits);
             if clear_empty_task && it.task {
                 edits.push(edit(parsed, marker_end..it.body, String::new()));
             }
@@ -329,11 +546,12 @@ pub fn apply(
                 .collect();
             let ordered = source.as_bytes()[it.marker].is_ascii_digit();
             if prefix != "- [ ] " && ordered == (prefix == "1. ") {
-                return Some(lift(parsed, &selected, selection, false));
+                return Some(lift(parsed, &selected, selection, true));
             }
-            let remove_tasks = prefix == "- [ ] " && selected.iter().all(|p| p.task);
+            // v0.6.2 跨类型切换修改父列表容器；子列表类型及任务状态独立保留。
+            let remove_tasks = prefix == "- [ ] " && peers.iter().all(|p| p.task);
             let mut edits = Vec::new();
-            for (i, entry) in selected.iter().enumerate() {
+            for (i, entry) in peers.iter().enumerate() {
                 let marker_end = entry.marker_end;
                 if prefix == "- [ ] " {
                     if remove_tasks {
@@ -342,15 +560,11 @@ pub fn apply(
                         edits.push(edit(parsed, entry.body..entry.body, "[ ] ".into()));
                     }
                 } else {
-                    edits.push(edit(
-                        parsed,
-                        entry.marker..marker_end,
-                        if prefix == "1. " {
-                            format!("{}. ", i + 1)
-                        } else {
-                            "- ".into()
-                        },
-                    ));
+                    let marker = if prefix == "1. " { format!("{}. ", i + 1) } else { "- ".into() };
+                    let delta = marker.len() as isize - (marker_end - entry.marker) as isize;
+                    edits.push(edit(parsed, entry.marker..marker_end, marker));
+                    let next = source[entry.start..].find('\n').map_or(entry.end, |offset| entry.start + offset + 1);
+                    reindent_tail(parsed, entry, next, delta, &mut edits);
                 }
             }
             Some(Ok(result(selection, edits)))
@@ -371,6 +585,9 @@ pub fn apply(
                 first = parent;
             }
             let peers = siblings(parsed, first.list);
+            if range.end > peers.last().map_or(parsed.nodes[first.list].source.end, |entry| entry.end.max(parsed.nodes[first.list].source.end)) {
+                return Some(Ok(result(selection, Vec::new())));
+            }
             let from = peers.iter().position(|p| p.node == first.node).unwrap();
             let selected: Vec<_> = peers
                 .iter()
@@ -403,51 +620,43 @@ pub fn apply(
             };
             let width = previous.marker_end - previous.marker;
             let mut edits = Vec::new();
+            let ordered = from > 0 && source.as_bytes()[first.marker].is_ascii_digit();
+            let mut number = 1u64;
+            if ordered {
+                let tail = parsed.nodes.iter().enumerate().filter(|(_, node)| node.parent == Some(previous.node)).max_by_key(|(_, node)| node.source.end);
+                if let Some((list, _)) = tail.filter(|(_, node)| node.kind == "list") {
+                    let children = siblings(parsed, list);
+                    if let Some(child) = children.first().filter(|child| source.as_bytes()[child.marker].is_ascii_digit()) {
+                        let digits = source[child.marker..].bytes().take_while(u8::is_ascii_digit).count();
+                        let Ok(start) = source[child.marker..child.marker + digits].parse::<u64>() else {
+                            return Some(Err(ControlError::InvalidRange));
+                        };
+                        number = start.saturating_add(children.len() as u64);
+                    }
+                }
+            }
             for entry in &selected {
                 if let Err(error) = shifted_lines(parsed, entry, width as isize, &mut edits) {
                     return Some(Err(error));
+                }
+                if ordered {
+                    let delimiter = if source[entry.marker..entry.marker_end].contains(')') { ')' } else { '.' };
+                    let marker = format!("{number}{delimiter} ");
+                    let delta = marker.len() as isize - (entry.marker_end - entry.marker) as isize;
+                    edits.push(edit(parsed, entry.marker..entry.marker_end, marker));
+                    let next = source[entry.start..].find('\n').map_or(entry.end, |offset| entry.start + offset + 1);
+                    reindent_tail(parsed, entry, next, delta, &mut edits);
+                    number = number.saturating_add(1);
                 }
             }
             Some(Ok(result(selection, edits)))
         }
         EditIntent::Newline | EditIntent::ParagraphBreak
-            if range.start >= it.body && range.end <= line_end(source, it.body) =>
+            if range.start >= it.body && range.end <= it.end
+                && !parsed.nodes.iter().any(|node| matches!(node.kind, "quote" | "html" | "table")
+                    && node.source.start >= it.body && node.source.start <= range.start && range.start < node.source.end) =>
         {
-            let end = line_end(source, it.body);
-            let has_children = parsed
-                .nodes
-                .iter()
-                .any(|n| n.parent == Some(it.node) && n.kind != "paragraph");
-            if source[it.body..end].trim().is_empty() && !has_children {
-                return Some(lift(parsed, &[it], selection, true));
-            }
-            let mut prefix = source[it.start..it.body].to_string();
-            if it.task {
-                let at = it.marker_end - it.start + 1;
-                prefix.replace_range(at..at + 1, " ");
-            }
-            // 有序列表续项从当前项编号递增；未改动的同级标记保持原文。
-            let offset = it.marker - it.start;
-            let digits = prefix[offset..]
-                .bytes()
-                .take_while(u8::is_ascii_digit)
-                .count();
-            if digits > 0 {
-                if let Ok(number) = prefix[offset..offset + digits].parse::<u64>() {
-                    prefix.replace_range(
-                        offset..offset + digits,
-                        &number.saturating_add(1).to_string(),
-                    );
-                }
-            }
-            Some(Ok(result(
-                selection,
-                vec![edit(
-                    parsed,
-                    range.clone(),
-                    format!("{}{prefix}", commands::line_ending(source, range.start)),
-                )],
-            )))
+            Some(split_item(parsed, &it, selection, range))
         }
         EditIntent::Backspace if range.is_empty() && range.start == it.body => {
             if it.task {
@@ -523,7 +732,10 @@ mod tests {
         let parsed = super::super::parse::fixture(source);
         let selection = DocumentSelection::caret(parsed.identity.from_byte + at as u64);
         let result = apply(&parsed, selection, &intent).unwrap_or_else(|| panic!("not handled: {source:?} at {at}: {intent:?}")).unwrap();
-        let mut text = source.to_string();
+        edited(&parsed, &result)
+    }
+    fn edited(parsed: &ParsedWindow, result: &EditResult) -> String {
+        let mut text = parsed.source.to_string();
         for edit in result.edits.iter().rev() {
             text.replace_range(
                 (edit.from_byte - parsed.identity.from_byte) as usize
@@ -593,14 +805,14 @@ mod tests {
         );
     }
     #[test]
-    fn list_type_and_tasks_touch_only_selected_items() {
+    fn list_type_and_tasks_switch_the_parent_group() {
         assert_eq!(
             run(
                 "1. first\n2. second\n   - child\n3. last\n",
                 "second",
                 EditIntent::LinePrefix("- ".into())
             ),
-            "1. first\n- second\n   - child\n3. last\n"
+            "- first\n- second\n  - child\n- last\n"
         );
         assert_eq!(
             run(
@@ -608,7 +820,7 @@ mod tests {
                 "first",
                 EditIntent::LinePrefix("- [ ] ".into())
             ),
-            "- first\n  - [x] child\n- last\n"
+            "- [x] first\n  - [x] child\n- [ ] last\n"
         );
         assert_eq!(
             run(
@@ -655,5 +867,206 @@ mod tests {
             ),
             "- [ ] A\n- [x] B"
         );
+    }
+
+    #[test]
+    fn tab_at_eof_moves_the_item_and_preserves_first_item_and_selection() {
+        for (source, expected) in [
+            ("- A\n- B", "- A\n  - B"),
+            ("5. A\r\n6. B", "5. A\r\n   1. B"),
+            ("- [x] A\n- [ ] B", "- [x] A\n  - [ ] B"),
+            ("- A", "- A"),
+        ] {
+            let parsed = super::super::parse::fixture(source);
+            let selection = DocumentSelection::caret(parsed.identity.from_byte + source.len() as u64);
+            let result = tab(&parsed, selection, false).unwrap().unwrap();
+            assert_eq!(edited(&parsed, &result), expected, "{source:?}");
+            assert_eq!(result.selection.head_byte, parsed.identity.from_byte + expected.len() as u64);
+        }
+        let parsed = super::super::parse::fixture("- A\n- B");
+        for reversed in [false, true] {
+            let mut selection = DocumentSelection { anchor_byte: parsed.identity.from_byte + 2, head_byte: parsed.identity.to_byte };
+            if reversed { std::mem::swap(&mut selection.anchor_byte, &mut selection.head_byte); }
+            let result = tab(&parsed, selection, false).unwrap().unwrap();
+            assert!(result.edits.is_empty());
+            assert_eq!(result.selection, selection);
+        }
+        let source = "- A\n  - [x] B";
+        let parsed = super::super::parse::fixture(source);
+        let result = tab(&parsed, DocumentSelection::caret(parsed.identity.to_byte), true).unwrap().unwrap();
+        assert_eq!(edited(&parsed, &result), "- A\n- [x] B");
+        let outside = DocumentSelection { anchor_byte: parsed.identity.from_byte, head_byte: parsed.identity.to_byte + 100 };
+        assert!(matches!(tab(&parsed, outside, false), Some(Err(ControlError::NeedsContext(_)))));
+    }
+
+    #[test]
+    fn space_and_tab_complete_prefixes_with_one_mixed_list_transition() {
+        for (source, expected) in [
+            ("-", "- "), ("*", "- "), ("+", "- "), ("12.", "12. "),
+            ("- [X]", "- [x] "), ("> -", "> - "),
+            ("1. Parent\n2. -", "1. Parent\n   - "),
+            ("1. Parent\n2. - [x]", "1. Parent\n   - [x] "),
+            ("1. Parent\n   1. -", "1. Parent\n   - "),
+        ] {
+            let parsed = super::super::parse::fixture(source);
+            let selection = DocumentSelection::caret(parsed.identity.to_byte);
+            let space = complete_prefix(&parsed, selection).unwrap_or_else(|| panic!("{source:?}")).unwrap();
+            let tab = tab(&parsed, selection, false).unwrap().unwrap();
+            assert_eq!(space, tab, "{source:?}");
+            assert_eq!(edited(&parsed, &space), expected, "{source:?}");
+            assert_eq!(space.selection.head_byte, parsed.identity.from_byte + expected.len() as u64);
+        }
+        for source in ["text", "--", "1. already", "1. ", "code\n\n\u{0060}\u{0060}\u{0060}\n-", "\u{0060}-\u{0060}"] {
+            let parsed = super::super::parse::fixture(source);
+            assert!(complete_prefix(&parsed, DocumentSelection::caret(parsed.identity.to_byte)).is_none(), "{source:?}");
+        }
+    }
+
+    #[test]
+    fn group_conversion_moves_descendants_without_changing_their_type_or_check_state() {
+        let source = "5. [x] A\r\n   7. Child\r\n6. B\r\n";
+        let parsed = super::super::parse::fixture(source);
+        let selection = DocumentSelection::caret(parsed.identity.from_byte + source.find('B').unwrap() as u64);
+        let result = apply(&parsed, selection, &EditIntent::LinePrefix("- ".into())).unwrap().unwrap();
+        let expected = "- [x] A\r\n  7. Child\r\n- B\r\n";
+        assert_eq!(edited(&parsed, &result), expected);
+        assert_eq!(result.selection.head_byte, parsed.identity.from_byte + expected.find('B').unwrap() as u64);
+        assert_eq!(run("- A\n  7. Child\n- B", "B", EditIntent::LinePrefix("1. ".into())), "1. A\n   7. Child\n2. B");
+        let source = "- [x] A\n- B\n  - [x] Child";
+        let marked = run(source, "B", EditIntent::LinePrefix("- [ ] ".into()));
+        assert_eq!(marked, "- [x] A\n- [ ] B\n  - [x] Child");
+        assert_eq!(run(&marked, "B", EditIntent::LinePrefix("- [ ] ".into())), "- A\n- B\n  - [x] Child");
+    }
+
+    #[test]
+    fn enter_splits_inline_formats_at_visible_edges_and_inside_text() {
+        for (source, at, expected) in [
+            ("- **ABCD**", 6, "- **AB**\n- **CD**"),
+            ("- **AB**", 4, "- \n- **AB**"),
+            ("- **AB**", 6, "- **AB**\n- "),
+            ("- [ABCD](https://example.test)", 5, "- [AB](https://example.test)\n- [CD](https://example.test)"),
+            ("- A\n\n  BC", 8, "- A\n\n  B\n- C"),
+        ] {
+            let parsed = super::super::parse::fixture(source);
+            let selection = DocumentSelection::caret(parsed.identity.from_byte + at);
+            let result = apply(&parsed, selection, &EditIntent::ParagraphBreak).unwrap().unwrap();
+            let text = edited(&parsed, &result);
+            assert_eq!(text, expected, "{source:?} at {at}");
+            assert!(result.selection.head_byte <= parsed.identity.from_byte + text.len() as u64);
+            let next = super::super::parse::fixture(&text);
+            if source.contains("**") && at == 6 && source.contains("CD") {
+                assert_eq!(next.inline.iter().filter(|span| span.format == super::super::parse::InlineFormat::Strong).count(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn enter_continues_displayed_numbers_and_exits_only_one_empty_level() {
+        for (source, expected) in [
+            ("5. A\n1. B", "5. A\n1. B\n7. "),
+            ("- [x] Done", "- [x] Done\n- [ ] "),
+            ("- A\n- ", "- A\n\n"),
+            ("- A\n  - ", "- A\n- "),
+            ("> - [x] Done", "> - [x] Done\n> - [ ] "),
+        ] {
+            assert_eq!(run_at(source, source.len(), EditIntent::ParagraphBreak), expected, "{source:?}");
+        }
+        assert_eq!(run_at("- Parent\n  - Child", 8, EditIntent::ParagraphBreak), "- Parent\n- \n  - Child");
+    }
+
+    #[test]
+    fn ordered_indent_starts_or_joins_a_child_list_and_keeps_descendant_depth() {
+        for (source, needle, expected) in [
+            ("9. A\n10. B\n    - Child", "B", "9. A\n   1. B\n      - Child"),
+            ("1. A\n   1. Child\n2. B", "B", "1. A\n   1. Child\n   2. B"),
+            ("1. A\n\n   7. Child\n2. B", "B", "1. A\n\n   7. Child\n   8. B"),
+        ] {
+            let parsed = super::super::parse::fixture(source);
+            let selection = DocumentSelection::caret(parsed.identity.from_byte + source.find(needle).unwrap() as u64);
+            let result = tab(&parsed, selection, false).unwrap().unwrap();
+            assert_eq!(edited(&parsed, &result), expected);
+        }
+        assert_eq!(run("1. Parent\n   - Child\n     - Grandchild", "Child", EditIntent::Indent { outdent: true }),
+            "1. Parent\n1. Child\n   - Grandchild");
+    }
+
+    #[test]
+    fn empty_child_stays_a_list_across_tab_enter_and_next_character() {
+        let source = "- Parent\n- ";
+        let parsed = super::super::parse::fixture(source);
+        let result = tab(&parsed, DocumentSelection::caret(parsed.identity.to_byte), false).unwrap().unwrap();
+        let indented = edited(&parsed, &result);
+        assert_eq!(indented, "- Parent\n  - ");
+        let child = super::super::parse::fixture(&indented);
+        assert_eq!(child.nodes.iter().filter(|node| node.kind == "item").count(), 2);
+        assert_eq!(run_at(&indented, indented.len(), EditIntent::ParagraphBreak), "- Parent\n- ");
+        let typed = format!("{indented}正文");
+        assert_eq!(super::super::parse::fixture(&typed).nodes.iter().filter(|node| node.kind == "item").count(), 2);
+    }
+
+    #[test]
+    fn list_transitions_save_and_undo_redo_as_one_session_transaction() {
+        use super::super::native_port::NativeWindowPort;
+        use std::{fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+            .join(".artifacts/list-parity-v062-20261102/session-tests");
+        fs::create_dir_all(&base).unwrap();
+        let root = base.join(format!("history-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        assert!(!root.exists());
+        fs::create_dir(&root).unwrap();
+        for (index, source) in ["1. A\n2. B", "9. A\n10. B\n    - Child", "1. Parent\n2. -", "- **中文AB**"].into_iter().enumerate() {
+            let port = NativeWindowPort::open(root.join(index.to_string()), "list-test".into(), None, Some(source.into())).unwrap();
+            let status = port.status().unwrap();
+            let parsed = ParsedWindow::parse(port.read_window(status.revision, 0..status.byte_length).unwrap(),
+                "list-test", 0, WindowContext::Complete).unwrap();
+            let at = if index == 3 { source.find("AB").unwrap() + 1 }
+                else if index == 1 { source.find('B').unwrap() } else { source.len() };
+            let before = DocumentSelection::caret(at as u64);
+            let change = match index {
+                0 => commands::apply_semantic(&parsed, before, EditIntent::LinePrefix("- ".into())).unwrap(),
+                1 | 2 => tab(&parsed, before, false).unwrap().unwrap(),
+                _ => commands::apply_semantic(&parsed, before, EditIntent::ParagraphBreak).unwrap(),
+            };
+            let expected = edited(&parsed, &change);
+            let after = change.selection;
+            let revision = port.submit(DocumentTransaction {
+                base_revision: status.revision, operation_id: "list-change".into(), history_group_id: "list-change".into(),
+                edits: change.edits, selection_before: before, selection_after: after, template_update: change.template_update,
+            }).unwrap();
+            assert_eq!(port.read_window(revision, 0..expected.len() as u64).unwrap().text, expected);
+            let (undone, selection) = port.history(revision, false).unwrap();
+            assert_eq!(selection, Some(before));
+            assert_eq!(port.read_window(undone, 0..source.len() as u64).unwrap().text, source);
+            let (redone, selection) = port.history(undone, true).unwrap();
+            assert_eq!(selection, Some(after));
+            assert_eq!(port.read_window(redone, 0..expected.len() as u64).unwrap().text, expected);
+            let path = root.join(format!("saved-{index}.md"));
+            let snapshot = port.capture_for_save(redone).unwrap();
+            port.save_captured(snapshot, Some(path.clone()), false).unwrap();
+            assert_eq!(fs::read_to_string(path).unwrap(), expected);
+            port.close(true).unwrap();
+        }
+        let resolved = root.canonicalize().unwrap();
+        assert!(resolved.starts_with(base.canonicalize().unwrap()));
+        fs::remove_dir_all(resolved).unwrap();
+    }
+
+    #[test]
+    fn enter_exits_an_empty_formatted_item_and_clears_its_template() {
+        use super::super::host::WindowHostAdapter;
+        let mut host = WindowHostAdapter::new(DocumentWindow { document_id: "list-format".into(), revision: 1,
+            from_byte: 0, to_byte: 2, text: "- ".into(), inline_templates: Vec::new() },
+            "list-format", 0, WindowContext::Complete).unwrap();
+        host.mark_layout_ready(LayoutStamp { identity: host.parsed.identity.clone(), width: 600.0,
+            font_generation: 0, resource_generation: 0, zoom: 1.0 }, 24.0).unwrap();
+        let styled = commands::apply_semantic(&host.parsed, DocumentSelection::caret(2),
+            EditIntent::ToggleInline(super::super::parse::InlineFormat::Strong)).unwrap();
+        host.queue_template_edit(styled.edits, styled.selection, "style", styled.template_update).unwrap();
+        assert_eq!(&*host.parsed.source, "- ****");
+        let exited = commands::apply_semantic(&host.parsed, host.selection, EditIntent::ParagraphBreak).unwrap();
+        host.queue_template_edit(exited.edits, exited.selection, "enter", exited.template_update).unwrap();
+        assert_eq!(&*host.parsed.source, "");
+        assert!(host.parsed.context.inline_templates.is_empty());
+        assert_eq!(host.selection, DocumentSelection::caret(0));
     }
 }

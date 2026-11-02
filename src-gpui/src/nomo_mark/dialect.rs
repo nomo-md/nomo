@@ -21,6 +21,14 @@ impl DetailsBlock {
         open.end..end
     }
 
+    /// 空正文使用标题分隔行之后的同一落点绘制光标和接收输入。
+    pub fn empty_body_caret(&self, source: &str) -> Option<usize> {
+        let body = &source[self.body.clone()];
+        body.trim().is_empty().then(|| {
+            self.body.start + body.match_indices('\n').take(2).last().map_or(0, |(at, _)| at + 1)
+        })
+    }
+
     pub fn unwrapped(&self, source: &str) -> String {
         let eol = super::commands::line_ending(source, self.source.start);
         let title = source[self.title(source)].trim();
@@ -42,6 +50,37 @@ pub fn events(
     unresolved: &mut Vec<Range<usize>>,
     reference_keys: &mut BTreeSet<String>,
 ) -> Vec<(Event<'static>, Range<usize>)> {
+    let (projected, empty_items) = project_empty_list_items(source, options, document_start);
+    if !empty_items.is_empty() {
+        let details_from = details.len();
+        let unresolved_from = unresolved.len();
+        let mut result = events(&projected, offset, document_start, options, context, details, unresolved, reference_keys);
+        let map = |at: usize| at - empty_items.partition_point(|item| offset + item.projected < at);
+        for (event, range) in &mut result {
+            if matches!(event, Event::Text(_)) {
+                let index = empty_items.partition_point(|item| offset + item.projected < range.start);
+                if let Some(item) = empty_items.get(index).filter(|item| offset + item.projected < range.end) {
+                    *event = Event::Text("".into());
+                    *range = offset + item.anchor..offset + item.anchor;
+                    continue;
+                }
+            }
+            *range = map(range.start)..map(range.end);
+            if let Event::Start(Tag::List(Some(number))) = event {
+                let index = empty_items.partition_point(|item| offset + item.marker < range.start);
+                if let Some(original) = empty_items.get(index).filter(|item| offset + item.line <= range.start && range.start <= offset + item.marker)
+                    .and_then(|item| item.number)
+                { *number = original; }
+            }
+        }
+        for block in &mut details[details_from..] {
+            block.source = map(block.source.start)..map(block.source.end);
+            block.summary = map(block.summary.start)..map(block.summary.end);
+            block.body = map(block.body.start)..map(block.body.end);
+        }
+        for range in &mut unresolved[unresolved_from..] { *range = map(range.start)..map(range.end); }
+        return result;
+    }
     let mut result = Vec::new();
     let front = if document_start {
         nomo_syntax::front_matter_end(source)
@@ -166,6 +205,78 @@ pub fn events(
     }
     reference_keys.extend(keys.into_inner());
     result
+}
+
+struct EmptyListItem {
+    line: usize,
+    marker: usize,
+    insert: usize,
+    anchor: usize,
+    number: Option<u64>,
+    projected: usize,
+}
+
+/// CommonMark 的空子项不能打断段落。临时补一个解析字符并映射回原文，维持编辑结构。
+/// 仅有候选行时检查容器；投影及坐标表随本次窗口解析释放，不写回正文。
+fn project_empty_list_items(source: &str, options: Options, document_start: bool) -> (std::borrow::Cow<'_, str>, Vec<EmptyListItem>) {
+    if !source.contains('\n') { return (source.into(), Vec::new()); }
+    let front = if document_start { nomo_syntax::front_matter_end(source).unwrap_or(0) } else { 0 };
+    let mut candidates = Vec::new();
+    let mut from = 0;
+    for line in source.split_inclusive('\n') {
+        let raw = line.trim_end_matches(['\r', '\n']);
+        let prefix = raw.len() - raw.trim_start_matches([' ', '\t', '>']).len();
+        let body = &raw[prefix..];
+        let digits = body.bytes().take_while(u8::is_ascii_digit).count();
+        let marker = if body.starts_with(['-', '+', '*']) { 1 }
+            else if (1..=9).contains(&digits) && matches!(body.as_bytes().get(digits), Some(b'.' | b')')) { digits + 1 }
+            else { 0 };
+        if from >= front && prefix > 0 && marker > 0 && body.len() > marker
+            && body[marker..].bytes().all(|byte| matches!(byte, b' ' | b'\t'))
+        {
+            candidates.push(EmptyListItem { line: from, marker: from + prefix, insert: from + prefix + marker + 1,
+                anchor: from + raw.len(), number: if digits > 0 { body[..digits].parse().ok() } else { None }, projected: 0 });
+        }
+        from += line.len();
+    }
+    if candidates.is_empty() { return (source.into(), Vec::new()); }
+    let mut containers = Parser::new_ext(source, options).into_offset_iter().filter_map(|(event, range)| match event {
+        Event::Start(Tag::Item) => Some((true, range)),
+        Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock) => Some((false, range)),
+        _ => None,
+    }).peekable();
+    let mut active = Vec::new();
+    let mut items = Vec::new();
+    for mut candidate in candidates {
+        while containers.peek().is_some_and(|(_, range)| range.start <= candidate.insert) { active.push(containers.next().unwrap()); }
+        active.retain(|(_, range)| range.end >= candidate.marker);
+        let inside = active.iter().any(|(item, range)| *item && range.start < candidate.line && candidate.marker < range.end);
+        let covered = active.iter().any(|(item, range)| {
+            if *item { super::commands::line_start(source, range.start) == candidate.line && range.start <= candidate.marker && candidate.marker <= range.end }
+            else { range.start <= candidate.marker && candidate.marker < range.end }
+        });
+        if inside && !covered {
+            candidate.projected = candidate.insert + items.len();
+            items.push(candidate);
+        }
+    }
+    drop(containers);
+    if items.is_empty() { return (source.into(), items); }
+    let mut projected = String::with_capacity(source.len() + items.len());
+    let mut from = 0;
+    for item in &items {
+        projected.push_str(&source[from..item.marker]);
+        if item.number.is_some() {
+            let digits = source[item.marker..].bytes().take_while(u8::is_ascii_digit).count();
+            projected.push_str(&"0".repeat(digits - 1));
+            projected.push('1');
+            projected.push_str(&source[item.marker + digits..item.insert]);
+        } else { projected.push_str(&source[item.marker..item.insert]); }
+        projected.push('x');
+        from = item.insert;
+    }
+    projected.push_str(&source[from..]);
+    (projected.into(), items)
 }
 fn parser_definitions(
     source: &str,

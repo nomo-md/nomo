@@ -356,6 +356,8 @@ impl NomoMark {
             return Err(ControlError::Unsupported("对象草稿超过当前窗口预算；请在源码窗口中继续编辑".into()));
         }
         let inserted_details = result.edits.iter().any(|e| e.inserted_text.contains("<details"));
+        let previous_selection = self.host.selection;
+        let previous_generation = self.host.parsed.identity.projection_generation;
         if !self.auxiliary_input && self.host.projected_window_bytes(&result.edits)? > super::session_window::policy().group_bytes as usize {
             self.host.queue_rewindow(result.edits, result.selection, group, result.template_update)?;
         } else {
@@ -376,6 +378,12 @@ impl NomoMark {
         }
         self.invalidate();
         self.submit(cx);
+        if self.host.parsed.identity.projection_generation == previous_generation && self.host.selection != previous_selection {
+            cx.emit(ControlEvent::SelectionChanged {
+                identity: self.host.parsed.identity.clone(),
+                selection: self.host.selection,
+            });
+        }
         cx.notify();
         Ok(())
     }
@@ -536,6 +544,13 @@ impl NomoMark {
         }
     }
     fn tab(&mut self, backwards: bool, cx: &mut Context<Self>) {
+        if self.keyboard_protected() { return; }
+        if self.effective_mode() == ViewMode::Semantic
+            && local_range(&self.host.parsed.source, self.host.parsed.identity.from_byte, self.host.selection.range()).is_err()
+        {
+            self.command(EditIntent::Indent { outdent: backwards }, cx);
+            return;
+        }
         if self.effective_mode() == ViewMode::Semantic {
             if let Some(table) = self
                 .host
@@ -588,11 +603,10 @@ impl NomoMark {
         let parsed = &self.host.parsed;
         let at = self.local_cursor();
         let code = self.auxiliary_input || parsed.nodes.iter().any(|n| n.kind == "code" && n.source.contains(&at));
-        let list = parsed.nodes.iter().any(|n| n.kind == "item" && n.source.contains(&at));
         if code || self.effective_mode() == ViewMode::Source {
             self.command(EditIntent::IndentWith { outdent: backwards, unit: cx.global::<Settings>().code_indent.into() }, cx);
-        } else if list {
-            self.command(EditIntent::Indent { outdent: backwards }, cx);
+        } else if let Some(result) = super::list_commands::tab(parsed, self.host.selection, backwards) {
+            if let Err(error) = result.and_then(|result| self.apply_host_edit(result, cx)) { self.error(error, cx); }
         } else if !backwards {
             self.command(EditIntent::Replace("\t".into()), cx);
         } else if self.host.selection.range().is_empty() && at > 0 && parsed.source.as_bytes()[at - 1] == b'\t' {
@@ -2059,6 +2073,14 @@ impl NomoMark {
         mark: bool,
         cx: &mut Context<Self>,
     ) {
+        if !mark && text == " " && range.is_none() && !self.keyboard_protected() && self.external_composition.is_none()
+            && self.effective_mode() == ViewMode::Semantic && !self.auxiliary_input
+        {
+            if let Some(result) = super::list_commands::complete_prefix(&self.host.parsed, self.host.selection) {
+                if let Err(error) = result.and_then(|result| self.apply_host_edit(result, cx)) { self.error(error, cx); }
+                return;
+            }
+        }
         if self.effective_mode() == ViewMode::Semantic && self.host.selection.range().is_empty()
             && self.local_cursor() == self.host.parsed.source.len() && super::editing_rules::trailing_prefix(&self.host.parsed).is_some() {
             if mark || self.external_composition.is_some() { self.replace_external_composition(range, text, selected, mark, cx); }

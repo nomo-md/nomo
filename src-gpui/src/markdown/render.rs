@@ -859,7 +859,9 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                     builder.indent += metrics.list_indent();
                     builder.containers.push(Container::Item { marker_pending: true, number, depth, task: None });
                     let raw=source[range.clone()].trim_end_matches(['\r','\n']);
-                    if builder.controlled && crate::nomo_mark::commands::structural_prefix_len(raw)==Some(raw.len()) {
+                    // 行尾的 "-"、"1." 也会被解析为空列表项，未输入空格时仍须保留行高和光标锚点。
+                    let empty_item = events.peek().is_some_and(|(event, _)| matches!(event, Event::End(TagEnd::Item)));
+                    if builder.controlled && (empty_item || crate::nomo_mark::commands::structural_prefix_len(raw)==Some(raw.len())) {
                         builder.empty_anchor(range.start+raw.len());
                     }
                 }
