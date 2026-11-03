@@ -4,7 +4,7 @@ mod service;
 use super::{markdown_history::MarkdownSelection, markdown_session::MarkdownStatus};
 pub(super) use matcher::{check_cancel, Checkpoint, Matcher};
 use serde::{Deserialize, Serialize};
-pub(super) use service::{SearchService, SearchTask};
+pub(super) use service::{SearchKind, SearchService, SearchTask};
 use std::sync::Arc;
 
 pub(crate) const SEARCH_EVENT: &str = "nomo://markdown-task-progress";

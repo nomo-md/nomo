@@ -76,7 +76,11 @@ pub(in crate::text_document) struct TaskData {
     pub completed_operation: Option<String>,
     touched: Instant,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::text_document) enum SearchKind { Find, ReplaceAll }
+
 pub(in crate::text_document) struct SearchTask {
+    kind: SearchKind,
     pub owner: String,
     pub query: SearchQuery,
     pub identity: TaskIdentity,
@@ -161,6 +165,7 @@ impl SearchService {
         &self,
         owner: String,
         query: SearchQuery,
+        kind: SearchKind,
         snapshot: DocumentSnapshot,
         lifetime: Box<dyn Send + Sync>,
         sink: Option<ProgressSink>,
@@ -177,6 +182,7 @@ impl SearchService {
         };
         let total_bytes = snapshot.len();
         let task = Arc::new(SearchTask {
+            kind,
             owner: owner.clone(),
             query,
             snapshot,
@@ -204,11 +210,24 @@ impl SearchService {
             idle: Condvar::new(),
             retired: Arc::downgrade(&self.retired),
         });
-        self.cancel_owner(&owner);
-        self.tasks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(task.identity.task_id.clone(), task.clone());
+        // 查找结果和替换候选各占一个位置。替换未改正文时，当前查找仍可继续分页。
+        let previous = {
+            let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+            let mut previous = Vec::new();
+            let sequence = task.query.request_id.parse::<u64>().ok();
+            for other in tasks.values().filter(|t| t.owner == owner && t.query.document_id == task.query.document_id && t.kind == kind) {
+                // 正式查找在派发前分配递增序号；非数字请求标识仍按登记顺序处理。
+                if kind == SearchKind::Find && (other.query.base_revision > task.query.base_revision
+                    || (other.query.base_revision == task.query.base_revision && sequence.zip(other.query.request_id.parse::<u64>().ok())
+                        .is_some_and(|(incoming, active)| incoming < active))) {
+                    return Err(TextDocumentError::new("task-cancelled", "搜索请求已被更新的查询取代"));
+                }
+                previous.push(other.identity.task_id.clone());
+            }
+            tasks.insert(task.identity.task_id.clone(), task.clone());
+            previous
+        };
+        for id in previous { self.cancel(&owner, &id); }
         Ok(task)
     }
     pub fn get(&self, owner: &str, id: &str) -> TextDocumentResult<Arc<SearchTask>> {

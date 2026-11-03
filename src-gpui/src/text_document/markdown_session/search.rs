@@ -4,7 +4,7 @@ mod tests;
 use super::*;
 use crate::text_document::markdown_search::{
     check_cancel, Checkpoint, ProgressSink, ReplaceQuery, ReplaceResult, SearchPage, SearchQuery,
-    SearchTask, TaskIdentity, TaskProgress,
+    SearchKind, SearchTask, TaskIdentity, TaskProgress,
 };
 
 const HISTORY_BATCH_ITEMS: usize = 4096;
@@ -132,6 +132,7 @@ impl MarkdownDocumentSessionManager {
         &self,
         owner: &str,
         query: SearchQuery,
+        kind: SearchKind,
         sink: Option<ProgressSink>,
     ) -> TextDocumentResult<Arc<SearchTask>> {
         let handle = self.session(&query.document_id)?;
@@ -147,7 +148,7 @@ impl MarkdownDocumentSessionManager {
             session.current.clone()
         };
         self.search
-            .create(owner.into(), query, snapshot, Box::new(handle), sink)
+            .create(owner.into(), query, kind, snapshot, Box::new(handle), sink)
     }
     pub(crate) fn start_search(
         &self,
@@ -155,7 +156,7 @@ impl MarkdownDocumentSessionManager {
         query: SearchQuery,
         sink: Option<ProgressSink>,
     ) -> TextDocumentResult<TaskIdentity> {
-        let task = self.search_task(owner, query, sink)?;
+        let task = self.search_task(owner, query, SearchKind::Find, sink)?;
         let identity = task.identity.clone();
         self.search.start_search(task);
         Ok(identity)
@@ -198,7 +199,7 @@ impl MarkdownDocumentSessionManager {
         if request.operation_id.is_empty() || request.anchors.len() > 64 {
             return Err(error("invalid-transaction", "替换操作身份或阅读锚点无效"));
         }
-        let task = self.search_task(owner, request.search.clone(), sink)?;
+        let task = self.search_task(owner, request.search.clone(), SearchKind::ReplaceAll, sink)?;
         if let Err(error) = validate_selection(&task.snapshot, request.selection.as_ref()) {
             self.search.cancel(owner, &task.identity.task_id);
             return Err(error);

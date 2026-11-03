@@ -100,14 +100,21 @@ impl WritingStatsService {
                 .state
                 .lock()
                 .map_err(|_| super::invalid("统计调度锁已损坏"))?;
+            // 同一标签的后台请求可能乱序到达。迟到的旧选区不能取消已在计算的新选区。
+            if state.active.as_ref().is_some_and(|active| active.owner == owner && active.document == query.document_id
+                && active.request > query.request_id && !active.cancel.load(Ordering::Relaxed))
+                || state.pending.iter().any(|job| job.owner == owner && job.query.document_id == query.document_id
+                    && job.query.request_id > query.request_id) {
+                return Err(cancelled());
+            }
             if let Some(active) = &state.active {
-                if active.owner == owner {
+                if active.owner == owner && active.document == query.document_id {
                     active.cancel.store(true, Ordering::Relaxed);
                 }
             }
             let mut i = 0;
             while i < state.pending.len() {
-                if state.pending[i].owner == owner {
+                if state.pending[i].owner == owner && state.pending[i].query.document_id == query.document_id {
                     let old = state.pending.remove(i).unwrap();
                     let _ = old.reply.send(Err(cancelled()));
                 } else {
