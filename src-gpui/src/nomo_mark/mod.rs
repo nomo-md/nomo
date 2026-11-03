@@ -26,6 +26,7 @@ mod inline_commands;
 mod semantic_selection;
 mod semantic_global;
 pub(crate) mod link_edit;
+pub(crate) mod link_display;
 mod link_target;
 mod list_commands;
 mod template_projection;

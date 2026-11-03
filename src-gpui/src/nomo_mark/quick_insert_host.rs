@@ -52,6 +52,7 @@ impl DocumentHost {
     }
     fn dismiss_quick(&mut self,cx:&mut Context<Self>) {self.control.update(cx,|view,cx|view.dismiss_quick_insert(cx));}
     fn quick_error(&mut self,error:ControlError,cx:&mut Context<Self>) {
+        if matches!(error, ControlError::Stale) { self.dismiss_quick(cx); return; }
         let message=ToolbarLocale::current(cx).error(&error);
         self.control.update(cx,|view,cx|view.quick_insert_error(message,cx));
     }
@@ -72,7 +73,7 @@ impl DocumentHost {
         }
         let stale=self.quick.picker.as_ref().is_some_and(|picker|!self.quick_current(picker.target(),cx))
             || self.quick.import.as_ref().is_some_and(|request|!self.import_current(request,cx));
-        if stale {self.quick.cancel();self.report(ControlError::Stale,cx);window.focus(&self.control.focus_handle(cx),cx);}
+        if stale {self.quick.cancel();cx.notify();return;}
         if self.control.read(cx).host.pending_count()==0 {
             if let Some((edit, inputs)) = self.quick.images.take() {
                 self.insert_image_inputs(edit, inputs, window, cx);
@@ -136,11 +137,13 @@ impl DocumentHost {
         let Some(anchor)=self.control.read(cx).quick_insert_anchor() else{return;};
         let view=cx.new(|cx|{let mut view=EditorPopover::new_link(String::new(),String::new(),false,cx);view.set_popup_anchor(PopupAnchor::Bounds(anchor));view});
         let subscription=cx.subscribe_in(&view,window,|host,view,event,window,cx| {
+            let Some(Picker::Link{target,draft,view:current,..})=host.quick.picker.as_ref() else{return;};
+            if current != view {return;}
+            if !host.quick_current(target,cx) {host.quick.cancel();cx.notify();return;}
             if matches!(event,EditorPopoverEvent::Dismiss){host.quick.picker=None;window.focus(&host.control.focus_handle(cx),cx);cx.notify();return;}
-            let Some(Picker::Link{target,draft,..})=host.quick.picker.as_ref() else{return;};
             let result=host.quick_validate(target,cx).and_then(|_|match event {EditorPopoverEvent::ApplyLink{text,href}=>draft.edit(&host.control.read(cx).host.parsed,text,Some(href)),_=>Err(ControlError::InvalidRange)});
             let result=result.and_then(|result|host.control.update(cx,|control,cx|control.apply_host_edit(result,cx)));
-            match result {Ok(())=>{host.quick.picker=None;window.focus(&host.control.focus_handle(cx),cx);},Err(error)=>view.update(cx,|view,cx|view.set_error(Some(ToolbarLocale::current(cx).error(&error).into()),cx))}
+            match result {Ok(())=>{host.quick.picker=None;window.focus(&host.control.focus_handle(cx),cx);},Err(ControlError::Stale)=>host.quick.cancel(),Err(error)=>view.update(cx,|view,cx|view.set_error(Some(ToolbarLocale::current(cx).error(&error).into()),cx))}
             cx.notify();
         });
         self.dismiss_quick(cx);window.focus(&view.focus_handle(cx),cx);
@@ -149,14 +152,19 @@ impl DocumentHost {
     fn open_quick_emoji(&mut self,target:QuickTarget,window:&mut Window,cx:&mut Context<Self>) {
         let Some(anchor)=self.control.read(cx).quick_insert_anchor() else{return;};
         let view=cx.new(|cx|EmojiPicker::new(PopupAnchor::Bounds(anchor),cx));
-        let subscription=cx.subscribe_in(&view,window,|host,_,event,window,cx|{
+        let subscription=cx.subscribe_in(&view,window,|host,view,event,window,cx|{
+            let Some(Picker::Emoji{target,view:current,..})=host.quick.picker.as_ref() else{return;};
+            if current != view {return;}
+            if !host.quick_current(target,cx) {host.quick.cancel();cx.notify();return;}
             if let EmojiPickerEvent::Choose(value)=event {
-                let result=host.quick.picker.as_ref().ok_or(ControlError::Stale).and_then(|picker|{
-                    let target=picker.target();host.quick_validate(target,cx)?;
+                let result=host.quick_validate(target,cx).and_then(|_|{
                     let parsed=&host.control.read(cx).host.parsed;let base=parsed.identity.from_byte;
                     crate::nomo_mark::commands::apply_semantic(parsed,DocumentSelection{anchor_byte:base+target.range.start as u64,head_byte:base+target.range.end as u64},EditIntent::Replace(value.clone()))
                 });
-                if let Err(error)=result.and_then(|result|host.control.update(cx,|view,cx|view.apply_host_edit(result,cx))){host.report(error,cx);}
+                match result.and_then(|result|host.control.update(cx,|view,cx|view.apply_host_edit(result,cx))) {
+                    Err(ControlError::Stale)=>{host.quick.cancel();cx.notify();return;},
+                    Err(error)=>host.report(error,cx), Ok(())=>{},
+                }
             }
             host.quick.picker=None;window.focus(&host.control.focus_handle(cx),cx);cx.notify();
         });
@@ -172,7 +180,7 @@ impl DocumentHost {
             if edit.is_semantic() { crate::nomo_mark::table_inline::validate_insertion(parsed, &range)?; }
             Ok(QuickTarget { trigger: parsed.source[range.clone()].into(), range, edit, pane: self.panes[self.active_pane].id })
         });
-        let target = match result { Ok(target) => target, Err(error) => { self.report(error, cx); return; } };
+        let target = match result { Ok(target) => target, Err(ControlError::Stale) => return, Err(error) => { self.report(error, cx); return; } };
         let settings = ImageSettings::read(&cx.global::<crate::settings::Settings>().value("imageHandlingSettings"));
         static NEXT: AtomicU64 = AtomicU64::new(1 << 32);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -199,7 +207,7 @@ impl DocumentHost {
     }
     fn quick_image_paths(&mut self,id:u64,paths:Vec<ImageInput>,window:&mut Window,cx:&mut Context<Self>) {
         let Some(request)=self.quick.import.as_ref().filter(|r|r.id==id)else{return;};
-        if !self.import_current(request,cx){self.quick.cancel();self.report(ControlError::Stale,cx);return;}
+        if !self.import_current(request,cx){self.quick.cancel();cx.notify();return;}
         if self.path().is_some() || request.settings.strategy == "upload" {self.start_quick_image_import(id,paths,window,cx);return;}
         let response=match self.prompt_save_path(window,cx) {
             Ok(response)=>response,
@@ -216,7 +224,7 @@ impl DocumentHost {
     }
     fn save_for_quick_image(&mut self,id:u64,paths:Vec<ImageInput>,path:PathBuf,window:&mut Window,cx:&mut Context<Self>) {
         let Some(request)=self.quick.import.as_ref().filter(|r|r.id==id)else{return;};
-        if !self.import_current(request,cx){self.quick.cancel();self.report(ControlError::Stale,cx);return;}
+        if !self.import_current(request,cx){self.quick.cancel();cx.notify();return;}
         let (port,snapshot)=match self.begin_save(cx){Ok(value)=>value,Err(error)=>{self.quick.cancel();self.report(error,cx);return;}};
         // 保存前清理空模板可能产生新修订；只接受原选区文本仍匹配的映射后落点。
         if let Some(request) = self.quick.import.as_mut().filter(|r| r.id == id) {
@@ -227,7 +235,13 @@ impl DocumentHost {
                     request.target.edit.selection = view.host.selection;
                     request.target.range = range;
                 }
-                _ => { self.quick.cancel(); self.saving = false; self.report(ControlError::Stale, cx); return; }
+                _ => {
+                    self.quick.cancel();
+                    self.saving = false;
+                    if let Err(error) = port.manager.release(&port.owner, &snapshot.snapshot_id) { self.report(ControlError::HostFailure(error.to_string()), cx); }
+                    cx.notify();
+                    return;
+                }
             }
         }
         let backup=cx.global::<crate::settings::Settings>().snapshot_before_save;
@@ -245,7 +259,7 @@ impl DocumentHost {
     }
     fn start_quick_image_import(&mut self,id:u64,paths:Vec<ImageInput>,window:&mut Window,cx:&mut Context<Self>) {
         let Some(mut request)=self.quick.import.as_ref().filter(|r|r.id==id).cloned()else{return;};
-        if !self.import_current(&request,cx){self.quick.cancel();self.report(ControlError::Stale,cx);return;}
+        if !self.import_current(&request,cx){self.quick.cancel();cx.notify();return;}
         let path=self.path();
         if path.is_none() && request.settings.strategy != "upload" {self.quick.cancel();return;}
         request.path=path.clone();self.quick.import=Some(request.clone());
@@ -255,8 +269,17 @@ impl DocumentHost {
         cx.spawn_in(window,async move|this,cx|{
             let result=task.await;
             let _=this.update_in(cx,|host,window,cx|{
-                if !host.quick.import.as_ref().is_some_and(|r|r.id==id){return;}
-                if !host.import_current(&request,cx){host.quick.cancel();host.report(ControlError::Unsupported("插入目标或文档路径已改变，原文已保留；已复制的图片保留在所选资源目录".into()),cx);return;}
+                let owns_request = host.quick.import.as_ref().is_some_and(|r|r.id==id);
+                if !owns_request || !host.import_current(&request,cx) {
+                    if owns_request { host.quick.cancel(); }
+                    let count = request.cancel.created_resources();
+                    if count > 0 && !host.closed {
+                        let action = if request.settings.strategy == "upload" { "上传" } else { "复制" };
+                        cx.emit(DocumentEvent::Notice(format!("已{action} {count} 张图片，但插入位置已失效，文档未插入图片。")));
+                    }
+                    cx.notify();
+                    return;
+                }
                 let result=result.map_err(ControlError::HostFailure).and_then(|batch|{
                     if batch.images.is_empty(){return Err(ControlError::HostFailure(format!("图片导入失败（{} 张）：{}",batch.failed,batch.errors.join("；"))));}
                     let view=host.control.read(cx);let parsed=&view.host.parsed;let range=request.target.range.clone();let base=parsed.identity.from_byte;

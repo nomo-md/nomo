@@ -3,26 +3,51 @@ use super::*;
 use crate::settings::{EditorMode, Settings};
 use std::{sync::atomic::{AtomicU64, Ordering}, time::{Duration, Instant}};
 
-/// 在大纲左侧的可用区域内按比例居中正文。返回左边距与正文宽度（逻辑像素）。
-fn outline_content_column(width: f32, outline_visible: bool, width_percent: f32) -> Option<(f32, f32)> {
-    if !outline_visible || width <= 900.0 { return None; }
-    let outline_space = 224.0 + (width * 0.035).clamp(32.0, 160.0);
-    let available = width - outline_space;
-    let content = available * width_percent;
-    Some(((available - content) / 2.0, content))
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum OutlineLayout {
+    Visible { shift_fraction: f32 },
+    Hidden,
+}
+
+impl OutlineLayout {
+    pub(crate) const PANEL_WIDTH: f32 = 220.0;
+    pub(crate) const RIGHT_INSET: f32 = 16.0;
+    pub(super) const CENTERED: Self = Self::Visible { shift_fraction: 0.0 };
+
+    fn for_column(self, width: f32, percent: f32) -> Self {
+        let right_margin = (width - width * percent) / 2.0;
+        let missing = Self::PANEL_WIDTH + Self::RIGHT_INSET + 12.0 - right_margin;
+        let max_shift = (width * 0.03).min(48.0);
+        // 重新显示大纲时多等 8px 余量，避免调整正文或侧栏宽度时反复显隐。
+        let threshold = if self == Self::Hidden { (max_shift - 8.0).max(0.0) } else { max_shift };
+        if missing > threshold { Self::Hidden } else { Self::Visible { shift_fraction: missing.max(0.0) / width } }
+    }
 }
 
 #[test]
-fn outline_content_column_preserves_margins_at_high_widths() {
-    let mut previous = 0.0;
-    for percent in 86..=90 {
-        let (left, content) = outline_content_column(1600.0, true, percent as f32 / 100.0).unwrap();
-        assert!(content > previous && left >= 66.0);
-        assert!((2.0 * left + content - 1320.0).abs() < 0.01);
-        previous = content;
+fn outline_content_column_preserves_percentage_and_outline_clearance() {
+    use OutlineLayout::{Hidden, Visible};
+    let initial = OutlineLayout::CENTERED;
+    for width in [420.0, 900.0, 1000.0, 1200.0, 1600.0, 4000.0] {
+        for percent in 30..=100 {
+            let fraction = percent as f32 / 100.0;
+            let margin = (width - width * fraction) / 2.0;
+            let max_shift = (width * 0.03_f32).min(48.0);
+            match initial.for_column(width, fraction) {
+                Visible { shift_fraction } => {
+                    let text_shift = width * shift_fraction;
+                    assert!(text_shift <= max_shift + 0.01 && margin >= text_shift);
+                    assert!((margin + text_shift) >= 248.0 - 0.01);
+                }
+                Hidden => assert!(margin + max_shift < 248.0),
+            }
+        }
     }
-    assert_eq!(outline_content_column(900.0, true, 0.9), None);
-    assert_eq!(outline_content_column(1600.0, false, 0.9), None);
+    assert_eq!(initial.for_column(1200.0, 0.60), Visible { shift_fraction: 8.0 / 1200.0 });
+    assert_eq!(initial.for_column(1200.0, 0.75), Hidden);
+    assert_eq!(initial.for_column(1600.0, 0.75), Visible { shift_fraction: 48.0 / 1600.0 });
+    assert_eq!(Hidden.for_column(1600.0, 0.75), Hidden);
+    assert_eq!(Hidden.for_column(1600.0, 0.74), Visible { shift_fraction: 40.0 / 1600.0 });
 }
 
 #[derive(Clone, Copy)]
@@ -32,6 +57,16 @@ struct OutlineScrollMotion { from: gpui::Pixels, previous: gpui::Pixels, started
 #[derive(Clone, Copy)]
 pub(super) struct ReadingAnchor { byte: u64, fraction: f32, revision: Option<u64>, view_only: bool, edge: Option<ReadingEdge>, motion: Option<OutlineScrollMotion> }
 
+const SCROLLBAR_EDGE_WIDTH: f32 = 20.0;
+const SCROLLBAR_IDLE: Duration = Duration::from_millis(900);
+
+#[derive(Default)]
+struct ScrollbarActivity {
+    last_offset: Option<gpui::Pixels>,
+    visible_until: Option<Instant>,
+    hide_timer: Option<gpui::Task<()>>,
+}
+
 pub(super) struct Pane {
     pub id: u64,
     pub control: Entity<NomoMark>,
@@ -39,6 +74,7 @@ pub(super) struct Pane {
     pub viewport: viewport_ui::Viewport,
     pub scroll: gpui::ScrollHandle,
     pub(super) scrollbar_drag: Option<f32>,
+    scrollbar_activity: ScrollbarActivity,
     pub reveal_selection: bool,
     pub stale: bool,
     pub load_error: Option<String>,
@@ -52,7 +88,35 @@ impl Pane {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self { id:NEXT.fetch_add(1,Ordering::Relaxed), control:control.clone(), mode,
             viewport:viewport_ui::Viewport::new(control,subscription), scroll:gpui::ScrollHandle::new(),
-            scrollbar_drag:None, reveal_selection:false, stale:false, load_error:None, reading_restore:None, sync_requested:false, layout_width:None }
+            scrollbar_drag:None, scrollbar_activity:ScrollbarActivity::default(), reveal_selection:false, stale:false, load_error:None, reading_restore:None, sync_requested:false, layout_width:None }
+    }
+
+    fn recently_scrolled(&mut self, offset: gpui::Pixels, cx: &mut Context<DocumentHost>) -> bool {
+        let activity = &mut self.scrollbar_activity;
+        let now = Instant::now();
+        if activity.last_offset.replace(offset).is_some_and(|previous| previous != offset) {
+            activity.visible_until = Some(now + SCROLLBAR_IDLE);
+        }
+        let Some(delay) = activity.visible_until.and_then(|end| end.checked_duration_since(now)) else { return false; };
+        // 连续滚动只延后截止时间。到期重绘时如果又滚过，再等待余下的时间。
+        if activity.hide_timer.is_none() {
+            let id = self.id;
+            activity.hide_timer = Some(cx.spawn(async move |host, cx| {
+                cx.background_executor().timer(delay).await;
+                let _ = host.update(cx, |host, cx| {
+                    if let Some(pane) = host.panes.iter_mut().find(|pane| pane.id == id) {
+                        pane.scrollbar_activity.hide_timer = None;
+                        cx.notify();
+                    }
+                });
+            }));
+        }
+        true
+    }
+
+    pub(super) fn clear_scrollbar(&mut self) {
+        self.scrollbar_drag = None;
+        self.scrollbar_activity = ScrollbarActivity::default();
     }
 }
 
@@ -136,7 +200,20 @@ impl DocumentHost {
         // 同一帧内两栏都收到用户输入时，以最后的真实意图为准，防止互相回送旧锚点。
         for (index,pane) in self.panes.iter_mut().enumerate() {pane.sync_requested=index==source;}
     }
-    fn reading_anchor(&self, pane:usize, cx:&Context<Self>) -> Option<ReadingAnchor> {
+    pub(crate) fn workspace_reading_position(&self, cx: &gpui::App) -> Option<(u64, f32)> {
+        self.panes[self.active_pane].reading_restore.or_else(|| self.reading_anchor(self.active_pane, cx))
+            .map(|anchor| (anchor.byte, anchor.fraction))
+    }
+    pub(crate) fn restore_workspace_position(&mut self, byte:u64, fraction:f32, mut selection:DocumentSelection, cx:&mut Context<Self>) {
+        selection.anchor_byte=selection.anchor_byte.min(self.total_bytes);
+        selection.head_byte=selection.head_byte.min(self.total_bytes);
+        self.control.update(cx,|view,cx|view.restore_session_selection(selection,cx));
+        let pane=&mut self.panes[self.active_pane];
+        pane.reveal_selection=false;
+        pane.reading_restore=Some(ReadingAnchor {byte:byte.min(self.total_bytes),fraction:fraction.clamp(0.0,1.0),revision:None,view_only:false,edge:None,motion:None});
+        self.schedule_viewport(16,cx);
+    }
+    fn reading_anchor(&self, pane:usize, cx:&gpui::App) -> Option<ReadingAnchor> {
         let bounds=self.panes[pane].scroll.bounds();
         let height=f32::from(bounds.size.height);
         if height<=0.0 {return None;}
@@ -154,7 +231,7 @@ impl DocumentHost {
             })
         })
     }
-    fn visible_source_bounds(&self, pane:usize, byte:u64, cx:&Context<Self>) -> Option<gpui::Bounds<gpui::Pixels>> {
+    fn visible_source_bounds(&self, pane:usize, byte:u64, cx:&gpui::App) -> Option<gpui::Bounds<gpui::Pixels>> {
         let viewport=self.panes[pane].scroll.bounds();
         self.panes[pane].viewport.mounts.iter().find_map(|mount| {
             let (_,bounds)=mount.view.read(cx).caret_bounds(byte)?;
@@ -688,25 +765,36 @@ impl DocumentHost {
         self.schedule_pane(pane, 16, cx);
         cx.notify();
     }
-    fn pane_scrollbar(&self, pane:usize, cx:&Context<Self>) -> impl IntoElement {
+    pub(super) fn pane_scrollbar(&self, pane:usize, cx:&Context<Self>) -> impl IntoElement {
         let id = self.panes[pane].id;
         let scroll = self.panes[pane].scroll.clone();
         let owner = cx.entity().downgrade();
+        let observer = owner.clone();
         let color = cx.global::<Theme>().scrollbar;
         gpui::canvas(
-            move |bounds, window, _| {
+            move |bounds, window, cx| {
                 let max = f32::from(scroll.max_offset().y);
                 let visible = f32::from(scroll.bounds().size.height);
                 let track = gpui::Bounds::new(bounds.origin + gpui::point(px(0.0), px(2.0)),
                     gpui::size(bounds.size.width, (bounds.size.height - px(4.0)).max(px(0.0))));
                 let height = f32::from(track.size.height);
-                if max <= 0.0 || visible <= 0.0 || height <= 0.0 { return None; }
+                let offset = scroll.offset().y;
+                let (scrolling, dragging) = observer.update(cx, |host, cx| {
+                    if host.hidden || host.closed { return None; }
+                    let state = host.panes.get_mut(pane).filter(|state| state.id == id)?;
+                    if max <= 0.0 || visible <= 0.0 || height <= 0.0 {
+                        state.clear_scrollbar();
+                        return None;
+                    }
+                    if !window.is_window_active() { state.scrollbar_drag = None; }
+                    Some((state.recently_scrolled(offset, cx), state.scrollbar_drag.is_some()))
+                }).ok().flatten()?;
                 let thumb_height = (height * visible / (visible + max)).clamp(24.0_f32.min(height), height);
-                let top = (-f32::from(scroll.offset().y) / max).clamp(0.0, 1.0) * (height - thumb_height);
+                let top = (-f32::from(offset) / max).clamp(0.0, 1.0) * (height - thumb_height);
                 let thumb = gpui::Bounds::new(track.origin + gpui::point(px(3.0), px(top)), gpui::size(px(6.0), px(thumb_height)));
-                Some((window.insert_hitbox(bounds, gpui::HitboxBehavior::BlockMouseExceptScroll), track, thumb))
+                Some((window.insert_hitbox(bounds, gpui::HitboxBehavior::BlockMouseExceptScroll), track, thumb, scrolling, dragging))
             },
-            move |_, geometry, window, _| {
+            move |bounds, geometry, window, _| {
                 let released = owner.clone();
                 window.on_mouse_event(move |event:&gpui::MouseUpEvent, phase, _, cx| {
                     if phase != gpui::DispatchPhase::Bubble || event.button != gpui::MouseButton::Left { return; }
@@ -716,9 +804,14 @@ impl DocumentHost {
                         }
                     });
                 });
-                let Some((hitbox, track, thumb)) = geometry else { return; };
-                window.set_cursor_style(gpui::CursorStyle::Arrow, &hitbox);
-                crate::layout::paint_box(thumb, color, 3.0, None, window);
+                let Some((hitbox, track, thumb, scrolling, dragging)) = geometry else { return; };
+                // 感应带只决定绘制。真正拦截点击的仍是原来的 12px 轨道。
+                let edge = gpui::Bounds::new(gpui::point(bounds.right() - px(SCROLLBAR_EDGE_WIDTH), bounds.top()),
+                    gpui::size(px(SCROLLBAR_EDGE_WIDTH), bounds.size.height));
+                let near = window.is_window_hovered() && edge.contains(&window.mouse_position());
+                if dragging { window.set_window_cursor_style(gpui::CursorStyle::ClosedHand); }
+                else { window.set_cursor_style(gpui::CursorStyle::OpenHand, &hitbox); }
+                if scrolling || near || dragging { crate::layout::paint_box(thumb, color, 3.0, None, window); }
                 let pressed = owner.clone();
                 window.on_mouse_event(move |event:&gpui::MouseDownEvent, phase, window, cx| {
                     if phase != gpui::DispatchPhase::Bubble || event.button != gpui::MouseButton::Left || !hitbox.is_hovered(window) { return; }
@@ -735,10 +828,20 @@ impl DocumentHost {
                     });
                 });
                 let moved = owner.clone();
-                window.on_mouse_event(move |event:&gpui::MouseMoveEvent, phase, _, cx| {
-                    if phase != gpui::DispatchPhase::Bubble { return; }
+                let view_id = window.current_view();
+                window.on_mouse_event(move |event:&gpui::MouseMoveEvent, phase, window, cx| {
+                    if phase == gpui::DispatchPhase::Capture {
+                        if near != (window.is_window_hovered() && edge.contains(&event.position)) { cx.notify(view_id); }
+                        return;
+                    }
+                    if !dragging && event.pressed_button != Some(gpui::MouseButton::Left) { return; }
                     let _ = moved.update(cx, |host, cx| {
                         if host.panes.get(pane).is_some_and(|state| state.id == id && state.scrollbar_drag.is_some()) && !host.hidden && !host.closed {
+                            if event.pressed_button != Some(gpui::MouseButton::Left) {
+                                host.panes[pane].scrollbar_drag = None;
+                                cx.notify();
+                                return;
+                            }
                             host.drag_pane_scrollbar(pane, event.position.y, track, f32::from(thumb.size.height), cx);
                             cx.stop_propagation();
                         }
@@ -747,15 +850,29 @@ impl DocumentHost {
             },
         ).absolute().right_0().top_0().w(px(12.0)).h_full()
     }
+    pub(crate) fn update_outline_layout(&mut self, width: f32, percent: f32, cx: &mut Context<Self>) -> bool {
+        let layout = if self.panes.len() == 1 { self.outline_layout.for_column(width, percent) }
+            else if width > 900.0 { OutlineLayout::CENTERED } else { OutlineLayout::Hidden };
+        if layout != self.outline_layout {
+            self.outline_layout = layout;
+            cx.notify();
+        }
+        layout != OutlineLayout::Hidden
+    }
+
     fn render_pane(&self, pane:usize, cx:&Context<Self>) -> gpui::AnyElement {
         let host=cx.entity().downgrade();
         let id=self.panes[pane].id;
         let width=self.panes[pane].layout_width.unwrap_or_else(||f32::from(self.panes[pane].scroll.bounds().size.width));
         let settings=cx.global::<Settings>();
-        let avoid=outline_content_column(width,!self.mini_layout && self.panes.len()==1 && settings.show_outline,settings.content_width_percent);
-        let document_body=div().children(self.pane_children(pane,cx))
-            .when_some(avoid,|el,(content_left,content_width)|el.w(px(content_width)).ml(px(content_left)))
-            .when(avoid.is_none(),|el|el.w(gpui::relative(if self.mini_layout || self.panes.len()==2 {1.0}else{settings.content_width_percent})).mx_auto());
+        let single_column = !self.mini_layout && self.panes.len() == 1;
+        let mut document_body = div().children(self.pane_children(pane,cx))
+            .w(gpui::relative(if single_column { settings.content_width_percent } else { 1.0 })).mx_auto();
+        if single_column && settings.show_outline && let OutlineLayout::Visible { shift_fraction } = self.outline_layout
+            && shift_fraction > 0.0 {
+            let left = (1.0 - settings.content_width_percent) / 2.0 - shift_fraction;
+            document_body = document_body.ml(gpui::relative(left.max(0.0)));
+        }
         let zoom_host = cx.entity().downgrade();
         // GPUI 的默认滚动先于冒泡回调执行；在捕获阶段处理缩放，避免一次手势既缩放又滚动。
         // 普通命中区域不遮挡编辑器；弹层的遮挡命中区域仍优先。
@@ -831,8 +948,7 @@ impl DocumentHost {
             let content_width=width.map(|width| {
                 let content=if self.mini_layout {width-2.0*(width*0.05).clamp(18.0,30.0)}
                     else if self.panes.len()==2 {width-64.0}
-                    else {outline_content_column(width, settings.show_outline, settings.content_width_percent)
-                        .map_or(width * settings.content_width_percent, |(_, content)| content)};
+                    else {width * settings.content_width_percent};
                 (content*window.scale_factor()).round()/window.scale_factor()
             });
             let views:Vec<_>=self.panes[pane].viewport.mounts.iter().map(|mount|mount.view.clone()).collect();

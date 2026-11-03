@@ -28,6 +28,12 @@ pub enum TableIntent {
     Resize { rows: usize, columns: usize },
     Header { enabled: bool },
 }
+impl TableIntent {
+    pub(super) fn would_empty_table(self, rows: usize, columns: usize) -> bool {
+        matches!(self, Self::DeleteRow { row: 0 } if rows == 1)
+            || matches!(self, Self::DeleteColumn { column: 0 } if columns == 1)
+    }
+}
 #[derive(Clone, Copy, Debug)]
 pub enum Alignment {
     Left,

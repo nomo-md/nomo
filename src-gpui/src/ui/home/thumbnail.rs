@@ -15,6 +15,7 @@ const RENDER_VERSION: &[u8] = b"nomo-home-preview-3";
 pub(super) struct Thumbnail {
     pub pixels: RgbaImage,
     pub title: String,
+    pub fingerprint: String,
 }
 
 /// 使用稳定的目标主题，避免外壳颜色过渡的每一帧都重新生成位图。
@@ -115,7 +116,7 @@ fn check(cancel: &AtomicBool) -> Result<(), String> {
     if cancel.load(Ordering::Acquire) { Err("预览请求已取消".into()) } else { Ok(()) }
 }
 
-pub(super) fn load(path: &Path, palette: &Palette, cancel: &AtomicBool) -> Result<Thumbnail, String> {
+pub(super) fn load(path: &Path, palette: &Palette, known: Option<&str>, cancel: &AtomicBool) -> Result<Option<Thumbnail>, String> {
     check(cancel)?;
     if !std::fs::metadata(path).map_err(|_| "文件已移动或无法访问")?.is_file() { return Err("此记录已不再是文件".into()); }
     let file = File::open(path).map_err(|e| match e.kind() {
@@ -157,6 +158,7 @@ pub(super) fn load(path: &Path, palette: &Palette, cancel: &AtomicBool) -> Resul
         }
     }
     let fingerprint = format!("{:x}", hash.finalize());
+    if known == Some(&fingerprint) { return Ok(None); }
     if let Some(png) = library::cached_thumbnail(path, &fingerprint)? {
         let mut reader = image::ImageReader::with_format(Cursor::new(png), image::ImageFormat::Png);
         let mut limits = image::Limits::default();
@@ -165,7 +167,7 @@ pub(super) fn load(path: &Path, palette: &Palette, cancel: &AtomicBool) -> Resul
         limits.max_alloc = Some(u64::from(WIDTH * HEIGHT * 8));
         reader.limits(limits);
         if let Ok(image) = reader.decode() {
-            if image.width() == WIDTH && image.height() == HEIGHT { check(cancel)?; return Ok(Thumbnail { pixels: image.into_rgba8(), title }); }
+            if image.width() == WIDTH && image.height() == HEIGHT { check(cancel)?; return Ok(Some(Thumbnail { pixels: image.into_rgba8(), title, fingerprint })); }
         }
     }
     check(cancel)?;
@@ -175,7 +177,7 @@ pub(super) fn load(path: &Path, palette: &Palette, cancel: &AtomicBool) -> Resul
     image::codecs::png::PngEncoder::new(&mut png).write_image(image.as_raw(), WIDTH, HEIGHT, image::ExtendedColorType::Rgba8).map_err(|e| e.to_string())?;
     check(cancel)?;
     library::store_thumbnail(path, &fingerprint, &png)?;
-    Ok(Thumbnail { pixels: image, title })
+    Ok(Some(Thumbnail { pixels: image, title, fingerprint }))
 }
 
 fn decode_head(bytes: &[u8]) -> String {

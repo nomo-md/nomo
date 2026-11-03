@@ -1117,18 +1117,26 @@ impl NomoMark {
                     cx.notify();
                 })));
         }
+        let dragging = object.image_drag.is_some();
         let mut panel = div().id("image-preview").w(viewport.width).h(viewport.height).relative().bg(theme.surface).text_color(theme.fg).occlude()
+            .cursor(gpui::CursorStyle::OpenHand)
             .on_mouse_down(MouseButton::Left, cx.listener(|view, event: &MouseDownEvent, _, cx| {
-                if let Some(object) = &mut view.object { object.image_drag = Some(event.position); } cx.stop_propagation();
+                if let Some(object) = &mut view.object { object.image_drag = Some(event.position); cx.notify(); } cx.stop_propagation();
             }))
             .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _, cx| {
                 if let Some(object) = &mut view.object {
-                    if let Some(from) = object.image_drag { object.image_offset += event.position - from; object.image_drag = Some(event.position); cx.notify(); }
+                    if let Some(from) = object.image_drag.take() {
+                        if event.pressed_button == Some(MouseButton::Left) {
+                            object.image_offset += event.position - from;
+                            object.image_drag = Some(event.position);
+                        }
+                        cx.notify();
+                    }
                 }
                 cx.stop_propagation();
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|view, _, _, cx| { if let Some(object) = &mut view.object { object.image_drag = None; } cx.stop_propagation(); }))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|view, _, _, cx| { if let Some(object) = &mut view.object { object.image_drag = None; } cx.stop_propagation(); }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|view, _, _, cx| { if view.object.as_mut().and_then(|object| object.image_drag.take()).is_some() { cx.notify(); } cx.stop_propagation(); }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|view, _, _, cx| { if view.object.as_mut().and_then(|object| object.image_drag.take()).is_some() { cx.notify(); } cx.stop_propagation(); }))
             .on_scroll_wheel(cx.listener(|view, event: &gpui::ScrollEvent, window, cx| {
                 let delta = event.delta.pixel_delta(px(16.0));
                 if event.modifiers.control || event.modifiers.platform {
@@ -1136,13 +1144,14 @@ impl NomoMark {
                 } else if let Some(object) = &mut view.object { object.image_offset += delta; cx.notify(); }
                 cx.stop_propagation();
             }))
-            .child(contents).child(controls).into_any_element();
+            .child(contents).child(controls.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())).into_any_element();
         Some(gpui::deferred(gpui::canvas(move |_, window, cx| {
             panel.layout_as_root(size(gpui::AvailableSpace::Definite(viewport.width), gpui::AvailableSpace::Definite(viewport.height)), window, cx);
             panel.prepaint_at(point(px(0.0), px(0.0)), window, cx);
             panel
-        }, |_, mut panel: gpui::AnyElement, window, cx| {
+        }, move |_, mut panel: gpui::AnyElement, window, cx| {
             window.with_content_mask(None, |window| panel.paint(window, cx));
+            if dragging { window.set_window_cursor_style(gpui::CursorStyle::ClosedHand); }
         }).absolute().inset_0()).with_priority(10).into_any_element())
     }
     pub(super) fn show_image_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -87,7 +87,7 @@ impl DocumentHost {
             state.viewport.failed.contains_key(&group.from) || state.viewport.mounts.iter().any(|mount| {
                 let view=mount.view.read(cx);
                 let id=&view.host.parsed.identity;
-                id.from_byte==group.from && id.to_byte==group.to
+                id.revision==self.status().revision && id.from_byte==group.from && id.to_byte==group.to
                     && view.measured_height().is_some_and(|height|(height-mount.height).abs()<0.5)
             })
         })
@@ -172,17 +172,22 @@ impl DocumentHost {
         self.panes[pane].viewport.dirty=true;
         self.panes[pane].load_error=None;
         self.panes[pane].viewport.failed.clear();
-        // 只有活动控件拥有乐观输入。其他窗口按已确认补丁移动占位，重新查询依赖。
-        // 引用定义可能影响远处窗口，不能以范围不相交推断其语义仍然有效。
-        self.retain_pane_control(pane, cx);
+        // 未改变正文的邻窗保留实体和已测高度，避免先变成占位再异步挂载。
+        // 引用依赖交给原有短查询刷新，不能继续使用过期目标。
+        let revision = self.status().revision;
+        let control = self.panes[pane].control.clone();
+        self.panes[pane].viewport.mounts.retain(|mount| {
+            if mount.view == control { return true; }
+            mount.view.update(cx, |view, cx| {
+                if view.rebase_passive(revision, edits, cx).is_ok() { true }
+                else { view.detach(false, cx).is_err() }
+            })
+        });
         self.update_pane_cost(pane, cx);
         let active_from=self.panes[pane].control.read(cx).host.parsed.identity.from_byte;
         for group in &mut self.panes[pane].viewport.groups {
-            let before = edits.iter().filter(|edit| edit.to_byte <= group.from && edit.from_byte < group.from).map(|e| e.inserted_text.len() as i128-(e.to_byte-e.from_byte) as i128).sum::<i128>();
             let active=group.from==active_from;
-            let within = edits.iter().filter(|edit| edit.from_byte >= group.from && (edit.from_byte < group.to || (active && edit.from_byte==group.to))).map(|e| e.inserted_text.len() as i128-(e.to_byte-e.from_byte) as i128).sum::<i128>();
-            group.from=(group.from as i128+before).max(0) as u64;
-            group.to=(group.to as i128+before+within).max(group.from as i128) as u64;
+            group.rebase(edits, active);
         }
         self.panes[pane].viewport.timer=None;
         self.schedule_pane(pane, crate::nomo_mark::session_window::policy().quiet_ms, cx);
@@ -205,7 +210,8 @@ impl DocumentHost {
         true
     }
     pub(super) fn pane_height(&mut self, pane: usize, view: &Entity<NomoMark>, stamp: &LayoutStamp, height: f32, cx: &mut Context<Self>) {
-        if stamp.identity != view.read(cx).host.parsed.identity || !height.is_finite() || height<1.0 { return; }
+        if stamp.identity != view.read(cx).host.parsed.identity || stamp.identity.revision!=self.status().revision
+            || !height.is_finite() || height<1.0 { return; }
         if let Some(mount)=self.panes[pane].viewport.mounts.iter_mut().find(|m| &m.view==view) { mount.height=height; }
         if let Some(index)=self.panes[pane].viewport.groups.iter().position(|g| g.matches_mount(&stamp.identity, *view == self.panes[pane].control)) {
             let old_bottom=self.panes[pane].viewport.heights.top(index+1);
@@ -218,6 +224,15 @@ impl DocumentHost {
             }
             if delta.abs()>0.1 { cx.notify(); }
         }
+        // 当前修订排版就绪后才释放同范围的旧邻窗，避免先清空再挂载。
+        let control=self.panes[pane].control.clone();
+        self.panes[pane].viewport.mounts.retain(|mount| {
+            let id=&mount.view.read(cx).host.parsed.identity;
+            if mount.view==control || mount.view==*view || id.from_byte!=stamp.identity.from_byte
+                || id.revision==stamp.identity.revision { return true; }
+            mount.view.update(cx,|view,cx|view.detach(false,cx)).is_err()
+        });
+        self.update_pane_cost(pane,cx);
         self.schedule_pane(pane, 16,cx);
     }
     fn pane_tick(&mut self, pane: usize, cx: &mut Context<Self>) {
@@ -250,10 +265,13 @@ impl DocumentHost {
         let control=self.panes[pane].control.clone();
         // 短动画只暂留已经挂载的目标；内存承压时仍服从原有回收预算。
         let animated_target=if pressured {None}else{self.animated_outline_byte(pane)};
-        self.panes[pane].viewport.mounts.retain(|mount| {
+        let viewport=&mut self.panes[pane].viewport;
+        let groups=&viewport.groups;
+        viewport.mounts.retain(|mount| {
             let id=&mount.view.read(cx).host.parsed.identity;
-            if mount.view==control || (id.to_byte>from && id.from_byte<to)
-                || animated_target.is_some_and(|byte| id.from_byte<=byte && byte<id.to_byte) { return true; }
+            let compatible=groups.binary_search_by_key(&id.from_byte,|group|group.from).is_ok_and(|index|groups[index].matches_mount(id,false));
+            if mount.view==control || (compatible && (id.to_byte>from && id.from_byte<to
+                || animated_target.is_some_and(|byte| id.from_byte<=byte && byte<id.to_byte))) { return true; }
             mount.view.update(cx, |v,cx|v.detach(false,cx)).is_err()
         });
         self.update_pane_cost(pane, cx);
@@ -263,7 +281,10 @@ impl DocumentHost {
         candidates.sort_by_key(|&i| if i>=visible_first && i<=visible_last { (0, i.abs_diff(visible_first)) } else { (1,i.abs_diff(visible_first)) });
         for index in candidates {
             let group=self.panes[pane].viewport.groups[index].clone();
-            if self.panes[pane].viewport.failed.contains_key(&group.from) || self.panes[pane].viewport.mounts.iter().any(|m| group.matches_mount(&m.view.read(cx).host.parsed.identity, m.view == control)) { continue; }
+            if self.panes[pane].viewport.failed.contains_key(&group.from) || self.panes[pane].viewport.mounts.iter().any(|m| {
+                let id=&m.view.read(cx).host.parsed.identity;
+                id.revision==self.status().revision && group.matches_mount(id,m.view==control)
+            }) { continue; }
             let required=index>=visible_first && index<=visible_last;
             if !required {
                 if scrolling || self.panes[pane].control.read(cx).prepare_unmount().is_err() { self.schedule_pane(pane, 300,cx); return; }
@@ -285,7 +306,11 @@ impl DocumentHost {
         let request=self.panes[pane].viewport.request.clone();
         let generation=self.panes[pane].viewport.generation;
         let pane_id=self.panes[pane].id;
-        let retained=vec![(identity.from_byte,identity.to_byte)];
+        let retained=self.panes[pane].viewport.mounts.iter().filter_map(|mount| {
+            let id=&mount.view.read(cx).host.parsed.identity;
+            (id.revision==revision && (mount.view==control || id.to_byte<=identity.from_byte || id.from_byte>=identity.to_byte))
+                .then_some((id.from_byte,id.to_byte))
+        }).collect::<Vec<_>>();
         let task=cx.background_executor().spawn(async move {port.window_groups(revision,&retained,&request)});
         cx.spawn(async move |this,cx| {
             let result=task.await;
@@ -343,6 +368,9 @@ impl DocumentHost {
     }
     fn mount_group(&mut self, pane: usize, group:Group, cx:&mut Context<Self>) {
         self.panes[pane].viewport.loading=true;
+        let reserved_height=self.panes[pane].viewport.groups.binary_search_by_key(&group.from,|group|group.from)
+            .map(|index|self.panes[pane].viewport.heights.top(index+1)-self.panes[pane].viewport.heights.top(index))
+            .unwrap_or(group.estimate);
         let control=self.panes[pane].control.clone();
         let identity=control.read(cx).host.parsed.identity.clone();
         let revision=identity.revision;
@@ -380,9 +408,9 @@ impl DocumentHost {
                         let mode=host.panes[pane].mode;
                         let base_dir=host.panes[pane].control.read(cx).base_dir.clone();
                         let embedded=host.embedded;
-                        let view=cx.new(|cx| {let mut view=NomoMark::new(adapter,cx);view.mode=mode;view.base_dir=base_dir;view.workspace_hosted=embedded;view.windowed_navigation=host.production;view});
+                        let view=cx.new(|cx| {let mut view=NomoMark::new(adapter,cx);view.reserve_layout_height(reserved_height);view.mode=mode;view.base_dir=base_dir;view.workspace_hosted=embedded;view.windowed_navigation=host.production;view});
                         let subscription=cx.subscribe(&view,Self::event);
-                        host.panes[pane].viewport.mounts.push(Mounted{view,_subscription:subscription,height:group.estimate});
+                        host.panes[pane].viewport.mounts.push(Mounted{view,_subscription:subscription,height:reserved_height});
                         host.panes[pane].viewport.demand.prepared(started.elapsed().as_secs_f64()*1000.0);
                     }
                     Err(error)=> {
@@ -410,12 +438,22 @@ impl DocumentHost {
         if self.hidden { return Vec::new(); }
         if !self.production || self.panes[pane].viewport.groups.is_empty() { return vec![self.pane_mount(self.panes[pane].control.clone(),cx)]; }
         let mut children=Vec::new();
-        let mut mounts:Vec<_>=self.panes[pane].viewport.mounts.iter().filter_map(|mount| {
-            let id=&mount.view.read(cx).host.parsed.identity;
-            let index=self.panes[pane].viewport.groups.binary_search_by_key(&id.from_byte,|g|g.from).ok()?;
-            self.panes[pane].viewport.groups[index].matches_mount(id, mount.view == self.panes[pane].control)
-                .then(|| (index,self.pane_mount(mount.view.clone(),cx)))
-        }).collect();
+        let mut ready:Vec<(usize,u8,Entity<NomoMark>)>=Vec::new();
+        for mount in &self.panes[pane].viewport.mounts {
+            let view=mount.view.read(cx);
+            let id=&view.host.parsed.identity;
+            let Ok(index)=self.panes[pane].viewport.groups.binary_search_by_key(&id.from_byte,|g|g.from) else {continue;};
+            let group=&self.panes[pane].viewport.groups[index];
+            if self.panes[pane].viewport.failed.contains_key(&group.from)
+                || !group.matches_mount(id,mount.view==self.panes[pane].control) {continue;}
+            let priority=if id.revision==self.status().revision {
+                if view.measured_height().is_some() {3}else{2}
+            } else {1};
+            if let Some(previous)=ready.iter_mut().find(|(at,_,_)|*at==index) {
+                if previous.1<priority {*previous=(index,priority,mount.view.clone());}
+            } else {ready.push((index,priority,mount.view.clone()));}
+        }
+        let mut mounts:Vec<_>=ready.into_iter().map(|(index,_,view)|(index,self.pane_mount(view,cx))).collect();
         for (&from,message) in &self.panes[pane].viewport.failed {
             let Ok(index)=self.panes[pane].viewport.groups.binary_search_by_key(&from,|group|group.from) else {continue;};
             let id=self.panes[pane].id;
@@ -448,7 +486,8 @@ impl DocumentHost {
         children
     }
     fn pane_mount(&self, view:Entity<NomoMark>, cx:&Context<Self>) -> gpui::AnyElement {
-        div().child(view.clone()).capture_any_mouse_down(cx.listener(move |host,event:&gpui::MouseDownEvent,window,cx| {
+        // 高度由子控件本帧测量决定，不能让上一帧组高度阻止段落收缩。
+        div().w_full().min_w_0().flex_shrink_0().child(view.clone()).capture_any_mouse_down(cx.listener(move |host,event:&gpui::MouseDownEvent,window,cx| {
             if matches!(event.button, gpui::MouseButton::Left | gpui::MouseButton::Right) && !host.promote(&view,cx) {
                 window.focus(&host.control.focus_handle(cx), cx);cx.stop_propagation();
             }

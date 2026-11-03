@@ -443,26 +443,33 @@ fn slider_with_thumb(id: ElementId, fraction: f32, dragging: bool, width: f32, t
                 let knob_x = knob_center - visual_radius;
                 window.paint_quad(quad(knob_x, middle - visual_radius, visual_radius * 2.0, visual_radius * 2.0, knob, visual_radius)
                     .border_color(border).border_widths(px(if solid { 0.0 } else { 2.0 })));
+                // 按下与松开可能发生在同一帧；捕获状态不能等下一帧传入 dragging 才生效。
+                let active = std::rc::Rc::new(std::cell::Cell::new(dragging));
                 let on_down = on_change.clone();
+                let down_active = active.clone();
                 window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, window, cx| {
                     if phase == gpui::DispatchPhase::Bubble && event.button == gpui::MouseButton::Left && bounds.contains(&event.position) {
+                        down_active.set(true);
                         on_down(position(event.position.x), true, window, cx);
                     }
                 });
-                if dragging {
-                    let on_move = on_change.clone();
-                    window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, window, cx| {
-                        if phase == gpui::DispatchPhase::Bubble && event.pressed_button == Some(gpui::MouseButton::Left) {
-                            on_move(position(event.position.x), true, window, cx);
-                        }
-                    });
-                    let on_up = on_change.clone();
-                    window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, window, cx| {
-                        if phase == gpui::DispatchPhase::Bubble {
-                            on_up(position(event.position.x), false, window, cx);
-                        }
-                    });
-                }
+                let on_move = on_change.clone();
+                let move_active = active.clone();
+                window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, window, cx| {
+                    if phase == gpui::DispatchPhase::Bubble && move_active.get()
+                        && event.pressed_button == Some(gpui::MouseButton::Left)
+                    {
+                        on_move(position(event.position.x), true, window, cx);
+                    }
+                });
+                let on_up = on_change.clone();
+                window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, window, cx| {
+                    if phase == gpui::DispatchPhase::Bubble && event.button == gpui::MouseButton::Left
+                        && active.replace(false)
+                    {
+                        on_up(position(event.position.x), false, window, cx);
+                    }
+                });
             },
         )
         .size_full(),

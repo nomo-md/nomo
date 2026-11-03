@@ -273,23 +273,22 @@ impl DocumentHost {
                     }
                 }),
             )
-            .child(
+            .child(div().relative().flex_1().min_h_0().child(
                 div()
                     .on_children_prepainted(move |_, _, cx| {
                         let _ = host.update(cx, |host, cx| host.reveal_pane(host.active_pane,cx));
                     })
                     .id("control-scroll")
-                    .flex_1()
-                    .min_h_0()
+                    .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.panes[self.active_pane].scroll)
                     .p_8()
-                    .on_scroll_wheel(cx.listener(|host, _, _, cx| {
+                    .on_scroll(cx.listener(|host, _, _, cx| {
                         host.panes[host.active_pane].reveal_selection = false;
                         host.schedule_viewport(16,cx);
                     }))
                     .children(self.pane_children(self.active_pane,cx)),
-            )
+            ).child(self.pane_scrollbar(self.active_pane,cx)))
             .child(
                 div()
                     .border_t_1()

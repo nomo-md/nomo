@@ -229,7 +229,9 @@ impl ParsedWindow {
                     }
                     if matches!(tag, Tag::Link { .. }) {
                         let raw = &source[range.clone()];
-                        if let Some(end) = raw.find("](").or_else(|| raw.find("][")) {
+                        if let Some(end) = super::link_edit::label_end(raw)
+                            .filter(|end| matches!(raw.as_bytes().get(end + 1), Some(b'(' | b'[')))
+                        {
                             inline.push(InlineSpan {
                                 format: InlineFormat::Link,
                                 open: range.start..range.start + 1,
@@ -426,7 +428,7 @@ impl ParsedWindow {
     }
 
     pub fn markers_for(&self, selection: &Range<usize>) -> Vec<Range<usize>> {
-        // 表格链接只显示标签；目标地址通过链接弹层编辑，避免参与列宽与行高计算。
+        // 表格中的脚注等原子对象保留整体映射，链接与正文共用选区展开规则。
         let mut tables: Vec<_> = self.nodes.iter().filter(|node| node.kind == "table")
             .map(|node| &node.source).chain(self.html_tables.iter().map(|table| &table.source)).collect();
         tables.sort_unstable_by_key(|range| range.start);
@@ -435,8 +437,8 @@ impl ParsedWindow {
             .filter(|span| span.intersects(selection))
             .filter(|span| {
                 let next = tables.partition_point(|range| range.start <= span.open.start);
-                if next == 0 || tables[next - 1].end < span.close.end { return true; }
-                span.format != InlineFormat::Link && !super::html_table::atom_at(&self.source, span.open.start)
+                if span.format == InlineFormat::Link || next == 0 || tables[next - 1].end < span.close.end { return true; }
+                !super::html_table::atom_at(&self.source, span.open.start)
                     .is_some_and(|run| run.source == span.range())
             })
             .flat_map(|span| [span.open.clone(), span.close.clone()])
@@ -465,10 +467,7 @@ impl ParsedWindow {
                 && revealed.contains(&(range.start, range.end))
                 && emitted.insert((range.start, range.end))
             {
-                output.push((
-                    Event::Text(self.source[range.clone()].to_owned().into()),
-                    range.clone(),
-                ));
+                output.extend(self.marker_events(range.clone()));
             }
             let relevant = spans
                 .get(&(range.start, range.end))
@@ -486,10 +485,7 @@ impl ParsedWindow {
                 if revealed.contains(&(marker.start, marker.end))
                     && emitted.insert((marker.start, marker.end))
                 {
-                    output.push((
-                        Event::Text(self.source[marker.clone()].to_owned().into()),
-                        marker,
-                    ));
+                    output.extend(self.marker_events(marker));
                 }
             }
             output.push((event.clone(), range.clone()));
@@ -511,6 +507,10 @@ impl ParsedWindow {
             }
         }
         output
+    }
+
+    fn marker_events(&self, marker: Range<usize>) -> impl Iterator<Item = (Event<'static>, Range<usize>)> {
+        super::link_display::marker_parts(&self.source, marker).map(|(range, text)| (Event::Text(text.into_static()), range))
     }
 
     /// 编辑投影补回解析器省略的行尾空白和空段落，语义事件及原文保持不变。

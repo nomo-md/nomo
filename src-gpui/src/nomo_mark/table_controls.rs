@@ -216,8 +216,11 @@ impl NomoMark {
             let Some(cell) = geometry.iter().filter(|c| c.0 <= row && row < c.0 + c.2).min_by_key(|c| c.2) else { continue; };
             let y = cell.5 + cell.7 * (row - cell.0) as f32 / cell.2 as f32;
             let h = cell.7 / cell.2 as f32;
-            deletions.push(div().absolute().left(px(left - 38.0 * zoom)).top(px(y + h / 2.0 - 17.0 * zoom))
-                .child(button(format!("table-row-delete-{row}"), locale.text("deleteTableRow").replace("{index}", &(row + 1).to_string()), None, Action::Edit(TableIntent::DeleteRow { row }), cx)));
+            let delete = TableIntent::DeleteRow { row };
+            if !delete.would_empty_table(rows, columns) {
+                deletions.push(div().absolute().left(px(left - 38.0 * zoom)).top(px(y + h / 2.0 - 17.0 * zoom))
+                    .child(button(format!("table-row-delete-{row}"), locale.text("deleteTableRow").replace("{index}", &(row + 1).to_string()), None, Action::Edit(delete), cx)));
+            }
             if row > 0 { for (side, x) in [left, right].into_iter().enumerate() {
                 insertions.push(div().absolute().left(px(x - 18.0 * zoom)).top(px(y - 18.0 * zoom))
                     .child(button(format!("table-row-add-{row}-{side}"), locale.text("insertRowBetween").replace("{from}", &row.to_string()).replace("{to}", &(row + 1).to_string()), None, Action::Edit(TableIntent::InsertRowBefore { row }), cx)));
@@ -227,8 +230,11 @@ impl NomoMark {
             let Some(cell) = geometry.iter().filter(|c| c.1 <= column && column < c.1 + c.3).min_by_key(|c| c.3) else { continue; };
             let x = cell.4 + cell.6 * (column - cell.1) as f32 / cell.3 as f32;
             let w = cell.6 / cell.3 as f32;
-            deletions.push(div().absolute().left(px(x + w / 2.0 - 18.0 * zoom)).top(px(bottom + 2.0 * zoom))
-                .child(button(format!("table-col-delete-{column}"), locale.text("deleteTableColumn").replace("{index}", &(column + 1).to_string()), None, Action::Edit(TableIntent::DeleteColumn { column }), cx)));
+            let delete = TableIntent::DeleteColumn { column };
+            if !delete.would_empty_table(rows, columns) {
+                deletions.push(div().absolute().left(px(x + w / 2.0 - 18.0 * zoom)).top(px(bottom + 2.0 * zoom))
+                    .child(button(format!("table-col-delete-{column}"), locale.text("deleteTableColumn").replace("{index}", &(column + 1).to_string()), None, Action::Edit(delete), cx)));
+            }
             if column > 0 { for (side, y) in [top, bottom].into_iter().enumerate() {
                 insertions.push(div().absolute().left(px(x - 18.0 * zoom)).top(px(y - 18.0 * zoom))
                     .child(button(format!("table-col-add-{column}-{side}"), locale.text("insertColumnBetween").replace("{from}", &column.to_string()).replace("{to}", &(column + 1).to_string()), None, Action::Edit(TableIntent::InsertColumn { at: column }), cx)));

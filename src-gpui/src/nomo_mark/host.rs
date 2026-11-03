@@ -480,6 +480,42 @@ impl WindowHostAdapter {
         generation: u64,
         edits: &[NativeRangeEdit],
     ) -> Result<(), ControlError> {
+        self.rebase_outside_with_selection(expected, revision, generation, edits, None)
+    }
+    /// 已确认的邻窗编辑不改变只读片段的正文，保留现有排版并移动全局锚点。
+    pub(crate) fn rebase_passive(&mut self, revision: u64, edits: &[SourceEdit]) -> Result<(), ControlError> {
+        if !self.readonly { return Err(ControlError::ReadOnly); }
+        self.interaction.prepare_detach(self.pending.len(), self.presentation)?;
+        let expected = self.parsed.identity.clone();
+        let selection = super::commands::map_selection(self.selection, edits);
+        let ranges: Vec<_> = edits.iter().map(|edit| NativeRangeEdit {
+            from_byte: edit.from_byte, to_byte: edit.to_byte, inserted_bytes: edit.inserted_text.len() as u64,
+        }).collect();
+        self.rebase_outside_with_selection(&expected, revision, expected.view_generation, &ranges, Some(selection))?;
+        let parsed = Arc::make_mut(&mut self.parsed);
+        if !parsed.context.reference_keys.is_empty() {
+            // 引用定义可能在活动窗变化；沿用原查询任务补齐，等待期间禁用旧目标。
+            parsed.context.pending_references = true;
+            for (event, range) in &parsed.events {
+                if let pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { link_type, .. } | pulldown_cmark::Tag::Image { link_type, .. }) = event {
+                    if !matches!(link_type, pulldown_cmark::LinkType::Inline | pulldown_cmark::LinkType::Autolink | pulldown_cmark::LinkType::Email | pulldown_cmark::LinkType::WikiLink { .. }) {
+                        parsed.context.unresolved_references.push(range.clone());
+                    }
+                }
+            }
+            parsed.context.unresolved_references.sort_by_key(|range| (range.start, range.end));
+            parsed.context.unresolved_references.dedup();
+        }
+        Ok(())
+    }
+    fn rebase_outside_with_selection(
+        &mut self,
+        expected: &WindowIdentity,
+        revision: u64,
+        generation: u64,
+        edits: &[NativeRangeEdit],
+        passive_selection: Option<DocumentSelection>,
+    ) -> Result<(), ControlError> {
         if expected != &self.parsed.identity
             || revision <= self.committed_revision
             || generation < expected.view_generation
@@ -501,12 +537,17 @@ impl WindowHostAdapter {
                 return Err(ControlError::InvalidRange);
             }
             previous = edit.to_byte;
-            if edit.from_byte <= expected.to_byte && edit.to_byte >= expected.from_byte {
+            let touches = if passive_selection.is_some() {
+                if edit.from_byte == edit.to_byte {
+                    expected.from_byte < edit.from_byte && edit.from_byte < expected.to_byte
+                } else { edit.from_byte < expected.to_byte && expected.from_byte < edit.to_byte }
+            } else { edit.from_byte <= expected.to_byte && edit.to_byte >= expected.from_byte };
+            if touches {
                 return Err(ControlError::NeedsContext(
                     "外部修改触及当前窗口，需要宿主提供新窗口".into(),
                 ));
             }
-            if edit.to_byte < expected.from_byte {
+            if edit.to_byte < expected.from_byte || (passive_selection.is_some() && edit.to_byte == expected.from_byte) {
                 shift += edit.inserted_bytes as i128 - (edit.to_byte - edit.from_byte) as i128;
             }
         }
@@ -516,7 +557,9 @@ impl WindowHostAdapter {
         let from = map(expected.from_byte)?;
         let to = map(expected.to_byte)?;
         // 窗口内选区随同窗口移动；跨窗口选区需要宿主显式回送，避免猜测外部位置。
-        let selection = if self.selection.range().start >= expected.from_byte
+        let selection = if let Some(selection) = passive_selection {
+            selection
+        } else if self.selection.range().start >= expected.from_byte
             && self.selection.range().end <= expected.to_byte
         {
             DocumentSelection {
@@ -555,7 +598,9 @@ impl WindowHostAdapter {
         identity.view_generation = generation;
         self.committed_revision = revision;
         self.selection = selection;
-        self.layout = None;
+        if passive_selection.is_some() {
+            if let Some(stamp) = &mut self.layout { stamp.identity = identity.clone(); }
+        } else { self.layout = None; }
         Ok(())
     }
     /// 引用补齐只替换局部解析上下文；正文 Arc、选区及会话历史保持原身份。
@@ -861,5 +906,93 @@ mod tests {
         assert_eq!(&*h.parsed.source, "中");
         h.detach(true).unwrap();
         assert!(h.parsed.source.is_empty());
+    }
+
+    #[test]
+    fn passive_rebase_keeps_source_layout_and_global_selection_across_boundary_edits() {
+        let mut h = host();
+        h.set_readonly(true);
+        let source = h.parsed.source.clone();
+        let events = h.parsed.events.clone();
+        h.selection = DocumentSelection { anchor_byte: 99, head_byte: 104 };
+        h.interaction.details_open.insert(100, false);
+        h.interaction.code_offsets.insert(100, (20.0, 12.0));
+        for (revision, edit, from, selection) in [
+            (6, SourceEdit { from_byte: 100, to_byte: 100, inserted_text: "前".into() }, 103, DocumentSelection { anchor_byte: 99, head_byte: 107 }),
+            (7, SourceEdit { from_byte: 106, to_byte: 106, inserted_text: "后".into() }, 103, DocumentSelection { anchor_byte: 99, head_byte: 110 }),
+            (8, SourceEdit { from_byte: 100, to_byte: 103, inserted_text: String::new() }, 100, DocumentSelection { anchor_byte: 99, head_byte: 107 }),
+        ] {
+            h.rebase_passive(revision, &[edit]).unwrap();
+            assert!(Arc::ptr_eq(&source, &h.parsed.source));
+            assert_eq!(h.parsed.events, events);
+            assert_eq!(h.parsed.identity.from_byte, from);
+            assert_eq!(h.parsed.identity.to_byte, from + 3);
+            assert_eq!(h.parsed.identity.revision, revision);
+            assert_eq!(h.layout.as_ref().unwrap().identity, h.parsed.identity);
+            assert_eq!(h.presentation, Presentation::ReadOnly);
+            assert_eq!(h.selection, selection);
+            assert_eq!(h.interaction.details_open.get(&from), Some(&false));
+            assert_eq!(h.interaction.code_offsets.get(&from), Some(&(20.0, 12.0)));
+        }
+        let identity = h.parsed.identity.clone();
+        for edit in [
+            SourceEdit { from_byte: 101, to_byte: 101, inserted_text: "x".into() },
+            SourceEdit { from_byte: 99, to_byte: 101, inserted_text: String::new() },
+        ] {
+            assert!(matches!(h.rebase_passive(9, &[edit]), Err(ControlError::NeedsContext(_))));
+            assert_eq!(h.parsed.identity, identity);
+            assert!(Arc::ptr_eq(&source, &h.parsed.source));
+        }
+        h.interaction.begin_composition(0);
+        assert_eq!(h.rebase_passive(9, &[]), Err(ControlError::Busy));
+    }
+
+    #[test]
+    fn confirmed_revision_keeps_the_optimistic_layout_ready() {
+        let mut h = host();
+        h.queue_edit(vec![SourceEdit { from_byte: 103, to_byte: 103, inserted_text: "文".into() }],
+            DocumentSelection::caret(106), "typing").unwrap();
+        ready(&mut h);
+        let source = h.parsed.source.clone();
+        let generation = h.parsed.identity.projection_generation;
+        let ControlEvent::Submit(transaction) = h.next_submission().unwrap() else { panic!() };
+        h.acknowledge(&transaction.operation_id, 6).unwrap();
+        assert_eq!(h.layout.as_ref().unwrap().identity, h.parsed.identity);
+        assert_eq!(h.presentation, Presentation::Editable);
+        assert_eq!(h.parsed.identity.projection_generation, generation);
+        assert!(Arc::ptr_eq(&source, &h.parsed.source));
+    }
+
+    #[test]
+    fn retained_reference_window_rechecks_targets_without_losing_its_source() {
+        use pulldown_cmark::{Event, Tag};
+        let mut h = WindowHostAdapter::new(DocumentWindow {
+            document_id: "ref".into(), revision: 5, from_byte: 100, to_byte: 120,
+            text: "[label][id] [future]".into(), inline_templates: Vec::new(),
+        }, "ref-view", 0, WindowContext::Complete).unwrap();
+        let mut context = h.parsed.context.clone();
+        context.references.insert("ID".into(), ReferenceTarget { destination: "/old".into(), title: String::new() });
+        h.refresh_references(context).unwrap();
+        ready(&mut h);
+        h.set_readonly(true);
+        let source = h.parsed.source.clone();
+        assert_eq!(h.parsed.context.reference_keys, vec!["FUTURE", "ID"]);
+        h.rebase_passive(6, &[SourceEdit { from_byte: 0, to_byte: 0, inserted_text: "changed definition".into() }]).unwrap();
+        assert!(h.parsed.context.pending_references);
+        assert!(h.parsed.context.reference_target_pending(&(0..11)));
+        assert_eq!(h.presentation, Presentation::ReadOnly);
+        assert_eq!(h.layout.as_ref().unwrap().identity, h.parsed.identity);
+        let mut context = h.parsed.context.clone();
+        context.pending_references = false;
+        context.references.insert("ID".into(), ReferenceTarget { destination: "/new".into(), title: String::new() });
+        context.references.insert("FUTURE".into(), ReferenceTarget { destination: "/future".into(), title: String::new() });
+        assert!(h.refresh_references(context).unwrap());
+        let targets: Vec<_> = h.parsed.events.iter().filter_map(|(event, _)| match event {
+            Event::Start(Tag::Link { dest_url, .. }) => Some(dest_url.as_ref()), _ => None,
+        }).collect();
+        assert_eq!(targets, vec!["/new", "/future"]);
+        assert!(h.parsed.context.unresolved_references.is_empty());
+        assert_eq!(h.parsed.context.reference_keys, vec!["FUTURE", "ID"]);
+        assert!(Arc::ptr_eq(&source, &h.parsed.source));
     }
 }

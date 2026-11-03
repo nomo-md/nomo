@@ -53,44 +53,39 @@ pub(crate) fn html(text: &str) -> String {
     super::table_inline::escape_html_in_markdown(&html)
 }
 
-pub(crate) fn preview(content: &str, empty: &str) -> String {
-    let content = content.trim();
-    if content.is_empty() { return empty.into(); }
-    let mut chars = content.chars();
-    let mut text: String = chars.by_ref().take(12).collect();
-    if chars.next().is_some() { text.push('…'); }
-    text.replace(['\r', '\n', '\t'], " ")
-}
-
-fn text_layout(text: &str, font_size: f32, window: &Window) -> crate::layout::TextLayout {
+fn text_layout(text: &str, font_size: f32, width: f32, window: &Window) -> crate::layout::TextLayout {
     let spec = crate::layout::ParaSpec::plain(text.into(), crate::layout::InlineStyle { color: crate::layout::ColorRole::AccentStrong, ..Default::default() },
         Family::Mono, font_size, font_size * 1.15, crate::layout::Wrap::Greedy);
-    crate::layout::layout_text(&spec, 1_000_000.0, window)
+    crate::layout::layout_text(&spec, width, window)
 }
 
 pub(crate) fn object(content: &str, empty: &str, editing: bool, font_size: f32, zoom: f32, window: &Window) -> InlineObject {
     let font_size = font_size * 0.9;
-    let label = if editing { String::new() } else { preview(content, empty) };
-    let first = if editing { content.split('\n').next().unwrap_or("").trim_end_matches('\r') } else { &label };
-    let measured = text_layout(first, font_size, window);
-    let mut width = measured.max_line_width();
-    let mut height = measured.height();
-    if editing {
-        for text in content.split('\n').skip(1) {
-            let measured = text_layout(text.trim_end_matches('\r'), font_size, window);
-            width = width.max(measured.max_line_width());
-            height += measured.height();
-        }
-        width += 6.0 * zoom;
-    }
     let viewport = f32::from(window.viewport_size().width);
     let max_width = if editing { (640.0 * zoom).min(font_size * 0.6 * 64.0).min(viewport * 0.84) }
         else { (font_size * 0.6 * 34.0).min(viewport * 0.72) };
-    let inner_width = width.max(if editing { 16.0 * zoom } else { 0.0 }).min(max_width.max(16.0 * zoom));
+    let text = if !editing && content.trim().is_empty() { empty } else { content };
+    measure(text, editing, font_size, zoom, max_width, window)
+}
+
+fn measure(text: &str, editing: bool, font_size: f32, zoom: f32, inner_limit: f32, window: &Window) -> InlineObject {
+    let limit = inner_limit.max(1.0);
+    let measured = text_layout(text, font_size, if editing { 1_000_000.0 } else { limit }, window);
+    let width = if editing { (measured.max_line_width() + 6.0 * zoom).max(16.0 * zoom) } else { measured.max_line_width() };
+    let height = measured.height();
     let ascent = measured.first_baseline() + 4.0 * zoom;
-    InlineObject { at: 0, width: inner_width + 20.0 * zoom, width_percent: None,
+    InlineObject { at: 0, width: width.min(limit) + 20.0 * zoom, width_percent: None,
         ascent, descent: (height + 8.0 * zoom - ascent).max(0.0),
-        key: InlineAsset::Comment { label, font_size: font_size.to_bits(), zoom: zoom.to_bits(), editing } }
+        key: InlineAsset::Comment { label: (!editing).then(|| crate::layout::CommentLabel(std::rc::Rc::new(measured))),
+            font_size: font_size.to_bits(), zoom: zoom.to_bits() } }
+}
+
+pub(crate) fn fit(object: &mut InlineObject, width: f32, window: &Window) {
+    let InlineAsset::Comment { label, font_size, zoom } = &object.key else { return; };
+    if let Some(label) = label {
+        let zoom = f32::from_bits(*zoom);
+        *object = InlineObject { at: object.at, ..measure(&label.0.text, false, f32::from_bits(*font_size), zoom, width - 20.0 * zoom, window) };
+    } else { object.width = object.width.min(width); }
 }
 
 pub(crate) fn colors(theme: &Theme) -> (Hsla, Hsla) {
@@ -100,16 +95,16 @@ pub(crate) fn colors(theme: &Theme) -> (Hsla, Hsla) {
 }
 
 pub(crate) fn paint(key: &InlineAsset, bounds: Bounds<Pixels>, theme: &Theme, window: &mut Window) {
-    let InlineAsset::Comment { label, font_size, zoom, editing } = key else { return; };
+    let InlineAsset::Comment { label, zoom, .. } = key else { return; };
     let zoom = f32::from_bits(*zoom);
-    let font_size = f32::from_bits(*font_size);
     let (background, border) = colors(theme);
     let chip = Bounds::new(bounds.origin + point(px(2.0 * zoom), px(0.0)), size(bounds.size.width - px(4.0 * zoom), bounds.size.height));
     crate::layout::paint_box(chip, background, 4.0 * zoom, Some((border, zoom)), window);
-    if *editing { return; }
+    let Some(label) = label else { return; };
     let text_bounds = Bounds::new(chip.origin + point(px(8.0 * zoom), px(4.0 * zoom)),
         size((chip.size.width - px(16.0 * zoom)).max(px(0.0)), chip.size.height - px(8.0 * zoom)));
     window.with_content_mask(Some(ContentMask { bounds: text_bounds }), |window| {
-        text_layout(label, font_size, window).paint(text_bounds.origin, 0.0..f32::from(text_bounds.size.height), theme, window);
+        let clip = window.content_mask().bounds;
+        label.0.paint(text_bounds.origin, f32::from(clip.top() - text_bounds.top())..f32::from(clip.bottom() - text_bounds.top()), theme, window);
     });
 }

@@ -8,12 +8,111 @@ use crate::ui::components::IconName;
 use gpui::{
     App, Bounds, Corners, Hsla, Pixels, Point, TransformationMatrix, Window, point, px, size,
 };
-use std::ops::Range;
+use std::{borrow::Cow, cmp::Reverse, ops::Range};
+
+struct LinkSpan<'a> { source: Range<usize>, target: Cow<'a, str> }
+
+fn footnote_target(id: &str) -> String { format!("#fn-{}", id.replace('%', "%25")) }
+
+fn link_spans(parsed: &super::parse::ParsedWindow) -> Vec<LinkSpan<'_>> {
+    use super::html_table::InlineAtom;
+    use pulldown_cmark::{Event, Tag, TagEnd};
+    let mut links = Vec::new();
+    let mut table = false;
+    for (event, range) in &parsed.events {
+        let (source, target) = match event {
+            Event::Start(Tag::Table(_)) => { table = true; continue; }
+            Event::End(TagEnd::Table) => { table = false; continue; }
+            Event::Start(Tag::Link { dest_url, .. }) => (range.clone(), Cow::Borrowed(dest_url.as_ref())),
+            Event::FootnoteReference(id) => (range.clone(), Cow::Owned(footnote_target(id))),
+            Event::InlineHtml(tag) if table && tag.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("<sup")) => {
+                let Some(run) = super::html_table::atom_at(&parsed.source, range.start) else { continue; };
+                let Some(InlineAtom::Footnote(id)) = run.atom else { continue; };
+                (run.source, Cow::Owned(footnote_target(&id)))
+            }
+            _ => continue,
+        };
+        links.push(LinkSpan { source, target });
+    }
+    for span in parsed.inline.iter().filter(|span| span.format == super::parse::InlineFormat::Link) {
+        if let Some(href) = super::nomo_syntax::html_tag(&parsed.source, span.open.start).and_then(|mut tag| tag.attrs.remove("href")) {
+            links.push(LinkSpan { source: span.range(), target: Cow::Owned(html_escape::decode_html_entities(&href).into_owned()) });
+        }
+    }
+    for run in parsed.html_cells().flat_map(|cell| &cell.runs) {
+        let target = if let Some(url) = &run.link { Cow::Borrowed(url.as_str()) }
+            else if let Some(InlineAtom::Footnote(id)) = &run.atom { Cow::Owned(footnote_target(id)) }
+            else { continue; };
+        links.push(LinkSpan { source: run.source.clone(), target });
+    }
+    links.sort_by_key(|link| (link.source.start, Reverse(link.source.end)));
+    // 外层链接覆盖标签内的对象；相邻链接保留各自的目标。后续按源码区间二分定位。
+    let mut end = 0;
+    links.retain_mut(|link| {
+        if parsed.context.reference_pending(&link.source) { return false; }
+        link.source.start = link.source.start.max(end);
+        if link.source.is_empty() { return false; }
+        end = link.source.end;
+        true
+    });
+    links
+}
+
+/// 绘制手形和 Ctrl 点击共用同一批可见矩形。行尾空白只参与文字光标定位。
+pub(super) fn visit_links(
+    parsed: &super::parse::ParsedWindow, layout: &BlockLayout, origin: Point<Pixels>, clip: Bounds<Pixels>,
+    mut visit: impl FnMut(Bounds<Pixels>, &str),
+) {
+    let links = link_spans(parsed);
+    if !links.is_empty() { visit_link_rects(layout, origin, clip, &links, &mut visit); }
+}
+
+fn visit_link_rects(
+    layout: &BlockLayout, origin: Point<Pixels>, clip: Bounds<Pixels>, links: &[LinkSpan<'_>],
+    visit: &mut impl FnMut(Bounds<Pixels>, &str),
+) {
+    for item in &layout.items {
+        match item {
+            DisplayItem::Horizontal { x, y, w, h, offset, layout, .. } => {
+                let viewport = Bounds::new(origin + point(px(*x), px(*y)), size(px(*w), px((*h - 8.0).max(0.0)))).intersect(&clip);
+                if !viewport.is_empty() { visit_link_rects(layout, origin + point(px(*x - offset.get()), px(*y)), viewport, links, visit); }
+            }
+            DisplayItem::Image { x, y, w, h, source, .. } => {
+                if let Some(link) = links.get(links.partition_point(|link| link.source.end <= source.start)).filter(|link| link.source.start < source.end) {
+                    let rect = Bounds::new(origin + point(px(*x), px(*y)), size(px(*w), px(*h))).intersect(&clip);
+                    if !rect.is_empty() { visit(rect, &link.target); }
+                }
+            }
+            DisplayItem::Text { x, y, layout, map } if !map.is_empty() => {
+                let text_origin = origin + point(px(*x), px(*y));
+                let bounds = Bounds::new(text_origin, size(px(layout.max_line_width()), px(layout.height()))).intersect(&clip);
+                if bounds.is_empty() { continue; }
+                let rows = ((f32::from(bounds.top() - text_origin.y) / layout.line_height).floor() as usize)
+                    ..((f32::from(bounds.bottom() - text_origin.y) / layout.line_height).ceil() as usize);
+                for seg in map {
+                    if seg.text.is_empty() { continue; }
+                    let start = links.partition_point(|link| link.source.end <= seg.source);
+                    for link in links[start..].iter().take_while(|link| link.source.start < seg.source_end) {
+                        let display = if seg.exact {
+                            seg.text.start + link.source.start.saturating_sub(seg.source)..seg.text.start + (link.source.end.min(seg.source_end) - seg.source)
+                        } else { seg.text.clone() };
+                        for (row, left, right) in layout.range_rects_in(display, rows.clone()) {
+                            let rect = Bounds::new(text_origin + point(px(left), px(row as f32 * layout.line_height)),
+                                size(px(right - left), px(layout.line_height))).intersect(&bounds);
+                            if !rect.is_empty() { visit(rect, &link.target); }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 /// 指针命中与正文共用同一帧几何；只注册可见区域，不触发鼠标移动时的重排。
 pub(super) fn prepaint_cursors(
     layout: &BlockLayout, origin: Point<Pixels>, clip: Bounds<Pixels>, window: &mut Window,
-    cursors: &mut Vec<(gpui::Hitbox, gpui::CursorStyle)>,
+    cursors: &mut Vec<(gpui::Hitbox, gpui::CursorStyle)>, scrollbar_cursor: gpui::CursorStyle,
 ) {
     use gpui::CursorStyle::{Arrow, IBeam, PointingHand};
     for item in &layout.items {
@@ -25,16 +124,25 @@ pub(super) fn prepaint_cursors(
                 | DisplayItem::CopyButton { x, y, size, .. } => (*x, *y, *size, *size, PointingHand),
             DisplayItem::TocLink { x, y, w, h, .. } => (*x, *y, *w, *h, PointingHand),
             DisplayItem::BlockControls { x, y, w, h, kind, .. } =>
-                (*x, *y, *w, *h, if matches!(*kind, "rule" | "diagram-toolbar") { Arrow } else { PointingHand }),
+                (*x, *y, *w, *h, if matches!(*kind, "rule" | "toc" | "diagram-toolbar") { Arrow } else { PointingHand }),
             DisplayItem::CodeBody { x, y, w, h, body, .. } => {
                 let (width, height) = body.viewport(*w, *h);
+                for (sx, sy, sw, sh) in [
+                    (*x + body.gutter + width, *y, *w - body.gutter - width, *h),
+                    (*x + body.gutter, *y + height, width, *h - height),
+                ] {
+                    let track = Bounds::new(origin + point(px(sx), px(sy)), size(px(sw), px(sh))).intersect(&clip);
+                    if !track.is_empty() { cursors.push((window.insert_hitbox(track, gpui::HitboxBehavior::Normal), scrollbar_cursor)); }
+                }
                 (*x + body.gutter, *y, width, height, IBeam)
             }
             DisplayItem::Horizontal { x, y, w, h, offset, layout, .. } => {
                 let viewport = Bounds::new(origin + point(px(*x), px(*y)), size(px(*w), px((*h - 8.0).max(0.0)))).intersect(&clip);
                 if viewport.size.width > px(0.0) && viewport.size.height > px(0.0) {
-                    prepaint_cursors(layout, origin + point(px(*x - offset.get()), px(*y)), viewport, window, cursors);
+                    prepaint_cursors(layout, origin + point(px(*x - offset.get()), px(*y)), viewport, window, cursors, scrollbar_cursor);
                 }
+                let track = Bounds::new(origin + point(px(*x), px(*y + h - 8.0)), size(px(*w), px(8.0))).intersect(&clip);
+                if !track.is_empty() { cursors.push((window.insert_hitbox(track, gpui::HitboxBehavior::Normal), scrollbar_cursor)); }
                 continue;
             }
             _ => continue,

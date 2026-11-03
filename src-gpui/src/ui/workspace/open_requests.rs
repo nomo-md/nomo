@@ -95,10 +95,11 @@ impl Workspace {
             let reused = handle.update(cx, |target, target_window, cx| {
                 let index = target.tabs.iter().position(|tab| tab.document.read(cx).path().as_ref() == Some(path));
                 let loading = target.opening.iter().any(|opening| opening.path.as_ref() == Some(path));
-                if index.is_none() && !loading { return false; }
+                let saved=target.saved_path_key(path);
+                if index.is_none() && !loading && saved.is_none() { return false; }
                 if !foreground {return true;}
                 let generation = target.next_open_intent();
-                if let Some(index) = index {
+                if let Some(key)=saved {target.open_saved_member(key,request.anchor.clone(),target_window,cx);} else if let Some(index) = index {
                     if !request.preview { target.tabs[index].preview = false; }
                     target.activate_after_open(index, generation, AfterOpen { anchor: request.anchor, ..Default::default() }, target_window, cx);
                 } else if let Some(opening) = target.opening.iter_mut().find(|opening| opening.path.as_ref() == Some(path) && opening.request.check().is_ok()) {

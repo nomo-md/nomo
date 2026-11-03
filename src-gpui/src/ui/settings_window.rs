@@ -73,7 +73,11 @@ pub fn open(cx: &mut App) {
         window_min_size: Some(size(px(760.0), px(520.0))),
         ..Default::default()
     };
-    if let Ok(handle) = cx.open_window(options, |_, cx| cx.new(SettingsWindow::new)) {
+    if let Ok(handle) = cx.open_window(options, |window, cx| {
+        let view = cx.new(SettingsWindow::new);
+        window.focus(&view.read(cx).focus.clone(), cx);
+        view
+    }) {
         cx.set_global(SettingsWindowHandle(Some(handle)));
     }
 }
@@ -105,6 +109,23 @@ impl Focusable for SettingsWindow {
 }
 
 impl SettingsWindow {
+    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open_select.take().is_some() {
+            cx.notify();
+        } else {
+            // 组字与未提交的快捷键草稿先由字段处理，再按 Esc 才关闭设置。
+            let editing = self.fields.iter().any(|(key, field)| {
+                let field = field.read(cx);
+                field.focus_handle(cx).is_focused(window) && (field.is_composing()
+                    || (super::shortcuts::SHORTCUTS.iter().any(|shortcut| shortcut.id == *key)
+                        && field.content != super::shortcuts::current(key, cx)))
+            });
+            if editing { cx.propagate(); return; }
+            window.remove_window();
+        }
+        cx.stop_propagation();
+    }
+
     fn new(cx: &mut Context<Self>) -> Self {
         Self {
             focus: cx.focus_handle(),
@@ -415,6 +436,10 @@ impl Render for SettingsWindow {
             .id("settings")
             .relative().children(animate_theme.then(crate::ui::motion::theme_frame))
             .track_focus(&self.focus)
+            .capture_action(cx.listener(|this, _: &crate::ui::text_field::FieldCancel, window, cx| this.escape(window, cx)))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" { this.escape(window, cx); }
+            }))
             .size_full()
             .flex()
             .bg(theme.app_bg)

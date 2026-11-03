@@ -186,6 +186,9 @@ fn open_paths(paths: Vec<PathBuf>, cx: &mut App) {
 }
 
 fn open_workspace(paths: Vec<PathBuf>, cx: &mut App) {
+    try_open_workspace(paths,cx).expect("打开窗口失败");
+}
+fn try_open_workspace(paths: Vec<PathBuf>, cx: &mut App) -> Result<gpui::WindowHandle<Workspace>,String> {
     let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
     let options = WindowOptions {
         app_id: Some("com.nomo.desktop".into()),
@@ -200,7 +203,7 @@ fn open_workspace(paths: Vec<PathBuf>, cx: &mut App) {
         window.observe_window_appearance(|window, cx| theme::Theme::apply(window.appearance(), cx)).detach();
         cx.new(|cx| Workspace::new(paths, window, cx))
     })
-    .expect("打开窗口失败");
+    .map_err(|error|error.to_string())
 }
 
 fn set_menus(cx: &mut App) {

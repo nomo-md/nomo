@@ -8,6 +8,7 @@
 | 启动、菜单、平台打开事件 | `src-gpui/src/main.rs`、`open_instance.rs` | 默认 Workspace 与 feature 开发入口；系统打开路由、Windows 同数据目录／会话的有界实例消息转交，无参数再次启动在原进程新建窗口 |
 | 文档主页与最近记录 | `src-gpui/src/ui/home.rs`、`home/library.rs`、`home/thumbnail.rs` | 无文件启动进入主页；本地文件夹入口、最近列表、虚拟网格和有界页首缩略图；与编辑页共用外壳面板、侧栏宽度和主页导航行，不创建编辑会话 |
 | 默认应用外壳 | `src-gpui/src/ui/workspace.rs`、`workspace/toolbar.rs`、`workspace_surface.rs` | 多标签、连体边框与阴影、文件树、模式、工具栏、搜索、自动保存 |
+| Windows 组合标签 | `src-gpui/src/ui/workspace/comparison.rs`、`comparison_ui.rs`、`comparison_close.rs`、`comparison_drag.rs`、`comparison_layout.rs` | 展示项与文档会话分离；双文档焦点、标签/成员拖放、批量关闭、跨窗归属移交及按需恢复 |
 | 编辑收尾与文档切换 | `src-gpui/src/ui/workspace/document_transition.rs`、`nomo_mark/workspace_host.rs`、`nomo_mark/object_ui.rs` | 组字和对象草稿收尾、确认后继续切换或关闭；单个待执行意图、临时订阅，无正文镜像或轮询 |
 | 浮动缩放与统计 | `src-gpui/src/ui/workspace/status.rs` | 原版右下角按钮、向上弹层、四种统计、阅读时间与缩放；复用会话统计和阅读锚点，不持有正文 |
 | Markdown Mini 小窗 | `src-gpui/src/ui/workspace/mini.rs`、`ui/mini.rs`、`ui/mini/native.rs` | Windows 原地切换、置顶与几何恢复；悬停控制条独立重绘，复用当前会话和阅读锚点；返回时释放控制条与原生回调 |
@@ -23,7 +24,7 @@
 | 跨行代码高亮 | `src-gpui/src/markdown/code_highlight.rs`、`highlight.rs`、`nomo_mark/source_view.rs` | syntect／two-face 原生语法，代码卡片与源码视图共用；按需语法库、8 MiB／120 项 LRU 和局部解析预算 |
 | 表格宽度与内容适配 | `src-gpui/src/nomo_mark/table_widths.rs`、`src-gpui/src/markdown/table_layout.rs` | 共享列宽约束、纯语义测量、表头字体与图片缩放；只作用于当前窗口布局，不写回自动列宽 |
 | 代码块原位编辑与语言选择 | `src-gpui/src/nomo_mark/code_blocks.rs`、`code_ui.rs`、`src-gpui/src/markdown/code_layout.rs` | 主会话局部输入与围栏保护；旧版卡片、固定行号与块内双向滚动、头部复制反馈／展开／语言选择；无代码草稿或独立历史 |
-| 行内注释标签与原位编辑 | `src-gpui/src/nomo_mark/comments.rs`、`object_ui.rs` | 跟随主题主色的短标签、12 字预览、正文及表格内原位输入；局部草稿按会话确认，IME 收尾后提交，关闭释放输入控件 |
+| 行内注释标签与原位编辑 | `src-gpui/src/nomo_mark/comments.rs`、`object_ui.rs` | 跟随主题主色的完整注释，按正文或单元格宽度折行，支持原位输入；局部草稿按会话确认，IME 收尾后提交，关闭释放输入控件 |
 | HTML 容器与属性卡片 | `src-gpui/src/nomo_mark/html_table.rs`、`front_matter.rs`、`object_ui.rs` | 安全 HTML 文本及实体映射、Details 标题边界；Front Matter 字段摘要、块注释完整预览与原位草稿；仅解析当前窗口，不重写未知属性 |
 | 文字布局与 KP | `src-gpui/src/layout.rs`、`kp.rs` | GPUI 塑形、上一帧段落弱引用复用、换行与可见选区几何 |
 | 图片／公式／图表 | `src-gpui/src/images.rs`、`embeds.rs`、`cache.rs` | 本地／HTTP(S) 图片解码预检、有限任务队列、失败与位图预算、CPU／atlas 淘汰；全屏查看复用现有图片和公式／图表 Store |
@@ -41,12 +42,12 @@
 | NomoMark 视图与对象 | `src-gpui/src/nomo_mark/view.rs`、`composition.rs`、`source_view.rs`、`paint.rs`、`object_ui.rs`、`table.rs`、`html_table.rs`、`table_inline.rs` | 键鼠、IME、跨窗口临时组字、两种表格共用对象边界、图像与对象交互 |
 | 表格交互与结构控件 | `src-gpui/src/nomo_mark/table_controls.rs`、`table_clipboard.rs`、`node_controls.rs` | 基于实际单元格几何的行列按钮、尺寸选择、矩形选区；标题、代码语言、Callout、Details、脚注及卡片控件；不创建第二套编辑模型 |
 | 编辑区右键菜单 | `src-gpui/src/nomo_mark/context_menu.rs`、`context_menu_ui.rs`、`context_image.rs` | 按正文、选区、链接及对象生成原版菜单；鼠标锚定、二级菜单与键盘导航；目标身份检查、局部事务和按需图片属性输入 |
-| 链接编辑与导航 | `src-gpui/src/nomo_mark/link_edit.rs`、`link_target.rs`、`src-gpui/src/ui/workspace.rs` | 局部链接弹层；本地 Markdown 路径解析、复用标签与异步锚点导航；正文仍按窗口加载 |
+| 链接编辑与导航 | `src-gpui/src/nomo_mark/link_edit.rs`、`link_display.rs`、`link_target.rs`、`src-gpui/src/ui/workspace.rs` | 局部链接弹层、可读地址与源码映射、本地 Markdown 路径解析、复用标签与异步锚点导航，正文仍按窗口加载 |
 | 脚注悬停预览 | `src-gpui/src/nomo_mark/footnote_preview.rs`、`workspace_queries.rs` | 共享结构索引定位，最多读取 8 KiB／显示 360 字；提示关闭、文档隐藏和后续悬停取消旧请求 |
 | 键盘与局部资源失效 | `src-gpui/src/nomo_mark/keyboard.rs`、`keyboard_session.rs`、`navigation.rs`、`resources.rs` | 按词、行、文档与翻页动作；有界跨窗查询；按资源依赖失效，无全文镜像 |
 | 连续窗口与预算 | `src-gpui/src/nomo_mark/native_port.rs`、`session_actions.rs`、`session_window.rs`、`viewport_ui.rs`、`resident_budget.rs` | 正式/开发共用会话连接、大编辑重分配、超大结构原文分片、失败重试、预取、回收和驻留预算 |
-| 同会话单栏/双栏 | `src-gpui/src/nomo_mark/window_panes.rs` | 按需 Pane、唯一输入控件、全局导航、局部窗口同步、模式/历史阅读锚点与取消；不持有完整正文/历史 |
-| 页面全文查询 | `src-gpui/src/nomo_mark/workspace_queries.rs` | 后台搜索分页、全文统计、大纲；按文档请求取消和过期校验 |
+| 同会话单栏/双栏 | `src-gpui/src/nomo_mark/window_panes.rs`、`src-gpui/src/ui/workspace/outline.rs` | 按需 Pane、唯一输入控件、全局导航、局部窗口同步、模式/历史阅读锚点与取消，不持有完整正文/历史。单栏按编辑区百分比排正文，右侧空间不足时自动隐藏大纲 |
+| 页面全文查询 | `src-gpui/src/nomo_mark/workspace_queries.rs` | 后台搜索分页、全文统计、大纲；查找与批量替换独立调度，按文档校验请求身份与修订 |
 | 工具栏文档命令与语言 | `src-gpui/src/nomo_mark/toolbar_commands.rs`、`toolbar_global.rs`、`semantic_selection.rs`、`semantic_global.rs`、`toc_update.rs`、`src-gpui/src/ui/toolbar_i18n.rs`、`src-gpui/resources/toolbar-locales.json` | 脚注和目录分页、派生事务、跨窗口语义补丁、四种界面语言；按需和预算内处理 |
 | 开发界面 | `src-gpui/src/nomo_mark/demo.rs`、`development_ui.rs` | feature 只控制开发入口和调试工具条 |
 | 文档导出 | `src-gpui/src/document_export.rs`、`document_export/{html,resources,model,media,pdf,pdf_fonts,word}.rs`、`ui/workspace/export.rs` | 固定修订及单个可取消任务；有界临时模型，HTML 流式输出、PDF 嵌入字体分页、Word 原生 OOXML；原子发布前复核取消，无第二份编辑模型或常驻正文 |

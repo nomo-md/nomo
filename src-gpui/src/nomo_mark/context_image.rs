@@ -126,7 +126,7 @@ impl NomoMark {
         let Some(form) = &self.context_form else { return; };
         if form.field.read(cx).is_composing() && confirm { return; }
         if form.identity != self.host.parsed.identity || self.host.presentation != Presentation::Editable {
-            self.context_form = None; window.focus(&self.focus, cx); self.error(ControlError::Stale, cx); return;
+            self.context_form = None; cx.notify(); return;
         }
         if confirm {
             let value = form.field.read(cx).content.trim();

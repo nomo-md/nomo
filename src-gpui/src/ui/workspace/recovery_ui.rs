@@ -177,8 +177,15 @@ impl Workspace {
         if let Some(manager)=&self.services {for candidate in &mut catalog.candidates {manager.refresh_recovery_location(candidate);}}
     }
 
+    pub(super) fn layout_recovery_candidate(&self,id:&str,cx:&App)->Result<Option<RecoveryCandidate>,String> {
+        let catalog=cx.try_global::<RecoveryCatalog>().ok_or("草稿目录尚未就绪")?;
+        if catalog.loading { return Err("正在检查草稿，请稍后恢复工作区。".into()); }
+        if let Some(error)=&catalog.error {return Err(error.clone());}
+        if catalog.busy.contains_key(id) {return Err("草稿正在另一个窗口中恢复。".into());}
+        Ok(catalog.candidates.iter().find(|candidate|candidate.document_id==id).cloned())
+    }
     pub(super) fn begin_recovery_attempt(&mut self,source:&OpenSource,cx:&mut Context<Self>) -> bool {
-        let candidate=match source {OpenSource::Recovery(candidate,_,_,_)|OpenSource::DiskRecovery(candidate,_,_)=>candidate,_=>return true};
+        let candidate=match source {OpenSource::Layout(_,Some(candidate))|OpenSource::Recovery(candidate,_,_,_)|OpenSource::DiskRecovery(candidate,_,_)=>candidate,_=>return true};
         let owner=cx.entity().downgrade();
         let catalog=cx.global_mut::<RecoveryCatalog>();
         catalog.busy.retain(|_,owner|owner.upgrade().is_some());
@@ -193,7 +200,7 @@ impl Workspace {
     }
 
     pub(super) fn finish_recovery_attempt(&mut self,source:&OpenSource,accepted:bool,cx:&mut Context<Self>) {
-        let candidate=match source {OpenSource::Recovery(candidate,_,_,_)|OpenSource::DiskRecovery(candidate,_,_)=>candidate,_=>return};
+        let candidate=match source {OpenSource::Layout(_,Some(candidate))|OpenSource::Recovery(candidate,_,_,_)|OpenSource::DiskRecovery(candidate,_,_)=>candidate,_=>return};
         let catalog=cx.global_mut::<RecoveryCatalog>();
         catalog.busy.remove(&candidate.document_id);
         if accepted {catalog.candidates.retain(|entry|entry.document_id!=candidate.document_id);}

@@ -1,6 +1,7 @@
 //! 窗口大纲的有界分页投影。正文和折叠树仍由文档会话及结构索引持有。
 use super::*;
 use crate::text_document::{StructureIdentity, StructureQuery};
+use crate::nomo_mark::session_window::structure_error;
 use std::{collections::VecDeque, rc::Rc, time::{Duration, Instant}};
 
 const MAX_PAGES: usize = 8;
@@ -141,7 +142,7 @@ fn query_error(error: impl std::fmt::Display) -> ControlError { ControlError::Ho
 fn read_page(port: &NativeWindowPort, identity: &StructureIdentity, view: &str, from: usize, generation: Option<u64>) -> Result<(Page, bool), ControlError> {
     let response = port.manager.query_structure(&port.owner, identity.clone(), StructureQuery::OutlineView {
         view_id: view.into(), from_index: from as u64, view_generation: generation,
-    }).map_err(query_error)?;
+    }).map_err(structure_error)?;
     let incomplete = !response.semantic_complete;
     let page = response.items.into_iter().next().ok_or_else(|| query_error("大纲页缺少结果"))?;
     Ok((serde_json::from_value(page).map_err(query_error)?, incomplete))
@@ -161,7 +162,7 @@ fn read_refresh_page(port: &NativeWindowPort, identity: &StructureIdentity, view
         if let Some((key, byte)) = &anchor {
             let located = port.manager.query_structure(&port.owner, identity.clone(), StructureQuery::LocateOutline {
                 view_id: view.into(), heading_id: key.clone(), byte: *byte, parent: false,
-            }).map_err(query_error)?;
+            }).map_err(structure_error)?;
             if let Some(index) = located.items.first().and_then(|item| item["position"].as_u64()) {
                 target = index as usize;
             } else if !located.items.first().is_some_and(|item| item["complete"] == true) { continue; }
@@ -275,7 +276,7 @@ impl DocumentHost {
                 let identity = worker_port.ready_index(revision, &request)?;
                 let created = old_view.is_none();
                 let view = if let Some(view) = old_view { view } else {
-                    let response = worker_port.manager.query_structure(&worker_port.owner, identity.clone(), StructureQuery::OpenOutline { default_level: level }).map_err(query_error)?;
+                    let response = worker_port.manager.query_structure(&worker_port.owner, identity.clone(), StructureQuery::OpenOutline { default_level: level }).map_err(structure_error)?;
                     response.items.first().and_then(|item| item["viewId"].as_str()).ok_or_else(|| query_error("大纲视图缺少身份"))?.to_owned()
                 };
                 let result = (|| { request.check()?; let (page, incomplete) = read_refresh_page(&worker_port, &identity, &view, from, anchor, &request)?; request.check()?; Ok::<_, ControlError>((identity, page, incomplete)) })();
@@ -335,7 +336,7 @@ impl DocumentHost {
             let _ = this.update(cx, |host, cx| {
                 if host.hidden || host.closed || host.status().revision != revision || host.queries.outline_state.serial != serial { return; }
                 let s = &mut host.queries.outline_state; s.pending = false;
-                match result { Ok((page, incomplete)) => { s.incomplete = incomplete; if let Err(error) = s.insert(page) { s.error = Some(error.to_string()); } }, Err(error) => s.error = Some(error.to_string()) }
+                match result { Ok((page, incomplete)) => { s.incomplete = incomplete; if let Err(error) = s.insert(page) { s.error = Some(error.to_string()); } }, Err(ControlError::Stale) => {}, Err(error) => s.error = Some(error.to_string()) }
                 let reset = s.reset_level; let level = s.default_level; s.reset_level = false;
                 if reset { host.set_outline_level(level, cx); }
                 cx.notify();
@@ -362,7 +363,7 @@ impl DocumentHost {
             let identity = port.ready_index(revision, &request)?;
             request.check()?;
             let response = port.manager.query_structure(&port.owner, identity,
-                StructureQuery::Resolve { namespace: "heading".into(), key }).map_err(query_error)?;
+                StructureQuery::Resolve { namespace: "heading".into(), key }).map_err(structure_error)?;
             request.check()?;
             let byte = response.items.first().and_then(|item| item["fromByte"].as_u64());
             Ok::<_, ControlError>(byte)
@@ -382,7 +383,11 @@ impl DocumentHost {
         }).detach();
     }
     pub(crate) fn move_outline_section(&mut self, source: &OutlineHeading, target: &OutlineHeading, placement: crate::text_document::markdown_session::OutlinePlacement, revision: u64, cx: &mut Context<Self>) {
+        use crate::text_document::markdown_session::OutlinePlacement;
         if self.status().revision != revision { self.report(ControlError::Stale, cx); return; }
+        let destination = match placement { OutlinePlacement::Before => target.byte, _ => target.to_byte };
+        if source.level == target.level + u8::from(matches!(placement, OutlinePlacement::Inside))
+            && (destination == source.byte || destination == source.to_byte) { return; }
         if !self.ready_for_session_action(cx) { self.report(ControlError::NeedsContext("编辑器正忙，暂时不能移动章节。".into()), cx); return; }
         if self.control.read(cx).host.presentation != Presentation::Editable { self.report(ControlError::ReadOnly, cx); return; }
         let Some(identity) = self.queries.outline_state.identity.clone().filter(|id| id.revision == revision) else { self.report(ControlError::Stale, cx); return; };
@@ -394,16 +399,21 @@ impl DocumentHost {
         let port = self.port.clone();
         let task = cx.background_executor().spawn(async move {
             request.check()?;
-            let moved = port.manager.move_outline_section(&port.owner, move_request).map_err(query_error)?;
+            let moved = match port.manager.move_outline_section(&port.owner, move_request) {
+                Ok(moved) => moved,
+                Err(error) if error.code == "outline-no-change" => return Ok(None),
+                Err(error) => return Err(query_error(error)),
+            };
             let loaded = port.load_group(moved.status.revision, moved.byte, None, &request)?;
-            Ok::<_, ControlError>((loaded, moved.byte))
+            Ok::<_, ControlError>(Some((loaded, moved.byte)))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |host, cx| {
                 host.navigating = false;
-                match result.and_then(|(loaded, byte)| host.install(loaded, Some(DocumentSelection::caret(byte)), cx)) {
-                    Ok(()) => host.message = "章节已移动".into(),
+                match result.and_then(|moved| moved.map(|(loaded, byte)| host.install(loaded, Some(DocumentSelection::caret(byte)), cx)).transpose()) {
+                    Ok(Some(())) => host.message = "章节已移动".into(),
+                    Ok(None) => {},
                     Err(error) => { host.refresh_status(cx); host.action_failed(error, cx); },
                 }
                 cx.notify();
@@ -424,7 +434,7 @@ impl DocumentHost {
         let port = self.port.clone();
         let task = cx.background_executor().spawn(async move {
             request.check()?;
-            port.manager.query_structure(&port.owner, identity.clone(), query).map_err(query_error)?;
+            port.manager.query_structure(&port.owner, identity.clone(), query).map_err(structure_error)?;
             request.check()?;
             let result = read_page(&port, &identity, &view, 0, None)?;
             request.check()?;
@@ -435,7 +445,7 @@ impl DocumentHost {
             let _ = this.update(cx, |host, cx| {
                 if host.hidden || host.closed || host.status().revision != revision || host.queries.outline_state.serial != serial { return; }
                 let s = &mut host.queries.outline_state; s.pending = false;
-                match result { Ok((page, incomplete)) => { if let Err(error) = s.replace_page(page) { s.error = Some(error.to_string()); } else { s.incomplete = incomplete; } }, Err(error) => s.error = Some(error.to_string()) }
+                match result { Ok((page, incomplete)) => { if let Err(error) = s.replace_page(page) { s.error = Some(error.to_string()); } else { s.incomplete = incomplete; } }, Err(ControlError::Stale) => {}, Err(error) => s.error = Some(error.to_string()) }
                 let reset = s.reset_level; let level = s.default_level; s.reset_level = false;
                 if reset { host.set_outline_level(level, cx); }
                 cx.notify();
@@ -454,7 +464,7 @@ impl DocumentHost {
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(30)).await;
             let task = cx.background_executor().spawn(async move {
-                port.manager.query_structure(&port.owner, identity, StructureQuery::HeadingAtByte { byte }).map_err(query_error)
+                port.manager.query_structure(&port.owner, identity, StructureQuery::HeadingAtByte { byte }).map_err(structure_error)
             });
             let result = task.await;
             let _ = this.update(cx, |host, cx| {
@@ -470,6 +480,35 @@ impl DocumentHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outline_read_from_before_a_list_edit_is_stale_instead_of_a_host_failure() {
+        use std::{fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+        let base=PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+            .join(".artifacts/list-followup-20261102/outline-tests");
+        fs::create_dir_all(&base).unwrap();
+        let root=base.join(format!("stale-{}-{}",std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let source="# Heading\n\n1. Alpha\n2. Bravo\n3. Charlie";
+        let port=NativeWindowPort::open(root.clone(),"outline-list-test".into(),None,Some(source.into())).unwrap();
+        let revision=port.status().unwrap().revision;
+        let identity=port.ready_index(revision,&Default::default()).unwrap();
+        let response=port.manager.query_structure(&port.owner,identity.clone(),StructureQuery::OpenOutline {default_level:6}).unwrap();
+        let view=response.items[0]["viewId"].as_str().unwrap();
+        assert!(read_page(&port,&identity,view,0,None).is_ok());
+        let parsed=crate::nomo_mark::parse::ParsedWindow::parse(port.read_window(revision,0..source.len() as u64).unwrap(),
+            "outline-list-test",0,WindowContext::Complete).unwrap();
+        let before=DocumentSelection::caret(source.find("Bravo").unwrap() as u64);
+        let change=crate::nomo_mark::commands::apply_semantic(&parsed,before,
+            crate::nomo_mark::commands::EditIntent::LinePrefix("1. ".into())).unwrap();
+        port.submit(DocumentTransaction {base_revision:revision,operation_id:"cancel-list".into(),history_group_id:"cancel-list".into(),
+            edits:change.edits,selection_before:before,selection_after:change.selection,template_update:change.template_update}).unwrap();
+        assert!(matches!(read_page(&port,&identity,view,0,None),Err(ControlError::Stale)));
+        port.close(true).unwrap();
+        drop(port);
+        let resolved=root.canonicalize().unwrap();
+        assert!(resolved.starts_with(base.canonicalize().unwrap()));
+        fs::remove_dir_all(resolved).unwrap();
+    }
 
     fn page(index: usize, title_bytes: usize) -> Page {
         Page { view_id: "test".into(), view_generation: 1, visible_count: 20,

@@ -20,7 +20,7 @@ use crate::{
     theme::{Family, Theme},
 };
 use gpui::{
-    App, Bounds, ContentMask, Context, CursorStyle, Element, ElementId,
+    App, AvailableSpace, Bounds, ContentMask, Context, CursorStyle, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point, Render, Style, UTF16Selection, Window, div, point, prelude::*, px,
@@ -82,6 +82,8 @@ pub struct NomoMark {
     composition_templates: super::template_projection::CompositionTemplates,
     external_composition: Option<composition::ExternalComposition>,
     preferred_x: Option<f32>,
+    // 同一字节既是软换行行尾又是下一行行首时，保留实际选中的视觉侧。
+    upstream_caret: Option<u64>,
     pending_page: Option<(f32, f32, Option<u64>)>,
     height: f32,
     history_serial: u64,
@@ -102,6 +104,7 @@ pub struct NomoMark {
     pub(super) auxiliary_math: bool,
     pending_comment_history: Option<bool>,
     pub(crate) pending_block_entry: Option<bool>,
+    pub(super) pending_navigation_caret: bool,
     pub(super) pending_block_navigation: Option<bool>,
     last_geometry: Option<ControlEvent>,
     horizontal_drag: Option<(usize, f32, f32)>,
@@ -144,6 +147,7 @@ impl NomoMark {
             composition_templates: Default::default(),
             external_composition: None,
             preferred_x: None,
+            upstream_caret: None,
             pending_page: None,
             height: 32.0,
             history_serial: 0,
@@ -164,6 +168,7 @@ impl NomoMark {
             auxiliary_math: false,
             pending_comment_history: None,
             pending_block_entry: None,
+            pending_navigation_caret: false,
             pending_block_navigation: None,
             workspace_hosted: false,
             windowed_navigation: false,
@@ -177,6 +182,8 @@ impl NomoMark {
             return Err(ControlError::Busy);
         }
         self.mode = mode;
+        self.upstream_caret = None;
+        self.pending_navigation_caret = false;
         self.context_menu = None;
         self.context_form = None;
         self.code_language = None;
@@ -205,7 +212,9 @@ impl NomoMark {
         self.block_menu_open = false;
         self.dismiss_quick_insert(cx);
         self.pending_page = None;
+        self.upstream_caret = None;
         self.pending_block_entry = None;
+        self.pending_navigation_caret = false;
         self.pending_block_navigation = None;
         self.pending_comment_history = None;
         self.menu_open = false;
@@ -232,7 +241,9 @@ impl NomoMark {
         revision: u64,
         cx: &mut Context<Self>,
     ) -> Result<(), ControlError> {
+        let previous = self.host.parsed.identity.clone();
         self.host.acknowledge(operation, revision)?;
+        self.rekey_layout_identity(&previous);
         if let Some(session) = &mut self.quick_insert {
             if session.matches(&self.host.parsed, self.host.selection) {
                 session.identity = self.host.parsed.identity.clone();
@@ -242,6 +253,20 @@ impl NomoMark {
         self.flush_block_navigation(cx);
         cx.notify();
         Ok(())
+    }
+    pub(crate) fn rebase_passive(&mut self, revision: u64, edits: &[SourceEdit], cx: &mut Context<Self>) -> Result<(), ControlError> {
+        let previous = self.host.parsed.identity.clone();
+        self.host.rebase_passive(revision, edits)?;
+        self.rekey_layout_identity(&previous);
+        cx.notify();
+        Ok(())
+    }
+    fn rekey_layout_identity(&mut self, previous: &WindowIdentity) {
+        // 确认版本或邻窗位移都不改变局部几何，无需丢弃布局再绘制整段正文。
+        if let Some((stamp, ..)) = &mut self.layout_key {
+            if &stamp.identity == previous { stamp.identity = self.host.parsed.identity.clone(); }
+        }
+        self.last_geometry = None;
     }
     pub fn fail(&mut self, message: String, cx: &mut Context<Self>) {
         self.host.submission_failed(message.clone());
@@ -335,6 +360,9 @@ impl NomoMark {
             + self.context_menu.as_ref().map_or(0, |menu| menu.estimated_bytes())
             + self.context_form.as_ref().map_or(0, |form| form.estimated_bytes())
     }
+    pub(crate) fn reserve_layout_height(&mut self, height: f32) {
+        if self.layout.is_none() && height.is_finite() && height>=1.0 { self.height=height; }
+    }
     fn invalidate(&mut self) {
         self.layout_key = None;
         self.last_geometry = None;
@@ -352,6 +380,7 @@ impl NomoMark {
         &self.host.parsed.source
     }
     fn queue_result(&mut self, result: commands::EditResult, group: &str, cx: &mut Context<Self>) -> Result<(), ControlError> {
+        self.upstream_caret = None;
         if self.auxiliary_input && self.host.projected_window_bytes(&result.edits)? > super::session_window::policy().group_bytes as usize {
             return Err(ControlError::Unsupported("对象草稿超过当前窗口预算；请在源码窗口中继续编辑".into()));
         }
@@ -459,6 +488,7 @@ impl NomoMark {
             .iter()
             .find(|table| table.source.contains(&at))
         {
+            if intent.would_empty_table(table.rows, table.columns) { return; }
             let intent = match intent {
                 TableIntent::InsertRow { after } => HtmlTableIntent::InsertRow { at: after + 1 },
                 TableIntent::InsertRowBefore { row } => HtmlTableIntent::InsertRow { at: row },
@@ -477,6 +507,7 @@ impl NomoMark {
                 intent,
             )
         } else if let Some(table) = super::table::Table::at(&self.host.parsed, at) {
+            if intent.would_empty_table(table.rows.len(), table.separator.cells.len()) { return; }
             table.edit(&self.host.parsed, self.host.selection, intent)
         } else {
             return;
@@ -621,6 +652,7 @@ impl NomoMark {
             .min(self.host.parsed.source.len() as u64) as usize
     }
     pub fn select(&mut self, selection: DocumentSelection, cx: &mut Context<Self>) {
+        self.upstream_caret = None;
         self.context_menu = None;
         self.context_form = None;
         self.code_language = None;
@@ -630,6 +662,7 @@ impl NomoMark {
         self.cell_selection = None;
         self.dismiss_quick_insert(cx);
         if self.finish_external_composition(true, cx) { return; }
+        self.pending_navigation_caret = selection.range().is_empty();
         self.host.selection = selection;
         self.ensure_horizontal_caret();
         self.history_serial += 1;
@@ -646,9 +679,14 @@ impl NomoMark {
     }
     /// 宿主恢复/同步全局选区，不伪造用户选区事件或切换活动输入视图。
     pub(crate) fn restore_selection(&mut self, selection:DocumentSelection, cx:&mut Context<Self>) {
+        if self.host.selection != selection { self.upstream_caret = None; }
         if self.host.selection != selection { self.context_menu = None; self.context_form = None; }
         self.dismiss_quick_insert(cx);
+        self.pending_navigation_caret = false;
         self.host.selection=selection;
+        if self.layout_key.as_ref().is_some_and(|key| key.0.identity == self.host.parsed.identity) {
+            self.resolve_navigation_caret(cx);
+        }
         self.ensure_horizontal_caret();
         cx.notify();
     }
@@ -660,6 +698,10 @@ impl NomoMark {
         self.queue_result(result,&group,cx)
     }
     fn move_to(&mut self, at: usize, extend: bool, cx: &mut Context<Self>) {
+        let ready = self.layout_key.as_ref().is_some_and(|key| key.0.identity == self.host.parsed.identity);
+        let at = if ready && self.effective_mode() == ViewMode::Semantic {
+            self.layout.as_ref().and_then(|layout| layout.nearest_caret(at)).unwrap_or(at)
+        } else { at };
         let at = self.host.parsed.identity.from_byte + at as u64;
         self.select(
             DocumentSelection {
@@ -672,6 +714,16 @@ impl NomoMark {
             },
             cx,
         );
+        self.pending_navigation_caret = !ready;
+    }
+    fn move_to_row(&mut self, at: usize, y: f32, extend: bool, cx: &mut Context<Self>) {
+        let upstream = self.layout.as_ref().and_then(|layout| layout.caret_at(at)).is_some_and(|(_, top, _)| y < top);
+        self.move_to(at, extend, cx);
+        self.upstream_caret = upstream.then_some(self.host.selection.head_byte);
+    }
+    fn visual_caret_at(&self, at: usize) -> Option<(f32, f32, f32)> {
+        let byte = self.host.parsed.identity.from_byte + at as u64;
+        self.layout.as_ref()?.caret_at_with_affinity(at, self.upstream_caret == Some(byte))
     }
     fn horizontal(&mut self, forward: bool, word: bool, extend: bool, cx: &mut Context<Self>) {
         if self.keyboard_protected() {
@@ -704,7 +756,9 @@ impl NomoMark {
         }
         let unit = if word { super::navigation::CursorUnit::Word } else { super::navigation::CursorUnit::Grapheme };
         let next = if self.effective_mode() == ViewMode::Semantic {
-            self.layout.as_ref().and_then(|layout| layout.horizontal_caret(at, unit, forward)).unwrap_or(if forward { source.len() } else { 0 })
+            if self.layout_key.as_ref().is_none_or(|key| key.0.identity != self.host.parsed.identity) { return; }
+            let Some(layout) = &self.layout else { return; };
+            layout.horizontal_caret(at, unit, forward).unwrap_or(at)
         } else {
             super::navigation::boundary(source, at, unit, forward)
         };
@@ -753,7 +807,7 @@ impl NomoMark {
         let Some(layout) = &self.layout else {
             return;
         };
-        let Some((x, y, h)) = layout.caret_at(self.local_cursor()) else {
+        let Some((x, y, h)) = self.visual_caret_at(self.local_cursor()) else {
             return;
         };
         let x = self.preferred_x.unwrap_or(x);
@@ -774,14 +828,14 @@ impl NomoMark {
         }
         if let Some(at) = layout.source_at(x, target) {
             if !extend && self.enter_block_at(at, !down, window, cx) { return; }
-            self.move_to(at, extend, cx);
+            self.move_to_row(at, target, extend, cx);
         }
     }
     fn home_end(&mut self, end: bool, extend: bool, cx: &mut Context<Self>) {
         if self.keyboard_protected() { return; }
         let source = &self.host.parsed.source;
         let at = self.local_cursor();
-        let target = self.layout.as_ref().and_then(|layout| layout.line_boundary(at, end)).unwrap_or_else(|| if end {
+        let target = self.layout.as_ref().and_then(|layout| layout.line_boundary_with_affinity(at, end, self.upstream_caret == Some(self.host.selection.head_byte))).unwrap_or_else(|| if end {
             source[at..]
                 .find(['\r', '\n'])
                 .map_or(source.len(), |p| at + p)
@@ -790,6 +844,7 @@ impl NomoMark {
         });
         self.preferred_x = None;
         self.move_to(target, extend, cx);
+        self.upstream_caret = end.then_some(self.host.selection.head_byte);
     }
     fn copy(&mut self, cut: bool, cx: &mut Context<Self>) {
         if let Some(payload) = self.copy_cells(cx.global::<Settings>().copy_markdown_syntax) {
@@ -1176,8 +1231,17 @@ impl NomoMark {
                 }
             }
         }
-        let object_at = (self.effective_mode() == ViewMode::Semantic
-            && (event.click_count == 2 || event.modifiers.control || event.modifiers.platform))
+        if event.modifiers.control || event.modifiers.platform {
+            let mut target = None;
+            self.visit_visible_links(|rect, url| {
+                if rect.contains(&event.position) { target = Some(url.to_owned()); }
+            });
+            if let Some(target) = target {
+                cx.emit(ControlEvent::OpenLink(target));
+                return;
+            }
+        }
+        let object_at = (self.effective_mode() == ViewMode::Semantic && event.click_count == 2)
             .then(|| {
                 let bounds = self.content_bounds()?;
                 self.layout.as_ref()?.object_source_at(
@@ -1188,45 +1252,6 @@ impl NomoMark {
         let Some(at) = object_at.or_else(|| self.hit(event.position)) else {
             return;
         };
-        if (event.modifiers.control || event.modifiers.platform)
-            && !self.host.parsed.context.reference_pending(&(at..at))
-        {
-            if let Some(target) = self
-                .host
-                .parsed
-                .html_cells()
-                .flat_map(|cell| &cell.runs)
-                .find(|run| run.source.contains(&at))
-                .and_then(|run| run.link.clone().or_else(|| match run.atom.as_ref() { Some(super::html_table::InlineAtom::Footnote(id)) => Some(format!("#fn-{}",id.replace('%',"%25"))), _ => None }))
-            {
-                cx.emit(ControlEvent::OpenLink(target));
-                return;
-            }
-            if let Some(super::html_table::InlineAtom::Footnote(id)) = super::table_inline::atom_at(&self.host.parsed, at).and_then(|run| run.atom) {
-                cx.emit(ControlEvent::OpenLink(format!("#fn-{}",id.replace('%',"%25"))));
-                return;
-            }
-            for (event, range) in &self.host.parsed.events {
-                if range.contains(&at) {
-                    if let pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link {
-                        dest_url,
-                        ..
-                    }) = event
-                    {
-                        cx.emit(ControlEvent::OpenLink(dest_url.to_string()));
-                        return;
-                    }
-                }
-            }
-            if let Some(tag) = self.host.parsed.inline.iter()
-                .find(|span| span.format == super::parse::InlineFormat::Link && span.content.contains(&at))
-                .and_then(|span| super::nomo_syntax::html_tag(&self.host.parsed.source, span.open.start)) {
-                if let Some(target) = tag.attrs.get("href") {
-                    cx.emit(ControlEvent::OpenLink(html_escape::decode_html_entities(target).into_owned()));
-                    return;
-                }
-            }
-        }
         if event.click_count == 1 && !event.modifiers.shift && self.enter_block_at(at, false, window, cx) { return; }
         if event.click_count == 2 && self.effective_mode() == ViewMode::Semantic
             && !self.host.parsed.context.reference_pending(&(at..at))
@@ -1301,7 +1326,7 @@ impl NomoMark {
                 cx,
             );
         } else {
-            self.move_to(at, event.modifiers.shift, cx);
+            if let Some(bounds) = self.bounds { self.move_to_row(at, f32::from(event.position.y - bounds.top()), event.modifiers.shift, cx); }
         }
         self.cell_selection = None;
         self.table_drag_anchor = if self.effective_mode() == ViewMode::Semantic { self.table_cell_at(at) } else { None };
@@ -1310,6 +1335,13 @@ impl NomoMark {
         self.preferred_x = None;
     }
     fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.pressed_button != Some(MouseButton::Left) && (self.horizontal_drag.is_some() || self.code_scroll_drag.is_some()) {
+            self.horizontal_drag = None;
+            self.code_scroll_drag = None;
+            self.host.interaction.dragging = false;
+            cx.notify();
+            return;
+        }
         if self.code_scroll_move(event, cx) { return; }
         if let Some((source, start, initial)) = self.horizontal_drag {
             if let (Some(bounds), Some(layout)) = (self.bounds, &self.layout) {
@@ -1323,7 +1355,7 @@ impl NomoMark {
         }
         if self.host.interaction.dragging {
             if let Some(at) = self.hit(event.position) {
-                self.move_to(at, true, cx);
+                if let Some(bounds) = self.bounds { self.move_to_row(at, f32::from(event.position.y - bounds.top()), true, cx); }
                 if let (Some((table, row, column)), Some((target, r, c))) = (self.table_drag_anchor, self.table_cell_at(at)) {
                     if table == target && (row, column) != (r, c) {
                         self.cell_selection = Some(table_clipboard::CellSelection { identity: self.host.parsed.identity.clone(), table, anchor: (row, column), head: (r, c) });
@@ -1463,12 +1495,18 @@ impl NomoMark {
     pub(crate) fn content_bounds(&self) -> Option<Bounds<Pixels>> {
         (self.layout_key.as_ref()?.0.identity == self.host.parsed.identity).then_some(self.bounds).flatten()
     }
+    fn visit_visible_links(&self, visit: impl FnMut(Bounds<Pixels>, &str)) {
+        if self.auxiliary_input || !matches!(self.host.presentation, Presentation::Editable | Presentation::ReadOnly) { return; }
+        if let (Some(layout), Some(bounds), Some(clip)) = (&self.layout, self.content_bounds(), self.visible_bounds) {
+            if !clip.is_empty() { super::paint::visit_links(&self.host.parsed, layout, bounds.origin, clip, visit); }
+        }
+    }
     /// 纸面留白沿用正文命中及选区事件，不创建文档补丁或历史记录。
     pub(crate) fn place_caret_at(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         if self.host.interaction.protected() || self.host.presentation != Presentation::Editable { return; }
-        if let Some(at) = self.hit(position) {
+        if let (Some(at), Some(bounds)) = (self.hit(position), self.bounds) {
             window.focus(&self.focus, cx);
-            self.move_to(at, false, cx);
+            self.move_to_row(at, f32::from(position.y - bounds.top()), false, cx);
             self.preferred_x = None;
         }
     }
@@ -1492,7 +1530,7 @@ impl NomoMark {
         if self.layout_key.as_ref()?.0.identity != *identity { return None; }
         let local = byte.checked_sub(identity.from_byte)? as usize;
         if local > self.host.parsed.source.len() { return None; }
-        let (_, y, height) = self.layout.as_ref()?.caret_at(local)?;
+        let (_, y, height) = self.visual_caret_at(local)?;
         Some((identity.clone(), y, height))
     }
     /// 从当前布局的屏幕位置提取完整文档字节锚点，供宿主保持阅读位置和同步双栏。
@@ -1525,7 +1563,7 @@ impl NomoMark {
                 if source.contains(&local) && !body.caret_visible(local, *w, *h) { return None; }
             }
         }
-        let (x, y, h) = self.layout.as_ref()?.caret_at(local)?;
+        let (x, y, h) = self.visual_caret_at(local)?;
         Some((
             self.host.parsed.identity.clone(),
             Bounds::new(bounds.origin + point(px(x), px(y)), size(px(1.5), px(h))),
@@ -1620,11 +1658,12 @@ impl NomoMark {
         let scale = window.scale_factor();
         let expected = self.height * scale;
         let actual = f32::from(height) * scale;
-        // GPUI 将绝对高度对齐到设备像素；半像素取整不能让控件永久停在 Preparing。
+        // 发布高度已按 GPUI 的测量规则向上取整；仅容许设备边缘的半像素误差。
         let precision = expected.abs().max(actual.abs()) * f32::EPSILON * 4.0;
         (actual - expected).abs() <= 0.5 + precision
     }
     fn prepare_layout(&mut self, width: f32, window: &Window, cx: &mut Context<Self>) {
+        let width = (width * window.scale_factor()).round() / window.scale_factor();
         if width <= 0.0
             || matches!(
                 self.host.presentation,
@@ -1661,6 +1700,7 @@ impl NomoMark {
         let mut configuration = std::collections::hash_map::DefaultHasher::new();
         metrics.font_size.to_bits().hash(&mut configuration);
         metrics.line_height.to_bits().hash(&mut configuration);
+        window.scale_factor().to_bits().hash(&mut configuration);
         settings.wrap().hash(&mut configuration);
         settings.inline_code_rendering.hash(&mut configuration);
         settings.code_line_numbers.hash(&mut configuration);
@@ -1685,6 +1725,7 @@ impl NomoMark {
             configuration.finish(),
         );
         if self.layout_key.as_ref() == Some(&key) {
+            if self.pending_navigation_caret { self.resolve_navigation_caret(cx); }
             return;
         }
         let mut reuse = crate::layout::TextLayoutReuse::default();
@@ -1836,11 +1877,14 @@ impl NomoMark {
                 for item in &mut layout.items { if let DisplayItem::Text { x, .. } = item { *x -= offset; } }
             }
         }
-        self.height = layout.height.max(self.auxiliary_comment.map_or(metrics.body_line_height(), |em| em * metrics.zoom * 1.15));
+        layout.height = layout.height.max(self.auxiliary_comment.map_or(metrics.body_line_height(), |em| em * metrics.zoom * 1.15));
+        // GPUI 对测量尺寸向上取整；分组高度及就绪判断必须发布同一个设备像素高度。
+        self.height = (layout.height * window.scale_factor()).ceil() / window.scale_factor();
         stamp.resource_generation = self.layout_resources.generation(cx.global::<ImageStore>(), cx.global::<EmbedStore>());
         key.0 = stamp.clone();
         self.layout = Some(Rc::new(layout));
         self.layout_key = Some(key);
+        self.resolve_navigation_caret(cx);
         // 标签宽度变化即使不改变整段高度，也要更新同一位置的命中区和输入控件。
         if self.inline_editing() || self.block_editing() || self.layout.as_ref().is_some_and(|layout| !layout.comment_rects().is_empty()
             || layout.items.iter().any(|item| matches!(item, DisplayItem::CodeHeader { .. }))) { cx.notify(); }
@@ -2308,6 +2352,7 @@ impl Render for NomoMark {
             .w_full()
             .key_context("NomoMark")
             .track_focus(&self.focus)
+            .on_modifiers_changed(cx.listener(|view, _, _, cx| { if !view.workspace_hosted { cx.notify(); } }))
             .on_key_down(cx.listener(|view,event:&gpui::KeyDownEvent,window,cx|{
                 if view.viewer_key(&event.keystroke, window, cx) { return; }
                 let keys=&event.keystroke;
@@ -2620,13 +2665,28 @@ impl Element for ControlElement {
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         window: &mut Window,
-        cx: &mut App,
+        _cx: &mut App,
     ) -> (LayoutId, ()) {
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
-        style.size.height = px(self.control.read(cx).height).into();
         style.flex_shrink = 0.0;
-        (window.request_layout(style, [], cx), ())
+        let control = self.control.clone();
+        let layout = window.request_measured_layout(style, move |known, available, window, cx| {
+            let width = known.width.or(match available.width {
+                AvailableSpace::Definite(width) => Some(width),
+                _ => None,
+            });
+            let height = control.update(cx, |view, cx| {
+                // 先按本帧的实际宽度排版，再把高度交给父布局；不能等绘制时才改变行数。
+                if let Some(width) = width.filter(|width| f32::from(*width).is_finite() && *width > px(0.0)) {
+                    view.prepare_layout(f32::from(width), window, cx);
+                }
+                // 返回原始内在高度，由 GPUI 取整一次；不能将已取整的逻辑高度再次取整。
+                px(view.layout.as_ref().map_or(view.height, |layout| layout.height))
+            });
+            size(width.unwrap_or(px(0.0)), known.height.unwrap_or(height))
+        });
+        (layout, ())
     }
     fn prepaint(
         &mut self,
@@ -2649,7 +2709,12 @@ impl Element for ControlElement {
                 point(left, top),
                 size((right - left).max(px(0.0)), (bottom - top).max(px(0.0))),
             ));
-            v.prepare_layout(f32::from(bounds.size.width), window, cx);
+            let actual_width = f32::from(bounds.size.width);
+            // 父布局边缘与测量宽度可能相差一个设备像素；沿用本帧测量宽度，避免二次折行。
+            let measured_width = v.layout_key.as_ref().map(|key| key.0.width)
+                .filter(|width| ((actual_width - width) * window.scale_factor()).abs() <= 1.0 + f32::EPSILON)
+                .unwrap_or(actual_width);
+            v.prepare_layout(measured_width, window, cx);
             if let Some((stamp, _, _, _)) = &v.layout_key {
                 if v.layout_height_ready(bounds.size.height, window)
                     && v.host.presentation == Presentation::Preparing
@@ -2663,8 +2728,15 @@ impl Element for ControlElement {
             v.report_geometry(cx);
         });
         let mut cursors = Vec::new();
-        if let Some(layout) = &self.control.read(cx).layout {
-            super::paint::prepaint_cursors(layout, bounds.origin, bounds.intersect(&window.content_mask().bounds), window, &mut cursors);
+        let control = self.control.read(cx);
+        if let Some(layout) = &control.layout {
+            let modifiers = window.modifiers();
+            let dragging = control.horizontal_drag.is_some() || control.code_scroll_drag.is_some();
+            let scrollbar_cursor = if dragging { CursorStyle::ClosedHand } else { CursorStyle::OpenHand };
+            super::paint::prepaint_cursors(layout, bounds.origin, bounds.intersect(&window.content_mask().bounds), window, &mut cursors, scrollbar_cursor);
+            if modifiers.control || modifiers.platform {
+                control.visit_visible_links(|rect, _| cursors.push((window.insert_hitbox(rect, gpui::HitboxBehavior::Normal), CursorStyle::PointingHand)));
+            }
         }
         cursors
     }
@@ -2690,6 +2762,7 @@ impl Element for ControlElement {
         for (hitbox, cursor) in cursors {
             window.set_cursor_style(*cursor, hitbox);
         }
+        if control.horizontal_drag.is_some() || control.code_scroll_drag.is_some() { window.set_window_cursor_style(CursorStyle::ClosedHand); }
         if control.open_profile.is_some() && control.host.presentation != Presentation::Preparing {
             let bytes = control.host.parsed.source.len();
             let source = control.host.parsed.context.source_only;

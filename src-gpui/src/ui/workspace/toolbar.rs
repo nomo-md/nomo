@@ -271,7 +271,7 @@ impl Workspace {
                 .child(indicator)
                 .child(mode_segment("mode-semantic", IconName::BookOpenText, "语义", "语义模式", EditorMode::Semantic, cx))
                 .child(mode_segment("mode-source", IconName::CodeXml, "源码", "切换源码 ⌘E", EditorMode::Source, cx))
-                .child(mode_segment("mode-split", IconName::Columns, "分栏", "分栏模式", EditorMode::Split, cx))
+                .when(self.active_pair().is_none(), |bar| bar.child(mode_segment("mode-split", IconName::Columns, "分栏", "分栏模式", EditorMode::Split, cx)))
                 .into_any_element(),
         ];
         if mode == EditorMode::Split {

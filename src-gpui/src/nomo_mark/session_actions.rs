@@ -225,7 +225,10 @@ impl DocumentHost {
             let _ = this.update(cx, |host, cx| {
                 host.navigating = false;
                 match result.and_then(|loaded| host.install(loaded, selection, cx)) {
-                    Ok(()) => { host.focus_pending = focus; }
+                    Ok(()) => {
+                        host.focus_pending = focus;
+                        host.control.update(cx, |view, cx| view.defer_navigation_caret(cx));
+                    }
                     Err(error) => host.action_failed(error, cx),
                 }
                 cx.notify();
@@ -386,15 +389,41 @@ impl DocumentHost {
             let loaded=port.load_group(revision,at,None,&request)?;
             let loaded=if loaded.input.from_byte<=byte && byte<=loaded.input.to_byte {loaded}
                 else {port.load_group(revision,byte,None,&request)?};
-            Ok::<_, ControlError>((loaded, selection))
+            // 在发布历史窗口前准备整份有界分组几何，不能让视口先按局部片段高度夹回顶部。
+            let groups=port.window_groups(revision,&[(loaded.input.from_byte,loaded.input.to_byte)],&request)?;
+            Ok::<_, ControlError>((loaded, selection, groups))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |host, cx| {
                 host.navigating = false;
-                let result=result.and_then(|(loaded, selection)| {
+                let result=result.and_then(|(loaded, selection, groups)| {
                     let anchor=host.history_reading_anchor(&loaded,selection,cx);
-                    host.install(loaded,selection,cx)?;
+                    let pane=host.active_pane;
+                    let scroll=host.panes[pane].scroll.offset();
+                    // 移交现有元数据所有权，保留未改动窗口的实测高度，不复制正文或新建缓存。
+                    let previous_groups=std::mem::take(&mut host.panes[pane].viewport.groups);
+                    let previous_heights=std::mem::take(&mut host.panes[pane].viewport.heights);
+                    let mut previous_mounts=std::mem::take(&mut host.panes[pane].viewport.mounts);
+                    // 连续撤销期间每个范围最多暂留一份已就绪的旧显示，未完成交互仍受原门禁保护。
+                    let mut kept=std::collections::BTreeSet::new();
+                    previous_mounts.reverse();
+                    previous_mounts.retain(|mount| {
+                        if mount.view==host.control {return true;}
+                        let view=mount.view.read(cx);
+                        if view.measured_height().is_some() && kept.insert(view.host.parsed.identity.from_byte) {return true;}
+                        mount.view.update(cx,|view,cx|view.detach(false,cx)).is_err()
+                    });
+                    previous_mounts.reverse();
+                    let installed=host.install(loaded,selection,cx);
+                    host.panes[pane].viewport.groups=previous_groups;
+                    host.panes[pane].viewport.heights=previous_heights;
+                    // 邻窗在当前修订排版就绪前继续只读显示；旧修订不能被提升为输入控件。
+                    host.panes[pane].viewport.mounts=previous_mounts;
+                    installed?;
+                    host.replace_pane_groups(pane,groups,cx);
+                    host.update_pane_cost(pane,cx);
+                    if anchor.is_some() {host.panes[pane].scroll.set_offset(scroll);}
                     if let Some(anchor)=anchor {host.restore_history_reading(anchor);}
                     Ok(())
                 });

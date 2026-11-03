@@ -18,6 +18,7 @@ impl Metadata {
 #[derive(Clone)]
 pub enum DocumentEvent {
     Saved,
+    FileStateChanged,
     Notice(String),
     Changed,
     Status,
@@ -72,6 +73,7 @@ impl DocumentHost {
             queries: Default::default(),
             embedded: true,
             mini_layout: false,
+            outline_layout: OutlineLayout::CENTERED,
             closed: false,
             control: control.clone(),
             message: String::new(),
@@ -83,7 +85,7 @@ impl DocumentHost {
             request: Default::default(),
             panes: vec![window_panes::Pane::new(control.clone(), subscription, mode)],
             active_pane: 0, split_ratio: 0.5, split_dragging: false, split_focus: cx.focus_handle(),
-            focus_pending: false, toolbar_marks: 0,
+            focus_pending: false, accepts_workspace_focus:true, toolbar_marks: 0,
             quick: Default::default(),
 
         };
@@ -91,6 +93,19 @@ impl DocumentHost {
         host.schedule_metadata(cx);
         host.schedule_toc(300, false, cx);
         host
+    }
+    /// 目标窗口只接管一个已加载的片段。正文、历史和修订继续由同一个原生会话持有。
+    pub(crate) fn transfer_adapter(&self, byte:u64, cx:&App) -> Result<WindowHostAdapter,ControlError> {
+        self.ready(cx)?;
+        let view=self.panes[self.active_pane].viewport.mounts.iter().map(|mount|mount.view.read(cx))
+            .find(|view|{let id=&view.host.parsed.identity;id.revision==self.status().revision && id.from_byte<=byte && byte<=id.to_byte})
+            .unwrap_or_else(||self.control.read(cx));
+        let id=&view.host.parsed.identity;
+        if id.revision!=self.status().revision {return Err(ControlError::Stale);}
+        let input=self.port.read_window(id.revision,id.from_byte..id.to_byte)?;
+        static NEXT_TRANSFER:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
+        let serial=NEXT_TRANSFER.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+        WindowHostAdapter::new(input,format!("transferred-window-{serial}"),0,WindowContext::Resolved(view.host.parsed.context.clone()))
     }
     pub(crate) fn port(&self) -> NativeWindowPort {
         self.port.clone()
@@ -256,20 +271,45 @@ impl DocumentHost {
         self.cancel_toc();
         self.cancel_queries(cx);
         self.port.close(discard)?;
+        self.release_closed_view(discard, cx)
+    }
+    pub(crate) fn set_workspace_focus(&mut self, focused:bool, cx:&mut Context<Self>) {
+        if self.accepts_workspace_focus==focused {return;}
+        self.accepts_workspace_focus=focused;
+        self.focus_pending=false;
+        if !focused {
+            self.set_outline_enabled(false, 0, cx);
+            self.outline_layout=OutlineLayout::CENTERED;
+        }
+    }
+    pub(crate) fn is_visible(&self) -> bool { !self.hidden && !self.closed }
+
+    /// 会话已由批量事务关闭或移交，只拆除旧控件和任务。
+    pub(crate) fn release_closed_view(&mut self, discard: bool, cx: &mut Context<Self>) -> Result<(), ControlError> {
         self.closed = true;
+        self.quick.cancel();
+        self.request.cancel();
+        self.pause_viewport(cx);
+        self.cancel_toc();
+        self.cancel_queries(cx);
         for mount in self.panes.iter().flat_map(|pane|&pane.viewport.mounts) {
             mount.view.update(cx, |view, cx| view.detach(discard, cx))?;
         }
-        for pane in &mut self.panes { pane.viewport.mounts.clear(); }
+        for pane in &mut self.panes {
+            pane.clear_scrollbar();
+            pane.viewport.mounts.clear();
+        }
         self.update_resident_cost(cx);
         Ok(())
     }
     pub(crate) fn refresh_status(&mut self, cx: &mut Context<Self>) {
         match self.port.status() {
             Ok(status) => {
+                let file_state_changed = self.status().dirty != status.dirty
+                    || self.status().path != status.path;
                 self.total_bytes = status.byte_length;
                 self.metadata.status = status;
-                cx.emit(DocumentEvent::Status);
+                cx.emit(if file_state_changed { DocumentEvent::FileStateChanged } else { DocumentEvent::Status });
             }
             Err(error) => self.report(error, cx),
         }
@@ -487,7 +527,7 @@ impl Render for DocumentHost {
             let overlay=self.quick_insert_overlay(cx);
             return div().size_full().relative().child(body).children(overlay).into_any_element();
         }
-        if self.focus_pending && !self.hidden && !window.has_active_prompt() {
+        if self.focus_pending && self.accepts_workspace_focus && !self.hidden && !window.has_active_prompt() {
             self.focus_pending = false;
             window.focus(&self.control.focus_handle(cx), cx);
         }

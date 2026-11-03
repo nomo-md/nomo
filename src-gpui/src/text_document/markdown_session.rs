@@ -138,6 +138,13 @@ struct PendingSave {
     saved_tree: String,
     digest: [u8; 32],
 }
+/// 批量操作绑定发起时的文档归属。原生 UI 还校验用户已确认的修订。
+pub(crate) struct SessionMember {
+    pub document_id: String,
+    pub owner: String,
+    pub revision: Option<u64>,
+}
+
 struct Session {
     root: PathBuf,
     owner: String,
@@ -183,6 +190,15 @@ impl Drop for SessionCleanup {
                 });
             }
         }
+    }
+}
+impl SessionMember {
+    fn validate(&self, session: &Session) -> TextDocumentResult<()> {
+        session.owner(&self.owner)?;
+        if self.revision.is_some_and(|revision| revision != session.manifest.revision) {
+            return Err(error("revision-conflict", "文档已修改，请重新操作"));
+        }
+        Ok(())
     }
 }
 impl Session {
@@ -1197,9 +1213,23 @@ impl MarkdownDocumentSessionManager {
         let mut ids = document_ids.to_vec();
         ids.sort();
         ids.dedup();
-        let handles = ids
-            .iter()
-            .map(|id| self.session(id).map_err(|e| e.message))
+        let ownership = ids.into_iter().map(|document_id| (SessionMember {
+            document_id, owner: source.to_owned(), revision: None,
+        }, target.to_owned())).collect();
+        self.transfer_documents_with(ownership, commit)
+    }
+
+    /// 原生工作区按文档隔离查询。按同一顺序锁住所有成员，提交前保留全部原 owner。
+    pub(crate) fn transfer_documents_with<T>(
+        &self,
+        mut ownership: Vec<(SessionMember, String)>,
+        commit: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        ownership.sort_by(|a, b| a.0.document_id.cmp(&b.0.document_id));
+        if ownership.windows(2).any(|pair| pair[0].0.document_id == pair[1].0.document_id) {
+            return Err("移交包含重复文档".into());
+        }
+        let handles = ownership.iter().map(|(member, _)| self.session(&member.document_id).map_err(|e| e.message))
             .collect::<Result<Vec<_>, _>>()?;
         let gates = handles
             .iter()
@@ -1217,19 +1247,19 @@ impl MarkdownDocumentSessionManager {
             .iter()
             .map(|handle| lock(handle).map_err(|e| e.message))
             .collect::<Result<Vec<_>, _>>()?;
-        for session in &sessions {
-            session.owner(source).map_err(|e| e.message)?;
+        for (session, (member, _)) in sessions.iter().zip(&ownership) {
+            member.validate(session).map_err(|e| e.message)?;
         }
         if lock(&self.snapshots)
             .map_err(|e| e.message)?
             .values()
-            .any(|snapshot| ids.contains(&snapshot.document_id))
+            .any(|snapshot| ownership.iter().any(|(member, _)| member.document_id == snapshot.document_id))
         {
             return Err("请先完成文档快照任务再移交".into());
         }
         let result = commit()?;
-        for session in &mut sessions {
-            session.owner = target.into();
+        for (session, (_, target)) in sessions.iter_mut().zip(ownership) {
+            session.owner = target;
             self.writing_stats.invalidate(&session.manifest.document_id, true);
             self.structure.invalidate(&session.manifest.document_id, true);
             self.search.invalidate(&session.manifest.document_id, None);
@@ -1298,20 +1328,23 @@ impl MarkdownDocumentSessionManager {
         Ok(())
     }
     /// 组合成员全部通过归属、快照和保存校验后才共同释放，避免部分关闭。
-    pub(crate) fn close_many(&self, owner: &str, mut documents: Vec<(String, bool)>) -> TextDocumentResult<()> {
-        documents.sort_by(|left, right| left.0.cmp(&right.0));
-        if documents.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+    pub(crate) fn close_many(&self, owner: &str, documents: Vec<(String, bool)>) -> TextDocumentResult<()> {
+        self.close_documents(documents.into_iter().map(|(document_id, discard)| (SessionMember { document_id, owner: owner.to_owned(), revision: None }, discard)).collect())
+    }
+    pub(crate) fn close_documents(&self, mut documents: Vec<(SessionMember, bool)>) -> TextDocumentResult<()> {
+        documents.sort_by(|left, right| left.0.document_id.cmp(&right.0.document_id));
+        if documents.windows(2).any(|pair| pair[0].0.document_id == pair[1].0.document_id) {
             return Err(error("invalid-close-group", "组合关闭包含重复文档"));
         }
         let _paths = lock(&self.path_operations)?;
-        let handles = documents.iter().map(|(id, _)| self.session(id)).collect::<TextDocumentResult<Vec<_>>>()?;
+        let handles = documents.iter().map(|(member, _)| self.session(&member.document_id)).collect::<TextDocumentResult<Vec<_>>>()?;
         let gates = handles.iter().map(|handle| Ok(lock(handle)?.save_gate.clone())).collect::<TextDocumentResult<Vec<_>>>()?;
         let _saving = gates.iter().map(|gate| lock(gate)).collect::<TextDocumentResult<Vec<_>>>()?;
         let mut sessions = handles.iter().map(|handle| lock(handle)).collect::<TextDocumentResult<Vec<_>>>()?;
         {
-            for ((id, discard), session) in documents.iter().zip(sessions.iter()) {
-                session.owner(owner)?;
-                self.require_released_snapshots(id, "close-many", "组合文档仍有正在使用的完整快照")?;
+            for ((member, discard), session) in documents.iter().zip(sessions.iter()) {
+                member.validate(session)?;
+                self.require_released_snapshots(&member.document_id, "close-many", "组合文档仍有正在使用的完整快照")?;
                 if session.dirty && !discard { return Err(error("unsaved-document", "组合文档尚有未保存内容")); }
             }
         }
@@ -1322,7 +1355,7 @@ impl MarkdownDocumentSessionManager {
             self.search.invalidate(&session.manifest.document_id, None);
         }
         let mut registry = lock(&self.sessions)?;
-        for (id, _) in documents { registry.remove(&id); }
+        for (member, _) in documents { registry.remove(&member.document_id); }
         drop(registry); drop(sessions);
         Ok(())
     }

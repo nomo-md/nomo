@@ -9,10 +9,24 @@ impl DocumentHost {
         if (forward && before.head_byte >= self.total_bytes) || (!forward && before.head_byte == 0) { return; }
         let revision = self.control.read(cx).host.parsed.identity.revision;
         let semantic = self.control.read(cx).effective_mode() == ViewMode::Semantic;
+        // 语义布局耗尽可见落点后只能进入邻窗，逐字查询会倒退到本窗隐藏的 #、> 或列表标记里。
+        let semantic_target = if semantic && !delete {
+            let identity = &self.control.read(cx).host.parsed.identity;
+            if forward {
+                if identity.to_byte >= self.total_bytes { return; }
+                Some(identity.to_byte)
+            } else {
+                if identity.from_byte == 0 { return; }
+                Some(identity.from_byte - 1)
+            }
+        } else { None };
         let request = self.begin_session_action(cx);
         let port = self.port.clone();
         let task = cx.background_executor().spawn(async move {
-            let next = port.cursor_boundary(revision, before.head_byte, unit, forward, &request)?;
+            let next = match semantic_target {
+                Some(next) => next,
+                None => port.cursor_boundary(revision, before.head_byte, unit, forward, &request)?,
+            };
             let mut after = if delete { DocumentSelection::caret(before.head_byte.min(next)) }
                 else { DocumentSelection { anchor_byte: if extend { before.anchor_byte } else { next }, head_byte: next } };
             let revision = if delete && next != before.head_byte {
@@ -39,8 +53,9 @@ impl DocumentHost {
             let _ = this.update(cx,|host,cx| {
                 host.navigating = false;
                 match result.and_then(|(loaded,after)|host.install(loaded,Some(after),cx)) {
-                    Ok(()) if semantic && !delete && !extend => host.control.update(cx, |view, cx| {
-                        view.pending_block_entry = Some(forward); cx.notify();
+                    Ok(()) if semantic && !delete => host.control.update(cx, |view, cx| {
+                        view.defer_navigation_caret(cx);
+                        if !extend { view.pending_block_entry = Some(forward); }
                     }),
                     Ok(()) => {}
                     Err(error) => host.action_failed(error,cx),

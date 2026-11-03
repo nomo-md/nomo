@@ -33,6 +33,16 @@ impl Group {
     pub fn matches_mount(&self, identity: &WindowIdentity, active: bool) -> bool {
         self.from == identity.from_byte && (active || self.to == identity.to_byte)
     }
+    pub(super) fn rebase(&mut self, edits: &[SourceEdit], active: bool) {
+        let before = edits.iter().filter(|edit| edit.to_byte <= self.from && (edit.from_byte < self.from || !active))
+            .map(|edit| edit.inserted_text.len() as i128 - (edit.to_byte - edit.from_byte) as i128).sum::<i128>();
+        let within = edits.iter().filter(|edit| edit.from_byte >= self.from
+            && (edit.from_byte < self.to || (active && edit.from_byte == self.to))
+            && (active || edit.from_byte != self.from || edit.to_byte != self.from))
+            .map(|edit| edit.inserted_text.len() as i128 - (edit.to_byte - edit.from_byte) as i128).sum::<i128>();
+        self.from = (self.from as i128 + before).max(0) as u64;
+        self.to = (self.to as i128 + before + within).max(self.from as i128) as u64;
+    }
 }
 
 /// 与 MarkdownStableGroups 相同的 32 KiB / 64 块封口规则。
@@ -151,6 +161,35 @@ impl ScrollDemand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn confirmed_boundary_edits_keep_neighbor_mounts_and_measured_heights() {
+        use crate::nomo_mark::host::WindowHostAdapter;
+        let mut neighbor = WindowHostAdapter::new(DocumentWindow {
+            document_id: "lists".into(), revision: 1, from_byte: 100, to_byte: 103,
+            text: "中".into(), inline_templates: Vec::new(),
+        }, "neighbor", 0, WindowContext::Complete).unwrap();
+        neighbor.set_readonly(true);
+        neighbor.mark_layout_ready(LayoutStamp { identity: neighbor.parsed.identity.clone(), width: 600.0,
+            font_generation: 0, resource_generation: 0, zoom: 1.0 }, 24.0).unwrap();
+        let mut groups = [
+            Group { id: "active".into(), from: 0, to: 100, estimate: 80.0, semantic: true, blocks: 1 },
+            Group { id: "neighbor".into(), from: 100, to: 103, estimate: 24.0, semantic: true, blocks: 1 },
+        ];
+        let heights = Heights::new([80.0, 24.0]);
+        for (revision, edit) in [
+            (2, SourceEdit { from_byte: 100, to_byte: 100, inserted_text: "- ".into() }),
+            (3, SourceEdit { from_byte: 100, to_byte: 102, inserted_text: String::new() }),
+        ] {
+            neighbor.rebase_passive(revision, std::slice::from_ref(&edit)).unwrap();
+            groups[0].rebase(std::slice::from_ref(&edit), true);
+            groups[1].rebase(std::slice::from_ref(&edit), false);
+            assert_eq!(groups[0].to, groups[1].from);
+            assert!(groups[1].matches_mount(&neighbor.parsed.identity, false));
+            assert_eq!(heights.top(1), 80.0);
+            assert_eq!(heights.total(), 104.0);
+        }
+    }
+
     #[test]
     fn ime_mount_survives_pending_edits_partial_ack_and_deletion() {
         use crate::nomo_mark::host::WindowHostAdapter;

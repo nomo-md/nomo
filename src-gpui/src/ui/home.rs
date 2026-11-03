@@ -28,10 +28,10 @@ fn card_height(width: f32) -> f32 {
 }
 
 #[derive(Clone)]
-pub(crate) enum HomeEvent { Open(PathBuf), NewFile, OpenFile, OpenFolder, AddFolder, Resume }
+pub(crate) enum HomeEvent { Open(PathBuf), NewFile, OpenFile, OpenFolder, AddFolder, Resume, Restore }
 
-enum Preview { Ready { image: Arc<RenderImage>, title: SharedString }, Failed(SharedString) }
-struct CachedPreview { preview: Preview, used: u64 }
+enum Preview { Ready { image: Arc<RenderImage>, title: SharedString, fingerprint: String }, Failed(SharedString) }
+struct CachedPreview { preview: Preview, used: u64, stale: bool }
 
 #[derive(Default)]
 struct CardMotion {
@@ -60,6 +60,7 @@ pub(crate) struct Home {
     _subscription: Subscription,
     active: bool,
     pub open_tabs: usize,
+    pub restore_layout: bool,
     /// 与编辑页文件栏同宽（由 Workspace 每帧同步其可拖动宽度），两页切换时侧栏边界不跳动。
     pub sidebar_width: f32,
     sidebar_scroll: UniformListScrollHandle,
@@ -90,7 +91,11 @@ impl Home {
                 let new = next.recent.iter().find(|entry| &entry.path == *path);
                 old.map(|entry| (entry.opened,entry.revision)) != new.map(|entry| (entry.opened,entry.revision))
             }).cloned().collect();
-            for path in retired { home.remove_preview(&path, cx); }
+            for path in retired {
+                if next.recent.iter().any(|entry| entry.path == path) {
+                    if let Some(preview) = home.previews.get_mut(&path) { preview.stale = true; }
+                } else { home.remove_preview(&path, cx); }
+            }
             if let Some((path, cancel)) = &home.running {
                 if home.snapshot.recent.iter().find(|entry| &entry.path == path).map(|entry| (entry.opened,entry.revision))
                     != next.recent.iter().find(|entry| &entry.path == path).map(|entry| (entry.opened,entry.revision)) {
@@ -102,7 +107,7 @@ impl Home {
             cx.notify();
         });
         cx.on_release(|home, cx| home.clear_previews(cx)).detach();
-        Self { focus: cx.focus_handle(), library, snapshot, _subscription: subscription, active, open_tabs: 0, sidebar_width: 250.0,
+        Self { focus: cx.focus_handle(), library, snapshot, _subscription: subscription, active, open_tabs: 0, restore_layout:false, sidebar_width: 250.0,
             sidebar_scroll: UniformListScrollHandle::new(), grid_scroll: UniformListScrollHandle::new(),
             preview_theme: thumbnail::Palette::new(cx.global::<Theme>()),
             previews: HashMap::new(), card_motion: HashMap::new(), bytes: 0, clock: 0, visible: Vec::new(), pending: VecDeque::new(), scheduled: false, worker: None, running: None }
@@ -116,7 +121,9 @@ impl Home {
     }
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.clear_previews(cx);
+        // 窗口激活后只在后台校验可见卡片；旧位图保留到文件或资源指纹确实改变。
+        if let Some((_, cancel)) = &self.running { cancel.store(true, Ordering::Release); }
+        for preview in self.previews.values_mut() { preview.stale = true; }
         self.library.update(cx, |library, cx| library.change(Change::Refresh, cx));
         cx.notify();
     }
@@ -130,8 +137,8 @@ impl Home {
     }
 
     fn remove_preview(&mut self, path: &Path, cx: &mut App) {
-        if let Some(CachedPreview { preview: Preview::Ready { image, title }, .. }) = self.previews.remove(path) {
-            self.bytes = self.bytes.saturating_sub(BITMAP_BYTES + title.len());
+        if let Some(CachedPreview { preview: Preview::Ready { image, title, fingerprint }, .. }) = self.previews.remove(path) {
+            self.bytes = self.bytes.saturating_sub(BITMAP_BYTES + title.len() + fingerprint.len());
             cx.drop_image(image, None);
         }
     }
@@ -142,7 +149,7 @@ impl Home {
         if self.visible != paths {
             self.card_motion.retain(|path, _| paths.iter().any(|visible| visible.as_path() == path.as_ref()));
         }
-        if self.visible == paths && (self.worker.is_some() || paths.iter().all(|path| self.previews.contains_key(path))) { return; }
+        if self.visible == paths && (self.worker.is_some() || paths.iter().all(|path| self.previews.get(path).is_some_and(|p| !p.stale))) { return; }
         self.visible = paths;
         if self.scheduled { return; }
         self.scheduled = true;
@@ -155,7 +162,7 @@ impl Home {
                 if let Some((path, cancel)) = &home.running {
                     if !home.visible.contains(path) { cancel.store(true, Ordering::Release); }
                 }
-                home.pending = home.visible.iter().filter(|path| !home.previews.contains_key(*path)).cloned().collect();
+                home.pending = home.visible.iter().filter(|path| home.previews.get(*path).is_none_or(|p| p.stale)).cloned().collect();
                 home.start_next(cx);
             });
         });
@@ -164,43 +171,54 @@ impl Home {
     fn start_next(&mut self, cx: &mut Context<Self>) {
         if !self.active || self.worker.is_some() { return; }
         let Some(path) = self.pending.pop_front() else { return; };
-        if self.previews.contains_key(&path) { self.start_next(cx); return; }
+        if self.previews.get(&path).is_some_and(|p| !p.stale) { self.start_next(cx); return; }
         let cancel = Arc::new(AtomicBool::new(false));
         self.running = Some((path.clone(), cancel.clone()));
         let background_path = path.clone();
         let background_cancel = cancel.clone();
         let palette = self.preview_theme.clone();
         let render_palette = palette.clone();
-        let task = cx.background_executor().spawn(async move { thumbnail::load(&background_path, &render_palette, &background_cancel) });
+        let known = self.previews.get(&path).and_then(|entry| match &entry.preview {
+            Preview::Ready { fingerprint, .. } => Some(fingerprint.clone()), Preview::Failed(_) => None,
+        });
+        let task = cx.background_executor().spawn(async move { thumbnail::load(&background_path, &render_palette, known.as_deref(), &background_cancel) });
         self.worker = Some(cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |home, cx| {
                 home.worker = None;
                 home.running = None;
+                let mut changed = false;
                 if home.active && home.preview_theme == palette && !cancel.load(Ordering::Acquire)
                     && home.snapshot.recent.iter().any(|entry| entry.path == path) {
-                    home.remove_preview(&path, cx);
-                    let preview = match result {
-                        Ok(thumbnail::Thumbnail { mut pixels, title }) => {
+                    let replacement = match result {
+                        Ok(None) => None,
+                        Ok(Some(thumbnail::Thumbnail { mut pixels, title, fingerprint })) => {
                             // GPUI 的 RenderImage 使用 BGRA，磁盘缓存仍保留标准 PNG。
                             for pixel in pixels.pixels_mut() { pixel.0.swap(0,2); }
-                            home.bytes += BITMAP_BYTES + title.len();
-                            Preview::Ready { image: Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])), title: title.into() }
+                            home.bytes += BITMAP_BYTES + title.len() + fingerprint.len();
+                            Some(Preview::Ready { image: Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])), title: title.into(), fingerprint })
                         },
-                        Err(error) => Preview::Failed(error.into()),
+                        Err(error) => Some(Preview::Failed(error.into())),
                     };
-                    home.clock = home.clock.wrapping_add(1);
-                    home.previews.insert(path, CachedPreview { preview, used: home.clock });
+                    if let Some(preview) = replacement {
+                        changed = true;
+                        home.remove_preview(&path, cx);
+                        home.clock = home.clock.wrapping_add(1);
+                        home.previews.insert(path, CachedPreview { preview, used: home.clock, stale: false });
+                    } else if let Some(preview) = home.previews.get_mut(&path) {
+                        preview.stale = false;
+                    }
                     while home.bytes > MEMORY_CACHE_BYTES || home.previews.len() > library::RECENT_LIMIT {
                         let oldest = home.previews.iter().min_by_key(|(_, entry)| entry.used).map(|(path, _)| path.clone());
                         let Some(oldest) = oldest else { break; };
                         home.remove_preview(&oldest, cx);
                     }
+                }
+                home.pending.retain(|path| home.visible.contains(path) && home.previews.get(path).is_none_or(|p| p.stale));
+                home.start_next(cx);
+                if changed || (home.worker.is_none() && home.active && home.visible.iter().any(|path| home.previews.get(path).is_none_or(|p| p.stale))) {
                     cx.notify();
                 }
-                home.pending.retain(|path| home.visible.contains(path) && !home.previews.contains_key(path));
-                home.start_next(cx);
-                cx.notify();
             });
         }));
     }
@@ -396,6 +414,8 @@ impl Render for Home {
                     .child(div().w_full().flex_none().flex().items_center().gap(px(12.0))
                         .child(div().flex_none().text_size(px(18.0)).font_weight(FontWeight::BOLD).child("主页"))
                         .child(div().flex_1().min_w(px(0.0)).flex().flex_wrap().items_center().justify_end().gap(px(6.0))
+                            .when(self.restore_layout,|row|row.child(button("home-restore-layout",crate::ui::toolbar_i18n::ToolbarLocale::current(cx).text("tab_restore_layout"),Some(IconName::Columns),ButtonKind::Ghost,&theme).flex_none()
+                                .on_click(cx.listener(|_,_,_,cx|cx.emit(HomeEvent::Restore)))))
                             .when(self.open_tabs>0,|row|row.child(button("home-resume","继续编辑",Some(IconName::SquarePen),ButtonKind::Ghost,&theme).flex_none()
                                 .on_click(cx.listener(|_,_,_,cx|cx.emit(HomeEvent::Resume)))))
                             .child(button("home-open-folder","打开文件夹",Some(IconName::FolderOpen),ButtonKind::Ghost,&theme).flex_none()

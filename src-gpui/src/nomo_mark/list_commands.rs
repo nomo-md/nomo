@@ -223,6 +223,19 @@ fn line_end(source: &str, from: usize) -> usize {
         .find(['\r', '\n'])
         .map_or(source.len(), |i| from + i)
 }
+
+fn join_end(parsed: &ParsedWindow, previous: &Item) -> Option<usize> {
+    let source = &parsed.source;
+    let last_text = previous.body + source[previous.body..previous.end].trim_end().len();
+    // 前项的普通续行可以合并；列表、围栏等子块的尾部不属于父项的可编辑正文。
+    let ends_in = |span: &Range<usize>| previous.body <= span.start && span.start < last_text && last_text <= span.end;
+    if parsed.nodes.iter().any(|node| ends_in(&node.source)
+        && matches!(node.kind, "list" | "quote" | "code" | "html" | "table" | "heading" | "footnote"))
+        || parsed.events.iter().any(|(event, span)| matches!(event, pulldown_cmark::Event::Rule | pulldown_cmark::Event::DisplayMath(_)) && ends_in(span)) {
+        return None;
+    }
+    Some(line_end(source, last_text).min(previous.end))
+}
 fn shifted_lines(
     parsed: &ParsedWindow,
     it: &Item,
@@ -422,7 +435,9 @@ fn lift(
         for it in selected {
             let eol = commands::line_ending(&parsed.source, it.start);
             // 退出顶层列表时移除任务符号，保留子任务。空行阻止 Markdown 懒续行吞并。
-            let before = if it.start > parsed.nodes[it.list].source.start {
+            let previous_line = commands::line_start(&parsed.source, it.start.saturating_sub(1));
+            let separated = parsed.source[previous_line..it.start].trim_matches([' ', '\t', '\r', '\n', '>']).is_empty();
+            let before = if it.start > parsed.nodes[it.list].source.start && !separated {
                 format!("{eol}{}", &parsed.source[it.start..it.indent_at])
             } else {
                 String::new()
@@ -537,16 +552,10 @@ pub fn apply(
     match intent {
         EditIntent::LinePrefix(prefix) if matches!(prefix.as_str(), "- " | "1. " | "- [ ] ") => {
             let peers = siblings(parsed, it.list);
-            let from = peers.iter().position(|p| p.node == it.node).unwrap();
-            let selected: Vec<_> = peers
-                .iter()
-                .skip(from)
-                .take_while(|p| p.start < range.end.max(range.start + 1))
-                .cloned()
-                .collect();
             let ordered = source.as_bytes()[it.marker].is_ascii_digit();
             if prefix != "- [ ] " && ordered == (prefix == "1. ") {
-                return Some(lift(parsed, &selected, selection, true));
+                // 同类型快捷键取消整个当前列表层级，不能只提升光标所在项。
+                return Some(lift(parsed, &peers, selection, true));
             }
             // v0.6.2 跨类型切换修改父列表容器；子列表类型及任务状态独立保留。
             let remove_tasks = prefix == "- [ ] " && peers.iter().all(|p| p.task);
@@ -680,7 +689,7 @@ pub fn apply(
                 r.selection = DocumentSelection::caret(
                     parsed.identity.from_byte
                         + if at > 0 {
-                            line_end(source, peers[at - 1].body)
+                            join_end(parsed, &peers[at - 1]).unwrap_or_else(|| line_end(source, peers[at - 1].body))
                         } else {
                             it.start
                         } as u64,
@@ -693,8 +702,7 @@ pub fn apply(
                     return Some(lift(parsed, &[it], selection, false));
                 }
                 let previous = &peers[at - 1];
-                let previous_end = line_end(source, previous.body);
-                if source[previous_end..it.start].trim().is_empty() {
+                if let Some(previous_end) = join_end(parsed, previous).filter(|&end| source[end..it.start].trim().is_empty()) {
                     Some(Ok(result(
                         selection,
                         vec![edit(parsed, previous_end..it.body, String::new())],
@@ -939,6 +947,36 @@ mod tests {
     }
 
     #[test]
+    fn same_type_shortcut_cancels_all_peers_from_any_item_or_selection() {
+        for (source, prefix, expected) in [
+            ("1. A\n2. B\n3. C", "1. ", "A\n\nB\n\nC"),
+            ("1. A\n\n2. B\n\n3. C", "1. ", "A\n\nB\n\nC"),
+            ("- A\r\n- B\r\n- C", "- ", "A\r\n\r\nB\r\n\r\nC"),
+            ("> 1. A\n> 2. B\n> 3. C", "1. ", "> A\n> \n> B\n> \n> C"),
+        ] {
+            let parsed = super::super::parse::fixture(source);
+            for needle in ['A', 'B', 'C'] {
+                let at = source.find(needle).unwrap();
+                for selection in [
+                    DocumentSelection::caret(parsed.identity.from_byte + at as u64),
+                    DocumentSelection { anchor_byte: parsed.identity.from_byte + at as u64, head_byte: parsed.identity.to_byte },
+                    DocumentSelection { anchor_byte: parsed.identity.to_byte, head_byte: parsed.identity.from_byte + at as u64 },
+                ] {
+                    let change = apply(&parsed, selection, &EditIntent::LinePrefix(prefix.into())).unwrap().unwrap();
+                    assert_eq!(edited(&parsed, &change), expected, "{source:?}: {selection:?}");
+                    let next = super::super::parse::fixture(expected);
+                    assert!(!next.nodes.iter().any(|node| node.kind == "list"));
+                    assert!(change.selection.range().end <= parsed.identity.from_byte + expected.len() as u64);
+                }
+            }
+        }
+        let source = "1. Parent\n   1. A\n   2. B\n2. Tail";
+        assert_eq!(run(source, "B", EditIntent::LinePrefix("1. ".into())), "1. Parent\n1. A\n1. B\n2. Tail");
+        let source = "1. A\n2. B\n\n---\n\n1. Other";
+        assert_eq!(run(source, "B", EditIntent::LinePrefix("1. ".into())), "A\n\nB\n\n---\n\n1. Other");
+    }
+
+    #[test]
     fn enter_splits_inline_formats_at_visible_edges_and_inside_text() {
         for (source, at, expected) in [
             ("- **ABCD**", 6, "- **AB**\n- **CD**"),
@@ -1014,17 +1052,18 @@ mod tests {
         let root = base.join(format!("history-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
         assert!(!root.exists());
         fs::create_dir(&root).unwrap();
-        for (index, source) in ["1. A\n2. B", "9. A\n10. B\n    - Child", "1. Parent\n2. -", "- **中文AB**"].into_iter().enumerate() {
+        for (index, source) in ["1. A\n2. B", "9. A\n10. B\n    - Child", "1. Parent\n2. -", "- **中文AB**", "1. A\n2. B\n3. C"].into_iter().enumerate() {
             let port = NativeWindowPort::open(root.join(index.to_string()), "list-test".into(), None, Some(source.into())).unwrap();
             let status = port.status().unwrap();
             let parsed = ParsedWindow::parse(port.read_window(status.revision, 0..status.byte_length).unwrap(),
                 "list-test", 0, WindowContext::Complete).unwrap();
             let at = if index == 3 { source.find("AB").unwrap() + 1 }
-                else if index == 1 { source.find('B').unwrap() } else { source.len() };
+                else if matches!(index, 1 | 4) { source.find('B').unwrap() } else { source.len() };
             let before = DocumentSelection::caret(at as u64);
             let change = match index {
                 0 => commands::apply_semantic(&parsed, before, EditIntent::LinePrefix("- ".into())).unwrap(),
                 1 | 2 => tab(&parsed, before, false).unwrap().unwrap(),
+                4 => commands::apply_semantic(&parsed, before, EditIntent::LinePrefix("1. ".into())).unwrap(),
                 _ => commands::apply_semantic(&parsed, before, EditIntent::ParagraphBreak).unwrap(),
             };
             let expected = edited(&parsed, &change);
@@ -1068,5 +1107,42 @@ mod tests {
         assert_eq!(&*host.parsed.source, "");
         assert!(host.parsed.context.inline_templates.is_empty());
         assert_eq!(host.selection, DocumentSelection::caret(0));
+    }
+
+    #[test]
+    fn list_history_retains_the_tail_window_origin_after_other_groups() {
+        use super::super::{native_port::NativeWindowPort, session_window::WindowRequest};
+        use std::{fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+        let base=PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+            .join(".artifacts/list-followup-20261102/history-tests");
+        fs::create_dir_all(&base).unwrap();
+        let root=base.join(format!("tail-{}-{}",std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let mut source=(1..130).map(|index|format!("窗口保留段落 {index}\n\n")).collect::<String>();
+        source.push_str("1. Alpha\n2. Bravo\n3. Charlie\n");
+        let port=NativeWindowPort::open(root.clone(),"list-tail-test".into(),None,Some(source.clone())).unwrap();
+        let revision=port.status().unwrap().revision;
+        let request=WindowRequest::default();
+        let loaded=port.load_group(revision,source.len() as u64,None,&request).unwrap();
+        let from=loaded.input.from_byte;
+        let parsed=ParsedWindow::parse(loaded.input,"tail",0,loaded.context).unwrap();
+        let before=DocumentSelection::caret(source.find("Bravo").unwrap() as u64);
+        let change=commands::apply_semantic(&parsed,before,EditIntent::LinePrefix("1. ".into())).unwrap();
+        let revision=port.submit(DocumentTransaction {base_revision:revision,operation_id:"tail-cancel".into(),history_group_id:"tail-cancel".into(),
+            edits:change.edits,selection_before:before,selection_after:change.selection,template_update:change.template_update}).unwrap();
+        let mut revision=revision;
+        for redo in [false,true,false,true] {
+            let (next,selection)=port.history(revision,redo).unwrap();
+            revision=next;
+            let loaded=port.load_group(revision,from,None,&request).unwrap();
+            let groups=port.window_groups(revision,&[(loaded.input.from_byte,loaded.input.to_byte)],&request).unwrap();
+            assert_eq!(loaded.input.from_byte,from);
+            assert!(selection.unwrap().head_byte>=loaded.input.from_byte && selection.unwrap().head_byte<=loaded.input.to_byte);
+            assert_eq!(groups.last().unwrap().to,loaded.total_bytes);
+        }
+        port.close(true).unwrap();
+        drop(port);
+        let resolved=root.canonicalize().unwrap();
+        assert!(resolved.starts_with(base.canonicalize().unwrap()));
+        fs::remove_dir_all(resolved).unwrap();
     }
 }

@@ -43,6 +43,8 @@ mod document_transition;
 mod open_requests;
 mod recovery_ui;
 mod export;
+mod comparison;
+use comparison::{TabItem, ComparisonState};
 use open_requests::{OpenRequests, OpenRequest, AfterOpen};
 use explorer::ExplorerState;
 
@@ -58,6 +60,7 @@ actions!(
 );
 
 pub(crate) struct Tab {
+    key: u64,
     document: Entity<DocumentHost>,
     pub(crate) mode: EditorMode,
     preview: bool,
@@ -206,6 +209,7 @@ struct PendingPopover {
 pub struct Workspace {
     focus: FocusHandle,
     home_visible: bool,
+    link_modifier: bool,
     home: Entity<Home>,
     library: Entity<Library>,
     _home_subscription: Subscription,
@@ -235,6 +239,7 @@ pub struct Workspace {
     waiting_library_close: bool,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
+    comparison: ComparisonState,
     tab_scroll: ScrollHandle,
     toolbar_scroll: ScrollHandle,
     toolbar_trigger_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
@@ -288,6 +293,7 @@ impl Workspace {
         let home = cx.new(|cx| Home::new(library.clone(), home_visible, cx));
         let home_subscription = cx.subscribe_in(&home, window, |workspace, _, event, window, cx| match event {
             HomeEvent::Open(path) => workspace.open_path(path, window, cx),
+            HomeEvent::Restore => workspace.restore_last_layout(window,cx),
             HomeEvent::NewFile => workspace.new_file(window, cx),
             HomeEvent::OpenFile => workspace.prompt_open(false, window, cx),
             HomeEvent::OpenFolder => workspace.prompt_open(true, window, cx),
@@ -340,7 +346,7 @@ impl Workspace {
         Theme::arm_ui_transition(cx);
         let mut workspace = Self {
             focus: cx.focus_handle(),
-            home_visible, home, library,
+            home_visible, home, library, link_modifier: false,
             _home_subscription: home_subscription,
             _library_subscription: library_subscription,
             chrome,
@@ -357,6 +363,7 @@ impl Workspace {
             close_prompt:false, closing_window:false, waiting_library_close:false,
             tabs: Vec::new(),
             active: 0,
+            comparison: ComparisonState::new(cx),
             tab_scroll: ScrollHandle::new(),
             toolbar_scroll: ScrollHandle::new(),
             toolbar_trigger_bounds: Rc::new(Cell::new(None)),
@@ -393,6 +400,7 @@ impl Workspace {
             mini: Default::default(),
         };
         workspace.refresh_system_motion(cx);
+        workspace.init_layout_store(cx);
         workspace.init_tree_search(window, cx);
         for path in paths {
             workspace.enqueue_open(Some(path), false, None, false, cx);
@@ -464,11 +472,8 @@ impl Workspace {
             if !self.prepare_document_transition(&document, false, window, cx, |workspace, window, cx| workspace.show_home(window, cx)) { return; }
         }
         if !self.leave_mini(window, cx) { return; }
-        if let Some(document) = self.document() {
-            if let Err(error) = document.update(cx, |host, cx| host.set_active(false, cx)) {
-                self.notice = Some(error.to_string().into()); cx.notify(); return;
-            }
-        }
+        self.record_layout(cx);
+        if !self.show_members(&[], cx) { return; }
         for opening in &self.opening { opening.request.cancel(); }
         self.pending_tree_click.take();
         self.deferred_open = None;
@@ -559,6 +564,9 @@ impl Workspace {
         }
         let path=path.canonicalize().unwrap_or_else(|_|path.to_path_buf());
         if self.explorer.mutating.iter().any(|busy| path.starts_with(busy)) {self.notice=Some("文件操作正在进行，请稍后打开。".into());cx.notify();return;}
+        if let Some(key)=self.saved_path_key(&path) {
+            self.open_saved_member(key,anchor,window,cx); return;
+        }
         let preview=preview && cx.global::<Settings>().bool("filePreviewEnabled");
         self.cancel_preview_opens(Some(&path));
         if let Some(index)=self.tabs.iter().position(|tab|tab.document.read(cx).path().as_ref()==Some(&path)) {
@@ -662,19 +670,21 @@ impl Workspace {
                 workspace.open_document_from(path, preview, anchor, source, generation, window, cx);
             }) { return; }
         }
-        if !self.begin_recovery_attempt(&source,cx) {return;}
+        if !self.begin_recovery_attempt(&source,cx) { self.cancel_saved_request(&source);return; }
+        self.mark_saved_loading(&source);
         let request=WindowRequest::default();
         let open_profile=crate::open_profile::OpenProfile::begin();
         let loading_profile=open_profile.clone();
         // 查询服务按 owner 取消任务；每文档独立 owner 防止后台标签误取消活动文档。
-        static NEXT_DOCUMENT: std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
-        let id=NEXT_DOCUMENT.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+        let id=comparison::next_tab_key();
+        let layout_doc=self.saved_open_document(&source);
         let owner=match &source { application_dialogs::OpenSource::Reload(document,_) | application_dialogs::OpenSource::DiskRecovery(_,Some(document),_) | application_dialogs::OpenSource::Recovery(_,false,Some(document),_) => document.read(cx).port().owner, _ => format!("{}:document-{}",self.owner,id) };
         self.opening.push(OpeningDocument {id,generation,path:path.clone(),request:request.clone(),preview,anchor});
         let requested=path.clone();
-        let recovery=match &source {application_dialogs::OpenSource::Recovery(candidate,copy,_,_)=>Some((candidate.clone(),*copy)),_=>None};
+        let recovery=match &source {application_dialogs::OpenSource::Recovery(candidate,copy,_,_)=>Some((candidate.clone(),*copy)),application_dialogs::OpenSource::Layout(_,Some(candidate))=>Some((candidate.clone(),false)),_=>None};
         let fresh=matches!(&source,application_dialogs::OpenSource::Reload(_,_)|application_dialogs::OpenSource::DiskRecovery(_,_,_));
         self.last_notice=Some("正在打开文档…".into());
+        let reading_byte=layout_doc.as_ref().map(|doc|doc.byte);
         let task=cx.background_executor().spawn(async move {
             request.check()?;
             let port=match recovery {
@@ -683,7 +693,7 @@ impl Workspace {
                 _ => NativeWindowPort::open_in(manager,owner,path.clone(),path.is_none().then(String::new))?,
             };
             if let Some(profile)=&loading_profile {profile.stage("session_ready_ms");}
-            let loaded=port.status().and_then(|status|port.load_initial_group(status.revision,&request));
+            let loaded=port.status().and_then(|status|match reading_byte {Some(byte) if byte>0=>port.load_group(status.revision,byte.min(status.byte_length),None,&request),_=>port.load_initial_group(status.revision,&request)});
             if let (Some(profile),Ok(loaded))=(&loading_profile,&loaded) {
                 profile.stage("window_ready_ms");
                 if let Ok(progress)=port.manager.query_structure(&port.owner,loaded.index.clone(),crate::text_document::StructureQuery::Progress) {
@@ -708,12 +718,14 @@ impl Workspace {
                 let generation=opening.generation;
                 match result {
                     Ok((port,loaded))=> {
-                        let mode=match &source {application_dialogs::OpenSource::Reload(previous,_)|application_dialogs::OpenSource::DiskRecovery(_,Some(previous),_)|application_dialogs::OpenSource::Recovery(_,false,Some(previous),_)=>workspace.tabs.iter().find(|tab|tab.document==*previous).map(|tab|tab.mode).unwrap_or(cx.global::<Settings>().default_mode),_=>cx.global::<Settings>().default_mode};
+                        let mode=match &source {application_dialogs::OpenSource::Layout(_,_)=>layout_doc.as_ref().map(|doc|doc.mode).unwrap_or(EditorMode::Semantic),application_dialogs::OpenSource::Reload(previous,_)|application_dialogs::OpenSource::DiskRecovery(_,Some(previous),_)|application_dialogs::OpenSource::Recovery(_,false,Some(previous),_)=>workspace.tabs.iter().find(|tab|tab.document==*previous).map(|tab|tab.mode).unwrap_or(cx.global::<Settings>().default_mode),_=>cx.global::<Settings>().default_mode};
                         let status=match port.status(){Ok(status)=>status,Err(e)=>{workspace.notice=Some(e.to_string().into());return false;}};
-                        let adapter=match crate::nomo_mark::host::WindowHostAdapter::new(loaded.input,"workspace-window",0,loaded.context) {
+                        let adapter=match crate::nomo_mark::host::WindowHostAdapter::new(loaded.input,format!("workspace-window-{id}"),0,loaded.context) {
                             Ok(adapter)=>adapter,Err(e)=>{workspace.notice=Some(e.to_string().into());return false;}
                         };
+                        let focus_before_open=workspace.tab().map(|tab|tab.key);
                         let mut reload_selection=None;
+                        let mut tab_key=match &source {application_dialogs::OpenSource::Layout(key,_)=>*key,_=>id};
                         if let application_dialogs::OpenSource::Recovery(_,false,Some(previous),revision)=&source {
                             let Some(index)=workspace.tabs.iter().position(|tab|tab.document==*previous) else {return false;};
                             if previous.read(cx).status().revision!=*revision || previous.read(cx).is_dirty(cx) {
@@ -724,7 +736,7 @@ impl Workspace {
                             application_dialogs::clear_external_after_save(workspace,previous,cx);
                             workspace.forget_document_transition(previous);
                             workspace.pending_saves.retain(|pending|pending.document!=*previous);
-                            workspace.tabs.remove(index);workspace.active=workspace.active.saturating_sub(usize::from(index<workspace.active)).min(workspace.tabs.len().saturating_sub(1));
+                            tab_key=workspace.tabs.remove(index).key;workspace.active=workspace.active.saturating_sub(usize::from(index<workspace.active)).min(workspace.tabs.len().saturating_sub(1));
                         }
                         let replacement=match &source {application_dialogs::OpenSource::Reload(previous,revision)=>Some((previous,*revision,true)),application_dialogs::OpenSource::DiskRecovery(_,Some(previous),revision)=>Some((previous,*revision,false)),_=>None};
                         if let Some((previous,revision,discard))=replacement {
@@ -736,55 +748,37 @@ impl Workspace {
                             application_dialogs::clear_external_after_save(workspace,previous,cx);
                             workspace.forget_document_transition(previous);
                             workspace.pending_saves.retain(|pending|pending.document!=*previous);
-                            workspace.tabs.remove(index); workspace.active=workspace.active.saturating_sub(usize::from(index<workspace.active)).min(workspace.tabs.len().saturating_sub(1));
+                            tab_key=workspace.tabs.remove(index).key; workspace.active=workspace.active.saturating_sub(usize::from(index<workspace.active)).min(workspace.tabs.len().saturating_sub(1));
                             workspace.search=None; workspace.popover=None;
                         }
                         let document=cx.new(|cx|DocumentHost::workspace(port,adapter,status,if mode==EditorMode::Source {ViewMode::Source}else{ViewMode::Semantic},open_profile,cx));
                         application_dialogs::mark_recovered_change(workspace,&document,&source,cx);
                         if mode==EditorMode::Split {if let Err(e)=document.update(cx,|host,cx|host.change_mode(mode,cx)) {workspace.notice=Some(e.to_string().into());return false;}}
-                        let subscriptions=vec![
-                            cx.subscribe_in(&document,window,|workspace,document,event,window,cx| {
-                                match event {
-                                    DocumentEvent::Changed=>{
-                                        if document.read(cx).is_dirty(cx) {
-                                            if let Some(tab)=workspace.tabs.iter_mut().find(|tab|tab.document==*document) {tab.preview=false;}
-                                        }
-                                        workspace.schedule_autosave(document.clone(),window,cx);
-                                    }
-                                    DocumentEvent::Failure(message)=>workspace.failure_notice=Some(message.clone().into()),
-                                    DocumentEvent::Notice(message)=>workspace.notice=Some(message.clone().into()),
-                                    DocumentEvent::OpenMarkdownLink {path,anchor}=>workspace.open_markdown_link(path,anchor.clone(),window,cx),
-                                    DocumentEvent::TocSettled(warning)=>{
-                                        if let Some(warning)=warning {
-                                            let locale=crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
-                                            workspace.notice=Some(format!("{}: {warning}",locale.text("toc_warning")).into());
-                                        }
-                                        if let Some(index)=workspace.pending_saves.iter().position(|pending| pending.document==*document) {
-                                            let pending=workspace.pending_saves.remove(index);
-                                            if warning.is_some() && document.read(cx).has_failed_input(cx) {
-                                                let locale=crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
-                                                workspace.notice=Some(format!("{}: {}",locale.text("save_blocked"),warning.as_deref().unwrap_or("")).into());
-                                                workspace.cancel_close(cx);
-                                            } else {
-                                                workspace.save_path(pending.document,pending.path,pending.follow_current,pending.close_after,window,cx);
-                                            }
-                                        }
-                                    },
-                                    DocumentEvent::Saved=>{workspace.refresh_tree(cx);workspace.sync_tree_selection(false,cx);},
-                                    DocumentEvent::Status|DocumentEvent::ToolbarState=>{},
-                                }
-                                cx.notify();
-                            }),
-                            cx.observe(&document,|_,_,cx|cx.notify()),
-                        ];
+                        let subscriptions=workspace.subscribe_document(&document,window,cx);
                         let _=document.update(cx,|host,cx|host.set_active(false,cx));
                         if let Some(path)=document.read(cx).path() {workspace.library.update(cx,|library,cx|library.change(LibraryChange::Opened(path),cx));}
                         if workspace.tree.is_none() {if let Some(parent)=document.read(cx).path().as_ref().or(requested.as_ref()).and_then(|p|p.parent()){workspace.replace_tree(parent.to_path_buf(),cx);}}
                         if preview {for tab in &mut workspace.tabs {tab.preview=false;}}
                         let dirty=document.read(cx).is_dirty(cx);
-                        workspace.tabs.push(Tab {document,mode,preview,opened_at:Instant::now(),dirty,dirty_animation_started:dirty.then(Instant::now),hover:ScalarMotion::default(),close_hover:ScalarMotion::default(),active_color:ScalarMotion::default(),hidden_hover:ScalarMotion::default(),autosave:None,_subscriptions:subscriptions});
+                        if !workspace.comparison.items.iter().any(|item|item.contains(tab_key)) {workspace.comparison.items.push(TabItem::Single(tab_key));}
+                        workspace.tabs.push(Tab {key:tab_key,document,mode,preview,opened_at:Instant::now(),dirty,dirty_animation_started:dirty.then(Instant::now),hover:ScalarMotion::default(),close_hover:ScalarMotion::default(),active_color:ScalarMotion::default(),hidden_hover:ScalarMotion::default(),autosave:None,_subscriptions:subscriptions});
+                        if let Some(index)=focus_before_open.and_then(|key|workspace.tab_index(key)) {workspace.active=index;}
+                        if generation!=workspace.open_requests.generation && tab_key!=id && !workspace.home_visible {
+                            if let Some(item)=workspace.tab().and_then(|tab|workspace.comparison.item(tab.key)) {workspace.show_members(&item.keys(),cx);}
+                        }
                         let save_as=matches!(&source, application_dialogs::OpenSource::Recovery(_,true,_,_));
-                        workspace.activate_after_open(workspace.tabs.len()-1,generation,AfterOpen {anchor,selection:reload_selection,save_as},window,cx);
+                        if let Some(saved)=&layout_doc {
+                            let document=workspace.tabs.last().unwrap().document.clone();
+                            document.update(cx, |host,cx|{
+                                let selection=if matches!(&source,application_dialogs::OpenSource::Layout(_,Some(_))) && host.status().revision!=saved.revision {
+                                    host.status().selection.as_ref().map(|s|crate::nomo_mark::protocol::DocumentSelection{anchor_byte:s.anchor_byte,head_byte:s.head_byte}).unwrap_or(saved.selection)
+                                } else {saved.selection};
+                                host.restore_workspace_position(saved.byte,saved.fraction,selection,cx);
+                            });
+                        } else {
+                            workspace.activate_after_open(workspace.tabs.len()-1,generation,AfterOpen {anchor,selection:reload_selection,save_as},window,cx);
+                            workspace.record_layout(cx);
+                        }
                         true
                     }
                     Err(e)=>{workspace.failure_notice=Some(format!("打开失败：{e}").into());cx.notify();false}
@@ -824,11 +818,53 @@ impl Workspace {
                     }
                 }
                 workspace.finish_recovery_attempt(&source,recovery_finished,cx);
+                if let application_dialogs::OpenSource::Layout(key,_) = &source {workspace.finish_saved_open(*key,accepted,window,cx);} else {workspace.advance_saved_open(window,cx);}
                 workspace.drain_open_requests(window,cx);
                 cx.notify();
             });
         }).detach();
         cx.notify();
+    }
+
+    fn subscribe_document(&self, document: &Entity<DocumentHost>, window: &mut Window, cx: &mut Context<Self>) -> Vec<Subscription> {
+        vec![
+            cx.subscribe_in(document,window,|workspace,document,event,window,cx| {
+                match event {
+                    DocumentEvent::Changed=>{
+                        if document.read(cx).is_dirty(cx) {
+                            if let Some(tab)=workspace.tabs.iter_mut().find(|tab|tab.document==*document) {
+                                tab.preview=false;
+                            }
+                        }
+                        workspace.schedule_autosave(document.clone(),window,cx);
+                    }
+                    DocumentEvent::Failure(message)=>workspace.failure_notice=Some(message.clone().into()),
+                    DocumentEvent::Notice(message)=>workspace.notice=Some(message.clone().into()),
+                    DocumentEvent::OpenMarkdownLink {path,anchor}=>workspace.open_markdown_link(path,anchor.clone(),window,cx),
+                    DocumentEvent::TocSettled(warning)=>{
+                        if let Some(warning)=warning {
+                            let locale=crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
+                            workspace.notice=Some(format!("{}: {warning}",locale.text("toc_warning")).into());
+                        }
+                        if let Some(index)=workspace.pending_saves.iter().position(|pending| pending.document==*document) {
+                            let pending=workspace.pending_saves.remove(index);
+                            if warning.is_some() && document.read(cx).has_failed_input(cx) {
+                                let locale=crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
+                                workspace.notice=Some(format!("{}: {}",locale.text("save_blocked"),warning.as_deref().unwrap_or("")).into());
+                                workspace.cancel_close(cx);
+                            } else {
+                                workspace.save_path(pending.document,pending.path,pending.follow_current,pending.close_after,window,cx);
+                            }
+                        }
+                    },
+                    DocumentEvent::Saved=>{workspace.refresh_tree(cx);workspace.sync_tree_selection(false,cx);},
+                    DocumentEvent::FileStateChanged=>workspace.record_layout(cx),
+                    DocumentEvent::Status|DocumentEvent::ToolbarState=>{},
+                }
+                cx.notify();
+            }),
+            cx.observe(document,|_,_,cx|cx.notify()),
+        ]
     }
 
     fn activate(&mut self,index:usize,window:&mut Window,cx:&mut Context<Self>) {
@@ -859,10 +895,14 @@ impl Workspace {
             }) { return; }
         }
         if !self.leave_mini(window,cx) {return;}
-        if index!=self.active {
-            if let Some(current)=self.document() {if let Err(e)=current.update(cx,|host,cx|host.set_active(false,cx)) {self.notice=Some(e.to_string().into());cx.notify();return;}}
+        let key=self.tabs[index].key;
+        let desired=self.comparison.item(key).map(|item|item.keys()).unwrap_or_else(||vec![key]);
+        if !self.show_members(&desired, cx) { return; }
+        if let Some(item)=self.comparison.item_mut(key) { item.focus(key); }
+        if self.active!=index && desired.len()==2 {
+            if self.search.is_some() {self.close_search(window,cx);}
+            self.outline_ui.clear_document();
         }
-        if let Err(e)=document.update(cx,|host,cx|host.set_active(true,cx)) {self.notice=Some(e.to_string().into());cx.notify();return;}
         let from_home = self.home_visible;
         self.home_visible = false;
         self.home.update(cx, |home, cx| home.set_active(false, cx));
@@ -875,7 +915,8 @@ impl Workspace {
         self.close_status(cx);
         self.active=index;
         self.tab_menu_open=false;
-        self.tab_scroll.scroll_to_item(index);
+        if let Some(position)=self.comparison.position(key) {self.tab_scroll.scroll_to_item(position);}
+        self.record_layout(cx);
         self.sync_tree_selection(true,cx);
         window.set_window_title(&format!("{} — Nomo",document.read(cx).title()));
         if !window.has_active_prompt() { window.focus(&document.focus_handle(cx), cx); }
@@ -890,6 +931,10 @@ impl Workspace {
     }
     pub(crate) fn set_mode(&mut self,mode:EditorMode,window:&mut Window,cx:&mut Context<Self>) {
         let Some(document)=self.document() else{return;};
+        if let Some(pair)=self.active_pair() {
+            if mode != EditorMode::Split { self.change_pair_mode(pair, mode, window, cx); }
+            return;
+        }
         let target = document.downgrade();
         if !self.prepare_document_transition(&document, false, window, cx, move |workspace, window, cx| {
             if workspace.document().as_ref() == target.upgrade().as_ref() { workspace.set_mode(mode, window, cx); }
@@ -905,8 +950,11 @@ impl Workspace {
         cx.notify();
     }
     fn close_tab(&mut self,index:usize,window:&mut Window,cx:&mut Context<Self>) {
-        if self.close_prompt || window.has_active_prompt() {return;}
+        if self.close_prompt || self.comparison.closing.is_some() || window.has_active_prompt() {return;}
         let Some(tab)=self.tabs.get(index) else{return;};
+        if let Some(pair)=self.comparison.item(tab.key).and_then(TabItem::pair) {
+            self.close_pair(pair, window, cx); return;
+        }
         let document=tab.document.clone();
         let target = document.downgrade();
         if !self.prepare_document_transition(&document, true, window, cx, move |workspace, window, cx| {
@@ -939,9 +987,18 @@ impl Workspace {
         self.forget_document_transition(document);
         if self.popover.as_ref().and_then(|p|p.document.upgrade()).as_ref()==Some(document) {self.popover=None;}
         self.pending_saves.retain(|pending| &pending.document != document);
-        self.tabs.remove(index);
-        if index<self.active {self.active-=1;}
-        self.active=self.active.min(self.tabs.len().saturating_sub(1));
+        let old_active=self.tabs.get(self.active).map(|tab|tab.key);
+        let pos=self.comparison.position(self.tabs[index].key).unwrap_or(0);
+        let key=self.tabs.remove(index).key;
+        self.note_closed_layout(key,document,discard,cx);
+        self.comparison.remove_member(key);
+        let next=old_active.filter(|active|*active!=key).or_else(||self.comparison.items.get(pos.min(self.comparison.items.len().saturating_sub(1))).map(|item|item.focused()));
+        self.active=next.and_then(|key|self.tab_index(key)).unwrap_or(0);
+        self.record_layout(cx);
+        if let Some(item)=next.and_then(|key|self.comparison.item(key)) && !self.closing_window && self.comparison.batch.is_empty() && self.load_saved_item(item,window,cx) {return;}
+        self.after_tabs_removed(window,cx);
+    }
+    fn after_tabs_removed(&mut self,window:&mut Window,cx:&mut Context<Self>) {
         if self.tabs.is_empty() {
             self.sync_tree_selection(false,cx);
             self.toolbar_popup=None;
@@ -958,6 +1015,7 @@ impl Workspace {
             }
         }
         else {if !self.home_visible || self.closing_window {self.activate(self.active,window,cx);}if self.closing_window {self.close_tab(self.active,window,cx);}}
+        if !self.closing_window {self.next_batch_close(window,cx);}
         cx.notify();
     }
     pub(crate) fn request_close_window(&mut self,window:&mut Window,cx:&mut Context<Self>)->bool {
@@ -972,16 +1030,17 @@ impl Workspace {
         if !self.application_dialogs.close_approved {self.choose_close_behavior(window,cx);return false;}
         if !self.opening.is_empty() || !self.open_requests.pending.is_empty() {self.notice=Some("文档仍在打开，请稍后关闭".into());cx.notify();return false;}
         if self.tabs.is_empty() {
+            if !self.closing_window {self.flush_layout(cx);}
             if self.library.read(cx).is_busy() {
                 self.waiting_library_close=true;
                 self.notice=Some("正在保存主页记录…".into());cx.notify();return false;
             }
             return true;
         }
-        if !self.closing_window {self.closing_window=true;self.close_tab(self.active,window,cx);}
+        if !self.closing_window {self.flush_layout(cx);self.closing_window=true;self.close_tab(self.active,window,cx);}
         false
     }
-    fn cancel_close(&mut self,cx:&mut Context<Self>){self.closing_window=false;self.application_dialogs.close_approved=false;crate::cancel_quit(cx);}
+    fn cancel_close(&mut self,cx:&mut Context<Self>){self.comparison.closing=None;self.comparison.batch.clear();self.closing_window=false;self.application_dialogs.close_approved=false;self.record_layout(cx);crate::cancel_quit(cx);}
     pub(crate) fn request_quit(&mut self,window:&mut Window,cx:&mut Context<Self>)->bool {
         if window.has_active_prompt(){crate::cancel_quit(cx);return false;}
         if self.closing_window && !self.tabs.is_empty() {return false;}
@@ -1002,8 +1061,19 @@ impl Workspace {
             if let Ok(Ok(Some(paths)))=response.await {let _=this.update_in(cx,|workspace,window,cx| {workspace.open_paths(paths,window,cx);});}
         }).detach();
     }
+    fn request_manual_save(&mut self, document: &Entity<DocumentHost>, save_as: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_pair().is_some() {
+            let target = document.downgrade();
+            if !self.prepare_document_transition(document, false, window, cx, move |workspace, window, cx| {
+                if let Some(document) = target.upgrade().filter(|doc|workspace.tabs.iter().any(|tab|tab.document==*doc)) {
+                    workspace.save_document(&document,save_as,false,window,cx);
+                }
+            }) { return; }
+        }
+        self.save_document(document,save_as,false,window,cx);
+    }
     fn save_document(&mut self,document:&Entity<DocumentHost>,save_as:bool,close_after:bool,window:&mut Window,cx:&mut Context<Self>) {
-        if !save_as && self.resolve_external_before_save(document,window,cx){return;}
+        if !save_as && self.resolve_external_before_save(document,window,cx){if close_after {self.cancel_close(cx);}return;}
         let existing=document.read(cx).path();
         if !save_as {if let Some(path)=existing.clone() {self.save_path(document.clone(),path,true,close_after,window,cx);return;}}
         let response=match document.update(cx,|host,cx| {
@@ -1052,7 +1122,7 @@ impl Workspace {
                     workspace.refresh_tree(cx);
                     workspace.sync_tree_selection(false,cx);
                     if workspace.document().as_ref()==Some(&document) {window.set_window_title(&format!("{} — Nomo",document.read(cx).title()));}
-                    if close_after {if document.read(cx).is_dirty(cx) {workspace.cancel_close(cx);workspace.notice=Some("保存期间有新修改，文档保持打开".into());}else{workspace.remove_tab(&document,false,window,cx);}}
+                    if close_after && workspace.comparison.closing.is_some() {workspace.continue_pair_save(&document,window,cx);} else if close_after {if document.read(cx).is_dirty(cx) {workspace.cancel_close(cx);workspace.notice=Some("保存期间有新修改，文档保持打开".into());}else{workspace.remove_tab(&document,false,window,cx);}}
                 }else{workspace.cancel_close(cx);}
                 cx.notify();
             });
@@ -1233,7 +1303,7 @@ impl Workspace {
         };
         let view=cx.new(|cx| {
             let mut view=match &link {
-                Some(draft)=>EditorPopover::new_link(draft.text.clone(),draft.href.clone(),draft.active,cx),
+                Some(draft)=>EditorPopover::new_link(draft.text.clone(),draft.display_href(),draft.active,cx),
                 None=>EditorPopover::new_table(cx),
             };
             view.set_popup_anchor(anchor);
@@ -1310,15 +1380,17 @@ impl Workspace {
         let viewport = self.tab_scroll.bounds();
         let offset = self.tab_scroll.offset().x;
         let reduced = self.explorer.reduce_motion;
-        let rows: Vec<AnyElement> = self.tabs.iter().enumerate().filter_map(|(index, tab)| {
+        let rows: Vec<AnyElement> = self.tab_rows(cx).into_iter().enumerate().filter_map(|(index, row)| {
             let bounds = self.tab_scroll.bounds_for_item(index)?;
             if bounds.left() + offset >= viewport.left() && bounds.right() + offset <= viewport.right() { return None; }
-            let document = tab.document.read(cx);
-            let title = document.title();
-            let dirty = document.is_dirty(cx);
-            let tab_id = tab.document.entity_id();
-            let hover = tab.hidden_hover.value();
-            let active = index == self.active;
+            let item=row.item;
+            let Some(tab_index)=row.tab else {return Some(self.saved_tab_button(item,row.title,index,None,cx));};
+            let tab=&self.tabs[tab_index];
+            let title=row.title;
+            let dirty=row.dirty;
+            let tab_id=tab.document.entity_id();
+            let hover=tab.hidden_hover.value();
+            let active=self.tabs.get(self.active).is_some_and(|tab|item.contains(tab.key));
             let row = div().id(("hidden-tab", index)).h(px(30.0)).px(px(8.0)).flex().flex_none()
                 .items_center().gap(px(8.0)).rounded(px(5.0)).cursor_pointer()
                 .text_color(if active { theme.heading } else { motion::color(theme.muted, theme.fg, hover) })
@@ -1335,9 +1407,12 @@ impl Workspace {
                         cx.notify();
                     }
                 }))
+                .when(cfg!(windows),|row|row.on_mouse_down(MouseButton::Right,cx.listener(move|w,event:&gpui::MouseDownEvent,win,cx|{
+                    w.tab_menu_open=false;w.open_tab_context(item,event.position,win,cx);
+                })))
                 .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
                     cx.stop_propagation();
-                    workspace.activate(index, window, cx);
+                    workspace.activate_item(item, window, cx);
                 }));
             Some(row.into_any_element())
         }).collect();
@@ -1358,20 +1433,23 @@ impl Workspace {
     }
 
     fn render_tabs(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let tab_count = self.tabs.len();
+        let rows=self.tab_rows(cx);
+        let tab_count=rows.len();
         let reduced = self.explorer.reduce_motion;
         let surface = self.surface.clone();
         let tab_scroll = self.tab_scroll.clone();
         if tab_count == 0 { surface.clear(); }
-        let tabs: Vec<AnyElement> = self
-            .tabs
-            .iter_mut()
-            .enumerate()
-            .map(|(index, tab)| {
-                let buffer = tab.document.read(cx);
-                let active = index == self.active;
-                let title = buffer.title();
-                let dirty = buffer.is_dirty(cx);
+        let focused=self.tabs.get(self.active).map(|tab|tab.key);
+        let highlight=self.comparison.highlight;
+        let tabs: Vec<AnyElement> = rows.into_iter().enumerate().map(|(index,row)| {
+                let item=row.item;
+                let Some(tab_index)=row.tab else {
+                    return self.saved_tab_button(item,row.title,index,Self::drop_marker(highlight,item,index,tab_count,theme),cx);
+                };
+                let tab=&mut self.tabs[tab_index];
+                let active=focused.is_some_and(|key|item.contains(key));
+                let title=row.title;
+                let dirty=row.dirty;
                 if tab.dirty != dirty {
                     tab.dirty = dirty;
                     tab.dirty_animation_started = dirty.then(Instant::now);
@@ -1404,9 +1482,10 @@ impl Workspace {
                             cx.notify();
                         }
                     }))
+                    .on_mouse_down(MouseButton::Left, |_,_,cx|cx.stop_propagation())
                     .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
-                        workspace.close_tab(index, window, cx);
+                        workspace.close_item(item, window, cx);
                     }));
                 let tab_element = div()
                     .id(("tab", index))
@@ -1429,6 +1508,11 @@ impl Workspace {
                     .child(icon(IconName::FileText, 14.0, tab_icon))
                     .child(div().flex_1().min_w(px(0.0)).truncate()
                         .when(tab.preview, |el| el.italic().opacity(0.85)).child(title))
+                    .children(Self::drop_marker(highlight,item,index,tab_count,theme))
+                    .when(cfg!(windows), |el| el
+                        .tooltip(tooltip(row.tooltip.clone()))
+                        .on_mouse_down(MouseButton::Right,cx.listener(move |w,e:&gpui::MouseDownEvent,win,cx| w.open_tab_context(item,e.position,win,cx)))
+                        .on_mouse_down(MouseButton::Left,cx.listener(move |w,e:&gpui::MouseDownEvent,win,cx| w.arm_tab_drag(item,None,e.position,win,cx))))
                     .children(dirty_indicator)
                     .child(close)
                     .on_hover(cx.listener(move |workspace, hovered: &bool, _, cx| {
@@ -1439,13 +1523,14 @@ impl Workspace {
                         }
                     }))
                     .on_click(cx.listener(move |workspace, event: &ClickEvent, window, cx| {
+                        if workspace.drag_suppresses_click() {return;}
                         workspace.pending_tree_click.take();
                         workspace.deferred_open=None;
                         workspace.cancel_preview_opens(None);
                         if event.click_count()>=2 {
-                            if let Some(tab)=workspace.tabs.get_mut(index) {tab.preview=false;}
+                            if let Some(idx)=workspace.tab_index(item.first()) {workspace.tabs[idx].preview=false;}
                         }
-                        workspace.activate(index, window, cx);
+                        workspace.activate_item(item, window, cx);
                     }));
                 if animate {
                     tab_element.with_animation(
@@ -1492,8 +1577,10 @@ impl Workspace {
                 .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| workspace.new_file(window, cx)))
                 .into_any_element()
         };
+        let rail=self.comparison.rail.clone();
         div()
             .id("tabs")
+            .relative().child(gpui::canvas(move|bounds,_,_|rail.set(Some(bounds)),|_,_,_,_|{}).absolute().top_0().left_0().size_full())
             .h(px(TAB_RAIL_HEIGHT))
             .w_full()
             .flex()
@@ -1684,8 +1771,9 @@ impl Render for Workspace {
             }
         }
         let reduced = self.explorer.reduce_motion;
-        for (index, tab) in self.tabs.iter_mut().enumerate() {
-            tab.active_color.set(index == self.active, reduced, Duration::from_millis(150));
+        let active_item=self.tabs.get(self.active).and_then(|tab|self.comparison.item(tab.key));
+        for tab in &mut self.tabs {
+            tab.active_color.set(active_item.is_some_and(|item|item.contains(tab.key)), reduced, Duration::from_millis(150));
         }
         let animate_ui = Theme::ui_transition_active(cx) || self.tab_action_hover.running()
             || self.tabs.iter().any(|tab| tab.hover.running() || tab.close_hover.running()
@@ -1695,6 +1783,11 @@ impl Render for Workspace {
         let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
         let ui_font = Some(settings.string("uiFontFamily")).filter(|name| !name.trim().is_empty()).unwrap_or_else(|| crate::theme::ui_font_family().into());
         let mode = self.tab().map(|tab| tab.mode);
+        if self.active_pair().is_none() {
+            self.comparison.pane_focus=None;
+            self.comparison.resizing=false;
+            if let Some(document)=self.document(){document.update(cx,|host,cx|host.set_workspace_focus(true,cx));}
+        }
         if mode.is_none() { self.outline_ui.clear_document(); }
         let status=self.document().map(|document|document.read(cx).status().clone());
         // 编辑页始终保留标签栏，单个文档也通过标签显示名称与修改状态。
@@ -1708,20 +1801,21 @@ impl Render for Workspace {
             has_document:status.is_some(), can_undo:status.as_ref().is_some_and(|s|s.can_undo),
             can_redo:status.as_ref().is_some_and(|s|s.can_redo),mode:mode.unwrap_or(EditorMode::Semantic),
             sidebar_visible:settings.show_sidebar, toolbar_visible:settings.show_toolbar,
-            outline_visible:settings.show_outline,split_available:true,
+            outline_visible:settings.show_outline,split_available:self.active_pair().is_none(),
             toolbar_shortcut: crate::ui::shortcuts::current("toggle-toolbar", cx).into(),
             recent,
             capabilities:vec![ChromeCapability::Recent,ChromeCapability::NewWindow,ChromeCapability::HeadingLevels,ChromeCapability::HeadingAdjustment,ChromeCapability::ClearFormatting,ChromeCapability::LinkPicker,ChromeCapability::TablePicker,ChromeCapability::MathInline,ChromeCapability::Callout,ChromeCapability::Details,ChromeCapability::InlineComment,ChromeCapability::BlockComment,ChromeCapability::FrontMatter,ChromeCapability::Diagrams,ChromeCapability::Footnote,ChromeCapability::Toc,ChromeCapability::UnavailableNotice,ChromeCapability::ResetOutlinePosition]
-                .into_iter().chain([ChromeCapability::ExportHtml, ChromeCapability::ExportPdf, ChromeCapability::ExportWord].into_iter().filter(|_| self.export_job.is_none())).chain((cfg!(windows) && status.is_some() && !window.is_fullscreen()).then_some(ChromeCapability::Mini)).collect(),
+                .into_iter().chain([ChromeCapability::ExportHtml, ChromeCapability::ExportPdf, ChromeCapability::ExportWord].into_iter().filter(|_| self.export_job.is_none())).chain((cfg!(windows) && self.active_pair().is_none() && status.is_some() && !window.is_fullscreen()).then_some(ChromeCapability::Mini)).collect(),
             ..Default::default()
         },cx));
         let tabs = show_tabs.then(|| self.render_tabs(&theme, cx).into_any_element());
         let sidebar = if self.home_visible || mini { None } else { self.render_sidebar_animated(settings.show_sidebar, &theme, window, cx) };
         let main: AnyElement = if self.home_visible {
             let count = self.tabs.len();
+            let offer_restore = count==0 && self.has_saved_layout(cx);
             let sidebar_width = self.explorer.sidebar_width.unwrap_or(250.0)
                 .min((f32::from(window.viewport_size().width) - 420.0).max(180.0));
-            self.home.update(cx, |home, _| { home.open_tabs = count; home.sidebar_width = sidebar_width; });
+            self.home.update(cx, |home, _| { home.restore_layout = offer_restore; home.open_tabs = count; home.sidebar_width = sidebar_width; });
             self.home.clone().into_any_element()
         } else { match mode {
             None => self.render_empty(&theme, cx).into_any_element(),
@@ -1729,8 +1823,8 @@ impl Render for Workspace {
                 let toolbar = if mini { None } else { self.render_toolbar_animated(settings.show_toolbar, &theme, mode, cx) };
                 let tab = self.tab().expect("active tab");
                 tab.document.update(cx, |host, _| host.set_save_directory(self.tree.as_ref().map(|tree|tree.root.as_path())));
-                let editors=div().size_full().child(tab.document.clone()).into_any_element();
-                let outline = if mini { None } else { self.render_outline_panel(&theme, window, cx) };
+                let editors = if let Some(pair)=self.active_pair() { self.render_comparison(pair, &theme, window, cx) } else { div().size_full().child(tab.document.clone()).into_any_element() };
+                let outline = if mini || self.active_pair().is_some() { None } else { self.render_outline_panel(&theme, mode, window, cx) };
                 let measured = self.outline_ui.bounds.clone();
                 let weak = cx.entity().downgrade();
                 let outline_measure = gpui::canvas(move |bounds, window, _| {
@@ -1760,12 +1854,16 @@ impl Render for Workspace {
                     .flex()
                     .flex_col()
                     .children(toolbar)
-                    .child(div().relative().flex_1().min_h(px(0.0)).children((!mini).then_some(outline_measure)).child(editors).children(outline).children(search).children(split_guide).children(reveal_toolbar))
+                    .child(div().relative().flex_1().min_h_0()
+                        .children((!mini && self.active_pair().is_none()).then_some(outline_measure)).child(editors).children(outline)
+                        .children(search).children(split_guide).children(reveal_toolbar))
                     .into_any_element()
             }
         }};
         let popover=self.popover.as_ref().map(|pending|gpui::deferred(pending.view.clone()).with_priority(4));
         let toolbar_popup = self.render_toolbar_popup(&theme, cx);
+        let tab_context = self.render_tab_context(&theme, cx);
+        let tab_drag_ghost = self.drag_ghost(&theme,cx);
         let outline_menu = self.render_outline_menu(&theme, cx);
         let outline_drag_preview = self.render_outline_drag_preview(&theme);
         let toast = self.toast.clone().filter(|_|!window.has_active_prompt()).map(|toast| gpui::deferred(toast).with_priority(9));
@@ -1773,8 +1871,11 @@ impl Render for Workspace {
         let status = if mini { None } else { self.render_status_controls(&theme, window, cx) };
         let status_popup = self.render_status_popup(&theme, cx);
         let mini_bar = self.render_mini_bar(cx);
-        div()
-            .id("workspace")
+        let root = div().id("workspace");
+        #[cfg(windows)]
+        let root = root.capture_any_mouse_up(Self::remember_tab_release)
+            .on_mouse_up_out(MouseButton::Left, Self::remember_tab_release);
+        root
             .relative()
             .key_context("Workspace")
             .track_focus(&self.focus)
@@ -1785,9 +1886,16 @@ impl Render for Workspace {
             .text_color(theme.fg)
             .font_family(ui_font)
             .capture_key_down(|_, _, _| crate::frame_profile::input())
-            .on_mouse_move(cx.listener(|workspace, event: &gpui::MouseMoveEvent, _, cx| workspace.outline_mouse_move(event, cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|workspace, _, window, cx| workspace.outline_mouse_up(window, cx)))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|workspace, event: &gpui::MouseUpEvent, window, cx| workspace.outline_mouse_up_out(event, window, cx)))
+            .on_modifiers_changed(cx.listener(|workspace, event: &gpui::ModifiersChangedEvent, window, _| {
+                let held = event.modifiers.control || event.modifiers.platform;
+                if workspace.link_modifier != held {
+                    workspace.link_modifier = held;
+                    if !workspace.home_visible { window.refresh(); }
+                }
+            }))
+            .on_mouse_move(cx.listener(|workspace, event: &gpui::MouseMoveEvent, _, cx| {workspace.comparison_mouse_move(event,cx);workspace.outline_mouse_move(event,cx);}))
+            .on_mouse_up(MouseButton::Left, cx.listener(|workspace, _, window, cx| {workspace.finish_comparison_resize(cx);workspace.outline_mouse_up(window, cx);}))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|workspace, event: &gpui::MouseUpEvent, window, cx| {workspace.finish_comparison_resize(cx);workspace.outline_mouse_up_out(event, window, cx);}))
             .on_action(cx.listener(|w, _: &NewFile, window, cx| w.new_file(window, cx)))
             .on_action(cx.listener(|w, _: &ShowHome, window, cx| w.show_home(window, cx)))
             .on_action(cx.listener(|w, _: &RecoverDocuments, window, cx| w.show_recovery_list(window, cx)))
@@ -1796,7 +1904,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &OpenFolder, window, cx| w.prompt_open(true, window, cx)))
             .on_action(cx.listener(|w, _: &Save, window, cx| {
                 if let Some(buffer) = w.document() {
-                    w.save_document(&buffer,false,false,window,cx);
+                    w.request_manual_save(&buffer,false,window,cx);
                 }
             }))
             .on_action(cx.listener(|w, _: &ExportHtml, window, cx| w.export_document(crate::document_export::Format::Html, window, cx)))
@@ -1804,7 +1912,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &ExportWord, window, cx| w.export_document(crate::document_export::Format::Word, window, cx)))
             .on_action(cx.listener(|w, _: &SaveAs, window, cx| {
                 if let Some(buffer) = w.document() {
-                    w.save_document(&buffer,true,false,window,cx);
+                    w.request_manual_save(&buffer,true,window,cx);
                 }
             }))
             .on_action(cx.listener(|w, _: &CloseTab, window, cx| {
@@ -1814,14 +1922,12 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|w, _: &NextTab, window, cx| {
                 if !w.tabs.is_empty() {
-                    let next = (w.active + 1) % w.tabs.len();
-                    w.activate(next, window, cx);
+                    w.cycle_item(true, window, cx);
                 }
             }))
             .on_action(cx.listener(|w, _: &PrevTab, window, cx| {
                 if !w.tabs.is_empty() {
-                    let previous = (w.active + w.tabs.len() - 1) % w.tabs.len();
-                    w.activate(previous, window, cx);
+                    w.cycle_item(false, window, cx);
                 }
             }))
             .on_action(cx.listener(|w, _: &Find, window, cx| w.open_search(false, window, cx)))
@@ -1881,7 +1987,7 @@ impl Render for Workspace {
             .children(mini_bar)
             .children(popover)
             .children(toolbar_popup)
-            .children(outline_menu)
+            .children(tab_drag_ghost).children(tab_context).children(outline_menu)
             .children(outline_drag_preview)
             .children(toast)
             .children(update_notice)

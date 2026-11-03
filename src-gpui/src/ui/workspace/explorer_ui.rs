@@ -229,6 +229,7 @@ impl Workspace {
                     move |thumb, progress| thumb.opacity(from + (to - from) * progress)).into_any_element()
             } else { thumb.into_any_element() };
             div().id("tree-scrollbar").absolute().right(px(0.0)).top(px(0.0)).bottom(px(0.0)).w(px(8.0))
+                .cursor(gpui::CursorStyle::OpenHand)
                 .on_mouse_down(MouseButton::Left, cx.listener(move |workspace, event: &gpui::MouseDownEvent, _, cx| {
                     cx.stop_propagation();
                     let y = f32::from(event.position.y - workspace.tree_scroll.0.borrow().base_handle.bounds().top());
@@ -262,7 +263,9 @@ impl Workspace {
             }));
         let tracking = (self.explorer.resizing || self.explorer.scroll_dragging).then(|| {
             let workspace = cx.entity().downgrade();
+            let dragging = self.explorer.scroll_dragging;
             div().absolute().size_full().child(gpui::canvas(|_, _, _| (), move |_, _, window, _| {
+                if dragging { window.set_window_cursor_style(gpui::CursorStyle::ClosedHand); }
                 let moving = workspace.clone();
                 window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, window, cx| {
                     if phase != gpui::DispatchPhase::Bubble { return; }

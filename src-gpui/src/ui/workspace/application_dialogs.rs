@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 #[derive(Clone)]
-pub(super) enum OpenSource { File, Reload(Entity<DocumentHost>,u64), Recovery(RecoveryCandidate,bool,Option<Entity<DocumentHost>>,u64), DiskRecovery(RecoveryCandidate,Option<Entity<DocumentHost>>,u64) }
+pub(super) enum OpenSource { File, Layout(u64,Option<RecoveryCandidate>), Reload(Entity<DocumentHost>,u64), Recovery(RecoveryCandidate,bool,Option<Entity<DocumentHost>>,u64), DiskRecovery(RecoveryCandidate,Option<Entity<DocumentHost>>,u64) }
 #[derive(Default)]
 pub(super) struct ApplicationDialogs {
     pub close_approved: bool,
@@ -18,8 +18,8 @@ pub(super) struct ApplicationDialogs {
     probe_failure: Option<u64>,
     generation: u64,
     pub(super) busy: bool,
-    ignored: HashMap<String,ExternalChange>,
-    mini_deferred: std::collections::HashSet<String>,
+    pub(super) ignored: HashMap<String,ExternalChange>,
+    pub(super) mini_deferred: std::collections::HashSet<String>,
 }
 
 
@@ -34,7 +34,7 @@ pub(super) fn clear_external_after_save(workspace:&mut Workspace,document:&Entit
     workspace.application_dialogs.generation=workspace.application_dialogs.generation.wrapping_add(1);
 }
 pub(super) fn mark_recovered_change(workspace:&mut Workspace,document:&Entity<DocumentHost>,source:&OpenSource,cx:&App){
-    if let OpenSource::Recovery(candidate,false,_,_)=source {if let Some(change)=&candidate.change {workspace.application_dialogs.ignored.insert(document.read(cx).status().document_id.clone(),change.clone());}}
+    if let OpenSource::Recovery(candidate,false,_,_) | OpenSource::Layout(_,Some(candidate))=source {if let Some(change)=&candidate.change {workspace.application_dialogs.ignored.insert(document.read(cx).status().document_id.clone(),change.clone());}}
 }
 
 impl Workspace {
@@ -49,7 +49,7 @@ impl Workspace {
             loop {
                 cx.background_executor().timer(Duration::from_millis(1200)).await;
                 if this.update_in(cx,|workspace,window,cx| {
-                    if workspace.application_dialogs.busy || window.has_active_prompt() || workspace.closing_window || !workspace.opening.is_empty() {return;}
+                    if workspace.application_dialogs.busy || window.has_active_prompt() || workspace.closing_window || workspace.comparison.closing.is_some() || !workspace.opening.is_empty() {return;}
                     workspace.drain_open_requests(window,cx);
                     if workspace.application_dialogs.busy || window.has_active_prompt() || !workspace.opening.is_empty() || workspace.pending_document_transition.is_some() {return;}
                     if workspace.offer_document_recovery(window,cx) {return;}
@@ -74,7 +74,7 @@ impl Workspace {
         }
         let reusable=self.tabs.is_empty() && self.opening.is_empty();
         let belongs=self.tree.as_ref().is_some_and(|tree|path.starts_with(&tree.root));
-        let already=self.tabs.iter().any(|tab|tab.document.read(cx).path().as_ref()==Some(&path));
+        let already=self.saved_path_key(&path).is_some() || self.tabs.iter().any(|tab|tab.document.read(cx).path().as_ref()==Some(&path));
         let preference=cx.global::<Settings>().string("openDefaultBehavior");
         if !request.choose_window || reusable || belongs || already || preference=="current-window" {self.open_request_here(request,window,cx);return;}
         if preference=="new-window" {crate::open_workspace(vec![path],cx);return;}

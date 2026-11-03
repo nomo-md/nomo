@@ -97,7 +97,7 @@ pub fn events(
     let keys = RefCell::new(BTreeSet::new());
     let mut resolve = |link: pulldown_cmark::BrokenLink<'_>| {
         let key = normalize_reference_label(&link.reference);
-        if context.pending_references { keys.borrow_mut().insert(key.clone()); }
+        keys.borrow_mut().insert(key.clone());
         if let Some(target) = context.references.get(&key) {
             Some((target.destination.clone().into(), target.title.clone().into()))
         } else if context.pending_references && matches!(link.link_type, pulldown_cmark::LinkType::Reference | pulldown_cmark::LinkType::Collapsed) {
@@ -134,7 +134,7 @@ pub fn events(
                     *dest_url = target.destination.clone().into();
                     *title = target.title.clone().into();
                 }
-                if context.pending_references { keys.borrow_mut().insert(key); }
+                keys.borrow_mut().insert(key);
             }
         }
         if matches!(event, Event::Start(Tag::HtmlBlock)) {

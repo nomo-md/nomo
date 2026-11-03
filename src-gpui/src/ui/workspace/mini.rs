@@ -32,6 +32,7 @@ impl Workspace {
     }
 
     pub(super) fn toggle_mini(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_pair().is_some() { return; }
         if window.has_active_prompt() || self.closing_window { return; }
         if self.mini.active() {
             if self.leave_mini(window, cx) {

@@ -207,11 +207,7 @@ impl Workspace {
         let host = doc.read(cx);
         let metric_value = |stats: &crate::text_document::DocumentStats| [stats.lines, stats.words, stats.visible_chars, stats.chars][metric];
         let value = host.stats().map(metric_value);
-        let label = if host.stats_failed() && host.stats().is_none() { locale.text("status_unavailable").to_owned() }
-            else {
-                let value = value.map(|value| value.to_string()).unwrap_or_else(|| "—".into());
-                format!("{value}{}", locale.text(METRICS[metric].3))
-            };
+        let label = format!("{}{}", value.map(|value| value.to_string()).unwrap_or_else(|| "—".into()), locale.text(METRICS[metric].3));
         let reduced = self.explorer.reduce_motion;
         self.status_ui.stats.update(metric, value, host.full_stats().map(metric_value), host.stats_are_selected(), reduced);
         if self.status_ui.last_zoom.is_some_and(|previous| previous != percent) {
@@ -383,10 +379,6 @@ impl Workspace {
             panel = panel.child(div().flex_none().pt(sp(11.0)).pb(sp(9.0)).px(sp(12.0))
                 .border_b_1().border_color(theme.border).text_size(sp(14.0)).font_weight(FontWeight::SEMIBOLD)
                 .child(locale.text("status_stats")));
-            if document.read(cx).stats_failed() {
-                panel = panel.child(div().px(sp(12.0)).py(sp(6.0)).text_color(theme.muted)
-                    .child(locale.text("status_unavailable")));
-            }
             if cx.global::<Settings>().reading_time {
                 if let Some(stats) = &stats {
                     panel = panel.child(div().flex_none().mx(sp(6.0)).mt(sp(6.0)).py(sp(7.0)).px(sp(8.0))

@@ -1,7 +1,7 @@
 //! 用户选择的本地图片导入。逐文件预检和复制，只持有固定读缓冲，不保留图片缓存。
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{fs::{self, File, OpenOptions}, io::{Read, Write}, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}}};
+use std::{fs::{self, File, OpenOptions}, io::{Read, Write}, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}}};
 #[path = "image_upload.rs"]
 mod upload;
 pub(crate) use upload::test_connection;
@@ -34,10 +34,14 @@ pub(crate) fn normalize_width(value:&str)->Option<String> {
 }
 
 #[derive(Clone,Default)]
-pub(crate) struct ImportCancellation(Arc<AtomicBool>);
+pub(crate) struct ImportCancellation(Arc<ImportProgress>);
+#[derive(Default)]
+struct ImportProgress { cancelled: AtomicBool, created: AtomicUsize }
 impl ImportCancellation {
-    pub fn cancel(&self){self.0.store(true,Ordering::Release);}
-    pub fn cancelled(&self)->bool{self.0.load(Ordering::Acquire)}
+    pub fn cancel(&self){self.0.cancelled.store(true,Ordering::Release);}
+    pub fn cancelled(&self)->bool{self.0.cancelled.load(Ordering::Acquire)}
+    pub fn created_resources(&self)->usize{self.0.created.load(Ordering::Acquire)}
+    fn record_resource(&self){self.0.created.fetch_add(1,Ordering::Release);}
     fn check(&self)->Result<(),String>{if self.cancelled(){Err("图片导入已取消".into())}else{Ok(())}}
 }
 pub(crate) struct ImportedImage {pub src:String,pub alt:String}
@@ -106,7 +110,10 @@ pub(crate) fn import_inputs(inputs: Vec<ImageInput>, document: &Path, settings: 
         for path in &files.paths {
             cancel.check()?;
             match validate_image(path).and_then(|_| upload::upload(path, settings, cancel)) {
-                Ok(src) => batch.images.push(ImportedImage { src, alt: path.file_name().unwrap_or_default().to_string_lossy().into() }),
+                Ok(src) => {
+                    cancel.record_resource();
+                    batch.images.push(ImportedImage { src, alt: path.file_name().unwrap_or_default().to_string_lossy().into() });
+                }
                 Err(error) => { cancel.check()?; batch.failed += 1; if batch.errors.len() < 4 { batch.errors.push(error); } }
             }
         }
@@ -192,6 +199,7 @@ fn import_one(path:&Path,directory:&Path,prefix:&str,cancel:&ImportCancellation)
             output.sync_all().map_err(|e|e.to_string())?;cancel.check()
         })();
         drop(output);copied?;guard.complete=true;
+        cancel.record_resource();
         return Ok(ImportedImage{src:markdown_src(prefix,&name),alt});
     }
 }

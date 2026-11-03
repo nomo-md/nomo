@@ -46,6 +46,8 @@ pub struct HtmlTag {
     pub self_closing: bool,
     pub end: usize,
     pub attrs: BTreeMap<String, String>,
+    /// 链接 href 值的原文字节范围，不含引号。
+    pub href_range: Option<Range<usize>>,
 }
 
 pub fn html_tag(source: &str, start: usize) -> Option<HtmlTag> {
@@ -68,6 +70,7 @@ pub fn html_tag(source: &str, start: usize) -> Option<HtmlTag> {
     }
     let name = source[name_start..at].to_ascii_lowercase();
     let mut attrs = BTreeMap::new();
+    let mut href_range = None;
     loop {
         while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
             at += 1;
@@ -79,6 +82,7 @@ pub fn html_tag(source: &str, start: usize) -> Option<HtmlTag> {
                 self_closing: false,
                 end: at + 1,
                 attrs,
+                href_range,
             });
         }
         if bytes.get(at..at + 2) == Some(b"/>") {
@@ -88,6 +92,7 @@ pub fn html_tag(source: &str, start: usize) -> Option<HtmlTag> {
                 self_closing: true,
                 end: at + 2,
                 attrs,
+                href_range,
             });
         }
         let key_start = at;
@@ -104,7 +109,7 @@ pub fn html_tag(source: &str, start: usize) -> Option<HtmlTag> {
         while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
             at += 1;
         }
-        let value = if bytes.get(at) == Some(&b'=') {
+        let value_range = if bytes.get(at) == Some(&b'=') {
             at += 1;
             while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
                 at += 1;
@@ -116,7 +121,7 @@ pub fn html_tag(source: &str, start: usize) -> Option<HtmlTag> {
                 while *bytes.get(at)? != quote {
                     at += 1;
                 }
-                let value = &source[from..at];
+                let value = from..at;
                 at += 1;
                 value
             } else {
@@ -130,12 +135,13 @@ pub fn html_tag(source: &str, start: usize) -> Option<HtmlTag> {
                 if at == from {
                     return None;
                 }
-                &source[from..at]
+                from..at
             }
         } else {
-            ""
+            at..at
         };
-        attrs.insert(key, html_escape::decode_html_entities(value).into_owned());
+        if name == "a" && key == "href" { href_range = Some(value_range.clone()); }
+        attrs.insert(key, html_escape::decode_html_entities(&source[value_range]).into_owned());
     }
 }
 

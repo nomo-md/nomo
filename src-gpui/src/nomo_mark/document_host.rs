@@ -38,6 +38,7 @@ pub use workspace_host::DocumentEvent;
 pub(crate) use workspace_host::EditTarget;
 pub use outline_queries::OutlineHeading;
 pub(crate) use outline_queries::OutlineSnapshot;
+pub(crate) use window_panes::OutlineLayout;
 #[cfg(feature = "nomo-mark-demo")]
 #[path = "development_ui.rs"]
 mod development_ui;
@@ -48,6 +49,7 @@ pub struct DocumentHost {
     port: NativeWindowPort,
     embedded: bool,
     mini_layout: bool,
+    outline_layout: OutlineLayout,
     closed: bool,
     metadata: workspace_host::Metadata,
     queries: workspace_queries::Queries,
@@ -66,6 +68,7 @@ pub struct DocumentHost {
     split_dragging: bool,
     split_focus: gpui::FocusHandle,
     focus_pending: bool,
+    accepts_workspace_focus: bool,
     toolbar_marks: u8,
     quick: quick_insert_host::QuickInsertUi,
 
@@ -118,6 +121,7 @@ impl DocumentHost {
             queries: Default::default(),
             embedded: false,
             mini_layout: false,
+            outline_layout: OutlineLayout::CENTERED,
             closed: false,
             port,
             control: control.clone(),
@@ -131,7 +135,7 @@ impl DocumentHost {
             total_bytes: status.byte_length,
             panes: vec![window_panes::Pane::new(control.clone(), subscription, ViewMode::Semantic)],
             active_pane: 0, split_ratio: 0.5, split_dragging: false, split_focus: cx.focus_handle(),
-            focus_pending: false, toolbar_marks: 0,
+            focus_pending: false, accepts_workspace_focus:true, toolbar_marks: 0,
             quick: Default::default(),
 
         }
@@ -450,6 +454,7 @@ impl DocumentHost {
         for pane in 0..self.panes.len() {
             if self.hidden {
                 self.panes[pane].viewport.saved_scroll=self.panes[pane].scroll.offset();
+                self.panes[pane].clear_scrollbar();
                 self.pause_pane(pane,cx);
             }
             for mount in &self.panes[pane].viewport.mounts {

@@ -28,7 +28,7 @@ pub(super) struct Queries {
     selected_stats: Option<DocumentStats>,
     stats_selection: Option<DocumentSelection>,
     stats_requested_selection: Option<DocumentSelection>,
-    pub stats_failed: bool,
+    stats_failed: bool,
     stats_enabled: bool,
     stats_revision: Option<u64>,
     stats_requested_revision: Option<u64>,
@@ -47,6 +47,12 @@ impl Drop for Queries {
 }
 fn error(e: impl std::fmt::Display) -> ControlError {
     ControlError::HostFailure(e.to_string())
+}
+fn search_error(e: crate::text_document::TextDocumentError) -> ControlError {
+    match e.code {
+        "search-expired" | "task-cancelled" | "revision-conflict" | "document-closed" => ControlError::Stale,
+        _ => error(e),
+    }
 }
 
 impl DocumentHost {
@@ -84,9 +90,6 @@ impl DocumentHost {
     }
     pub(crate) fn stats_are_selected(&self) -> bool {
         self.queries.selected_stats.is_some()
-    }
-    pub(crate) fn stats_failed(&self) -> bool {
-        self.queries.stats_failed
     }
     pub(crate) fn sync_stats_visibility(&mut self, cx: &mut Context<Self>) {
         if self.queries.stats_enabled != cx.global::<crate::settings::Settings>().stats_visible {
@@ -190,7 +193,10 @@ impl DocumentHost {
                         },
                     )
                     .await
-                    .map_err(error)?;
+                    .map_err(|err| match err.code {
+                        "stats-cancelled" | "revision-conflict" | "document-closed" => ControlError::Stale,
+                        _ => error(err),
+                    })?;
                 request.check()?;
                 Ok::<_, ControlError>(stats)
             });
@@ -198,11 +204,10 @@ impl DocumentHost {
             let _ = this.update(cx, |host, cx| {
                 let current_selection = host.selection(cx);
                 let current_selection = (!current_selection.range().is_empty()).then_some(current_selection);
-                if host.hidden || host.closed || !host.queries.stats_enabled
-                    || host.queries.serial != serial
-                    || host.status().revision != revision
-                    || current_selection != selection
-                {
+                if host.hidden || host.closed || !host.queries.stats_enabled || host.queries.serial != serial { return; }
+                if host.status().revision != revision || current_selection != selection {
+                    host.queries.stats_requested_revision = None;
+                    host.schedule_stats(cx);
                     return;
                 }
                 match result {
@@ -213,11 +218,13 @@ impl DocumentHost {
                         host.queries.stats_revision = Some(revision);
                         host.queries.stats_dirty_since = None;
                     }
-                    Err(ControlError::Stale) => return,
-                    Err(e) => {
+                    Err(ControlError::Stale) => {
                         host.queries.stats_requested_revision = None;
+                        return;
+                    },
+                    Err(e) => {
                         host.queries.stats_failed = true;
-                        host.report(e, cx);
+                        crate::app_logger::warn("WritingStats", &e.to_string());
                     }
                 }
                 cx.emit(DocumentEvent::Status);
@@ -270,17 +277,18 @@ impl DocumentHost {
                     },
                     None,
                 )
-                .map_err(error)?;
+                    .map_err(search_error)?;
             let result = (|| {
                 loop {
                     request.check()?;
                     let progress = port
                         .manager
                         .search_progress(&port.owner, &identity.task_id)
-                        .map_err(error)?;
+                        .map_err(search_error)?;
                     match progress.state.as_str() {
                         "ready" => break,
-                        "cancelled" | "conflict" | "failed" => {
+                        "cancelled" | "conflict" => return Err(ControlError::Stale),
+                        "failed" => {
                             return Err(error(
                                 progress
                                     .error
@@ -294,7 +302,7 @@ impl DocumentHost {
                 let page = port
                     .manager
                     .search_page(&port.owner, &identity.task_id, 0, 128)
-                    .map_err(error)?;
+                    .map_err(search_error)?;
                 request.check()?;
                 Ok(Some(page))
             })();
@@ -379,7 +387,7 @@ impl DocumentHost {
         let port = self.port.clone();
         let task = cx
             .background_executor()
-            .spawn(async move { port.manager.search_page(&port.owner, &id, index, 128) });
+            .spawn(async move { port.manager.search_page(&port.owner, &id, index, 128).map_err(search_error) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |host, cx| {
@@ -402,7 +410,11 @@ impl DocumentHost {
                         }
                         host.queries.search.matches = page.matches;
                     }
-                    Err(e) => host.report(error(e), cx),
+                    Err(ControlError::Stale) => {
+                        let search = &host.queries.search;
+                        host.set_search(search.query.clone(), search.case_sensitive, search.whole_word, cx);
+                    }
+                    Err(e) => host.report(e, cx),
                 }
                 cx.emit(DocumentEvent::Status);
                 cx.notify();
@@ -478,17 +490,18 @@ impl DocumentHost {
                     },
                     None,
                 )
-                .map_err(error)?;
+                    .map_err(search_error)?;
             let result = (|| {
                 loop {
                     request.check()?;
                     let progress = port
                         .manager
                         .search_progress(&port.owner, &identity.task_id)
-                        .map_err(error)?;
+                        .map_err(search_error)?;
                     match progress.state.as_str() {
                         "prepared" => break,
-                        "failed" | "conflict" | "cancelled" => {
+                        "cancelled" | "conflict" => return Err(ControlError::Stale),
+                        "failed" => {
                             return Err(error(
                                 progress
                                     .error
@@ -508,10 +521,11 @@ impl DocumentHost {
                         &identity.task_id,
                         &operation,
                     )
-                    .map_err(error)?;
+                    .map_err(search_error)?;
+                if result.changed_count == 0 { return Ok(None); }
                 let byte = result.anchors.first().copied().unwrap_or(0);
                 let loaded = port.load_group(result.status.revision, byte, None, &request)?;
-                Ok::<_, ControlError>((loaded, byte, result.changed_count))
+                Ok::<_, ControlError>(Some((loaded, byte, result.changed_count)))
             })();
             port.manager.release_search(&port.owner, &identity.task_id);
             result
@@ -521,7 +535,7 @@ impl DocumentHost {
             let _ = this.update(cx, |host, cx| {
                 host.navigating = false;
                 match result {
-                    Ok((loaded, byte, count)) => {
+                    Ok(Some((loaded, byte, count))) => {
                         if let Err(e) =
                             host.install(loaded, Some(DocumentSelection::caret(byte)), cx)
                         {
@@ -529,6 +543,11 @@ impl DocumentHost {
                         } else {
                             host.message = format!("已替换 {count} 处");
                         }
+                    }
+                    Ok(None) => {
+                        host.control.update(cx, |view, _| view.host.set_readonly(false));
+                        host.message.clear();
+                        host.schedule_viewport(16, cx);
                     }
                     Err(e) => host.action_failed(e, cx),
                 }

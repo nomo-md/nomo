@@ -8,7 +8,8 @@ use pulldown_cmark::{Event, Tag, CodeBlockKind};
 #[derive(Clone)]
 pub(super) enum Target {
     Text, Selection, Link(usize), Heading(u8),
-    Block(Range<usize>, ObjectKind), Table(Range<usize>, usize, usize, bool),
+    Block(Range<usize>, ObjectKind),
+    Table { source: Range<usize>, row: usize, column: usize, rows: usize, columns: usize, header: bool },
     Details(Range<usize>, bool), Image(Range<usize>),
 }
 
@@ -127,10 +128,12 @@ impl NomoMark {
                 }
             }
             if let Some(table) = parsed.html_tables.iter().find(|t| t.source.contains(&at)) {
-                if let Some(cell) = table.cell_at(at) { return Target::Table(table.source.clone(), cell.row, cell.column, table.cells.iter().filter(|c| c.row == 0).all(|c| c.header)); }
+                if let Some(cell) = table.cell_at(at) { return Target::Table { source: table.source.clone(), row: cell.row, column: cell.column,
+                    rows: table.rows, columns: table.columns, header: table.cells.iter().filter(|c| c.row == 0).all(|c| c.header) }; }
             }
             if let Some(table) = Table::at(parsed, at) {
-                if let Some((row, column)) = table.cell_at(at) { return Target::Table(table.source, row, column, true); }
+                if let Some((row, column)) = table.cell_at(at) { return Target::Table { source: table.source, row, column,
+                    rows: table.rows.len(), columns: table.separator.cells.len(), header: true }; }
             }
         }
         if self.host.selection.range().is_empty() { Target::Text } else { Target::Selection }
@@ -224,8 +227,8 @@ impl NomoMark {
                 ]); }
                 items.extend([sep(), item("deleteAction", "trash-2", MenuAction::Delete).enabled(editable).danger()]); items
             }
-            Target::Table(_, row, column, header) => {
-                let table = |key, icon, intent| item(key, icon, MenuAction::Table(intent)).enabled(editable);
+            Target::Table { row, column, header, rows, columns, .. } => {
+                let table = |key, icon, intent: TableIntent| item(key, icon, MenuAction::Table(intent)).enabled(editable && !intent.would_empty_table(*rows, *columns));
                 vec![table("addRowBefore", "table-2", TableIntent::InsertRowBefore { row: *row }),
                     table("addRowAfter", "table-2", TableIntent::InsertRow { after: *row }),
                     table("addColumnBefore", "table-2", TableIntent::InsertColumn { at: *column }),
@@ -291,7 +294,7 @@ impl NomoMark {
         use MenuAction as A;
         // 对象命令以右键命中目标为准，即使用户保留了另一端的选区。
         let target_at = match &menu.target { Target::Link(at) => Some(*at), Target::Block(r, _) | Target::Image(r) | Target::Details(r, _) => Some(r.start),
-            Target::Table(range, row, column, _) => self.context_table_cell(range, *row, *column), Target::Heading(_) => Some(menu.hit), _ => None };
+            Target::Table { source, row, column, .. } => self.context_table_cell(source, *row, *column), Target::Heading(_) => Some(menu.hit), _ => None };
         if let Some(at) = target_at { self.move_to(at, false, cx); }
         match action {
             A::None => {}, A::Edit(intent) => self.command(intent, cx),
@@ -339,7 +342,7 @@ impl NomoMark {
             A::CodeLanguage => if let Target::Block(range, _) = menu.target {
                 self.open_code_language(range.start, window, cx);
             },
-            A::Delete => match menu.target { Target::Block(r, _) | Target::Table(r, ..) | Target::Image(r) => self.context_replace(r, String::new(), cx), _ => {} },
+            A::Delete => match menu.target { Target::Block(r, _) | Target::Table { source: r, .. } | Target::Image(r) => self.context_replace(r, String::new(), cx), _ => {} },
             A::Table(intent) => self.table_command(intent, cx),
             A::DetailsDefault | A::DetailsUnwrap => if let Target::Details(range, open) = menu.target {
                 if let Some(block) = self.host.parsed.details.iter().find(|b| b.source == range) {

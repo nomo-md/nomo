@@ -15,6 +15,12 @@ pub(crate) struct LinkDraft {
     attrs: BTreeMap<String,String>,
 }
 impl LinkDraft {
+    pub(crate) fn display_href(&self) -> String {
+        let mut text = String::new();
+        for (_, part) in super::link_display::parts(&self.href, 0..self.href.len()) { text.push_str(&part); }
+        text
+    }
+
     pub(crate) fn insertion(parsed:&ParsedWindow,range:Range<usize>)->Result<Self,ControlError> {
         let base=parsed.identity.from_byte;
         let mut draft=Self::begin(parsed,DocumentSelection{anchor_byte:base+range.start as u64,head_byte:base+range.end as u64})?;
@@ -77,13 +83,22 @@ impl LinkDraft {
         let raw=parsed.source.get(self.content.clone()).ok_or(ControlError::InvalidRange)?;
         let remove=href.is_none();
         if remove && !self.active {return Err(ControlError::InvalidRange);}
-        let href=href.map(normalize_href).transpose()?;
+        let same_target = self.active && href.is_some_and(|value| value == self.href || value == self.display_href());
+        let href=href.map(|value| normalize_href(if same_target { &self.href } else { value })).transpose()?;
         let shown=if text.trim().is_empty() {
             if self.text.is_empty() {href.as_deref().unwrap_or("")}else{&self.text}
         }else{text};
         let table_cell=parsed.events.iter().any(|(event,range)|matches!(event,Event::Start(Tag::TableCell)) && range.start<=self.range.start && self.range.end<=range.end);
         let body=if shown==self.text {raw.to_owned()}else if self.html {html_escape::encode_text(shown).to_string()}else{escape_label(shown)};
         let body=if table_cell && !self.html {escape_table_pipes(&body)}else{body};
+        if same_target && (body == raw || parsed.source.get(self.content.end..self.range.end).is_some_and(|tail| tail.starts_with("]("))) {
+            let start = parsed.identity.from_byte + self.content.start as u64;
+            let selection = DocumentSelection { anchor_byte: start, head_byte: start + body.len() as u64 };
+            let edits = if body == raw { Vec::new() } else {
+                vec![SourceEdit { from_byte: start, to_byte: start + raw.len() as u64, inserted_text: body }]
+            };
+            return Ok(EditResult { edits, selection, template_update: None });
+        }
         let replacement=if let Some(href)=href {
             if self.html {
                 let mut attrs=self.attrs.clone();attrs.insert("href".into(),href);
@@ -139,7 +154,8 @@ fn escape_table_pipes(text:&str)->String {
     }
     result
 }
-fn label_end(raw:&str)->Option<usize> {
+pub(super) fn label_end(raw:&str)->Option<usize> {
+    if !raw.starts_with('[') { return None; }
     let bytes=raw.as_bytes();let mut depth=0usize;let mut at=0;
     while at<bytes.len() {
         match bytes[at] {

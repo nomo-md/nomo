@@ -181,6 +181,32 @@ impl BlockLayout {
         })
     }
 
+    /// 隐藏语法只能贴靠可见落点；不能把同一光标几何对应的源码前缀当作额外输入位置。
+    pub fn nearest_caret(&self, source: usize) -> Option<usize> {
+        let mut best = None;
+        let mut accept = |next: usize| {
+            if best.is_none_or(|old: usize| source.abs_diff(next) < source.abs_diff(old)) { best = Some(next); }
+        };
+        for item in &self.items {
+            match item {
+                DisplayItem::CodeBody { body, .. } => { if let Some(next) = body.code.nearest_caret(source) { accept(next); } }
+                DisplayItem::Horizontal { layout, .. } => { if let Some(next) = layout.nearest_caret(source) { accept(next); } }
+                DisplayItem::Text { map, .. } => {
+                    for segment in map {
+                        if segment.exact { accept(source.clamp(segment.source, segment.source_end)); }
+                        else { accept(segment.source); accept(segment.source_end); }
+                    }
+                }
+                DisplayItem::Image { source, .. } | DisplayItem::BlockControls { source, .. } => {
+                    accept(source.start); accept(source.end);
+                }
+                DisplayItem::Embed { source, .. } => accept(*source),
+                _ => {}
+            }
+        }
+        best
+    }
+
     pub fn horizontal_caret(&self, at: usize, unit: crate::nomo_mark::navigation::CursorUnit, forward: bool) -> Option<usize> {
         let mut best = None;
         let mut accept = |next| {
@@ -209,19 +235,22 @@ impl BlockLayout {
     }
 
     pub fn line_boundary(&self, at: usize, end: bool) -> Option<usize> {
+        self.line_boundary_with_affinity(at, end, false)
+    }
+    pub fn line_boundary_with_affinity(&self, at: usize, end: bool, upstream: bool) -> Option<usize> {
         let mut best = None;
         let mut distance = usize::MAX;
         for item in &self.items {
             match item {
                 DisplayItem::CodeBody { source, body, .. } if source.contains(&at) => return body.code.line_boundary(at, end),
-                DisplayItem::Horizontal { source, layout, .. } if source.start <= at && at <= source.end => return layout.line_boundary(at, end),
+                DisplayItem::Horizontal { source, layout, .. } if source.start <= at && at <= source.end => return layout.line_boundary_with_affinity(at, end, upstream),
                 DisplayItem::Image { source, .. } if source.start <= at && at <= source.end => return Some(if end { source.end } else { source.start }),
                 DisplayItem::Text { layout, map, .. } => {
                     for segment in map {
                         let delta = at.abs_diff(at.clamp(segment.source, segment.source_end));
                         if delta >= distance { continue; }
                         let offset = segment.mapping().to_display(at, at > segment.source && !segment.exact);
-                        let row = layout.line_for_offset(offset);
+                        let row = layout.caret_row(offset, upstream);
                         let line = &layout.lines[row];
                         if let Some(next) = map_to_source(map, if end { line.end } else { line.start }) { best = Some(next); distance = delta; }
                     }
@@ -361,6 +390,9 @@ impl BlockLayout {
 
     /// 源码位置对应的精确光标几何；隐藏标记贴靠最近的可见边界。
     pub fn caret_at(&self, source: usize) -> Option<(f32,f32,f32)> {
+        self.caret_at_with_affinity(source, false)
+    }
+    pub fn caret_at_with_affinity(&self, source: usize, upstream: bool) -> Option<(f32,f32,f32)> {
         let mut best = None;
         let mut distance = usize::MAX;
         for item in &self.items {
@@ -374,7 +406,7 @@ impl BlockLayout {
                 continue;
             }
             if let DisplayItem::Horizontal{x,y,source:range,offset,layout,..}=item{
-                if range.start<=source&&source<=range.end{if let Some((sx,sy,h))=layout.caret_at(source){return Some((x+sx-offset.get(),y+sy,h));}}continue;
+                if range.start<=source&&source<=range.end{if let Some((sx,sy,h))=layout.caret_at_with_affinity(source,upstream){return Some((x+sx-offset.get(),y+sy,h));}}continue;
             }
             if let DisplayItem::Image{x,y,w,h,source:range,..}=item{
                 if range.start<=source&&source<=range.end{return Some((if source==range.start{*x}else{x+w},*y,*h));}continue;
@@ -385,7 +417,8 @@ impl BlockLayout {
                 let delta = source.abs_diff(at);
                 if delta >= distance { continue; }
                 let byte = segment.mapping().to_display(at,at>segment.source&&!segment.exact);
-                let (row,cx) = layout.caret(byte);
+                let row = layout.caret_row(byte, upstream);
+                let cx = layout.x_in_line(&layout.lines[row], byte);
                 best = Some((x+cx,y+row as f32*layout.line_height,layout.line_height));
                 distance = delta;
             }
@@ -430,12 +463,12 @@ pub struct RenderEnv<'a> {
 
 impl RenderEnv<'_> {
     fn layout(&self, spec: &ParaSpec, width: f32, window: &Window) -> Rc<TextLayout> {
-        let resolved=spec.objects.iter().any(|object|object.width_percent.is_some()).then(||{
+        let resolved=spec.objects.iter().any(|object|object.width_percent.is_some() || (object.width > width && matches!(object.key, InlineAsset::Comment { .. }))).then(||{
             let mut resolved=spec.clone();
             for object in &mut resolved.objects {if let Some(percent)=object.width_percent.take(){
                 let next=width*percent/100.0;let ratio=next/object.width.max(f32::EPSILON);
                 object.width=next;object.ascent*=ratio;object.descent*=ratio;
-            }}
+            } else if object.width > width { crate::nomo_mark::comments::fit(object, width, window); }}
             resolved
         });
         let spec=resolved.as_ref().unwrap_or(spec);
@@ -681,6 +714,12 @@ enum Container {
     Footnote { indent: f32, min_bottom: f32 },
 }
 
+fn paragraph_end_gap(containers: &[Container], paragraph_gap: f32) -> f32 {
+    // 松列表会给原有首段补上 Paragraph 事件，不能因此拉大所有列表行。
+    // 同一项的后续段落仍由 begin_paragraph 保留段距。
+    if matches!(containers.last(), Some(Container::Item { .. })) { 0.0 } else { paragraph_gap }
+}
+
 struct Builder<'a> {
     env: &'a RenderEnv<'a>,
     window: &'a Window,
@@ -829,12 +868,17 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                             _ => {}
                         }
                     }
-                    let mut empty_start = source[range.clone()].find('\n').map_or(range.start, |end| range.start + end + 1);
+                    let mut empty_start = source[range.clone()].find('\n').map_or(range.end, |end| range.start + end + 1);
                     if text.is_empty() {
                         let tail = &source[empty_start..range.end];
                         empty_start += tail.len() - tail.trim_start_matches([' ', '\t', '>']).len();
                     }
-                    builder.code_block(&lang, &text, text_start.unwrap_or(empty_start),&text_map, range.start);
+                    // 未闭合围栏末尾的真实换行属于正文，删除末行文字后仍须保留该行的光标落点。
+                    let open_tail = matches!(kind, CodeBlockKind::Fenced(_))
+                        && text_map.last().is_some_and(|seg| seg.source_end == range.end)
+                        && source[..range.end].ends_with('\n');
+                    let body = if open_tail { text.as_str() } else { text.strip_suffix('\n').unwrap_or(&text) };
+                    builder.code_block(&lang, body, text_start.unwrap_or(empty_start), &text_map, range.start);
                 }
                 Tag::List(start) => {
                     builder.flush_paragraph();
@@ -888,7 +932,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                 }
                 Tag::Table(alignments) => {
                     builder.flush_paragraph();
-                    let table = collect_table(&mut events, alignments, source,range,env,context,window);
+                    let table = collect_table(&mut events, alignments, source,range,env,context,revealed,window);
                     builder.table(table, revealed);
                 }
                 Tag::Emphasis => builder.inline.italic += 1,
@@ -955,6 +999,9 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                 TagEnd::List(_) => {
                     builder.flush_paragraph();
                     builder.containers.pop();
+                    if !builder.containers.iter().any(|container| matches!(container, Container::Item { .. })) {
+                        builder.gap(metrics.paragraph_gap());
+                    }
                 }
                 TagEnd::Item => {
                     builder.flush_paragraph();
@@ -994,7 +1041,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                 builder.image_only &= text.trim().is_empty();
                 let exact = text.len() == range.len() && source.get(range.clone()) == Some(text.as_ref());
                 let mut style = builder.inline.style(builder.base);
-                if revealed.contains(&range) { style.color = ColorRole::Muted; }
+                if is_revealed(revealed, range.clone()) { style.color = ColorRole::Muted; }
                 builder.para.push(&text, style, Some((range.start, exact)));
                 if let Some(map) = builder.para.map.last_mut() { map.source_end = range.end; }
             }
@@ -1156,7 +1203,11 @@ fn push_table_atom(para: &mut ParaBuilder, atom: &crate::nomo_mark::html_table::
     if let Some(map) = para.map.last_mut() { map.source_end = range.end; }
 }
 
-fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)>, alignments: Vec<Alignment>, source:&str,range:Range<usize>,env:&RenderEnv,context:Option<&crate::nomo_mark::protocol::ParseContext>,window:&Window) -> TableData {
+fn is_revealed(markers: &[Range<usize>], part: Range<usize>) -> bool {
+    markers.iter().any(|marker| marker.start <= part.start && part.end <= marker.end)
+}
+
+fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)>, alignments: Vec<Alignment>, source:&str,range:Range<usize>,env:&RenderEnv,context:Option<&crate::nomo_mark::protocol::ParseContext>,revealed:&[Range<usize>],window:&Window) -> TableData {
     use crate::nomo_mark::{html_table::{self, InlineAtom}, table_inline};
     let mut table = TableData { source:range,alignments, rows: Vec::new() };
     let mut in_head = false;
@@ -1228,7 +1279,9 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
             Event::Text(text) => {
                 if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
                     let exact = source.get(range.clone())==Some(text.as_ref());
-                    cell.push(&text, inline.style(InlineStyle::default()), Some((range.start, exact)));
+                    let mut style = inline.style(InlineStyle::default());
+                    if is_revealed(revealed, range.clone()) { style.color = ColorRole::Muted; }
+                    cell.push(&text, style, Some((range.start, exact)));
                     if let Some(map)=cell.map.last_mut(){map.source_end=range.end;}
                 }
             }
@@ -1309,7 +1362,7 @@ impl Builder<'_> {
             self.flush_paragraph();
         }
         self.images.clear();
-        self.gap(self.env.metrics.paragraph_gap());
+        self.gap(paragraph_end_gap(&self.containers, self.env.metrics.paragraph_gap()));
     }
 
     fn spec(&self, para: ParaBuilder) -> (ParaSpec, Vec<MapSeg>) {
@@ -1460,7 +1513,7 @@ impl Builder<'_> {
         if self.controlled { self.gap(18.0 * self.env.metrics.zoom); }
         self.apply_gap();
         let mut failure = None;
-        if lang == "mermaid" {
+        if lang == "mermaid" && !text.trim().is_empty() {
             match self.mermaid(text, text_start, block_start) {
                 Ok(()) => {
                     self.gap(self.env.metrics.paragraph_gap());
@@ -1481,7 +1534,7 @@ impl Builder<'_> {
         let header = 26.0 * metrics.zoom;
         let label = match lang {
             "" => "code".to_string(),
-            "mermaid" => format!("Mermaid · {}", failure.as_deref().unwrap_or("渲染失败")),
+            "mermaid" => failure.as_ref().map_or_else(|| "Mermaid".into(), |reason| format!("Mermaid · {reason}")),
             other => crate::nomo_mark::code_blocks::language_label(other).to_string(),
         };
         let label_spec = ParaSpec::plain(label, InlineStyle { bold: true, color: ColorRole::Muted, ..Default::default() }, Family::Text, 12.0 * metrics.zoom, header, Wrap::Greedy);
@@ -1490,7 +1543,7 @@ impl Builder<'_> {
         let mut y = top + header;
         let mut lines = Vec::new();
         let mut offset = 0;
-        let body = text.strip_suffix('\n').unwrap_or(text);
+        let body = text;
         // 行号槽：宽度按最大行号位数估算，行号右对齐、弱化显示。
         let line_count = body.split('\n').count();
         let expanded = self.env.active_code == Some(block_start)
@@ -2069,13 +2122,18 @@ impl Builder<'_> {
         for cell in &table.cells {
             let base=table_layout::header_style(InlineStyle::default(), cell.header);
             let font_size = if cell.header { 13.0 } else { 14.0 } * zoom;
-            let mut pieces:Vec<_>=cell.runs.iter().map(|run|(run.source.clone(),run.text.clone(),run.formats.clone(),run.atom.as_ref())).collect();
-            for span in &cell.spans{for marker in [&span.open,&span.close]{if revealed.contains(marker){pieces.push((marker.clone(),self.source[marker.clone()].into(),Vec::new(),None));}}}
+            let mut pieces: Vec<_> = cell.runs.iter().map(|run| (
+                run.source.clone(), pulldown_cmark::CowStr::from(run.text.as_str()), run.formats.as_slice(), run.atom.as_ref(),
+            )).collect();
+            for marker in cell.spans.iter().flat_map(|span| [&span.open, &span.close]).filter(|marker| revealed.contains(marker)) {
+                pieces.extend(crate::nomo_mark::link_display::marker_parts(self.source, marker.clone())
+                    .map(|(range, text)| (range, text, &[][..], None)));
+            }
             pieces.sort_by_key(|(range,_,_,_)|range.start);
             let mut paragraphs=Vec::new();let mut para=ParaBuilder::new();
             let mut empty_anchor=cell.content.start;
             for (range,text,formats,atom) in pieces {
-                if text=="\n" {
+                if text.as_ref()=="\n" {
                     if para.map.is_empty(){para.map.push(MapSeg{text:0..0,source:range.start,source_end:range.start,exact:true});}
                     paragraphs.push(para);para=ParaBuilder::new();
                     // 只为空行保留锚点，后续正文仍使用自身格式和源码映射。
@@ -2084,12 +2142,13 @@ impl Builder<'_> {
                 }
                 let mut style=base;
                 for format in formats{match format{InlineFormat::Strong=>style.bold=true,InlineFormat::Emphasis=>style.italic=true,InlineFormat::Code=>{style.mono=true;style.code_bg=true;style.color=ColorRole::InlineCode;},InlineFormat::Strike=>style.strike=true,InlineFormat::Underline=>style.underline=true,InlineFormat::Highlight=>style.bg=1,InlineFormat::Superscript=>style.shift=1,InlineFormat::Subscript=>style.shift=-1,InlineFormat::Link=>{style.underline=true;style.color=ColorRole::Link;}}}
+                if is_revealed(revealed, range.clone()) { style.color = ColorRole::Muted; }
                 if let Some(atom) = atom {
                     push_table_atom(&mut para, atom, range, style, self.env, self.window);
                     continue;
                 }
                 if text.is_empty(){para.map.push(MapSeg{text:para.text.len()..para.text.len(),source:range.start,source_end:range.end,exact:true});}
-                else{let exact=self.source.get(range.clone())==Some(text.as_str());para.push(&text,style,Some((range.start,exact)));if let Some(map)=para.map.last_mut(){map.source_end=range.end;}}
+                else{let exact=self.source.get(range.clone())==Some(text.as_ref());para.push(&text,style,Some((range.start,exact)));if let Some(map)=para.map.last_mut(){map.source_end=range.end;}}
             }
             if para.map.is_empty(){para.map.push(MapSeg{text:0..0,source:empty_anchor,source_end:empty_anchor,exact:true});}paragraphs.push(para);
             let mut natural=0.0f32;let mut specs=Vec::new();
@@ -2332,7 +2391,37 @@ pub fn source_line_spec(line: &str, context: highlight::LineContext, lang: &str,
 
 #[cfg(test)]
 mod tests {
-    use pulldown_cmark::{Event, Options, Parser, Tag};
+    use super::{Container, paragraph_end_gap};
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+    #[test]
+    fn adding_a_loose_or_empty_list_item_does_not_add_paragraph_gaps_to_its_peers() {
+        for source in [
+            "- A\n- B", "- A\n\n- B", "- A\n- B\n\n- ",
+            "1. A\n2. B", "1. A\n\n2. B", "1. A\n2. B\n\n3. ",
+            "- A\n\n  - Child\n\n- B", "- [x] A\n\n- [ ] B\n\n- [ ] ",
+        ] {
+            let parsed = crate::nomo_mark::parse::fixture(source);
+            let mut containers = Vec::new();
+            let mut gaps = Vec::new();
+            for (event, _) in parsed.events {
+                match event {
+                    Event::Start(Tag::List(number)) => containers.push(Container::List { next: number, depth: 0 }),
+                    Event::Start(Tag::Item) => {
+                        gaps.push(0.0);
+                        containers.push(Container::Item { marker_pending: true, number: None, depth: 0, task: None });
+                    }
+                    Event::End(TagEnd::Paragraph) => *gaps.last_mut().unwrap() += paragraph_end_gap(&containers, 16.0),
+                    Event::End(TagEnd::List(_) | TagEnd::Item) => { containers.pop(); }
+                    _ => {}
+                }
+            }
+            assert!(gaps.len() >= 2, "{source:?}");
+            assert!(gaps.iter().all(|&gap| gap == 0.0), "{source:?}: {gaps:?}");
+        }
+        assert_eq!(paragraph_end_gap(&[], 16.0), 16.0);
+        assert_eq!(paragraph_end_gap(&[Container::Quote { start_y: 0.0, x: 0.0, width: 600.0, role: None }], 16.0), 16.0);
+    }
 
     fn tags(source: &str) -> Vec<String> {
         let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_GFM | Options::ENABLE_SUPERSCRIPT | Options::ENABLE_SUBSCRIPT | Options::ENABLE_MATH;

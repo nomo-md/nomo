@@ -127,6 +127,16 @@ pub enum Wrap {
 /// 行内对象的占位字符（U+FFFC OBJECT REPLACEMENT CHARACTER）。
 pub const OBJECT_CHAR: char = '\u{FFFC}';
 
+/// 注释的字形跟随所在段落释放，绘制时复用测量过的换行与字形。
+#[derive(Clone)]
+pub struct CommentLabel(pub Rc<TextLayout>);
+impl std::fmt::Debug for CommentLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_tuple("CommentLabel").field(&self.0.cache_key).finish() }
+}
+impl PartialEq for CommentLabel { fn eq(&self, other: &Self) -> bool { self.0.cache_key == other.0.cache_key } }
+impl Eq for CommentLabel {}
+impl Hash for CommentLabel { fn hash<H: Hasher>(&self, state: &mut H) { self.0.cache_key.hash(state); } }
+
 /// 嵌在段落中的行内对象（如行内公式）：`at` 为占位字符的字节偏移，宽度与基线上下尺寸为逻辑像素，
 /// `key` 由调用方解释（公式渲染缓存键）。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -134,7 +144,7 @@ pub enum InlineAsset {
     MathInput,
     Embed(u64),
     Image(std::path::PathBuf),
-    Comment { label: String, font_size: u32, zoom: u32, editing: bool },
+    Comment { label: Option<CommentLabel>, font_size: u32, zoom: u32 },
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct InlineObject {
@@ -287,7 +297,7 @@ impl TextLayout {
             + self.lines.iter().map(|line| 48 + line.glues.len() * 16).sum::<usize>()
             + self.styles.len() * 48
             + self.objects.capacity() * std::mem::size_of::<InlineObject>()
-            + self.objects.iter().map(|o| match &o.key { InlineAsset::Image(path) => path.as_os_str().len(), InlineAsset::Comment { label, .. } => label.capacity(), _ => 0 }).sum::<usize>()
+            + self.objects.iter().map(|o| match &o.key { InlineAsset::Image(path) => path.as_os_str().len(), InlineAsset::Comment { label: Some(label), .. } => label.0.estimated_bytes(), _ => 0 }).sum::<usize>()
     }
 
     /// 最宽视觉行的宽度，用于表格列宽和行内元素对齐。
@@ -312,7 +322,13 @@ impl TextLayout {
     }
 
     pub fn line_for_offset(&self, offset: usize) -> usize {
-        self.lines.partition_point(|line| line.end < offset).min(self.lines.len().saturating_sub(1))
+        // 两行共用一个换行字节边界，行首命中必须映回刚命中的后一行。
+        self.lines.partition_point(|line| line.start <= offset).saturating_sub(1)
+    }
+
+    pub fn caret_row(&self, offset: usize, upstream: bool) -> usize {
+        let row = self.line_for_offset(offset);
+        if upstream && row > 0 && self.lines[row].start == offset && self.lines[row - 1].end == offset { row - 1 } else { row }
     }
 
     /// 光标所在视觉行与横坐标（相对段落左上角）。

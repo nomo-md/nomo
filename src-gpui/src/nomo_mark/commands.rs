@@ -56,9 +56,12 @@ pub fn apply_semantic(
         return Ok(result);
     }
     if range.is_empty() && matches!(&intent, EditIntent::Backspace | EditIntent::Delete) {
-        let at = if matches!(&intent, EditIntent::Backspace) { range.start.checked_sub(1) } else { Some(range.start) };
-        if let Some(source) = at.and_then(|at| super::table_inline::atomic_range_at(parsed, at)
-            .or_else(|| super::comments::at(parsed, at).map(|(range, _)| range))) {
+        let backward = matches!(&intent, EditIntent::Backspace);
+        let at = if backward { range.start.checked_sub(1) } else { Some(range.start) };
+        let source = at.and_then(|at| super::table_inline::atomic_range_at(parsed, at)
+            .or_else(|| super::comments::at(parsed, at).map(|(range, _)| range)))
+            .or_else(|| super::link_display::deletion(parsed, range.start, backward));
+        if let Some(source) = source {
             return Ok(EditResult { template_update: None, edits: vec![SourceEdit {
                 from_byte: base + source.start as u64, to_byte: base + source.end as u64, inserted_text: String::new(),
             }], selection: DocumentSelection::caret(base + source.start as u64) });
@@ -752,12 +755,10 @@ pub fn apply(
                         return Err(ControlError::NeedsContext("需要前一窗口以继续删除".into()));
                     }
                     let start = line_start(source, cut.start);
-                    if !parsed
-                        .nodes
-                        .iter()
-                        .any(|node| node.kind == "code" && node.source.contains(&cut.start))
-                        && structural_prefix_len(&source[start..cut.start])
-                            == Some(cut.start - start)
+                    // 未闭合围栏的 EOF 也是代码正文落点，行内的 "- " 只删一个字符。
+                    if structural_prefix_len(&source[start..cut.start]) == Some(cut.start - start)
+                        && !parsed.nodes.iter().any(|node| node.kind == "code"
+                            && node.source.start <= cut.start && cut.start <= node.source.end)
                     {
                         return Ok(replace(start..cut.end, String::new(), start));
                     }

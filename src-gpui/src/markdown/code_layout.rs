@@ -46,7 +46,7 @@ impl CodeViewport {
 }
 
 impl Builder<'_> {
-    pub(super) fn code_card(&mut self, lang: &str, text: &str, text_start: usize, text_map: &[MapSeg], block_start: usize, failure: Option<&str>) {
+    pub(super) fn code_card(&mut self, lang: &str, body: &str, text_start: usize, text_map: &[MapSeg], block_start: usize, failure: Option<&str>) {
         crate::theme::prepare_code_font(self.window);
         let zoom = self.env.metrics.zoom;
         let (x, top, width) = (self.indent, self.y, (self.width-self.indent).max(1.0));
@@ -55,7 +55,6 @@ impl Builder<'_> {
         let font_size = 13.0 * zoom;
         let line_height = 18.0 * zoom;
         let pad = 12.0 * zoom;
-        let body = text.strip_suffix('\n').unwrap_or(text);
         let count = body.split('\n').count();
         let expanded = self.env.block_open.and_then(|open| open.get(&(self.env.source_base+block_start as u64))).copied().unwrap_or(false);
         let number_spec = |label: String| ParaSpec::plain(label, InlineStyle { color: ColorRole::CodeLineNumber, ..Default::default() }, Family::Code, font_size, line_height, Wrap::None);
@@ -109,7 +108,7 @@ impl Builder<'_> {
         self.items.push(DisplayItem::Rect { x: x+border, y: top+header, w: body_width, h: border, paint: Paint::CodeBorder, radius: 0.0, border: None });
         let source_end = text_map.iter().map(|seg| seg.source_end).max().unwrap_or(text_start).max(text_start);
         self.items.push(DisplayItem::CodeBody { x: x+border, y: top+header+border, w: body_width, h: body_height, source: block_start..source_end.saturating_add(1), body: Box::new(viewport) });
-        let label = if lang == "mermaid" { format!("Mermaid · {}", failure.unwrap_or("渲染失败")) }
+        let label = if lang == "mermaid" { failure.map_or_else(|| "Mermaid".into(), |reason| format!("Mermaid · {reason}")) }
             else { crate::nomo_mark::code_blocks::language_label(lang).to_string() };
         let limit = (width-14.0*zoom-10.0*zoom-if count > 24 { 76.0*zoom } else { 38.0*zoom }).max(1.0);
         let mut label: String = label.chars().take(64).collect();

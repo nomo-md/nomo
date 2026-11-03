@@ -35,7 +35,7 @@ pub(super) fn measure(
         .fold(0.0, f32::max);
     let mut replacements: Vec<_> = map.iter()
         .filter(|segment| !segment.text.is_empty()
-            && revealed.contains(&(segment.source..segment.source_end)))
+            && super::is_revealed(revealed, segment.source..segment.source_end))
         .map(|segment| (segment.text.clone(), None))
         .collect();
     replacements.extend(images.iter().filter(|image| !image.text.is_empty())
