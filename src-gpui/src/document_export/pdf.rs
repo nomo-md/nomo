@@ -1,5 +1,5 @@
 //! A4 原生分页；正文以嵌入字体输出，增强图形按有界位图输出。
-use super::{Appearance, ExportReport, Job, media::{self, Asset}, model::*, pdf_fonts::Fonts};
+use super::{Appearance, ExportReport, Job, media::{self, Placement, PreparedMedia}, model::*, pdf_fonts::Fonts};
 use krilla::{Document, color::rgb, geom::{Point, Rect, Size, Transform, PathBuilder}, image::Image,
     metadata::Metadata, outline::{Outline, OutlineNode}, annotation::{Annotation, LinkAnnotation, Target}, action::LinkAction, destination::XyzDestination,
     num::NormalizedF32, page::PageSettings, paint::Fill, text::KrillaGlyph};
@@ -21,15 +21,16 @@ struct Item { kind: ItemKind, width: f32, height: f32, level: Level, whitespace:
 struct Line { items: Vec<Item>, width: f32, height: f32 }
 enum Draw { Item { item: Item, x: f32, y: f32 }, Rect { x: f32, y: f32, w: f32, h: f32, color: [u8; 3] } }
 struct Layout<'a> {
-    fonts: Fonts, assets: &'a [Asset], pages: Vec<Vec<Draw>>, y: f32, bytes: usize, glyphs: usize, prepared: usize,
+    fonts: Fonts, placements: &'a [Placement], image_uses: Vec<usize>, pages: Vec<Vec<Draw>>, y: f32, bytes: usize, glyphs: usize, prepared: usize,
     destinations: BTreeMap<String, (usize, f32)>, headings: Vec<(u8, String, usize, f32)>,
     appearance: &'a Appearance, job: &'a Job<'a>, report: &'a mut ExportReport,
 }
 pub(super) fn rgb_bytes(value: gpui::Hsla) -> [u8; 3] {
     let c: gpui::Rgba = value.into(); [(c.r * 255.0).round() as u8, (c.g * 255.0).round() as u8, (c.b * 255.0).round() as u8]
 }
-pub(super) fn render(model: &Model, assets: Vec<Asset>, title: &str, appearance: &Appearance, path: Option<&Path>, job: &Job, report: &mut ExportReport) -> Result<Vec<u8>, String> {
-    let mut layout = Layout { fonts: Fonts::new(appearance), assets: &assets, pages: vec![Vec::new()], y: MARGIN, bytes: 0, glyphs: 0, prepared: 0,
+pub(super) fn render(model: &Model, mut media: PreparedMedia, title: &str, appearance: &Appearance, path: Option<&Path>, job: &Job, report: &mut ExportReport) -> Result<Vec<u8>, String> {
+    let mut layout = Layout { fonts: Fonts::new(appearance), placements: &media.placements, image_uses: vec![0; media.image_count()],
+        pages: vec![Vec::new()], y: MARGIN, bytes: 0, glyphs: 0, prepared: 0,
         destinations: BTreeMap::new(), headings: Vec::new(), appearance, job, report };
     layout.blocks(&model.blocks)?;
     if !model.footnotes.is_empty() {
@@ -40,9 +41,9 @@ pub(super) fn render(model: &Model, assets: Vec<Asset>, title: &str, appearance:
             layout.paragraph(&p)?; layout.blocks(blocks)?;
         }
     }
-    let Layout { fonts, pages, destinations, headings, .. } = layout;
+    let Layout { fonts, pages, destinations, headings, mut image_uses, .. } = layout;
     job.check()?;
-    let images: Vec<Image> = assets.into_iter().map(|asset| { let (w,h) = asset.pixels.dimensions(); Image::from_rgba8(asset.pixels.into_raw(), w, h) }).collect();
+    let mut images = vec![None; media.image_count()];
     let mut doc = Document::new(); doc.set_metadata(Metadata::new().title(title.into()));
     let mut outline = Outline::new();
     // 递归建立真正的标题层级，层级跳跃也允许（例如 H1 后直接 H3）。
@@ -72,8 +73,19 @@ pub(super) fn render(model: &Model, assets: Vec<Asset>, title: &str, appearance:
                     Draw::Rect { x, y, w, h, color } => rectangle(&mut surface, x, y, w, h, color),
                     Draw::Item { item, x, y } => match item.kind {
                         ItemKind::Image(id) => {
+                            let image = match images[id].take() {
+                                Some(image) => image,
+                                None => {
+                                    let mut png = Vec::with_capacity(media.png_len(id));
+                                    media.copy_png(id, &mut png, job)?;
+                                    Image::from_png(png.into(), false).map_err(|e| format!("PDF 图片编码失败：{e}"))?
+                                }
+                            };
+                            // 表头可能被分页器重复绘制，按实际绘制次数释放已编码的句柄。
+                            image_uses[id] -= 1;
+                            if image_uses[id] > 0 { images[id] = Some(image.clone()); }
                             surface.push_transform(&Transform::from_translate(x, y));
-                            surface.draw_image(images[id].clone(), Size::from_wh(item.width, item.height).ok_or("图片尺寸无效")?); surface.pop();
+                            surface.draw_image(image, Size::from_wh(item.width, item.height).ok_or("图片尺寸无效")?); surface.pop();
                         },
                         ItemKind::Text { text, glyphs, font, size, style } => {
                             let color = style.color.unwrap_or_else(|| if style.link.is_some() { rgb_bytes(appearance.theme.accent) } else { rgb_bytes(appearance.theme.fg) });
@@ -102,6 +114,7 @@ pub(super) fn render(model: &Model, assets: Vec<Asset>, title: &str, appearance:
         for annotation in annotations { page.add_annotation(annotation); } page.finish();
     }
     job.check()?;
+    drop(media);
     let output = doc.finish().map_err(|e| format!("PDF 封装失败：{e:?}"))?;
     job.check()?; Ok(output)
 }
@@ -127,6 +140,8 @@ impl Layout<'_> {
         self.bytes += 128;
         if let Draw::Item { item: Item { kind: ItemKind::Text { text, glyphs, style, .. }, .. }, .. } = &draw {
             self.glyphs += glyphs.len(); self.bytes += text.len() + glyphs.len() * std::mem::size_of::<KrillaGlyph>() + style.link.as_ref().map_or(0, String::len);
+        } else if let Draw::Item { item: Item { kind: ItemKind::Image(id), .. }, .. } = &draw {
+            self.image_uses[*id] += 1;
         }
         if self.glyphs > 750_000 || self.bytes > 64 * 1024 * 1024 { return Err("PDF 排版超过 75 万字形／64 MiB 预算，已有输出文件未改动。".into()); }
         self.pages.last_mut().unwrap().push(draw); Ok(())
@@ -175,10 +190,10 @@ impl Layout<'_> {
             match &run.content {
                 Content::Break => { lines.push(std::mem::take(&mut line)); line.height = size * 1.5; offset += 1; },
                 Content::Raster(id) => {
-                    let asset = &self.assets[*id];
+                    let asset = &self.placements[*id];
                     let scale = (available / asset.width).min((HEIGHT - 10.0) / asset.height).min(1.0);
                     if asset.block && !line.items.is_empty() { lines.push(std::mem::take(&mut line)); }
-                    let item = Item { kind: ItemKind::Image(*id), width: asset.width*scale, height: asset.height*scale, level, whitespace: false };
+                    let item = Item { kind: ItemKind::Image(asset.image), width: asset.width*scale, height: asset.height*scale, level, whitespace: false };
                     append(item, &mut line, &mut lines, available);
                     if asset.block { lines.push(std::mem::take(&mut line)); }
                     offset += '\u{fffc}'.len_utf8();
@@ -240,7 +255,7 @@ impl Layout<'_> {
             self.ensure(line.height)?; let h = line.height;
             if p.quote { self.add(Draw::Rect { x: MARGIN, y: self.y, w: 2.0, h, color: rgb_bytes(self.appearance.theme.border) })?; }
             let align = if p.runs.len() == 1 { if let Content::Raster(id) = p.runs[0].content {
-                match self.assets[id].align.as_str() { "center" => Alignment::Center, "right" => Alignment::Right, _ => p.align }
+                match self.placements[id].align.as_str() { "center" => Alignment::Center, "right" => Alignment::Right, _ => p.align }
             } else { p.align } } else { p.align };
             self.draw_line(line, MARGIN+indent, self.y, WIDTH-indent, align)?; self.y += h;
         }

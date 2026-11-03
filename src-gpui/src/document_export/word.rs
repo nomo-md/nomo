@@ -1,6 +1,5 @@
 //! 原生 OOXML：可编辑段落、列表、超链接、表格与脚注。媒体内嵌，无外部模板。
-use super::{ExportReport, Job, MAX_OUTPUT_BYTES, media::{self, Asset}, model::*};
-use image::ImageEncoder;
+use super::{ExportReport, Job, MAX_OUTPUT_BYTES, media::{self, Placement, PreparedMedia}, model::*};
 use pulldown_cmark::Alignment;
 use std::{collections::BTreeMap, fs::File, io::{self, Seek, SeekFrom, Write}, path::Path};
 use zip::{ZipWriter, CompressionMethod, write::SimpleFileOptions};
@@ -8,9 +7,9 @@ use zip::{ZipWriter, CompressionMethod, write::SimpleFileOptions};
 const NS: &str = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"";
 const HEADER: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/";
-pub(super) fn write(file: &mut File, model: &Model, assets: Vec<Asset>, title: &str, path: Option<&Path>, job: &Job, report: &mut ExportReport) -> Result<(), String> {
+pub(super) fn write(file: &mut File, model: &Model, mut media: PreparedMedia, title: &str, path: Option<&Path>, job: &Job, report: &mut ExportReport) -> Result<(), String> {
     let mut writer = ZipWriter::new(LimitedFile { file, position: 0, job });
-    let mut document = Word { xml: String::new(), job, path, assets: &assets, links: BTreeMap::new(), bookmarks: BTreeMap::new(),
+    let mut document = Word { xml: String::new(), job, path, placements: &media.placements, links: BTreeMap::new(), bookmarks: BTreeMap::new(),
         bookmark_id: 0, drawing_id: 0, footnotes: BTreeMap::new(), in_footnote: false, available: 481.9, report };
     visit(&model.blocks, &mut |p| {
         if let Some(id) = &p.id { let number = document.bookmarks.len()+1; document.bookmarks.entry(id.clone()).or_insert_with(|| format!("nomo_{number}")); }
@@ -40,7 +39,7 @@ pub(super) fn write(file: &mut File, model: &Model, assets: Vec<Asset>, title: &
     if !document.footnotes.is_empty() { document.raw(&format!("<Relationship Id=\"footnotes\" Type=\"{REL}footnotes\" Target=\"footnotes.xml\"/>"))?; }
     let links = document.links.clone();
     for (url, id) in links { document.raw(&format!("<Relationship Id=\"link{id}\" Type=\"{REL}hyperlink\" Target=\""))?; document.text(&url)?; document.raw("\" TargetMode=\"External\"/>")?; }
-    for id in 0..assets.len() { document.raw(&format!("<Relationship Id=\"image{id}\" Type=\"{REL}image\" Target=\"media/image{id}.png\"/>"))?; }
+    for id in 0..media.image_count() { document.raw(&format!("<Relationship Id=\"image{id}\" Type=\"{REL}image\" Target=\"media/image{id}.png\"/>"))?; }
     document.raw("</Relationships>")?;
     part(&mut writer, "word/_rels/document.xml.rels", document.xml.as_bytes(), job)?;
     // 两个部件的相对路径都以 word/ 为根；脚注中的图像和链接共用同一组 ID。
@@ -65,11 +64,11 @@ pub(super) fn write(file: &mut File, model: &Model, assets: Vec<Asset>, title: &
     part(&mut writer, "_rels/.rels", format!("{HEADER}<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"document\" Type=\"{REL}officeDocument\" Target=\"word/document.xml\"/><Relationship Id=\"core\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/></Relationships>").as_bytes(), job)?;
     let core = format!("{HEADER}<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:title>{}</dc:title><dc:creator>Nomo</dc:creator></cp:coreProperties>", xml(title));
     part(&mut writer, "docProps/core.xml", core.as_bytes(), job)?;
-    for (id, asset) in assets.into_iter().enumerate() {
+    for id in 0..media.image_count() {
         job.check()?;
-        writer.start_file(format!("word/media/image{id}.png"), options()).map_err(|e| e.to_string())?;
-        let (w,h) = asset.pixels.dimensions();
-        image::codecs::png::PngEncoder::new(&mut writer).write_image(&asset.pixels, w, h, image::ExtendedColorType::Rgba8).map_err(|e| e.to_string())?;
+        let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        writer.start_file(format!("word/media/image{id}.png"), stored).map_err(|e| e.to_string())?;
+        media.copy_png(id, &mut writer, job)?;
     }
     writer.finish().map_err(|e| e.to_string())?; job.check()
 }
@@ -95,7 +94,7 @@ impl Seek for LimitedFile<'_> { fn seek(&mut self, to: SeekFrom) -> io::Result<u
     if position > MAX_OUTPUT_BYTES { return Err(io::Error::other("Word 文件定位超过预算")); } self.position = position; Ok(position)
 } }
 struct Word<'a> {
-    xml: String, job: &'a Job<'a>, path: Option<&'a Path>, assets: &'a [Asset], links: BTreeMap<String, usize>, bookmarks: BTreeMap<String,String>,
+    xml: String, job: &'a Job<'a>, path: Option<&'a Path>, placements: &'a [Placement], links: BTreeMap<String, usize>, bookmarks: BTreeMap<String,String>,
     bookmark_id: usize, drawing_id: usize, footnotes: BTreeMap<String, usize>, in_footnote: bool, available: f32, report: &'a mut ExportReport,
 }
 impl Word<'_> {
@@ -121,7 +120,7 @@ impl Word<'_> {
         if let Some(item) = p.list { self.raw(&format!("<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"{}\"/></w:numPr>", item.level, item.id))?; }
         if p.quote { self.raw("<w:pBdr><w:left w:val=\"single\" w:sz=\"12\" w:space=\"6\" w:color=\"D9DDE3\"/></w:pBdr>")?; }
         if p.list.is_none() && (p.indent > 0 || p.quote) { self.raw(&format!("<w:ind w:left=\"{}\"/>", p.indent*360 + if p.quote { 240 } else { 0 }))?; }
-        let align = if p.runs.len() == 1 { if let Content::Raster(id) = p.runs[0].content { match self.assets[id].align.as_str() { "center" => Alignment::Center, "right" => Alignment::Right, _ => p.align } } else { p.align } } else { p.align };
+        let align = if p.runs.len() == 1 { if let Content::Raster(id) = p.runs[0].content { match self.placements[id].align.as_str() { "center" => Alignment::Center, "right" => Alignment::Right, _ => p.align } } else { p.align } } else { p.align };
         self.raw(&format!("<w:jc w:val=\"{}\"/>", alignment(align)))?; self.raw("</w:pPr>")?;
         let bookmark = p.id.as_ref().and_then(|id| self.bookmarks.get(id)).cloned();
         let id = self.bookmark_id; if let Some(name) = bookmark.as_ref() { self.bookmark_id += 1; self.raw(&format!("<w:bookmarkStart w:id=\"{id}\" w:name=\"{name}\"/>"))?; }
@@ -168,8 +167,9 @@ impl Word<'_> {
         }
         self.raw("</w:r>")?; if hyperlink { self.raw("</w:hyperlink>")?; } Ok(())
     }
-    fn drawing(&mut self, id: usize) -> Result<(), String> {
-        let asset = &self.assets[id];
+    fn drawing(&mut self, placement: usize) -> Result<(), String> {
+        let asset = &self.placements[placement];
+        let id = asset.image;
         let scale = (self.available/asset.width).min(720.0/asset.height).min(1.0);
         let (w,h) = ((asset.width*scale*12700.0).round().max(1.0) as u64, (asset.height*scale*12700.0).round().max(1.0) as u64);
         self.drawing_id += 1; let drawing = self.drawing_id;

@@ -50,7 +50,7 @@
 | 页面全文查询 | `src-gpui/src/nomo_mark/workspace_queries.rs` | 后台搜索分页、全文统计、大纲；查找与批量替换独立调度，按文档校验请求身份与修订 |
 | 工具栏文档命令与语言 | `src-gpui/src/nomo_mark/toolbar_commands.rs`、`toolbar_global.rs`、`semantic_selection.rs`、`semantic_global.rs`、`toc_update.rs`、`src-gpui/src/ui/toolbar_i18n.rs`、`src-gpui/resources/toolbar-locales.json` | 脚注和目录分页、派生事务、跨窗口语义补丁、四种界面语言；按需和预算内处理 |
 | 开发界面 | `src-gpui/src/nomo_mark/demo.rs`、`development_ui.rs` | feature 只控制开发入口和调试工具条 |
-| 文档导出 | `src-gpui/src/document_export.rs`、`document_export/{html,resources,model,media,pdf,pdf_fonts,word}.rs`、`ui/workspace/export.rs` | 固定修订及单个可取消任务；有界临时模型，HTML 流式输出、PDF 嵌入字体分页、Word 原生 OOXML；原子发布前复核取消，无第二份编辑模型或常驻正文 |
+| 文档导出 | `src-gpui/src/document_export.rs`、`document_export/{html,resources,model,media,pdf,pdf_fonts,word}.rs`、`ui/workspace/export.rs` | 固定修订及单个可取消任务；HTML 流式输出，PDF 与 Word 逐张编码并复用图片，每处引用独立排版；PDF 嵌入字体分页、Word 原生 OOXML，原子发布前复核取消 |
 | 外部文件变更策略 | `src-gpui/src/ui/workspace/application_dialogs.rs`、`text_document/markdown_session/external.rs` | 干净文档按偏好自动重载／覆盖／忽略；本地修改和删除仍显式选择，忽略继续阻止普通保存，覆盖校验检测令牌；Mini 返回后处理延迟冲突 |
 | 文档会话与保存 | `src-gpui/src/text_document/mod.rs`、`markdown_session.rs`、`markdown_session/rename.rs`、`markdown_session/external.rs`、`markdown_session/recovery.rs`、`markdown_history.rs` | PieceTree、磁盘正文与历史、快照、保存及重命名事务；外部身份复核、进程租约和原会话按需恢复 |
 | 结构索引／搜索／统计 | `src-gpui/src/text_document/structure_index/`、`markdown_search/`、`writing_stats/` | 唯一结构索引、分页查询和有界统计 |

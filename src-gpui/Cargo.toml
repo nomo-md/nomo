@@ -51,6 +51,8 @@ web_atoms = { version = "0.2" }
 # 用户触发的原生导出；复用正文整形，只启用 PDF 位图及 ZIP Deflate 能力。
 krilla = { version = "=0.8.2", default-features = false, features = ["raster-images"] }
 zip = { version = "=9.1.3", default-features = false, features = ["deflate-flate2"] }
+# 复用锁文件已有的匿名临时文件，导出媒体超过内存暂存阈值时转存磁盘。
+tempfile = "3.27"
 # 与现有渲染依赖共用文字整形、双向排版和媒体解码版本。
 rustybuzz = "=0.20.1"
 unicode-bidi = "=0.3.18"

@@ -48,7 +48,7 @@ fn word_is_editable_with_merged_cells_links_and_native_footnotes() {
     let request = WindowRequest::default(); let job = Job { request: &request, started: Instant::now() }; let mut report = ExportReport::default();
     let source = format!("# 中文标题\n\n[目录跳转](#中文标题) [网站](https://example.com/a?b=1&c=2)\n\n3. 第三项\n4. 第四项\n\n正文 **加粗** <u>下划线</u> <mark>高亮</mark> H~2~O 与脚注[^n]。\n\n{MERGED}\n\n[^n]: 中文脚注。\n");
     let model = model::parse(&source, &job, &mut report).unwrap();
-    let mut file = File::create(&path).unwrap(); word::write(&mut file, &model, vec![], "中文标题", None, &job, &mut report).unwrap(); drop(file);
+    let mut file = File::create(&path).unwrap(); word::write(&mut file, &model, Default::default(), "中文标题", None, &job, &mut report).unwrap(); drop(file);
     let bytes = std::fs::read(&path).unwrap();
     let xml = contents(&bytes, "word/document.xml");
     for expected in ["中文标题", "<w:tbl>", "<w:gridSpan w:val=\"2\"", "<w:vMerge w:val=\"restart\"", "<w:vMerge/>", "<w:numPr>", "<w:footnoteReference", "w:anchor=\"nomo_1\"", "<w:highlight", "subscript"] { assert!(xml.contains(expected), "missing {expected}"); }
@@ -65,7 +65,7 @@ fn pdf_embeds_chinese_and_paginates_tables_without_losing_tail() {
     for n in 0..120 { source.push_str(&format!("| {n} | 分页中文行内容 |\n")); }
     source.push_str("\n# 尾页标题\n\n结束标记。\n");
     let model = model::parse(&source, &job, &mut report).unwrap();
-    let bytes = pdf::render(&model, vec![], "中文分页验证", &appearance(), None, &job, &mut report).unwrap();
+    let bytes = pdf::render(&model, Default::default(), "中文分页验证", &appearance(), None, &job, &mut report).unwrap();
     assert!(bytes.starts_with(b"%PDF-"));
     let raw = String::from_utf8_lossy(&bytes);
     assert!(raw.contains("/ToUnicode")); assert!(raw.contains("/FontFile"));
@@ -84,7 +84,7 @@ fn embeds_formula_diagram_and_local_media_in_both_formats() {
         let request = WindowRequest::default(); let job = Job { request: &request, started: Instant::now() }; let mut report = ExportReport::default();
         let mut model = model::parse(&source, &job, &mut report).unwrap();
         let appearance = appearance(); let assets = media::prepare(&mut model, None, &appearance, &job, &mut report).unwrap();
-        assert_eq!(assets.len(), 3, "{:?}", report.warnings);
+        assert_eq!(assets.image_count(), 3, "{:?}", report.warnings);
         let bytes = if format == Format::Pdf { pdf::render(&model, assets, "媒体验证", &appearance, None, &job, &mut report).unwrap() }
         else { let folder = Folder::new(); let path = folder.0.join("media.docx"); let mut file = File::create(&path).unwrap(); word::write(&mut file, &model, assets, "媒体验证", None, &job, &mut report).unwrap(); drop(file); std::fs::read(path).unwrap() };
         artifact(&format!("media.{}", format.extension()), &bytes);
@@ -107,6 +107,68 @@ fn export_uses_captured_revision_and_preserves_history() {
     assert!(snapshot.released.load(Ordering::Acquire));
     let xml = contents(&std::fs::read(target).unwrap(), "word/document.xml"); assert!(xml.contains("捕获时的内容") && !xml.contains("后来输入"));
     drop(snapshot); port.close(true).unwrap();
+}
+
+#[test]
+fn exports_all_five_1080p_placements_and_embeds_each_picture_once() {
+    let folder = Folder::new();
+    let colors = [[35, 100, 175], [170, 65, 50], [35, 135, 95], [140, 85, 160], [185, 120, 35]];
+    for (index, color) in colors.into_iter().enumerate() {
+        // 有色图面便于核对顺序，纹理区让五个不同的 PNG 也覆盖磁盘暂存路径。
+        let mut state = index as u32 + 1;
+        let pixels = image::RgbImage::from_fn(1920, 1080, |x, y| {
+            if y < 800 { return image::Rgb(if x < 32 { [240, 240, 240] } else { color }); }
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let [_, r, g, b] = state.to_le_bytes();
+            image::Rgb([r, g, b])
+        });
+        pixels.save(folder.0.join(format!("picture-{index}.png"))).unwrap();
+    }
+
+    let mut failures = Vec::new();
+    for (case, unique) in [("distinct", 5), ("repeated", 1)] {
+        let mut source = format!("# {case} 1080p\n\n");
+        for (index, align) in ["left", "center", "right", "left", "center"].iter().enumerate() {
+            let picture = if unique == 1 { 0 } else { index };
+            let width = 200 + index * 80;
+            source.push_str(&format!(
+                "Figure {}\n\n![View {}](picture-{picture}.png){{width={width} align={align}}}\n\n", index + 1, index + 1
+            ));
+        }
+        source.push_str("END-OF-DOCUMENT\n");
+        let markdown = folder.0.join(format!("{case}.md"));
+        std::fs::write(&markdown, &source).unwrap();
+        let port = NativeWindowPort::open(folder.0.join(format!("sessions-{case}")), case.into(), Some(markdown.clone()), None).unwrap();
+        for format in [Format::Pdf, Format::Word] {
+            let snapshot = Snapshot::capture(port.clone(), port.status().unwrap().revision, Some(markdown.clone())).unwrap();
+            let name = format!("{case}.{}", format.extension());
+            let target = folder.0.join(&name);
+            let result = export(format, snapshot, &target, case, appearance(), WindowRequest::default());
+            let report = match result {
+                Ok(report) => report,
+                Err(error) => { failures.push(format!("{name}: {error}")); continue; }
+            };
+            assert!(report.warnings.is_empty(), "{name}: {:?}", report.warnings);
+            let bytes = std::fs::read(target).unwrap();
+            if format == Format::Word {
+                let archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+                assert_eq!(archive.file_names().map(Result::unwrap).filter(|path| path.starts_with("word/media/")).count(), unique, "{name}");
+                let xml = contents(&bytes, "word/document.xml");
+                assert_eq!(xml.matches("<w:drawing>").count(), 5, "{name}");
+                assert!(xml.contains("END-OF-DOCUMENT"));
+                for index in 0..5 {
+                    assert!(xml.contains(&format!("descr=\"View {}\"", index + 1)));
+                    assert!(xml.contains(&format!("cx=\"{}\"", (200 + index * 80) * 9525)));
+                }
+            } else {
+                let images = regex::bytes::Regex::new(r"/Subtype\s*/Image\b").unwrap();
+                assert_eq!(images.find_iter(&bytes).count(), unique, "{name}");
+            }
+            artifact(&name, &bytes);
+        }
+        port.close(true).unwrap();
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
@@ -135,7 +197,7 @@ fn cancellation_and_invalid_extension_never_replace_existing_file() {
 fn network_media_is_explicit_and_canceled_preparation_stops() {
     let request = WindowRequest::default(); let job = Job { request: &request, started: Instant::now() }; let mut report = ExportReport::default();
     let mut model = model::parse("![远程图片](https://example.invalid/image.png)\n", &job, &mut report).unwrap();
-    assert!(media::prepare(&mut model, None, &appearance(), &job, &mut report).unwrap().is_empty());
+    assert_eq!(media::prepare(&mut model, None, &appearance(), &job, &mut report).unwrap().image_count(), 0);
     assert!(!report.warnings.is_empty());
     assert!(matches!(&model.blocks[0], Block::Paragraph(p) if matches!(&p.runs[0].content, Content::Text(s) if s.contains("远程图片")) && p.runs[0].style.link.is_some()));
     request.cancel(); assert!(media::prepare(&mut model, None, &appearance(), &job, &mut report).is_err());

@@ -1,13 +1,78 @@
-//! 离线媒体解析。单个输入 8 MiB、单次解码 64 MiB、保留位图合计 32 MiB。
-use super::{Appearance, ExportReport, Job, MAX_RESOURCE_BYTES, MAX_RESOURCE_TOTAL, model::*};
+//! 离线媒体逐张解码，每处排版与可复用的 PNG 分开保存。
+use super::{Appearance, ExportReport, Job, MAX_OUTPUT_BYTES, MAX_RESOURCE_BYTES, model::*};
 use base64::Engine;
-use image::{ImageDecoder, RgbaImage};
-use std::{fs::File, io::{Cursor, Read}, path::Path, sync::{Arc, atomic::{AtomicBool, Ordering}}};
+use image::{ImageDecoder, ImageEncoder, RgbaImage};
+use sha2::{Digest, Sha256};
+use std::{collections::HashMap, fs::File, io::{Cursor, Read, Seek, SeekFrom, Write}, ops::Range, path::Path, sync::{Arc, atomic::{AtomicBool, Ordering}}};
+use tempfile::SpooledTempFile;
 
-pub(super) struct Asset {
-    pub pixels: RgbaImage, pub width: f32, pub height: f32, pub alt: String,
+pub(super) struct Placement {
+    pub image: usize, pub width: f32, pub height: f32, pub alt: String,
     pub block: bool, pub align: String,
 }
+
+pub(super) struct PreparedMedia {
+    pub placements: Vec<Placement>,
+    images: Vec<Range<u64>>,
+    data: SpooledTempFile,
+}
+
+impl Default for PreparedMedia {
+    fn default() -> Self {
+        Self { placements: Vec::new(), images: Vec::new(), data: tempfile::spooled_tempfile(4 * 1024 * 1024) }
+    }
+}
+
+impl PreparedMedia {
+    pub fn image_count(&self) -> usize { self.images.len() }
+
+    fn store_png(&mut self, pixels: RgbaImage) -> Result<usize, String> {
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&pixels, pixels.width(), pixels.height(), image::ExtendedColorType::Rgba8)
+            .map_err(|e| format!("导出图片编码失败：{e}"))?;
+        drop(pixels);
+        let start = self.images.last().map_or(0, |range| range.end);
+        let end = start + png.len() as u64;
+        if end > MAX_OUTPUT_BYTES { return Err("导出图片编码后合计超过 128 MiB，已有输出文件未改动。".into()); }
+        self.data.write_all(&png).map_err(|e| format!("导出图片暂存失败：{e}"))?;
+        let id = self.images.len();
+        self.images.push(start..end);
+        Ok(id)
+    }
+
+    pub fn png_len(&self, id: usize) -> usize {
+        let range = &self.images[id];
+        (range.end - range.start) as usize
+    }
+
+    pub fn copy_png(&mut self, id: usize, output: &mut impl Write, job: &Job) -> Result<(), String> {
+        self.data.seek(SeekFrom::Start(self.images[id].start)).map_err(|e| format!("读取暂存导出图片失败：{e}"))?;
+        let mut remaining = self.png_len(id);
+        let mut buffer = [0; 64 * 1024];
+        while remaining > 0 {
+            job.check()?;
+            let chunk = remaining.min(buffer.len());
+            self.data.read_exact(&mut buffer[..chunk]).map_err(|e| format!("读取暂存导出图片失败：{e}"))?;
+            output.write_all(&buffer[..chunk]).map_err(|e| format!("写入导出图片失败：{e}"))?;
+            remaining -= chunk;
+        }
+        Ok(())
+    }
+}
+
+struct Bitmap {
+    pixels: RgbaImage,
+    width: f32,
+    height: f32,
+}
+
+#[derive(Clone, Copy)]
+struct Picture { id: usize, width: f32, height: f32 }
+
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+enum SourceKind { Image, Math(bool), Mermaid }
+
 pub(super) fn link(value: &str, path: Option<&Path>) -> Option<String> {
     let value = value.trim();
     if value.chars().any(char::is_control) { return None; }
@@ -20,13 +85,20 @@ pub(super) fn link(value: &str, path: Option<&Path>) -> Option<String> {
     if Path::new(value).is_absolute() { return url::Url::from_file_path(value).ok().map(String::from); }
     url::Url::from_file_path(path?).ok()?.join(&value.replace('\\', "/")).ok().filter(|url| url.scheme() == "file").map(String::from)
 }
-pub(super) fn prepare(model: &mut Model, path: Option<&Path>, appearance: &Appearance, job: &Job, report: &mut ExportReport) -> Result<Vec<Asset>, String> {
-    let mut state = Media { assets: Vec::new(), bytes: 0, count: 0, enhancements: 0, path, appearance, job, report };
+pub(super) fn prepare(model: &mut Model, path: Option<&Path>, appearance: &Appearance, job: &Job, report: &mut ExportReport) -> Result<PreparedMedia, String> {
+    let mut state = Media { prepared: PreparedMedia::default(), sources: HashMap::new(), images_by_pixels: HashMap::new(),
+        count: 0, enhancements: 0, path, appearance, job, report };
     state.blocks(&mut model.blocks)?;
     for blocks in model.footnotes.values_mut() { state.blocks(blocks)?; }
-    Ok(state.assets)
+    Ok(state.prepared)
 }
-struct Media<'a> { assets: Vec<Asset>, bytes: usize, count: usize, enhancements: usize, path: Option<&'a Path>, appearance: &'a Appearance, job: &'a Job<'a>, report: &'a mut ExportReport }
+struct Media<'a> {
+    prepared: PreparedMedia,
+    sources: HashMap<(SourceKind, [u8; 32]), Picture>,
+    images_by_pixels: HashMap<[u8; 32], usize>,
+    count: usize, enhancements: usize, path: Option<&'a Path>, appearance: &'a Appearance,
+    job: &'a Job<'a>, report: &'a mut ExportReport,
+}
 impl Media<'_> {
     fn blocks(&mut self, blocks: &mut [Block]) -> Result<(), String> {
         for block in blocks {
@@ -37,59 +109,93 @@ impl Media<'_> {
                 Block::Code { text, language } if language.eq_ignore_ascii_case("mermaid") => {
                     self.enhancements += 1;
                     let image = if self.enhancements <= 256 && text.len() <= 64 * 1024 {
-                        crate::embeds::export_mermaid(text, self.appearance.theme.dark, self.appearance.theme.mermaid)
-                            .and_then(|svg| self.svg(svg.as_bytes(), true, "Mermaid 图表".into(), String::new()))
-                    } else { Err("增强渲染超过预算".into()) };
+                        self.picture(SourceKind::Mermaid, text, |media| {
+                            let svg = crate::embeds::export_mermaid(text, media.appearance.theme.dark, media.appearance.theme.mermaid)?;
+                            media.svg(svg.as_bytes())
+                        })?
+                    } else { None };
                     self.job.check()?;
                     match image {
-                        Ok(asset) => { let i = self.keep(asset)?; *block = Block::Paragraph(Paragraph { runs: vec![Run { content: Content::Raster(i), style: Style::default() }], ..Default::default() }); },
-                        Err(_) => self.report.warn("部分 Mermaid 图表未能渲染，已保留源码"),
+                        Some(picture) => {
+                            let content = self.place(picture, true, "Mermaid 图表", "", "");
+                            *block = Block::Paragraph(Paragraph { runs: vec![Run { content, style: Style::default() }], ..Default::default() });
+                        }
+                        None => self.report.warn("部分 Mermaid 图表未能渲染，已保留源码"),
                     }
                 }, _ => {}
             }
         }
         Ok(())
     }
-    fn keep(&mut self, asset: Asset) -> Result<usize, String> {
-        self.bytes += asset.pixels.len();
-        if self.bytes > MAX_RESOURCE_TOTAL { return Err("导出位图总量超过 32 MiB，已有输出文件未改动。".into()); }
-        let id = self.assets.len(); self.assets.push(asset); Ok(id)
+    fn picture(&mut self, kind: SourceKind, source: &str, render: impl FnOnce(&Self) -> Result<Bitmap, String>) -> Result<Option<Picture>, String> {
+        let key = (kind, Sha256::digest(source.as_bytes()).into());
+        if let Some(&picture) = self.sources.get(&key) { return Ok(Some(picture)); }
+        let bitmap = render(self);
+        self.job.check()?;
+        // 无效或不可访问的源沿用替代文字。有效图像的编码、暂存错误必须终止原子导出。
+        let Ok(Bitmap { pixels, width, height }) = bitmap else { return Ok(None); };
+        let mut hash = Sha256::new();
+        hash.update(pixels.width().to_be_bytes());
+        hash.update(pixels.height().to_be_bytes());
+        hash.update(pixels.as_raw());
+        let digest: [u8; 32] = hash.finalize().into();
+        let id = if let Some(&id) = self.images_by_pixels.get(&digest) {
+            id
+        } else {
+            let id = self.prepared.store_png(pixels)?;
+            self.images_by_pixels.insert(digest, id);
+            id
+        };
+        let picture = Picture { id, width, height };
+        self.sources.insert(key, picture);
+        Ok(Some(picture))
+    }
+
+    fn place(&mut self, picture: Picture, block: bool, alt: &str, width: &str, align: &str) -> Content {
+        let width = crate::nomo_mark::image_properties::ImageWidth::parse(width)
+            .map_or(picture.width, |value| value.resolve(481.9, 0.75).min(481.9));
+        let id = self.prepared.placements.len();
+        self.prepared.placements.push(Placement { image: picture.id, width, height: picture.height * (width / picture.width),
+            block, alt: alt.into(), align: align.into() });
+        Content::Raster(id)
     }
     fn runs(&mut self, runs: &mut [Run]) -> Result<(), String> {
         for run in runs {
             self.job.check()?;
-            let result = match &run.content {
+            let content = match &run.content {
                 Content::Image(props) => {
                     self.count += 1;
                     if self.count > 2048 { return Err("图片数量超过导出预算。".into()); }
-                    let result = self.image(&props.src, &props.alt, &props.width, &props.align);
-                    if result.is_err() {
-                        self.report.warn("部分图片无法嵌入，已保留替代文字和可用链接；网络图片不自动下载");
-                        run.style.link = link(&props.src, self.path);
+                    let src = props.src.trim();
+                    match self.picture(SourceKind::Image, src, |media| media.image(src))? {
+                        Some(picture) => self.place(picture, true, &props.alt, &props.width, &props.align),
+                        None => {
+                            self.report.warn("部分图片无法嵌入，已保留替代文字和可用链接；网络图片不自动下载");
+                            run.style.link = link(src, self.path);
+                            Content::Text(format!("[图片：{}]", if props.alt.is_empty() { "无法嵌入" } else { &props.alt }))
+                        }
                     }
-                    Some(result)
                 },
                 Content::Math(tex, display) => {
                     self.enhancements += 1;
                     let result = if tex.len() <= 64 * 1024 && self.enhancements <= 256 {
-                        crate::embeds::math_svg(tex, *display, super::pdf::rgb_bytes(self.appearance.theme.fg)).and_then(|(svg, _)| self.svg(svg.as_bytes(), *display, tex.clone(), String::new()))
-                    } else { Err("公式增强渲染超过预算".into()) };
-                    if result.is_err() { self.report.warn("部分公式未能渲染，已保留公式源码"); }
-                    Some(result)
-                }, _ => None,
+                        self.picture(SourceKind::Math(*display), tex, |media| {
+                            let (svg, _) = crate::embeds::math_svg(tex, *display, super::pdf::rgb_bytes(media.appearance.theme.fg))?;
+                            media.svg(svg.as_bytes())
+                        })?
+                    } else { None };
+                    match result {
+                        Some(picture) => self.place(picture, *display, tex, "", ""),
+                        None => { self.report.warn("部分公式未能渲染，已保留公式源码"); Content::Text(tex.clone()) }
+                    }
+                }, _ => continue,
             };
             self.job.check()?;
-            if let Some(result) = result {
-                run.content = match result {
-                    Ok(asset) => Content::Raster(self.keep(asset)?),
-                    Err(_) => Content::Text(match &run.content { Content::Image(p) => format!("[图片：{}]", if p.alt.is_empty() { "无法嵌入" } else { &p.alt }), _ => run.label().to_owned() }),
-                };
-            }
+            run.content = content;
         }
         Ok(())
     }
-    fn image(&self, source: &str, alt: &str, width: &str, align: &str) -> Result<Asset, String> {
-        let source = source.trim();
+    fn image(&self, source: &str) -> Result<Bitmap, String> {
         if source.starts_with("//") || url::Url::parse(source).is_ok_and(|url| matches!(url.scheme(), "http" | "https")) { return Err("网络图片不自动下载".into()); }
         let bytes = if let Some(data) = source.strip_prefix("data:") {
             let (header, content) = data.split_once(',').ok_or("无效图片 data URL")?;
@@ -105,7 +211,7 @@ impl Media<'_> {
         };
         if bytes.len() > MAX_RESOURCE_BYTES { return Err("图片超过 8 MiB".into()); }
         self.job.check()?;
-        let mut asset = match image::guess_format(&bytes) {
+        match image::guess_format(&bytes) {
             Ok(format) => {
                 let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
                 let mut limits = image::Limits::default(); limits.max_alloc = Some(64 * 1024 * 1024);
@@ -115,17 +221,12 @@ impl Media<'_> {
                 if w == 0 || h == 0 || u64::from(w) * u64::from(h) > 16 * 1024 * 1024 || decoder.total_bytes() > 64 * 1024 * 1024 { return Err("图片解码超过预算".into()); }
                 let image = image::DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
                 let image = if w.max(h) > 2048 { image.resize(2048, 2048, image::imageops::FilterType::Triangle) } else { image };
-                Asset { pixels: image.into_rgba8(), width: w as f32 * 0.75, height: h as f32 * 0.75, alt: alt.into(), block: true, align: align.into() }
+                Ok(Bitmap { pixels: image.into_rgba8(), width: w as f32 * 0.75, height: h as f32 * 0.75 })
             },
-            Err(_) => self.svg(&bytes, true, alt.into(), align.into())?,
-        };
-        if let Some(value) = crate::nomo_mark::image_properties::ImageWidth::parse(width) {
-            let w = value.resolve(481.9, 0.75).min(481.9);
-            asset.height *= w / asset.width; asset.width = w;
+            Err(_) => self.svg(&bytes),
         }
-        Ok(asset)
     }
-    fn svg(&self, bytes: &[u8], block: bool, alt: String, align: String) -> Result<Asset, String> {
+    fn svg(&self, bytes: &[u8]) -> Result<Bitmap, String> {
         if bytes.len() > MAX_RESOURCE_BYTES { return Err("SVG 超过预算".into()); }
         let refused = Arc::new(AtomicBool::new(false));
         let (a, b) = (refused.clone(), refused.clone());
@@ -146,6 +247,6 @@ impl Media<'_> {
         let mut bytes = pixmap.take();
         for px in bytes.chunks_exact_mut(4) { let alpha = u32::from(px[3]); if alpha > 0 { for c in &mut px[..3] { *c = ((u32::from(*c) * 255 + alpha / 2) / alpha).min(255) as u8; } } }
         let pixels = RgbaImage::from_raw(w, h, bytes).ok_or("SVG 像素长度错误")?;
-        Ok(Asset { pixels, width: size.width() * 0.75, height: size.height() * 0.75, alt, block, align })
+        Ok(Bitmap { pixels, width: size.width() * 0.75, height: size.height() * 0.75 })
     }
 }
