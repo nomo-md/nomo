@@ -302,6 +302,39 @@ fn reindent_tail(
     }
 }
 
+fn after_inline_openers(parsed: &ParsedWindow, mut at: usize) -> usize {
+    while let Some(span) = parsed.inline.iter().find(|span| span.open.start == at && span.open.end > at) {
+        at = span.open.end;
+    }
+    at
+}
+
+/// 删除空首项时让下一项继承整组的起号；保留它自己的分隔符、复选框和正文。
+fn delete_empty_ordered_head(parsed: &ParsedWindow, first: &Item, next: &Item) -> Option<EditResult> {
+    let source = &parsed.source;
+    if !source.as_bytes()[first.marker].is_ascii_digit()
+        || !source.get(first.body..next.start)?.trim_matches([' ', '\t', '\r', '\n']).is_empty()
+        || std::iter::successors(parsed.nodes[first.list].parent, |&p| parsed.nodes[p].parent)
+            .any(|p| parsed.nodes[p].kind != "quote")
+    {
+        return None;
+    }
+    let number = |it: &Item| {
+        let raw = &source[it.marker..it.marker_end];
+        &raw[..raw.bytes().take_while(u8::is_ascii_digit).count()]
+    };
+    let start = number(first);
+    let old = number(next);
+    let prefix = format!("{}{start}", &source[next.start..next.marker]);
+    let mut edits = vec![edit(parsed, first.start..next.marker + old.len(), prefix)];
+    if start.len() != old.len() {
+        let following_line = source[next.body..].find('\n').map_or(next.end, |at| next.body + at + 1);
+        reindent_tail(parsed, next, following_line, start.len() as isize - old.len() as isize, &mut edits);
+    }
+    let caret = parsed.identity.from_byte + after_inline_openers(parsed, next.body) as u64;
+    Some(result(DocumentSelection::caret(caret), edits))
+}
+
 /// 拆分列表项时先闭合左侧格式，再在新项恢复右侧格式；光标仍使用原文坐标。
 fn split_item(
     parsed: &ParsedWindow,
@@ -384,10 +417,7 @@ fn split_item(
     for span in parsed.inline.iter().filter(|span| span.content.start < range.end && range.end < span.content.end) {
         inserted.push_str(&source[span.open.clone()]);
     }
-    let mut right = range.end;
-    while let Some(span) = parsed.inline.iter().find(|span| span.open.start == right && span.open.end > right) {
-        right = span.open.end;
-    }
+    let right = after_inline_openers(parsed, range.end);
     let caret = parsed.identity.from_byte + (range.start + inserted.len() + right - range.end) as u64;
     let next = source[range.end..].find('\n').map_or(it.end, |offset| range.end + offset + 1);
     let delta = prefix.len() as isize - (it.body - it.start) as isize;
@@ -668,10 +698,13 @@ pub fn apply(
             Some(split_item(parsed, &it, selection, range))
         }
         EditIntent::Backspace if range.is_empty() && range.start == it.body => {
+            let peers = siblings(parsed, it.list);
+            let at = peers.iter().position(|p| p.node == it.node).unwrap();
+            if at == 0 && let Some(change) = peers.get(1).and_then(|next| delete_empty_ordered_head(parsed, &it, next)) {
+                return Some(Ok(change));
+            }
             if it.task {
                 // 对齐原版 deleteTaskListItemBeforeCursor：在隐藏任务标记后删除当前项。
-                let peers = siblings(parsed, it.list);
-                let at = peers.iter().position(|p| p.node == it.node).unwrap();
                 let mut r = result(
                     selection,
                     vec![edit(parsed, it.start..it.end, String::new())],
@@ -696,8 +729,6 @@ pub fn apply(
                 );
                 Some(Ok(r))
             } else {
-                let peers = siblings(parsed, it.list);
-                let at = peers.iter().position(|p| p.node == it.node).unwrap();
                 if at == 0 {
                     return Some(lift(parsed, &[it], selection, false));
                 }
@@ -717,6 +748,9 @@ pub fn apply(
             let peers = siblings(parsed, it.list);
             let at = peers.iter().position(|p| p.node == it.node).unwrap();
             let next = peers.get(at + 1)?;
+            if at == 0 && range.start == it.body && let Some(change) = delete_empty_ordered_head(parsed, &it, next) {
+                return Some(Ok(change));
+            }
             if source[range.start..next.start].trim().is_empty() {
                 Some(Ok(result(
                     selection,
