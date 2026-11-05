@@ -31,6 +31,10 @@ CREATE INDEX headings_base ON headings(generation,base,byte);
 CREATE TABLE slug_reuse(generation INTEGER NOT NULL,source_generation INTEGER NOT NULL,
  source_from INTEGER NOT NULL,source_to INTEGER NOT NULL,byte_delta INTEGER NOT NULL,
  PRIMARY KEY(generation,source_generation,source_from,source_to));
+CREATE INDEX slug_reuse_source ON slug_reuse(source_generation);
+-- 去重的回收清单与派生页共用同一 SQLite 容量上限，不持有文档快照或视图。
+CREATE TABLE retired_sources(generation INTEGER PRIMARY KEY);
+CREATE TABLE retired_views(view_id TEXT PRIMARY KEY);
 CREATE TABLE slug_dirty(generation INTEGER NOT NULL,base TEXT NOT NULL,PRIMARY KEY(generation,base));
 CREATE VIEW slug_mappings AS
  SELECT generation,generation AS source_generation,0 AS source_from,total+1 AS source_to,0 AS byte_delta FROM generations

@@ -34,8 +34,8 @@ impl MarkdownDocumentSessionManager {
         revision: u64,
     ) -> TextDocumentResult<Identity> {
         let handle = self.session(document_id)?;
-        let snapshot = {
-            let session = lock(&handle)?;
+        let (snapshot, index_owner) = {
+            let mut session = lock(&handle)?;
             session.owner(owner)?;
             if revision != session.current.revision {
                 return Err(TextDocumentError::revision_conflict(
@@ -43,11 +43,12 @@ impl MarkdownDocumentSessionManager {
                     session.current.revision,
                 ));
             }
-            session.current.clone()
+            let index_owner = Arc::downgrade(session.index_owner.get_or_insert_with(|| Arc::new(())));
+            (session.current.clone(), index_owner)
         };
         let identity = self
             .structure
-            .request(owner, document_id, snapshot, Box::new(handle))?;
+            .request_if_current(owner, document_id, snapshot, Box::new(handle), || index_owner.strong_count() != 0)?;
         let status = self.status(owner, document_id)?;
         if status.revision != revision {
             return Err(TextDocumentError::revision_conflict(

@@ -65,6 +65,9 @@ struct State {
     jobs: HashMap<u64, Arc<Job>>,
     queue: VecDeque<Arc<Job>>,
     running: bool,
+    reclaim_pending: bool,
+    stopping: bool,
+    worker: Option<std::thread::JoinHandle<()>>,
     published: HashMap<String, u64>,
     building: HashMap<String, u64>,
     invalidations: HashMap<String, Option<Invalidation>>,
@@ -90,7 +93,28 @@ impl Drop for Foreground<'_> {
 }
 #[derive(Clone)]
 pub struct StructureService {
+    owner: Arc<WorkerOwner>,
+}
+// 只有文档服务持有 WorkerOwner。后台线程借用 Inner，不能延长服务的生命周期。
+struct WorkerOwner {
     inner: Arc<Inner>,
+}
+impl Drop for WorkerOwner {
+    fn drop(&mut self) {
+        if let Ok(executing) = self.inner.executing.lock() {
+            if let Some(job) = executing.as_ref() { job.cancel.store(true, Ordering::Release); }
+        }
+        let worker = {
+            let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.stopping = true;
+            for job in state.jobs.values() { job.cancel.store(true, Ordering::Release); }
+            state.worker.take()
+        };
+        // 退出时只等当前批次。Store 随后关闭 SQLite 句柄并删除整个派生库。
+        if worker.is_some_and(|worker| worker.join().is_err()) {
+            crate::app_logger::warn("StructureIndex", "索引线程异常退出");
+        }
+    }
 }
 impl StructureService {
     pub fn toc_baseline(
@@ -99,7 +123,7 @@ impl StructureService {
         identity: &Identity,
         data: Option<&str>,
     ) -> TextDocumentResult<Option<String>> {
-        let state = lock(&self.inner.state)?;
+        let state = lock(&self.owner.inner.state)?;
         if !state
             .jobs
             .get(&identity.index_generation)
@@ -114,10 +138,10 @@ impl StructureService {
                 "目录索引版本已失效",
             ));
         }
-        lock(&self.inner.store)?.toc_baseline(&identity.document_id, data)
+        lock(&self.owner.inner.store)?.toc_baseline(&identity.document_id, data)
     }
     pub fn close_outline(&self, document_id: &str, view_id: &str) -> TextDocumentResult<()> {
-        lock(&self.inner.store)?.close_outline(document_id, view_id)
+        lock(&self.owner.inner.store)?.close_outline(document_id, view_id)
     }
     pub fn new(root: &std::path::Path) -> TextDocumentResult<Self> {
         let name = format!(
@@ -130,16 +154,16 @@ impl StructureService {
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
         let path: PathBuf = root.join(name);
-        Ok(Self {
-            inner: Arc::new(Inner {
-                store: Mutex::new(Store::lazy(path)),
-                state: Mutex::new(State::default()),
-                executing: Mutex::new(None),
-                foreground: Mutex::new(0),
-                foreground_done: Condvar::new(),
-            }),
-        })
+        let inner = Arc::new(Inner {
+            store: Mutex::new(Store::lazy(path)),
+            state: Mutex::new(State::default()),
+            executing: Mutex::new(None),
+            foreground: Mutex::new(0),
+            foreground_done: Condvar::new(),
+        });
+        Ok(Self { owner: Arc::new(WorkerOwner { inner }) })
     }
+    #[cfg(test)]
     pub fn request(
         &self,
         owner: &str,
@@ -147,10 +171,27 @@ impl StructureService {
         snapshot: DocumentSnapshot,
         lease: Box<dyn Any + Send + Sync>,
     ) -> TextDocumentResult<Identity> {
-        *lock(&self.inner.foreground)? += 1;
-        let _foreground = Foreground(&self.inner);
+        self.request_if_current(owner, document_id, snapshot, lease, || true)
+    }
+    pub fn request_if_current(
+        &self,
+        owner: &str,
+        document_id: &str,
+        snapshot: DocumentSnapshot,
+        lease: Box<dyn Any + Send + Sync>,
+        still_owned: impl Fn() -> bool,
+    ) -> TextDocumentResult<Identity> {
+        *lock(&self.owner.inner.foreground)? += 1;
+        let _foreground = Foreground(&self.owner.inner);
+        if !still_owned() {
+            return Err(TextDocumentError::new("structure-generation-expired", "结构请求的文档归属已失效"));
+        }
         self.cancel_executing(document_id, Some(snapshot.revision));
-        let mut state = lock(&self.inner.state)?;
+        let mut state = lock(&self.owner.inner.state)?;
+        // 与关闭摘除索引共用调度锁；排队等待数据库时失去归属的快照不能重建旧索引。
+        if !still_owned() {
+            return Err(TextDocumentError::new("structure-generation-expired", "结构请求的文档归属已失效"));
+        }
         if let Some(&current) = state.revisions.get(document_id) {
             if snapshot.revision < current {
                 return Err(TextDocumentError::revision_conflict(snapshot.revision, current));
@@ -168,7 +209,7 @@ impl StructureService {
                 if job.owner == owner
                     && job.identity.revision == snapshot.revision
                     && !job.cancel.load(Ordering::Acquire)
-                    && lock(&self.inner.store)?
+                    && lock(&self.owner.inner.store)?
                         .query(&job.identity, Query::Progress)?
                         .state
                         != "failed"
@@ -184,11 +225,11 @@ impl StructureService {
             state
                 .queue
                 .retain(|job| job.identity.index_generation != old);
-            lock(&self.inner.store)?.remove(old)?;
+            lock(&self.owner.inner.store)?.remove(old)?;
         }
         let generation = NEXT.fetch_add(1, Ordering::Relaxed);
         let identity = Identity::new(document_id.into(), snapshot.revision, generation);
-        lock(&self.inner.store)?.create(&identity, snapshot.len())?;
+        lock(&self.owner.inner.store)?.create(&identity, snapshot.len())?;
         let previous = state
             .published
             .get(document_id)
@@ -197,7 +238,7 @@ impl StructureService {
             .cloned();
         let invalidation = state.invalidations.get(document_id).copied().flatten();
         let reuse = if let (Some(previous), Some(invalidation)) = (previous, invalidation) {
-            let store = lock(&self.inner.store)?;
+            let store = lock(&self.owner.inner.store)?;
             if let Some(checkpoint) =
                 store.block_at(&previous.identity, invalidation.from.saturating_sub(1))?
             {
@@ -245,7 +286,7 @@ impl StructureService {
         state.jobs.insert(generation, job.clone());
         state.building.insert(document_id.into(), generation);
         state.queue.push_back(job);
-        start_worker(&self.inner, &mut state)?;
+        start_worker(&self.owner.inner, &mut state)?;
         Ok(identity)
     }
     pub fn demand(
@@ -255,9 +296,9 @@ impl StructureService {
         active: bool,
         priority: u8,
     ) -> TextDocumentResult<()> {
-        *lock(&self.inner.foreground)? += 1;
-        let _foreground = Foreground(&self.inner);
-        let mut state = lock(&self.inner.state)?;
+        *lock(&self.owner.inner.foreground)? += 1;
+        let _foreground = Foreground(&self.owner.inner);
+        let mut state = lock(&self.owner.inner.state)?;
         let job = state
             .jobs
             .get(&identity.index_generation)
@@ -271,7 +312,7 @@ impl StructureService {
         state.queue.retain(|queued| queued.identity != *identity);
         if active && state.building.get(&identity.document_id) == Some(&identity.index_generation) {
             state.queue.push_back(job);
-            start_worker(&self.inner, &mut state)?;
+            start_worker(&self.owner.inner, &mut state)?;
         }
         Ok(())
     }
@@ -281,9 +322,9 @@ impl StructureService {
         identity: &Identity,
         query: Query,
     ) -> TextDocumentResult<Response> {
-        *lock(&self.inner.foreground)? += 1;
-        let _foreground = Foreground(&self.inner);
-        let state = lock(&self.inner.state)?;
+        *lock(&self.owner.inner.foreground)? += 1;
+        let _foreground = Foreground(&self.owner.inner);
+        let state = lock(&self.owner.inner.state)?;
         let job = state
             .jobs
             .get(&identity.index_generation)
@@ -300,12 +341,12 @@ impl StructureService {
                 "结构生成已取消",
             ));
         }
-        lock(&self.inner.store)?.query(identity, query)
+        lock(&self.owner.inner.store)?.query(identity, query)
     }
     /// 编辑只取消构建；最后已发布版本仍可供界面保留。关闭/移交同时释放所有版本。
     pub fn invalidate(&self, document_id: &str, release: bool) {
         self.cancel_executing(document_id, None);
-        let Ok(mut state) = self.inner.state.lock() else {
+        let Ok(mut state) = self.owner.inner.state.lock() else {
             return;
         };
         self.invalidate_locked(&mut state, document_id, release);
@@ -315,11 +356,6 @@ impl StructureService {
         if release {
             state.revisions.remove(document_id);
             state.invalidations.remove(document_id);
-            if let Ok(store) = self.inner.store.lock() {
-                if let Err(error) = store.release_views(document_id) {
-                    crate::app_logger::warn("StructureIndex", &error.message);
-                }
-            }
         } else {
             state.invalidations.insert(document_id.into(), None);
         }
@@ -331,14 +367,48 @@ impl StructureService {
                 generations.push(generation);
             }
         }
-        for generation in generations {
+        for &generation in &generations {
             if let Some(job) = state.jobs.remove(&generation) {
                 job.cancel.store(true, Ordering::Release);
             }
             state
                 .queue
                 .retain(|job| job.identity.index_generation != generation);
-            if let Ok(store) = self.inner.store.lock() {
+        }
+        if release {
+            match lock(&self.owner.inner.store).and_then(|store| store.retire_document(document_id, &generations)) {
+                Ok(false) => return,
+                Ok(true) => {
+                    state.reclaim_pending = true;
+                    if let Err(error) = start_worker(&self.owner.inner, state) {
+                        // 标记已提交；正常 worker 不能启动时也完成本次回收。
+                        crate::app_logger::warn("StructureIndex", &error.message);
+                        if let Ok(store) = lock(&self.owner.inner.store) {
+                            loop {
+                                match store.reclaim_batch() {
+                                    Ok(true) => continue,
+                                    Ok(false) => state.reclaim_pending = false,
+                                    Err(error) => crate::app_logger::warn("StructureIndex", &error.message),
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    return;
+                }
+                Err(error) => {
+                    // 登记失败时事务已回滚，仍由原删除路径释放派生页。
+                    crate::app_logger::warn("StructureIndex", &error.message);
+                    if let Ok(store) = lock(&self.owner.inner.store) {
+                        if let Err(error) = store.release_views(document_id) {
+                            crate::app_logger::warn("StructureIndex", &error.message);
+                        }
+                    }
+                }
+            }
+        }
+        for generation in generations {
+            if let Ok(store) = self.owner.inner.store.lock() {
                 if let Err(error) = store.remove(generation) {
                     crate::app_logger::warn("StructureIndex", &error.message);
                 }
@@ -346,7 +416,7 @@ impl StructureService {
         }
     }
     fn cancel_executing(&self, document: &str, keep_revision: Option<u64>) {
-        if let Ok(executing) = self.inner.executing.lock() {
+        if let Ok(executing) = self.owner.inner.executing.lock() {
             if let Some(job) = executing.as_ref().filter(|job| job.identity.document_id == document
                 && keep_revision.is_none_or(|revision| job.identity.revision < revision)) {
                 job.cancel.store(true, Ordering::Release);
@@ -355,7 +425,7 @@ impl StructureService {
     }
     pub fn edited(&self, document_id: &str, revision: u64, edits: &[(u64, u64, u64)]) {
         self.cancel_executing(document_id, Some(revision));
-        if let Ok(mut state) = self.inner.state.lock() {
+        if let Ok(mut state) = self.owner.inner.state.lock() {
             if state.revisions.get(document_id).is_some_and(|current| *current > revision) { return; }
             let previous = state.invalidations.get(document_id).copied();
             // 修订门禁、取消与变更区间在同一锁内发布，避免旧请求消费半更新状态。
@@ -371,7 +441,7 @@ impl StructureService {
     }
     #[cfg(test)]
     pub fn scanned_bytes(&self, identity: &Identity) -> u64 {
-        let state = self.inner.state.lock().unwrap();
+        let state = self.owner.inner.state.lock().unwrap();
         let bytes = state.jobs[&identity.index_generation]
             .scan
             .lock()
@@ -381,25 +451,28 @@ impl StructureService {
     }
 }
 fn start_worker(inner: &Arc<Inner>, state: &mut State) -> TextDocumentResult<()> {
-    if state.running || state.queue.is_empty() {
+    if state.stopping || state.running || (state.queue.is_empty() && !state.reclaim_pending) {
         return Ok(());
+    }
+    // running 只在旧线程退出时清零；取到此锁后它已不再访问调度状态。
+    if state.worker.take().is_some_and(|worker| worker.join().is_err()) {
+        crate::app_logger::warn("StructureIndex", "索引线程异常退出");
     }
     state.running = true;
     let weak = Arc::downgrade(inner);
-    if let Err(error) = std::thread::Builder::new()
+    match std::thread::Builder::new()
         .name("nomo-structure".into())
         .spawn(move || worker(weak))
     {
-        state.running = false;
-        for job in state.queue.drain(..) {
-            lock(&inner.store)?.fail(job.identity.index_generation, &error.to_string())?;
+        Ok(worker) => { state.worker = Some(worker); Ok(()) }
+        Err(error) => {
+            state.running = false;
+            for job in state.queue.drain(..) {
+                lock(&inner.store)?.fail(job.identity.index_generation, &error.to_string())?;
+            }
+            Err(TextDocumentError::new("structure-worker-start", error.to_string()))
         }
-        return Err(TextDocumentError::new(
-            "structure-worker-start",
-            error.to_string(),
-        ));
     }
-    Ok(())
 }
 fn step(job: &Job, inner: &Inner) -> TextDocumentResult<Work> {
     let mut scan = lock(&job.scan)?;
@@ -535,6 +608,7 @@ fn step(job: &Job, inner: &Inner) -> TextDocumentResult<Work> {
     Ok(Work::Scan(batch, tail))
 }
 fn worker(weak: std::sync::Weak<Inner>) {
+    let mut reclaim_turn = false;
     while let Some(inner) = weak.upgrade() {
         // std::Mutex 不保证公平；连续后台批次不能抢在已等待的正文查询前重新占锁。
         let Ok(mut foreground) = inner.foreground.lock() else { return; };
@@ -546,23 +620,34 @@ fn worker(weak: std::sync::Weak<Inner>) {
             let Ok(mut state) = inner.state.lock() else {
                 return;
             };
-            let priority = state
-                .queue
-                .iter()
-                .map(|job| job.priority.load(Ordering::Acquire))
-                .max();
-            let selected = priority.and_then(|priority| {
-                state
-                    .queue
-                    .iter()
-                    .position(|job| job.priority.load(Ordering::Acquire) == priority)
-            });
-            let Some(job) = selected.and_then(|index| state.queue.remove(index)) else {
-                state.running = false;
-                return;
-            };
-            job
+            if state.stopping { return; }
+            if state.reclaim_pending && (reclaim_turn || state.queue.is_empty()) {
+                state.reclaim_pending = false;
+                None
+            } else {
+                let priority = state.queue.iter().map(|job| job.priority.load(Ordering::Acquire)).max();
+                let selected = priority.and_then(|priority| {
+                    state.queue.iter().position(|job| job.priority.load(Ordering::Acquire) == priority)
+                });
+                let Some(job) = selected.and_then(|index| state.queue.remove(index)) else {
+                    state.running = false;
+                    return;
+                };
+                Some(job)
+            }
         };
+        let Some(job) = job else {
+            // 不持有调度锁做磁盘删除；两批之间重新让位给前台查询和索引构建。
+            let result = lock(&inner.store).and_then(|store| store.reclaim_batch());
+            match result {
+                Ok(true) => if let Ok(mut state) = inner.state.lock() { state.reclaim_pending = true; },
+                Ok(false) => {}
+                Err(error) => crate::app_logger::warn("StructureIndex", &error.message),
+            }
+            reclaim_turn = false;
+            continue;
+        };
+        reclaim_turn = true;
         if job.cancel.load(Ordering::Acquire) || !job.active.load(Ordering::Acquire) {
             continue;
         }

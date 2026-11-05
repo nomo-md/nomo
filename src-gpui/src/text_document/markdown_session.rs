@@ -158,6 +158,8 @@ struct Session {
     search_ack: VecDeque<(String, super::markdown_search::ReplaceResult)>,
     toc_ack: VecDeque<(String, [u8; 32], MarkdownStatus)>,
     closed: bool,
+    // 只在首次请求索引时创建；关闭或移交使已取快照但尚未登记的请求失效。
+    index_owner: Option<Arc<()>>,
     save_gate: Arc<Mutex<()>>,
     active_group: Option<(String, String)>,
     persistence_warning: Option<String>,
@@ -447,6 +449,7 @@ impl MarkdownDocumentSessionManager {
             search_ack: VecDeque::new(),
             toc_ack: VecDeque::new(),
             closed: false,
+            index_owner: None,
             save_gate: Arc::new(Mutex::new(())),
             active_group: None,
             persistence_warning: None,
@@ -585,6 +588,7 @@ impl MarkdownDocumentSessionManager {
             search_ack: VecDeque::new(),
             toc_ack: VecDeque::new(),
             closed: false,
+            index_owner: None,
             save_gate: Arc::new(Mutex::new(())),
             active_group: None,
             persistence_warning: None,
@@ -1197,9 +1201,7 @@ impl MarkdownDocumentSessionManager {
             return Err(error("document-busy", "请先完成文档的快照任务"));
         }
         session.owner = target.into();
-        self.writing_stats.invalidate(document_id, true);
-        self.structure.invalidate(document_id, true);
-        self.search.invalidate(document_id, None);
+        self.release_document_services(&mut session);
         Ok(())
     }
     /// 多文档归属和工作区提交共享同一临界区；持久化失败时全部仍归源窗口。
@@ -1260,9 +1262,7 @@ impl MarkdownDocumentSessionManager {
         let result = commit()?;
         for (session, (_, target)) in sessions.iter_mut().zip(ownership) {
             session.owner = target;
-            self.writing_stats.invalidate(&session.manifest.document_id, true);
-            self.structure.invalidate(&session.manifest.document_id, true);
-            self.search.invalidate(&session.manifest.document_id, None);
+            self.release_document_services(session);
         }
         Ok(result)
     }
@@ -1282,6 +1282,14 @@ impl MarkdownDocumentSessionManager {
         ));
         Err(error("document-busy", message))
     }
+    fn release_document_services(&self, session: &mut Session) {
+        session.index_owner = None;
+        let document = &session.manifest.document_id;
+        self.writing_stats.invalidate(document, true);
+        self.structure.invalidate(document, true);
+        self.search.invalidate(document, None);
+    }
+
     /// 释放本窗口的内存映射，但保留恢复资料。已移交的会话由目标窗口继续持有。
     pub(crate) fn detach(&self, owner: &str, document_id: &str) -> TextDocumentResult<()> {
         let Some(handle) = lock(&self.sessions)?.get(document_id).cloned() else {
@@ -1296,9 +1304,7 @@ impl MarkdownDocumentSessionManager {
             }
             self.require_released_snapshots(document_id, "detach", "文档仍有正在使用的完整快照")?;
             session.closed = true;
-            self.writing_stats.invalidate(document_id, true);
-            self.structure.invalidate(document_id, true);
-            self.search.invalidate(document_id, None);
+            self.release_document_services(&mut session);
         }
         lock(&self.sessions)?.remove(document_id);
         Ok(())
@@ -1319,9 +1325,7 @@ impl MarkdownDocumentSessionManager {
             }
             session.closed = true;
             let document_id = session.manifest.document_id.clone();
-            self.writing_stats.invalidate(&document_id, true);
-            self.structure.invalidate(&document_id, true);
-            self.search.invalidate(&document_id, None);
+            self.release_document_services(&mut session);
             lock(&self.snapshots)?.retain(|_, snapshot| snapshot.document_id != document_id);
             lock(&self.sessions)?.remove(&document_id);
         }
@@ -1350,9 +1354,7 @@ impl MarkdownDocumentSessionManager {
         }
         for session in &mut sessions {
             session.closed = true; session.cleanup.remove = true;
-            self.writing_stats.invalidate(&session.manifest.document_id, true);
-            self.structure.invalidate(&session.manifest.document_id, true);
-            self.search.invalidate(&session.manifest.document_id, None);
+            self.release_document_services(session);
         }
         let mut registry = lock(&self.sessions)?;
         for (member, _) in documents { registry.remove(&member.document_id); }
@@ -1378,9 +1380,7 @@ impl MarkdownDocumentSessionManager {
             }
             session.closed = true;
             session.cleanup.remove = true;
-            self.writing_stats.invalidate(document_id, true);
-            self.structure.invalidate(document_id, true);
-            self.search.invalidate(document_id, None);
+            self.release_document_services(&mut session);
         }
         lock(&self.sessions)?.remove(document_id);
         drop(session);

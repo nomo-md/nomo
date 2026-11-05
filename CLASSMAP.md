@@ -53,7 +53,7 @@
 | 文档导出 | `src-gpui/src/document_export.rs`、`document_export/{html,resources,model,media,pdf,pdf_fonts,word}.rs`、`ui/workspace/export.rs` | 固定修订及单个可取消任务；HTML 流式输出，PDF 与 Word 逐张编码并复用图片，每处引用独立排版；PDF 嵌入字体分页、Word 原生 OOXML，原子发布前复核取消 |
 | 外部文件变更策略 | `src-gpui/src/ui/workspace/application_dialogs.rs`、`text_document/markdown_session/external.rs` | 干净文档按偏好自动重载／覆盖／忽略；本地修改和删除仍显式选择，忽略继续阻止普通保存，覆盖校验检测令牌；Mini 返回后处理延迟冲突 |
 | 文档会话与保存 | `src-gpui/src/text_document/mod.rs`、`markdown_session.rs`、`markdown_session/rename.rs`、`markdown_session/external.rs`、`markdown_session/recovery.rs`、`markdown_history.rs` | PieceTree、磁盘正文与历史、快照、保存及重命名事务；外部身份复核、进程租约和原会话按需恢复 |
-| 结构索引／搜索／统计 | `src-gpui/src/text_document/structure_index/`、`markdown_search/`、`writing_stats/` | 唯一结构索引、分页查询和有界统计 |
+| 结构索引／搜索／统计 | `src-gpui/src/text_document/structure_index/`、`markdown_search/`、`writing_stats/` | 唯一结构索引、分页查询和有界统计；关闭时撤销索引归属，`structure_index/reclaim.rs` 分批回收派生页 |
 | 编码、文件写入、格式模板 | `src-gpui/src/models.rs`、`file_system.rs`、`markdown_templates.rs` | 编码定义、原子替换、显式模板来源 |
 | Emoji 加载 | `src-gpui/src/nomo_mark/native_emoji.rs`、`ui/emoji_picker.rs` | 按需加载；固定版本 JSON、哈希、虚拟列表和原有缓存预算 |
 | 策略和既有语料 | `src-gpui/resources/` | 策略 JSON、搜索与结构样本 |

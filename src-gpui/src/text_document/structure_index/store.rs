@@ -6,6 +6,8 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 #[path = "outline.rs"]
 mod outline;
+#[path = "reclaim.rs"]
+mod reclaim;
 #[path = "changes.rs"]
 mod changes;
 pub use changes::ChangeScan;
@@ -258,7 +260,8 @@ impl Store {
                 )
                 .map_err(sql)?;
         }
-        self.db().execute("DELETE FROM heading_slugs WHERE generation NOT IN (SELECT generation FROM generations UNION SELECT source_generation FROM slug_reuse)", []).map_err(sql)?;
+        // 别的文档编辑或发布新修订时，不替正在关闭的标签同步清理积压页。
+        self.db().execute("DELETE FROM heading_slugs WHERE generation NOT IN (SELECT generation FROM generations UNION SELECT source_generation FROM slug_reuse UNION SELECT generation FROM retired_sources)", []).map_err(sql)?;
         for table in [
             "blocks",
             "headings",
@@ -266,7 +269,7 @@ impl Store {
             "dependencies",
             "geometry",
         ] {
-            self.db().execute(&format!("DELETE FROM {table} WHERE generation NOT IN (SELECT generation FROM generations UNION SELECT source_generation FROM reuse)"),[]).map_err(sql)?;
+            self.db().execute(&format!("DELETE FROM {table} WHERE generation NOT IN (SELECT generation FROM generations UNION SELECT source_generation FROM reuse UNION SELECT generation FROM retired_sources)"),[]).map_err(sql)?;
         }
         self.db()
             .execute_batch("PRAGMA incremental_vacuum(256)")
