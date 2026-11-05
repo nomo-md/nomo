@@ -561,6 +561,7 @@ impl Workspace {
             self.library.update(cx, |library, cx| library.change(LibraryChange::AddFolder(root.clone()), cx));
             Settings::set(cx, "sidebarHidden", serde_json::json!(false));
             self.replace_tree(root,cx);
+            self.record_layout(cx);
             cx.notify();
             return;
         }
@@ -686,16 +687,23 @@ impl Workspace {
         let recovery=match &source {application_dialogs::OpenSource::Recovery(candidate,copy,_,_)=>Some((candidate.clone(),*copy)),application_dialogs::OpenSource::Layout(_,Some(candidate))=>Some((candidate.clone(),false)),_=>None};
         let fresh=matches!(&source,application_dialogs::OpenSource::Reload(_,_)|application_dialogs::OpenSource::DiskRecovery(_,_,_));
         self.last_notice=Some(ToolbarLocale::current(cx).app_text("workspace.opening").into());
-        let reading_byte=layout_doc.as_ref().map(|doc|doc.byte);
+        let mut restored_layout=layout_doc;
         let task=cx.background_executor().spawn(async move {
             request.check()?;
             let port=match recovery {
-                Some((candidate,copy)) => { let status=manager.adopt_recovery(&owner,&candidate,copy).map_err(|error|ControlError::HostFailure(error.to_string()))?; NativeWindowPort {manager,owner,document_id:status.document_id} },
+                Some((candidate,copy)) => { let status=manager.adopt_recovery(&owner,&candidate,copy,||request.check().is_err()).map_err(|error|ControlError::HostFailure(error.to_string()))?; NativeWindowPort {manager,owner,document_id:status.document_id} },
                 None if fresh => { let status=manager.open_with_policy(&owner,path.clone(),None,true).map_err(|error|ControlError::HostFailure(error.to_string()))?; NativeWindowPort {manager,owner,document_id:status.document_id} },
                 _ => NativeWindowPort::open_in(manager,owner,path.clone(),path.is_none().then(String::new))?,
             };
             if let Some(profile)=&loading_profile {profile.stage("session_ready_ms");}
-            let loaded=port.status().and_then(|status|match reading_byte {Some(byte) if byte>0=>port.load_group(status.revision,byte.min(status.byte_length),None,&request),_=>port.load_initial_group(status.revision,&request)});
+            let loaded=(|| {
+                if let Some(saved)=&mut restored_layout {if let Some(line)=saved.legacy_line.take() {
+                    let byte=port.manager.legacy_line_byte(&port.owner,&port.document_id,line,||request.check().is_err()).map_err(|error|ControlError::HostFailure(error.to_string()))?;
+                    saved.byte=byte;
+                    if saved.selection==crate::nomo_mark::protocol::DocumentSelection::default() {saved.selection=crate::nomo_mark::protocol::DocumentSelection::caret(byte);}
+                }}
+                port.status().and_then(|status|match restored_layout.as_ref().map(|doc|doc.byte) {Some(byte) if byte>0=>port.load_group(status.revision,byte.min(status.byte_length),None,&request),_=>port.load_initial_group(status.revision,&request)})
+            })();
             if let (Some(profile),Ok(loaded))=(&loading_profile,&loaded) {
                 profile.stage("window_ready_ms");
                 if let Ok(progress)=port.manager.query_structure(&port.owner,loaded.index.clone(),crate::text_document::StructureQuery::Progress) {
@@ -703,13 +711,13 @@ impl Workspace {
                     profile.value("document_bytes",progress.total_bytes);
                 }
             }
-            Ok::<_,ControlError>((port,loaded))
+            Ok::<_,ControlError>((port,loaded,restored_layout))
         });
         cx.spawn_in(window,async move |this,cx| {
-            let (result,cleanup)=match task.await {
-                Ok((port,Ok(loaded)))=>(Ok((port.clone(),loaded)),Some(port)),
-                Ok((port,Err(error)))=>(Err(error),Some(port)),
-                Err(error)=>(Err(error),None),
+            let (result,cleanup,layout_doc)=match task.await {
+                Ok((port,Ok(loaded),layout))=>(Ok((port.clone(),loaded)),Some(port),layout),
+                Ok((port,Err(error),layout))=>(Err(error),Some(port),layout),
+                Err(error)=>(Err(error),None,None),
             };
             let completed_path=requested.clone();
             let accepted=this.update_in(cx,|workspace,window,cx| {
@@ -946,6 +954,7 @@ impl Workspace {
             Ok(())=>{self.popover=None;self.toolbar_popup=None;self.close_status(cx);self.tabs[self.active].mode=mode;
                 let preference=match mode { EditorMode::Semantic=>"semantic", EditorMode::Source=>"source", EditorMode::Split=>"split" };
                 Settings::set(cx, "editorMode", serde_json::json!(preference));
+                self.record_layout(cx);
                 window.focus(&document.focus_handle(cx), cx);}
             Err(e)=>self.notice=Some(e.to_string().into()),
         }

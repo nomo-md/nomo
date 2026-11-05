@@ -3,6 +3,8 @@ use super::*;
 use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
 use crate::nomo_mark::protocol::DocumentSelection;
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[path = "comparison_legacy.rs"]
+mod legacy;
 
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_DOCUMENTS: usize = 512;
@@ -19,6 +21,8 @@ pub(in crate::ui::workspace) struct SavedDocument {
     pub(in crate::ui::workspace) byte: u64,
     pub(in crate::ui::workspace) fraction: f32,
     pub(in crate::ui::workspace) selection: DocumentSelection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::ui::workspace) legacy_line: Option<u64>,
 }
 impl SavedDocument {
     pub(super) fn display_title(&self, cx: &App) -> String {
@@ -40,12 +44,15 @@ pub(super) struct SavedLayout {
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(super) struct LayoutBook {
     windows: Vec<SavedLayout>,
+    #[serde(default)]
+    legacy_imported: bool,
 }
 struct Store {
     book: LayoutBook,
     path: PathBuf,
     claims: HashMap<u64, gpui::WeakEntity<Workspace>>,
     error: Option<UiMessage>,
+    importing: bool,
 }
 impl gpui::Global for Store {}
 
@@ -67,7 +74,8 @@ impl Default for LayoutState {
             .as_nanos() as u64;
         Self {
             id,
-            tracked: false,
+            // 非 Windows 的普通窗口也记录布局，不依赖组合标签入口。
+            tracked: !cfg!(windows),
             flush: None,
             pending: Default::default(),
             target: None,
@@ -80,7 +88,7 @@ impl Default for LayoutState {
 impl Store {
     fn available(&self) -> Option<&SavedLayout> {
         self.book.windows.iter().rev().find(|s| {
-            !s.items.is_empty()
+            (!s.items.is_empty() || (!cfg!(windows) && s.folder.is_some()))
                 && !self
                     .claims
                     .get(&s.id)
@@ -97,7 +105,7 @@ impl Store {
                 return Err(UiMessage::new("layout.documentLimit").arg("count", MAX_DOCUMENTS));
             }
             next.windows.retain(|s| s.id != layout.id);
-            if !layout.items.is_empty() {
+            if !layout.items.is_empty() || (!cfg!(windows) && layout.folder.is_some()) {
                 next.windows.push(layout);
             }
         }
@@ -137,7 +145,7 @@ impl Store {
 
 impl Workspace {
     pub(in crate::ui::workspace) fn init_layout_store(&mut self, cx: &mut Context<Self>) {
-        if !cfg!(windows) || cx.try_global::<Store>().is_some() {
+        if cx.try_global::<Store>().is_some() {
             return;
         }
         let Some(path) = crate::settings::config_path()
@@ -168,12 +176,41 @@ impl Workspace {
         if let Some(error) = &error {
             self.failure_notice = Some(error.render(ToolbarLocale::current(cx)).into());
         }
+        let book = data.unwrap_or_default();
+        let importing = error.is_none() && !book.legacy_imported;
         cx.set_global(Store {
-            book: data.unwrap_or_default(),
+            book,
             claims: Default::default(),
-            path,
+            path: path.clone(),
             error,
+            importing,
         });
+        if importing {
+            let root = path.parent().unwrap().to_path_buf();
+            let task = cx.background_executor().spawn(async move { legacy::load(&root) });
+            cx.spawn(async move |_, cx| {
+                let result = task.await;
+                let _ = cx.update(|cx| {
+                    let store = cx.global_mut::<Store>();
+                    store.importing = false;
+                    let result = result.map_err(UiMessage::raw).and_then(|(mut layouts, warning)| {
+                        if !layouts.is_empty() && layouts.len() + store.book.windows.len() > CLOSED_WINDOWS {
+                            return Err(UiMessage::new("layout.windowLimit").arg("count", CLOSED_WINDOWS));
+                        }
+                        layouts.extend(store.book.windows.clone());
+                        store.persist(LayoutBook {windows: layouts, legacy_imported: true})?;
+                        Ok(warning)
+                    });
+                    for handle in cx.windows().into_iter().filter_map(|handle|handle.downcast::<Workspace>()) {
+                        let _ = handle.update(cx, |workspace, _, cx| {
+                            if let Err(error) = &result {workspace.failure_notice=Some(ToolbarLocale::current(cx).app_format("layout.legacyFailed", &[("error", &error.render(ToolbarLocale::current(cx)))]).into());}
+                            if let Ok(Some(warning)) = &result {workspace.failure_notice=Some(ToolbarLocale::current(cx).app_format("layout.legacyPartial", &[("error", warning)]).into());}
+                            cx.notify();
+                        });
+                    }
+                });
+            }).detach();
+        }
     }
     pub(in crate::ui::workspace) fn has_saved_layout(&self, cx: &App) -> bool {
         cx.try_global::<Store>()
@@ -194,6 +231,7 @@ impl Workspace {
             byte,
             fraction,
             selection,
+            legacy_line: None,
         }
     }
     pub(super) fn layout_snapshot(&self, cx: &App) -> SavedLayout {
@@ -294,6 +332,9 @@ impl Workspace {
         if !self.tabs.is_empty() || !self.opening.is_empty() || self.tab_interaction_busy(window) {
             return;
         }
+        if cx.try_global::<Store>().is_some_and(|store|store.importing) {
+            self.notice=Some(ToolbarLocale::current(cx).app_text("layout.loading").into());cx.notify();return;
+        }
         if let Err(error) = self.layout_recovery_candidate("", cx) {
             self.failure_notice = Some(error.into());
             cx.notify();
@@ -307,7 +348,12 @@ impl Workspace {
             return;
         };
         saved.normalize();
-        if saved.documents.is_empty() {
+        let folder = saved.folder.as_ref().filter(|path| path.is_dir()).cloned();
+        if saved.documents.is_empty() && (cfg!(windows) || folder.is_none()) {
+            if !cfg!(windows) && saved.folder.is_some() {
+                self.failure_notice = Some(ToolbarLocale::current(cx).app_text("layout.folderUnavailable").into());
+                cx.notify();
+            }
             return;
         }
         // 文件中是上次进程的逻辑 ID。本次分配新 ID，多个窗口可独立恢复、组合或交换。
@@ -332,6 +378,10 @@ impl Workspace {
         self.home.update(cx, |home, cx| home.set_active(false, cx));
         self.resume_tree(cx);
         self.comparison.items = items;
+        if !cfg!(windows) {
+            // 文件夹工作区也可再次恢复其他布局，原布局此时不再归当前窗口占用。
+            cx.global_mut::<Store>().claims.remove(&self.comparison.layout.id);
+        }
         self.comparison.layout.id = saved.id;
         self.comparison.layout.tracked = true;
         self.comparison.layout.pending = saved
@@ -340,15 +390,26 @@ impl Workspace {
             .map(|(key, doc)| (keys[&key], doc))
             .collect();
         self.claim_layout(cx);
-        if let Some(folder) = saved.folder.filter(|path| path.is_dir()) {
+        if let Some(folder) = folder {
             self.replace_tree(folder, cx);
+        } else if !cfg!(windows) && self.tree.is_some() {
+            self.suspend_tree(cx);
+            self.tree = None;
+            self.tree_animation = None;
+            self.clear_tree_search(cx);
+            self.explorer.search_focused = None;
         }
         let item = saved
             .active
             .and_then(|key| keys.get(&key))
             .and_then(|key| self.comparison.item(*key))
-            .unwrap_or(self.comparison.items[0]);
-        self.load_saved_item(item, window, cx);
+            .or_else(|| self.comparison.items.first().copied());
+        if let Some(item) = item {
+            self.load_saved_item(item, window, cx);
+        } else {
+            self.record_layout(cx);
+            cx.notify();
+        }
     }
     pub(super) fn load_to_close(
         &mut self,
@@ -495,7 +556,7 @@ impl Workspace {
             };
             if candidate.is_none()
                 && (saved.path.as_ref().is_some_and(|p| !p.is_file())
-                    || saved.dirty && saved.path.is_none())
+                    || saved.dirty)
             {
                 self.failure_notice =
                     Some(ToolbarLocale::current(cx).app_format("layout.restoreFailed", &[("name", &saved.display_title(cx))]).into());
@@ -613,7 +674,7 @@ impl SavedLayout {
                 .collect();
             match (item, valid.as_slice()) {
                 (TabItem::Pair(mut p), [_, _])
-                    if [p.left, p.right].iter().all(|key| {
+                    if cfg!(windows) && [p.left, p.right].iter().all(|key| {
                         self.documents[key]
                             .path
                             .as_ref()

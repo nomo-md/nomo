@@ -25,6 +25,7 @@ mod layout;
 mod markdown;
 mod markdown_templates;
 mod settings;
+mod legacy_records;
 mod theme;
 mod ui;
 

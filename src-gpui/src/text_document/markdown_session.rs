@@ -7,6 +7,7 @@ mod toc;
 mod rename;
 mod external;
 mod recovery;
+mod legacy;
 pub(crate) use external::ExternalChange;
 pub(crate) use recovery::{RecoveryCandidate, SessionLease};
 #[cfg(test)]
@@ -116,6 +117,8 @@ pub(crate) struct SnapshotHandle {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Manifest {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    legacy_unconfirmed: bool,
     #[serde(default)]
     derived: bool,
     version: u32,
@@ -247,7 +250,7 @@ impl Session {
     ) -> TextDocumentResult<MarkdownStatus> {
         let mut candidate = self.current.clone();
         candidate.tree = tree.clone();
-        let dirty = !snapshots_equal(&candidate, &self.saved)?;
+        let dirty = self.manifest.legacy_unconfirmed || !snapshots_equal(&candidate, &self.saved)?;
         self.current.added.sync()?;
         let offset = self.history.append(&record)?;
         let mut manifest = self.manifest.clone();
@@ -418,6 +421,7 @@ impl MarkdownDocumentSessionManager {
             added,
         };
         let manifest = Manifest {
+            legacy_unconfirmed: false,
             inline_templates: Vec::new(),
             derived: false,
             version: 1,
@@ -507,9 +511,10 @@ impl MarkdownDocumentSessionManager {
                 manifest.identity = Some(BaselineIdentity::read(&pending.path)?);
                 manifest.path = Some(pending.path);
                 manifest.saved_tree = Some(pending.saved_tree);
+                manifest.legacy_unconfirmed = false;
             }
         }
-        if as_copy { manifest.path = None; manifest.identity = None; }
+        if as_copy { manifest.path = None; manifest.identity = None; manifest.legacy_unconfirmed = false; }
         if let Some(path) = &manifest.path {
             let sessions = lock(&self.sessions)?.values().cloned().collect::<Vec<_>>();
             for session in sessions {
@@ -567,7 +572,7 @@ impl MarkdownDocumentSessionManager {
             MarkdownEncoding::Utf8,
         )?;
         File::open(root.join("raw"))?;
-        let dirty = !snapshots_equal(&current, &saved)?;
+        let dirty = manifest.legacy_unconfirmed || !snapshots_equal(&current, &saved)?;
         // 正文恢复不承诺重启后撤销；日志仍保留供正文 replay，新的历史从当前正文开始。
         manifest.undo = None;
         manifest.redo = None;
@@ -1100,6 +1105,9 @@ impl MarkdownDocumentSessionManager {
             session.owner(owner)?;
             rename::settle_pending_rename(&session)?;
             if follow_current || session.manifest.path.as_ref() == Some(&target) {
+                if session.manifest.legacy_unconfirmed && external.is_none() && !overwrite_external {
+                    return Err(error("external-change", "旧草稿的磁盘版本尚未确认，请确认覆盖或另存为新文件"));
+                }
                 let mut identity = session.manifest.identity.clone();
                 if follow_current {
                     // 同一文件在大小写不敏感卷上的规范化拼写可能与重命名后的路径不同。
@@ -1160,6 +1168,7 @@ impl MarkdownDocumentSessionManager {
         let mut manifest = session.manifest.clone();
         manifest.path = Some(target);
         manifest.identity = Some(identity);
+        manifest.legacy_unconfirmed = false;
         let old_saved_tree = manifest.saved_tree.replace(saved_tree);
         let persisted = session.persist(&manifest);
         session.manifest = manifest;

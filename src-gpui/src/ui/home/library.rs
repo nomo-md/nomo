@@ -80,12 +80,12 @@ impl Library {
                 if this.update(cx, |library, cx| {
                     library.loaded = true;
                     match result {
-                        Ok(mut snapshot) => {
+                        Ok((mut snapshot, warning)) => {
                             for entry in &mut snapshot.recent {
                                 entry.revision = if saved.as_ref() == Some(&entry.path) { library.generation.wrapping_add(1) }
                                     else { library.snapshot.recent.iter().find(|old| old.path == entry.path).map_or(0, |old| old.revision) };
                             }
-                            library.snapshot = Arc::new(snapshot); library.error = None;
+                            library.snapshot = Arc::new(snapshot); library.error = warning;
                         }
                         Err(error) => {
                             crate::app_logger::warn("Home", &format!("主页记录保存或读取失败：{error}"));
@@ -123,7 +123,8 @@ fn connect() -> Result<Connection, UiMessage> {
     if new { connection.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;").map_err(|e| e.to_string())?; }
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS entries (path TEXT NOT NULL, folder INTEGER NOT NULL, opened INTEGER NOT NULL, PRIMARY KEY(path, folder));
-         CREATE TABLE IF NOT EXISTS thumbnails (path TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, png BLOB NOT NULL, touched INTEGER NOT NULL);"
+         CREATE TABLE IF NOT EXISTS thumbnails (path TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, png BLOB NOT NULL, touched INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);"
     ).map_err(|e| e.to_string())?;
     Ok(connection)
 }
@@ -137,9 +138,47 @@ fn read_entries(connection: &Connection, folder: bool) -> Result<Vec<Entry>, Str
     entries.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
-fn apply(change: Change) -> Result<Snapshot, UiMessage> {
+fn import_legacy_recent(connection: &Connection) -> Result<(), String> {
+    let imported = connection.query_row("SELECT 1 FROM migrations WHERE name='legacy-recent-v1'", [], |_| Ok(())).optional().map_err(|e|e.to_string())?.is_some();
+    if imported { return Ok(()); }
+    let root = crate::settings::config_path().and_then(|p|p.parent().map(PathBuf::from)).ok_or("无法确定旧记录目录")?;
+    let config = crate::legacy_records::read_config(&root)?;
+    if let Some(entries) = config["recent"]["entries"].as_array() {
+        let mut entries: Vec<_> = entries.iter().collect();
+        entries.sort_by_key(|entry|std::cmp::Reverse(entry["opened_at"].as_u64().unwrap_or(0)));
+        let mut counts = [0usize;2];
+        let mut seen = std::collections::HashSet::new();
+        for entry in entries {
+            let folder = match entry["entry_type"].as_str() {Some("file")=>false,Some("folder")=>true,_=>continue};
+            let index = usize::from(folder);
+            if counts[index] >= if folder {FOLDER_LIMIT} else {RECENT_LIMIT} {continue;}
+            let Some(path) = crate::legacy_records::absolute_path(&entry["path"]) else {continue;};
+            if !seen.insert((path.clone(),folder)) {continue;}
+            counts[index] += 1;
+            // 原版 opened_at 是秒；主页使用毫秒。已有原生记录保留自己的顺序。
+            let opened = entry["opened_at"].as_u64().unwrap_or(0).saturating_mul(1000).min(i64::MAX as u64) as i64;
+            connection.execute("INSERT OR IGNORE INTO entries(path,folder,opened) VALUES (?1,?2,?3)",params![path_key(&path)?,folder,opened]).map_err(|e|e.to_string())?;
+        }
+        for (folder,limit) in [(false,RECENT_LIMIT),(true,FOLDER_LIMIT)] {
+            connection.execute("DELETE FROM entries WHERE folder=?1 AND path NOT IN (SELECT path FROM entries WHERE folder=?1 ORDER BY opened DESC,path LIMIT ?2)",params![folder,limit as i64]).map_err(|e|e.to_string())?;
+        }
+    }
+    connection.execute("INSERT INTO migrations(name) VALUES ('legacy-recent-v1')",[]).map_err(|e|e.to_string())?;
+    Ok(())
+}
+
+fn apply(change: Change) -> Result<(Snapshot, Option<UiMessage>), UiMessage> {
     let mut connection = connect()?;
-    let transaction = connection.transaction().map_err(|e| e.to_string())?;
+    let mut transaction = connection.transaction().map_err(|e| e.to_string())?;
+    // 升级兼容失败只回滚导入，不阻止正常打开、保存或清除原生记录。
+    let warning = if matches!(&change, Change::Refresh) {
+        let migration = (|| -> Result<(),String> {
+            let savepoint = transaction.savepoint().map_err(|e|e.to_string())?;
+            import_legacy_recent(&savepoint)?;
+            savepoint.commit().map_err(|e|e.to_string())
+        })();
+        migration.err().map(|error| UiMessage::raw(error).context("home.legacyFailed"))
+    } else {None};
     let result = (|| -> Result<(), UiMessage> {
         match change {
             Change::Refresh => {},
@@ -185,7 +224,7 @@ fn apply(change: Change) -> Result<Snapshot, UiMessage> {
     transaction.commit().map_err(|e| e.to_string())?;
     let snapshot = Snapshot { folders: read_entries(&connection, true)?, recent: read_entries(&connection, false)? };
     connection.execute_batch("PRAGMA incremental_vacuum(64);").map_err(|e| e.to_string())?;
-    Ok(snapshot)
+    Ok((snapshot, warning))
 }
 
 pub(super) fn cached_thumbnail(path: &Path, fingerprint: &str) -> Result<Option<Vec<u8>>, String> {

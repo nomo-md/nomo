@@ -20,16 +20,22 @@ pub(crate) struct RecoveryCandidate {
     pub verified: bool,
     modified: std::time::SystemTime,
     pub change: Option<ExternalChange>,
-    _lease: Arc<SessionLease>,
+    _lease: Option<Arc<SessionLease>>,
+    legacy: Option<crate::legacy_records::Draft>,
 }
 impl RecoveryCandidate {
+    pub(crate) fn is_legacy(&self) -> bool {self.legacy.is_some()}
     pub(crate) fn label(&self) -> String {
-        let name=self.path.as_ref().and_then(|path|path.file_name()).map(|name|name.to_string_lossy().into_owned()).unwrap_or_else(||"未命名".into());
+        let name=self.legacy.as_ref().map(|draft|format!("旧版 · {}",draft.title)).unwrap_or_else(||self.path.as_ref().and_then(|path|path.file_name()).map(|name|name.to_string_lossy().into_owned()).unwrap_or_else(||"未命名".into()));
         let minutes=self.modified.elapsed().unwrap_or_default().as_secs()/60;
         let age=if minutes<1 {"刚刚".into()}else if minutes<60 {format!("约 {minutes} 分钟前")}else if minutes<1440 {format!("约 {} 小时前",minutes/60)}else{format!("约 {} 天前",minutes/1440)};
         format!("{name} · {age}")
     }
     pub(crate) fn dismiss(&self)->Result<(),String> {
+        if let Some(draft)=&self.legacy {
+            let _lease=SessionLease::acquire(&draft.root.join("gpui-legacy-records")).map_err(|e|e.to_string())?;
+            return draft.mark_handled();
+        }
         let parent=self.root.canonicalize().map_err(|error|error.to_string())?;
         let target=self.root.join(&self.document_id).canonicalize().map_err(|error|error.to_string())?;
         if target.parent()!=Some(parent.as_path()) || target.file_name()!=Some(std::ffi::OsStr::new(&self.document_id)) {return Err("恢复目录身份不匹配，未清理任何资料".into());}
@@ -63,9 +69,9 @@ impl RecoveryCandidate {
                     Ok(true) => true,
                     Err(cause) => {crate::app_logger::warn("Recovery", &format!("无法完整核实草稿，保留手动恢复入口：{cause}"));false},
                 };
-                let change=manifest.path.as_ref().and_then(|path|external::identity(path).ok().filter(|current|*current!=manifest.identity).map(|current|ExternalChange{path:path.clone(),revision:manifest.revision,deleted:current.is_none(),token:external::token(&current)}));
+                let change=manifest.path.as_ref().and_then(|path|external::identity(path).ok().filter(|current|manifest.legacy_unconfirmed || *current!=manifest.identity).map(|current|ExternalChange{path:path.clone(),revision:manifest.revision,deleted:current.is_none(),token:external::token(&current)}));
                 let conflict=change.is_some();
-                candidates.push(Self { root: entry.path(), document_id: id, path: manifest.path, conflict, verified, change, modified: file_modified(&path), _lease: lease.clone() });
+                candidates.push(Self { root: entry.path(), document_id: id, path: manifest.path, conflict, verified, change, modified: file_modified(&path), _lease: Some(lease.clone()), legacy: None });
                 if candidates.len() == 32 { candidates.sort_by_key(|candidate|std::cmp::Reverse(candidate.modified)); return Ok(candidates); }
             }
         }
@@ -79,6 +85,7 @@ fn file_modified(path:&Path)->std::time::SystemTime {
 
 /// 按片段和 64 KiB 比较缓冲检查保存点，不挂载会话、清空历史或建立正文镜像。
 fn has_unsaved_changes(root:&Path,manifest:&Manifest,cancel:&std::sync::atomic::AtomicBool)->TextDocumentResult<bool> {
+    if manifest.legacy_unconfirmed {return Ok(true);}
     let raw=root.join("raw");
     let working=root.join("working");
     let (path,offset)=manifest.source_map.working_source(&raw,&working);
@@ -110,18 +117,31 @@ fn has_unsaved_changes(root:&Path,manifest:&Manifest,cancel:&std::sync::atomic::
 
 impl MarkdownDocumentSessionManager {
     pub(crate) fn refresh_recovery_location(&self,candidate:&mut RecoveryCandidate) {
-        if self.root.join(&candidate.document_id).is_dir() {candidate.root=self.root.clone();}
+        if self.root.join(&candidate.document_id).is_dir() {candidate.root=self.root.clone();candidate.legacy=None;}
     }
-    pub(crate) fn recovery_candidates(&self,cancel:&std::sync::atomic::AtomicBool) -> TextDocumentResult<Vec<RecoveryCandidate>> {
-        RecoveryCandidate::discover(self.root.parent().ok_or_else(|| error("recovery-root", "会话目录缺少父目录"))?, &self.root, cancel)
+    pub(crate) fn recovery_candidates(&self,cancel:&std::sync::atomic::AtomicBool) -> TextDocumentResult<(Vec<RecoveryCandidate>,Option<String>)> {
+        let parent=self.root.parent().ok_or_else(|| error("recovery-root", "会话目录缺少父目录"))?;
+        let mut candidates=RecoveryCandidate::discover(parent, &self.root, cancel)?;
+        let Some(data_root)=parent.parent().filter(|_|parent.file_name()==Some(std::ffi::OsStr::new("gpui-sessions"))) else {return Ok((candidates,None));};
+        let (drafts,warning)=match crate::legacy_records::drafts(data_root) {Ok(result)=>result,Err(error)=>(Vec::new(),Some(error))};
+        for draft in drafts {
+            super::super::markdown_search::check_cancel(cancel)?;
+            if candidates.iter().any(|candidate|candidate.document_id==draft.id) {continue;}
+            let change=draft.path.as_ref().and_then(|path|external::identity(path).ok().map(|current|ExternalChange{path:path.clone(),revision:1,deleted:current.is_none(),token:external::token(&current)}));
+            candidates.push(RecoveryCandidate{root:data_root.into(),document_id:draft.id.clone(),path:draft.path.clone(),conflict:draft.path.is_some(),verified:true,modified:draft.modified,change,_lease:None,legacy:Some(draft)});
+        }
+        candidates.sort_by_key(|candidate|std::cmp::Reverse(candidate.modified));
+        Ok((candidates,warning))
     }
     pub(crate) fn dismiss_recovery(&self,candidate:&RecoveryCandidate)->TextDocumentResult<()> {
         let _paths=lock(&self.path_operations)?;
         if lock(&self.sessions)?.contains_key(&candidate.document_id) {return Err(error("recovery-active","草稿正在文档中使用，未删除恢复资料"));}
         candidate.dismiss().map_err(|cause|error("recovery-dismiss",cause))
     }
-    pub(crate) fn adopt_recovery(&self, owner: &str, candidate: &RecoveryCandidate, as_copy: bool) -> TextDocumentResult<MarkdownStatus> {
+    pub(crate) fn adopt_recovery(&self, owner: &str, candidate: &RecoveryCandidate, as_copy: bool, cancelled: impl Fn() -> bool) -> TextDocumentResult<MarkdownStatus> {
         let _paths=lock(&self.path_operations)?;
+        if cancelled() {return Err(error("request-cancelled", "恢复已取消"));}
+        if let Some(draft)=&candidate.legacy {return self.adopt_legacy_under_path_lock(owner,draft,as_copy,&cancelled);}
         let target = self.root.join(&candidate.document_id);
         // 同卷原子移动，不读取或复制正文；失败保留源恢复目录。
         if !target.exists() { fs::rename(candidate.root.join(&candidate.document_id), &target)?; }

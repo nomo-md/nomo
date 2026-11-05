@@ -14,6 +14,7 @@ struct RecoveryCatalog {
     offered: HashSet<String>,
     busy: HashMap<String,gpui::WeakEntity<Workspace>>,
     error: Option<String>,
+    warning: Option<String>,
 }
 impl gpui::Global for RecoveryCatalog {}
 impl Drop for RecoveryCatalog {
@@ -39,7 +40,7 @@ impl Workspace {
             let _=cx.update(|cx| {
                 let catalog=cx.global_mut::<RecoveryCatalog>();
                 catalog.loading=false;
-                match result {Ok(candidates)=>catalog.candidates=candidates,Err(error)=>catalog.error=Some(error.to_string())}
+                match result {Ok((candidates,warning))=>{catalog.candidates=candidates;catalog.warning=warning;},Err(error)=>catalog.error=Some(error.to_string())}
             });
         }).detach();
     }
@@ -65,13 +66,15 @@ impl Workspace {
         let available=catalog.candidates.iter().filter(|candidate|!catalog.busy.contains_key(&candidate.document_id)).count();
         let candidates=catalog.candidates.iter().filter(|candidate|!catalog.busy.contains_key(&candidate.document_id)).take(32).cloned().collect::<Vec<_>>();
         if candidates.is_empty() {
-            self.notice=Some(ToolbarLocale::current(cx).app_text("recovery.empty").into());
+            if let Some(warning)=&catalog.warning {self.failure_notice=Some(ToolbarLocale::current(cx).app_format("recovery.legacyWarning", &[("error", &warning.to_string())]).into());}
+            else {self.notice=Some(ToolbarLocale::current(cx).app_text("recovery.empty").into());}
             cx.notify();return;
         }
         let mut actions=candidates.iter().map(|candidate|A::new(candidate.label(),IconName::FileText,Tone::Normal)).collect::<Vec<_>>();
         actions.push(A::new(UiMessage::new("recovery.later"),IconName::Close,Tone::Normal));
         let mut spec=dialog(UiMessage::new("recovery.title"),UiMessage::new("recovery.choose").into(),actions,candidates.len());
         if available>candidates.len() {spec.message=UiMessage::new("recovery.chooseMore").arg("shown",candidates.len()).arg("total",available);}
+        if let Some(warning)=&catalog.warning {spec.detail=Some(UiMessage::new("recovery.legacyWarning").arg("error",warning));}
         spec.kind=SecondaryKind::Folder;
         spec.leading=candidates.iter().map(|candidate|candidate.path.as_ref().map(|path|UiMessage::raw(super::explorer_actions::display_tree_path(path))).unwrap_or_else(||UiMessage::new("recovery.unsavedPath"))).collect();
         self.application_dialogs.busy=true;
@@ -162,7 +165,7 @@ impl Workspace {
         let owner=cx.entity().downgrade();
         cx.global_mut::<RecoveryCatalog>().busy.insert(candidate.document_id.clone(),owner);
         self.application_dialogs.busy=true;
-        let message=UiMessage::new("recovery.discardPrompt").arg("name",candidate.label());
+        let message=UiMessage::new(if candidate.is_legacy() {"recovery.discardLegacy"} else {"recovery.discardPrompt"}).arg("name",candidate.label());
         let response=dialogs::choose(dialog(UiMessage::new("recovery.discardTitle"),message,vec![A::new(UiMessage::new("recovery.keep"),IconName::Close,Tone::Normal),A::new(UiMessage::new("recovery.discard"),IconName::Trash2,Tone::Danger)],0),window,cx);
         cx.spawn_in(window,async move |this,cx| {
             let choice=response.await;
