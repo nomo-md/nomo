@@ -128,7 +128,6 @@ pub const CATEGORIES: &[Category] = &[
         title: "图片", icon: IconName::FileImage,
         page: Page::Groups(&[group("图片导入", &[
             item("imageHandlingSettings.imageInsertStrategy", "图片处理方式", "粘贴、拖放和上传图片时使用的默认策略。", Control::Choice(&[("copy-current-folder", "当前文件夹"), ("copy-assets", "assets 文件夹"), ("copy-document-assets", "文档.assets"), ("upload", "上传")]), Support::Full),
-            item("imageHandlingSettings.autoDeleteUnusedLocalImages", "自动清理本地图片", "图片引用完全移除后，同步删除对应本地文件。", Control::Toggle, Support::None("自动清理图片尚未接入，不会删除任何图片")),
             item("imageHandlingSettings.uploadProvider", "上传方式", "PicGo 适合常驻服务，PicGo-Core 适合命令行工作流。", Control::Choice(&[("picgo", "PicGo"), ("picgo-core", "PicGo-Core")]), Support::Full),
             item("imageHandlingSettings.picgoServerUrl", "PicGo Server 地址", "用于调用本机 PicGo 服务上传图片。", Control::Text { placeholder: "", compact: false }, Support::Full),
             item("imageHandlingSettings.picgoCoreCommand", "PicGo-Core 命令", "例如 picgo、npx picgo 或完整可执行文件路径。", Control::Text { placeholder: "", compact: false }, Support::Full),

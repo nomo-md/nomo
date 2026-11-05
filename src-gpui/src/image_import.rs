@@ -6,7 +6,7 @@ use std::{fs::{self, File, OpenOptions}, io::{Read, Write}, path::{Path, PathBuf
 mod upload;
 pub(crate) use upload::test_connection;
 
-pub(crate) fn defaults()->Value {json!({"imageInsertStrategy":"copy-assets","autoDeleteUnusedLocalImages":false,"uploadProvider":"picgo","picgoServerUrl":"http://127.0.0.1:36677/upload","picgoCoreCommand":"picgo","picgoCoreConfigPath":"","defaultImageWidth":"","defaultImageAlign":"none"})}
+pub(crate) fn defaults()->Value {json!({"imageInsertStrategy":"copy-assets","uploadProvider":"picgo","picgoServerUrl":"http://127.0.0.1:36677/upload","picgoCoreCommand":"picgo","picgoCoreConfigPath":"","defaultImageWidth":"","defaultImageAlign":"none"})}
 
 #[derive(Clone)]
 pub(crate) struct ImageSettings {

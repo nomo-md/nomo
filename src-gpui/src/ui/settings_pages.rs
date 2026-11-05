@@ -13,7 +13,6 @@ pub(super) fn display_value(settings: &Settings, key: &str) -> Value {
         "largeDocumentLimit" => json!(500_000),
         "renderMode" => json!("hardware"),
         "imageHandlingSettings.imageInsertStrategy" => json!("copy-assets"),
-        "imageHandlingSettings.autoDeleteUnusedLocalImages" => json!(false),
         "imageHandlingSettings.uploadProvider" => json!("picgo"),
         "imageHandlingSettings.picgoServerUrl" => json!("http://127.0.0.1:36677/upload"),
         "imageHandlingSettings.picgoCoreCommand" => json!("picgo"),
