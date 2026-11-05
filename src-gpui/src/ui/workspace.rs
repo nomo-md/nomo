@@ -1041,6 +1041,15 @@ impl Workspace {
         false
     }
     fn cancel_close(&mut self,cx:&mut Context<Self>){self.comparison.closing=None;self.comparison.batch.clear();self.closing_window=false;self.application_dialogs.close_approved=false;self.record_layout(cx);crate::cancel_quit(cx);}
+    #[cfg(windows)]
+    pub(crate) fn can_quit_to_install(&mut self, window:&mut Window,cx:&mut Context<Self>) -> bool {
+        if window.has_active_prompt() || self.closing_window || self.application_dialogs.busy || !self.opening.is_empty()
+            || !self.open_requests.pending.is_empty() || self.pending_document_transition.is_some() || !self.pending_saves.is_empty() {
+            self.reveal_window(window,cx);
+            self.notice=Some("请先完成当前操作，再点击“重启并安装”。".into()); cx.notify(); return false;
+        }
+        true
+    }
     pub(crate) fn request_quit(&mut self,window:&mut Window,cx:&mut Context<Self>)->bool {
         if window.has_active_prompt(){crate::cancel_quit(cx);return false;}
         if self.closing_window && !self.tabs.is_empty() {return false;}
@@ -1367,6 +1376,7 @@ impl Workspace {
             ChromeEvent::TablePicker=>self.open_editor_popover(EditorPopoverKind::Table,window,cx),
             ChromeEvent::ResetOutlinePosition=>self.reset_outline_position(cx),
             ChromeEvent::ToggleMini=>self.toggle_mini(window,cx),
+            ChromeEvent::SoftwareUpdate=>crate::ui::updates::action(window,cx),
             ChromeEvent::Unavailable(_)=>{self.notice=Some("此功能尚未提供".into());cx.notify();},
             _=>{self.notice=Some("此功能尚未接入原生页面".into());cx.notify();},
         }
@@ -1803,9 +1813,9 @@ impl Render for Workspace {
             sidebar_visible:settings.show_sidebar, toolbar_visible:settings.show_toolbar,
             outline_visible:settings.show_outline,split_available:self.active_pair().is_none(),
             toolbar_shortcut: crate::ui::shortcuts::current("toggle-toolbar", cx).into(),
-            recent,
+            recent, update:crate::ui::updates::chrome_state(cx),
             capabilities:vec![ChromeCapability::Recent,ChromeCapability::NewWindow,ChromeCapability::HeadingLevels,ChromeCapability::HeadingAdjustment,ChromeCapability::ClearFormatting,ChromeCapability::LinkPicker,ChromeCapability::TablePicker,ChromeCapability::MathInline,ChromeCapability::Callout,ChromeCapability::Details,ChromeCapability::InlineComment,ChromeCapability::BlockComment,ChromeCapability::FrontMatter,ChromeCapability::Diagrams,ChromeCapability::Footnote,ChromeCapability::Toc,ChromeCapability::UnavailableNotice,ChromeCapability::ResetOutlinePosition]
-                .into_iter().chain([ChromeCapability::ExportHtml, ChromeCapability::ExportPdf, ChromeCapability::ExportWord].into_iter().filter(|_| self.export_job.is_none())).chain((cfg!(windows) && self.active_pair().is_none() && status.is_some() && !window.is_fullscreen()).then_some(ChromeCapability::Mini)).collect(),
+                .into_iter().chain([ChromeCapability::SoftwareUpdate]).chain([ChromeCapability::ExportHtml, ChromeCapability::ExportPdf, ChromeCapability::ExportWord].into_iter().filter(|_| self.export_job.is_none())).chain((cfg!(windows) && self.active_pair().is_none() && status.is_some() && !window.is_fullscreen()).then_some(ChromeCapability::Mini)).collect(),
             ..Default::default()
         },cx));
         let tabs = show_tabs.then(|| self.render_tabs(&theme, cx).into_any_element());

@@ -286,7 +286,7 @@ cargo test --locked --release --features nomo-mark-demo --bin nomo text_document
 - 默认 Mermaid 图表类型已影响“默认图表”菜单项、正文右键插入、快捷插入的初始样式与工具栏图表选择器的初始选择；手动选择其它类型仍按用户选择插入。图表继续复用主会话事务和撤销历史。主题的 Mermaid default／dark／base 配置及 base 派生颜色进入原生渲染；颜色值参与原有缓存键，继续使用 128 MiB 位图预算，没有独立的图表缓存。
 - 代码高亮复用第二阶段的语义角色缓存，主题选择 GitHub 或 Gruvbox 的明暗调色板；[Gruvbox Light](https://raw.githubusercontent.com/shikijs/textmate-grammars-themes/main/packages/tm-themes/themes/gruvbox-light-medium.json) 与 [Gruvbox Dark](https://raw.githubusercontent.com/shikijs/textmate-grammars-themes/main/packages/tm-themes/themes/gruvbox-dark-medium.json) 为颜色参考。语言级 token 分类仍由原生语法库决定，未声称与 Shiki 完全一致。
 
-本阶段未新增生产依赖、全文副本或撤销历史，未新增或修改测试用例。网页样式令牌在 JSON 导入／导出中保留，原生组件仅消费对应令牌；未实现全部网页 CSS 效果或全部组件的样式档案切换，尚不能认定逐像素一致。软件渲染切换、开发者日志开关、Markdown 格式检查、外部文件自动处理、系统文件关联与右键注册仍保留未支持提示。未执行真实桌面、文件选择器、快捷键键鼠、IME、DPI、跨平台或性能基准验收。
+本阶段未新增生产依赖、全文副本或撤销历史，未新增或修改测试用例。网页样式令牌在 JSON 导入／导出中保留，原生组件仅消费对应令牌；未实现全部网页 CSS 效果或全部组件的样式档案切换，尚不能认定逐像素一致。软件渲染切换、开发者日志开关、Markdown 格式检查、外部文件自动处理在本阶段仍保留未支持提示。新版 Windows 文件关联与右键菜单见[原生构建说明](native-build.md#windows-x64)。未执行真实桌面、文件选择器、快捷键键鼠、IME、DPI、跨平台或性能基准验收。
 
 验证：默认与 `nomo-mark-demo` 的 `cargo check --locked`、默认 `cargo build --locked --release --bin nomo` 均通过；现有高亮 3 项、公式／图表与缓存 6 项测试通过，1 项目视样例保持忽略。没有新增主题解析或快捷键交互测试，文件导入／导出和键鼠行为仍需实机验收。构建后核对 231 个 Rust 源文件、JSON 资源与 Cargo 配置哈希无变化。默认 Release SHA-256 为 `B5236680341612F14A48D4E73FBABAB15CD3A5396A1985041F512D5290B3D6F8`，大小 64306688 字节；未提交或推送。
 

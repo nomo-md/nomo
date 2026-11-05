@@ -72,6 +72,7 @@ ashpd = { version = "=0.11.1", default-features = false, features = ["async-std"
 [target.'cfg(windows)'.dependencies]
 # platform 0.3.10 在 Windows 强制嵌入自己的 manifest；直接构造后端以保留 Nomo 的 DPI/版本资源。
 gpui_windows = { package = "gpui-pre-windows", version = "=0.3.10", default-features = false }
+windows-registry = "=0.6.1" # 与 GPUI 共用，为当前用户注册 Windows 文件关联。
 raw-window-handle = "=0.6.2"
 # 复用 GPUI 已使用的 Windows 绑定，通过 Shell 切换任务栏按钮，避免隐藏/重建窗口造成闪烁。
 windows = { version = "=0.62.2", features = ["Win32_System_Com", "Win32_UI_Input_Ime", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell"] }

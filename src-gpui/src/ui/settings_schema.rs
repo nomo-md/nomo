@@ -21,6 +21,8 @@ pub enum Support {
     None(&'static str),
 }
 
+const WINDOWS_SHELL: Support = if cfg!(windows) { Support::Full } else { Support::None("仅支持 Windows 资源管理器") };
+
 pub struct Item {
     pub key: &'static str,
     pub label: &'static str,
@@ -118,8 +120,8 @@ pub const CATEGORIES: &[Category] = &[
             item("sidebarHidden", "启动时隐藏资源管理器侧边栏", "下次打开后保持侧边栏收起。", Control::Toggle, Support::Full),
             item("closeWindowBehavior", "关闭窗口行为", "设置点击关闭按钮时的主窗口行为。", Control::Choice(&[("ask-every-time", "每次选择"), ("close-window", "关闭窗口"), ("close-to-tray", "关闭到托盘")]), Support::Partial("关闭到托盘仅在 Windows 可用")),
             item("externalFileChangeBehavior", "文件变更默认行为", "仅在没有本地修改时自动处理；有未保存修改、文件被删除或移动时仍会提示。忽略后保存仍需确认。", Control::Choice(&[("reload-external", "重新载入"), ("overwrite-external", "覆盖外部"), ("ignore", "忽略")]), Support::Full),
-            item("markdownAssociation", "绑定 .md 默认打开方式", "将 Nomo 注册到 Windows 默认应用候选列表，并在系统设置中完成确认。", Control::Action("绑定 .md"), Support::None("当前构建尚未接入系统文件关联设置")),
-            item("contextMenuRegistration", "注册 .md 与文件夹右键菜单", "在 .md / .markdown 文件和文件夹右键菜单中加入 Nomo。", Control::Action("注册右键菜单"), Support::None("当前构建尚未接入系统右键菜单注册")),
+            item("markdownAssociation", "绑定 .md 默认打开方式", "将 Nomo 加入候选列表，再到 Windows 默认应用设置中选择 .md 的打开程序。", Control::Action("绑定 .md"), WINDOWS_SHELL),
+            item("contextMenuRegistration", "注册 .md 与文件夹右键菜单", "在 Markdown 文件和文件夹的右键菜单中加入 Nomo。Windows 11 可在“显示更多选项”中找到。", Control::Action("注册右键菜单"), WINDOWS_SHELL),
         ])]),
     },
     Category {
@@ -170,5 +172,5 @@ pub const CATEGORIES: &[Category] = &[
 
 pub const ABOUT_ITEMS: &[Item] = &[
     item("softwareUpdateAutoCheckEnabled", "启动时自动检查更新", "每次冷启动后在后台检查一次，检查失败时不会打扰编辑。", Control::Toggle, Support::Full),
-    item("updateCheck", "更新检查", "检查 GitHub Release 中的 Nomo 稳定版更新。", Control::Action("检查更新"), Support::Full),
+    item("updateCheck", "更新检查", "检查官方稳定版。Windows 安装版可直接下载更新并重启安装。", Control::Action("检查更新"), Support::Full),
 ];

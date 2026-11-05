@@ -76,6 +76,47 @@ fn preview_variant(variant: &crate::theme::catalog::Variant) -> Div {
 }
 
 impl SettingsWindow {
+    #[cfg(windows)]
+    pub(super) fn render_shell_action(&self, key: &'static str, label: &'static str, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        use crate::windows_integration::{self, ShellAction};
+        let busy = self.shell.running.is_some();
+        let action_button = |action: ShellAction, label| {
+            button(eid(key, label), label, None, if busy { ButtonKind::Disabled } else { ButtonKind::Secondary }, theme)
+                .when(!busy, |el| el.on_click(cx.listener(move |view, _, window, cx| {
+                    if view.shell.running.is_some() { return; }
+                    view.shell.message = None;
+                    let work = cx.background_executor().spawn(async move { action.apply() });
+                    view.shell.running = Some((key, cx.spawn_in(window, async move |this, cx| {
+                        let result = work.await;
+                        let _ = this.update_in(cx, |view, _, cx| {
+                            let result = result.and_then(|message| {
+                                if action == ShellAction::BindMarkdown { windows_integration::open_default_apps()?; }
+                                Ok(message)
+                            });
+                            view.shell.message = Some((key, result));
+                            view.shell.running = None;
+                            cx.notify();
+                        });
+                    })));
+                    cx.notify();
+                })))
+        };
+        let buttons = div().flex().gap(px(6.0));
+        let buttons = if key == "markdownAssociation" {
+            buttons.child(action_button(ShellAction::BindMarkdown, label))
+        } else {
+            buttons.child(action_button(ShellAction::RegisterMenu, label)).child(action_button(ShellAction::RemoveMenu, "移除"))
+        };
+        let mut row = div().min_w(px(0.0)).flex().flex_col().items_end().gap(px(5.0)).child(buttons);
+        if self.shell.running.as_ref().is_some_and(|(owner, _)| *owner == key) {
+            row = row.child(div().text_size(px(12.0)).text_color(theme.muted).child("正在处理…"));
+        } else if let Some((_, result)) = self.shell.message.as_ref().filter(|(owner, _)| *owner == key) {
+            let (message, color) = match result { Ok(ok) => (*ok, theme.muted), Err(err) => (err.as_str(), theme.danger) };
+            row = row.child(div().text_size(px(12.0)).text_color(color).child(message.to_owned()));
+        }
+        row.into_any_element()
+    }
+
     pub(super) fn render_theme_picker(&self, theme: &Theme, viewport: gpui::Size<gpui::Pixels>, cx: &Context<Self>) -> AnyElement {
         use crate::theme::catalog::{self, ThemeCatalog};
         let catalog = cx.global::<ThemeCatalog>();

@@ -102,6 +102,14 @@ pub struct SettingsWindow {
     _subscriptions: Vec<Subscription>,
     image_test: Option<crate::image_import::ImportCancellation>,
     image_test_message: Option<String>,
+    #[cfg(windows)]
+    shell: ShellControls,
+}
+#[cfg(windows)]
+#[derive(Default)]
+struct ShellControls {
+    running: Option<(&'static str, gpui::Task<()>)>,
+    message: Option<(&'static str, Result<&'static str, String>)>,
 }
 impl Drop for SettingsWindow {
     fn drop(&mut self) { if let Some(cancel) = &self.image_test { cancel.cancel(); } }
@@ -113,6 +121,12 @@ impl Focusable for SettingsWindow {
 
 impl SettingsWindow {
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((picker, _)) = &self.font_picker {
+            if picker.read(cx).composing(cx) { cx.propagate(); return; }
+            self.font_picker = None;
+            window.focus(&self.focus, cx);
+            cx.stop_propagation(); cx.notify(); return;
+        }
         if self.open_select.take().is_some() {
             cx.notify();
         } else {
@@ -121,12 +135,6 @@ impl SettingsWindow {
                 let field = field.read(cx);
                 field.focus_handle(cx).is_focused(window) && (field.is_composing()
                     || (super::shortcuts::SHORTCUTS.iter().any(|shortcut| shortcut.id == *key)
-        if let Some((picker, _)) = &self.font_picker {
-            if picker.read(cx).composing(cx) { cx.propagate(); return; }
-            self.font_picker = None;
-            window.focus(&self.focus, cx);
-            cx.stop_propagation(); cx.notify(); return;
-        }
                         && field.content != super::shortcuts::current(key, cx)))
             });
             if editing { cx.propagate(); return; }
@@ -144,6 +152,8 @@ impl SettingsWindow {
             toggles: HashMap::new(), fields: HashMap::new(), field_errors: HashMap::new(), shortcut_errors: HashMap::new(),
             scroll: ScrollHandle::new(), _subscriptions: Vec::new(),
             image_test: None, image_test_message: None,
+            #[cfg(windows)]
+            shell: ShellControls::default(),
         }
     }
 
@@ -280,8 +290,13 @@ impl SettingsWindow {
                     .text_color(theme.muted).child(*unit)).into_any_element(),
             Control::Action(label) if key=="updateCheck" => {
                 let busy=super::updates::busy(cx);
-                button("update-check",if busy {"正在检查…"}else{label},None,ButtonKind::Secondary,theme)
-                    .when(!busy,|el|el.on_click(cx.listener(|_,_,window,cx|super::updates::check(window,cx,false))))
+                let label = match super::updates::chrome_state(cx) {
+                    Some(super::chrome::ChromeUpdateState::Downloading(p)) => format!("正在下载 {p}%"),
+                    Some(super::chrome::ChromeUpdateState::Downloaded) => "重启并安装".into(),
+                    _ if busy => "正在检查…".into(), _ => (*label).into(),
+                };
+                button("update-check",label,None,ButtonKind::Secondary,theme)
+                    .when(!busy,|el|el.on_click(cx.listener(|_,_,window,cx|super::updates::action(window,cx))))
                     .when(busy,|el|el.opacity(0.55)).into_any_element()
             },
             Control::Action(label) if key == "imageConnectionTest" => {
@@ -309,6 +324,10 @@ impl SettingsWindow {
                     .children(self.image_test_message.clone().map(|message| div().text_size(px(12.0)).text_color(theme.muted).child(message)))
                     .into_any_element()
             },
+            #[cfg(windows)]
+            Control::Action(label) if matches!(key, "markdownAssociation" | "contextMenuRegistration") => {
+                self.render_shell_action(key, label, theme, cx)
+            }
             Control::Action(label) => unavailable_action(key, label, theme).into_any_element(),
             Control::Info => div().px(px(9.0)).py(px(5.0)).rounded_full().border_1().border_color(theme.border)
                 .text_size(px(13.0)).text_color(theme.muted).child("后续版本支持").into_any_element(),
@@ -393,6 +412,7 @@ impl Render for SettingsWindow {
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.category = index;
                         this.open_select = None;
+                        this.font_picker = None;
                         this.toggles.clear();
                         this.scroll.set_offset(point(px(0.0), px(0.0)));
                         cx.notify();
@@ -412,7 +432,6 @@ impl Render for SettingsWindow {
             .when(!compact, |el| el.child(div().text_size(px(14.0)).font_weight(FontWeight::BOLD).child("偏好设置")));
         #[cfg(target_os = "windows")]
         { nav_drag = nav_drag.child(window_chrome::drag_surface("settings-nav-drag")); }
-                        this.font_picker = None;
         #[cfg(not(target_os = "windows"))]
         { nav_drag = nav_drag.on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.start_window_move()); }
 

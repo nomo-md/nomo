@@ -32,23 +32,53 @@
   WriteRegStr SHCTX "Software\Classes\.json\OpenWithList\${MAINBINARYNAME}.exe" "" ""
   WriteRegStr SHCTX "Software\Classes\.json\OpenWithProgids" "Nomo.Json" ""
 
+  ; 在“默认应用”中列出当前用户的 Markdown 候选，不写扩展名默认值或 UserChoice。
+  WriteRegStr SHCTX "Software\Nomo\Capabilities" "ApplicationName" "Nomo"
+  WriteRegStr SHCTX "Software\Nomo\Capabilities" "ApplicationDescription" "Nomo Markdown 编辑器"
+  WriteRegStr SHCTX "Software\Nomo\Capabilities\FileAssociations" ".md" "Nomo.Markdown"
+  WriteRegStr SHCTX "Software\Nomo\Capabilities\FileAssociations" ".markdown" "Nomo.Markdown"
+  WriteRegStr SHCTX "Software\RegisteredApplications" "Nomo" "Software\Nomo\Capabilities"
+
   System::Call "shell32::SHChangeNotify(i,i,i,i) (0x08000000, 0x1000, 0, 0)"
 !macroend
 
+!macro NOMO_REMOVE_OWN_MENU VERB ARGUMENT
+  ReadRegStr $0 SHCTX "Software\Classes\${VERB}\command" ""
+  ${If} $0 == '"$INSTDIR\${MAINBINARYNAME}.exe" "${ARGUMENT}"'
+  ${OrIf} $0 == '"$INSTDIR\${MAINBINARYNAME}.exe" "${ARGUMENT}\."'
+    DeleteRegKey SHCTX "Software\Classes\${VERB}"
+  ${EndIf}
+!macroend
+
 !macro NOMO_UNREGISTER_OPEN_WITH
-  ; 卸载时只移除 Nomo 自己注册的打开方式入口，保留用户选择的其他默认程序。
-  DeleteRegKey SHCTX "Software\Classes\Applications\${MAINBINARYNAME}.exe"
-  DeleteRegKey SHCTX "Software\Classes\Nomo.Markdown"
+  ; 便携版和安装版共用 ProgID 和菜单名，保留已重新绑定到另一份 Nomo 的入口。
+  ReadRegStr $0 SHCTX "Software\Classes\Applications\${MAINBINARYNAME}.exe\shell\open\command" ""
+  ${If} $0 == '"$INSTDIR\${MAINBINARYNAME}.exe" "%1"'
+    DeleteRegKey SHCTX "Software\Classes\Applications\${MAINBINARYNAME}.exe"
+    DeleteRegKey SHCTX "Software\Classes\.md\OpenWithList\${MAINBINARYNAME}.exe"
+    DeleteRegKey SHCTX "Software\Classes\.markdown\OpenWithList\${MAINBINARYNAME}.exe"
+    DeleteRegKey SHCTX "Software\Classes\.txt\OpenWithList\${MAINBINARYNAME}.exe"
+    DeleteRegKey SHCTX "Software\Classes\.json\OpenWithList\${MAINBINARYNAME}.exe"
+  ${EndIf}
+  ReadRegStr $0 SHCTX "Software\Classes\Nomo.Markdown\shell\open\command" ""
+  ${If} $0 == '"$INSTDIR\${MAINBINARYNAME}.exe" "%1"'
+    DeleteRegKey SHCTX "Software\Classes\Nomo.Markdown"
+    DeleteRegValue SHCTX "Software\Classes\.md\OpenWithProgids" "Nomo.Markdown"
+    DeleteRegValue SHCTX "Software\Classes\.markdown\OpenWithProgids" "Nomo.Markdown"
+    ReadRegStr $0 SHCTX "Software\RegisteredApplications" "Nomo"
+    ${If} $0 == "Software\Nomo\Capabilities"
+      DeleteRegValue SHCTX "Software\RegisteredApplications" "Nomo"
+      DeleteRegKey SHCTX "Software\Nomo\Capabilities"
+    ${EndIf}
+  ${EndIf}
   DeleteRegKey SHCTX "Software\Classes\Nomo.Text"
   DeleteRegKey SHCTX "Software\Classes\Nomo.Json"
-  DeleteRegKey SHCTX "Software\Classes\.md\OpenWithList\${MAINBINARYNAME}.exe"
-  DeleteRegValue SHCTX "Software\Classes\.md\OpenWithProgids" "Nomo.Markdown"
-  DeleteRegKey SHCTX "Software\Classes\.markdown\OpenWithList\${MAINBINARYNAME}.exe"
-  DeleteRegValue SHCTX "Software\Classes\.markdown\OpenWithProgids" "Nomo.Markdown"
-  DeleteRegKey SHCTX "Software\Classes\.txt\OpenWithList\${MAINBINARYNAME}.exe"
   DeleteRegValue SHCTX "Software\Classes\.txt\OpenWithProgids" "Nomo.Text"
-  DeleteRegKey SHCTX "Software\Classes\.json\OpenWithList\${MAINBINARYNAME}.exe"
   DeleteRegValue SHCTX "Software\Classes\.json\OpenWithProgids" "Nomo.Json"
+  !insertmacro NOMO_REMOVE_OWN_MENU "SystemFileAssociations\.md\shell\Nomo.Open" "%1"
+  !insertmacro NOMO_REMOVE_OWN_MENU "SystemFileAssociations\.markdown\shell\Nomo.Open" "%1"
+  !insertmacro NOMO_REMOVE_OWN_MENU "Directory\shell\Nomo.OpenFolder" "%1"
+  !insertmacro NOMO_REMOVE_OWN_MENU "Directory\Background\shell\Nomo.OpenFolder" "%V"
 
   System::Call "shell32::SHChangeNotify(i,i,i,i) (0x08000000, 0x1000, 0, 0)"
 !macroend

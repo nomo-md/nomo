@@ -1,24 +1,31 @@
-//! 更新界面复用旧版免安装分支：检查官方 Release，下载交给浏览器，不执行安装器。
+//! 检查官方 Release。Windows 安装版在应用内下载并确认重启；便携版保留单独的下载入口。
 use super::{dialogs::{self, SecondaryDialog, SecondaryKind, SecondaryAction as A, Tone}, components::IconName, toolbar_i18n::ToolbarLocale};
 use crate::settings::Settings;
 use gpui::{App, AppContext, AnyWindowHandle, Entity, Global, Task, Window, IntoElement};
 use serde::Deserialize;
 use std::{sync::{Arc, OnceLock}, time::Duration};
 mod notice;
+#[cfg(windows)]
+mod installer;
+#[cfg(windows)]
+mod install_ui;
+#[cfg(windows)]
+pub(crate) use install_ui::launch_after_close;
 
 #[derive(Default)]
-struct Updates { started:bool, busy:bool, task:Option<Task<()>>, notice:Option<(AnyWindowHandle,Entity<notice::UpdateNotice>)>, pending:Option<(AnyWindowHandle,Pending)> }
-enum Pending { Release(Release,bool), Failure(String) }
+struct Updates { started:bool, busy:bool, task:Option<Task<()>>, notice:Option<(AnyWindowHandle,Entity<notice::UpdateNotice>)>, pending:Option<(AnyWindowHandle,Pending)>,
+    #[cfg(windows)] install:install_ui::InstallState }
+enum Pending { Release(Release,bool), Failure(String), #[cfg(windows)] Install }
 impl Global for Updates {}
 #[derive(Clone,Deserialize)]
 struct Release {tag_name:String, html_url:String, body:Option<String>, published_at:Option<String>,#[serde(default)]assets:Vec<ReleaseAsset>}
 #[derive(Clone,Deserialize)]
-struct ReleaseAsset {name:String,browser_download_url:String}
+struct ReleaseAsset {name:String,browser_download_url:String, #[cfg(windows)] #[serde(default)] size:u64, #[cfg(windows)] digest:Option<String>}
 fn installed_windows()->bool {
-    cfg!(windows)&&std::env::current_exe().ok().and_then(|path|path.parent().map(|parent|parent.join("uninstall.exe").is_file())).unwrap_or(false)
+    #[cfg(windows)] { installer::installed() }
+    #[cfg(not(windows))] { false }
 }
 fn portable_download(release:&Release)->Option<String>{
-    if installed_windows(){return None;}
     let architecture=if cfg!(target_arch="aarch64"){["aarch64","arm64"]}else{["x64","x86_64"]};
     release.assets.iter().find_map(|asset|{
         let name=asset.name.to_ascii_lowercase();
@@ -30,6 +37,14 @@ fn portable_download(release:&Release)->Option<String>{
 }
 fn version(value:&str)->Option<(u64,u64,u64)> {let mut parts=value.trim_start_matches('v').split('.');let result=(parts.next()?.parse().ok()?,parts.next()?.parse().ok()?,parts.next()?.parse().ok()?);if parts.next().is_some(){None}else{Some(result)}}
 pub(crate) fn busy(cx:&App)->bool {cx.try_global::<Updates>().is_some_and(|state|state.busy)}
+pub(crate) fn chrome_state(cx:&App) -> Option<super::chrome::ChromeUpdateState> {
+    #[cfg(windows)] if let Some(stage) = install_ui::stage(cx) { return Some(stage); }
+    cx.try_global::<Updates>()?.notice.as_ref().map(|_| super::chrome::ChromeUpdateState::Available)
+}
+pub(crate) fn action(window:&mut Window, cx:&mut App) {
+    #[cfg(windows)] if install_ui::handle_action(window,cx) { return; }
+    check(window,cx,false);
+}
 pub(crate) fn startup(window:&mut Window,cx:&mut App) {
     if cx.try_global::<Updates>().is_some_and(|state|state.started){return;}
     if cx.try_global::<Updates>().is_none(){cx.set_global(Updates::default());}
@@ -41,7 +56,7 @@ pub(crate) fn check(window:&mut Window,cx:&mut App,startup:bool) {
     if cx.try_global::<Updates>().is_none(){cx.set_global(Updates::default());}
     cx.global_mut::<Updates>().busy=true;
     let previous=cx.global::<Settings>().string("nativeReleaseNotesVersion");
-    let just_updated= !previous.is_empty() && version(&previous)<version(env!("CARGO_PKG_VERSION"));
+    let just_updated= startup && !previous.is_empty() && version(&previous)<version(env!("CARGO_PKG_VERSION"));
     let endpoint=if just_updated {format!("https://api.github.com/repos/nomo-md/nomo/releases/tags/v{}",env!("CARGO_PKG_VERSION"))}else{"https://api.github.com/repos/nomo-md/nomo/releases/latest".into()};
     let task=cx.background_executor().spawn(async move {fetch(&endpoint)});
     let mut context=window.to_async(cx);
@@ -71,7 +86,7 @@ pub(crate) fn check(window:&mut Window,cx:&mut App,startup:bool) {
 pub(crate) fn present_pending(window:&mut Window,cx:&mut App)->bool {
     let matches=cx.try_global::<Updates>().and_then(|state|state.pending.as_ref()).is_some_and(|(owner,_)|*owner==window.window_handle());
     if !matches||window.has_active_prompt(){return false;}
-    if let Some((_,pending))=cx.global_mut::<Updates>().pending.take(){match pending {Pending::Release(release,success)=>show_release(release,success,window,cx),Pending::Failure(error)=>show_error(error,window,cx)}return true;}
+    if let Some((_,pending))=cx.global_mut::<Updates>().pending.take(){match pending {Pending::Release(release,success)=>show_release(release,success,window,cx),Pending::Failure(error)=>show_error(error,window,cx), #[cfg(windows)] Pending::Install=>install_ui::confirm(window,cx)}return true;}
     false
 }
 pub(crate) fn defer_pending(window:&Window,cx:&mut App) {
@@ -82,26 +97,32 @@ pub(crate) fn defer_pending(window:&Window,cx:&mut App) {
 fn show_release(release:Release,success:bool,window:&mut Window,cx:&mut App) {
     let locale=ToolbarLocale::current(cx);
     let newer=version(&release.tag_name)>version(env!("CARGO_PKG_VERSION"));
-    let download=if newer{portable_download(&release)}else{None};
+    let installed=installed_windows();
+    let in_app=installed && newer && !success;
+    let download=if newer && !installed {portable_download(&release)}else{None};
     let primary=download.clone().unwrap_or_else(||release.html_url.clone());
     let title=locale.text(if success {"softwareUpdateInstalledTitle"}else{"softwareUpdateReleaseTitle"}).replace("{version}",release.tag_name.trim_start_matches('v'));
     let message=format!("{}  ·  {}",release.tag_name,release.published_at.as_deref().unwrap_or("").split('T').next().unwrap_or(""));
-    let mut actions=vec![A::new(locale.text(if success {"softwareUpdateStartUsing"}else{"softwareUpdateLater"}),if success{IconName::Check}else{IconName::Close},if success{Tone::Primary}else{Tone::Normal})];
-    if !success {actions.push(A::new(if download.is_some(){locale.text("softwareUpdateDownloadPortable")}else{locale.text("nativeViewRelease")},IconName::ExternalLink,Tone::Primary));}
+    let dismiss = if success {"softwareUpdateStartUsing"} else if newer {"softwareUpdateLater"} else {"close"};
+    let mut actions=vec![A::new(locale.text(dismiss),if success{IconName::Check}else{IconName::Close},if success || !newer{Tone::Primary}else{Tone::Normal})];
+    if newer && !success {actions.push(A::new(if in_app {locale.text("nativeUpdateDownload")}else if download.is_some(){locale.text("softwareUpdateDownloadPortable")}else{locale.text("nativeViewRelease")},if in_app {IconName::Download} else {IconName::ExternalLink},Tone::Primary));}
     let notes=release.body.as_deref().map(strip_packages).filter(|text|!text.trim().is_empty()).unwrap_or_else(||locale.text("softwareUpdateReleaseFallback")).to_owned();
-    let detail=if success{Some(locale.text("softwareUpdateInstalledHint").into())}else if installed_windows(){None}else{Some(format!("{} · {}",locale.text("softwareUpdatePortableTitle"),locale.text("softwareUpdatePortableHint")))};
+    let detail=if success{Some(locale.text("softwareUpdateInstalledHint").into())}else if in_app {Some(locale.text("nativeUpdateDownloadHint").into())}else if !newer {Some(locale.text("nativeUpdateCurrent").into())}else if download.is_some(){Some(format!("{} · {}",locale.text("softwareUpdatePortableTitle"),locale.text("softwareUpdatePortableHint")))}else{None};
     let dialog=SecondaryDialog {kind:if success {SecondaryKind::UpdateSuccess}else{SecondaryKind::Update},title,message,detail,notes:Some(notes),actions,cancel:0,remember:None,leading:Vec::new()};
     let response=dialogs::choose(dialog,window,cx);
-    window.to_async(cx).spawn(async move |context| {let choice=response.await;let _=context.update(|_,cx| {
+    window.to_async(cx).spawn(async move |context| {let choice=response.await;let _=context.update(|window,cx| {
         if success {Settings::set(cx,"nativeReleaseNotesVersion",serde_json::json!(env!("CARGO_PKG_VERSION")));}
-        if choice.index==1 {cx.open_url(&primary);}
+        if choice.index==1 {
+            #[cfg(windows)] if in_app { install_ui::start(&release,window,cx); return; }
+            cx.open_url(&primary);
+        }
     });}).detach();
 }
-fn show_error(error:String,window:&mut Window,cx:&mut App) {
+pub(crate) fn show_error(error:String,window:&mut Window,cx:&mut App) {
     let locale=ToolbarLocale::current(cx);
     let dialog=SecondaryDialog {kind:SecondaryKind::Update,title:locale.text("nativeUpdateFailed").into(),message:error,detail:None,notes:None,actions:vec![A::new(locale.text("close"),IconName::Close,Tone::Normal),A::new(locale.text("softwareUpdateCheckAgain"),IconName::RefreshCw,Tone::Primary)],cancel:0,remember:None,leading:Vec::new()};
     let response=dialogs::choose(dialog,window,cx);
-    window.to_async(cx).spawn(async move |context| {let choice=response.await;if choice.index==1 {let _=context.update(|window,cx|check(window,cx,false));}}).detach();
+    window.to_async(cx).spawn(async move |context| {let choice=response.await;if choice.index==1 {let _=context.update(|window,cx|action(window,cx));}}).detach();
 }
 pub(crate) fn render_notice(window:&Window,cx:&App)->Option<gpui::AnyElement> {
     let (owner,notice)=cx.try_global::<Updates>()?.notice.as_ref()?;
@@ -112,6 +133,7 @@ pub(crate) fn prune_closed_windows(cx:&mut App) {
     let windows=cx.windows();
     if cx.try_global::<Updates>().is_some() {
         let state=cx.global_mut::<Updates>();
+        #[cfg(windows)] state.install.owner_closed(&windows);
         if state.notice.as_ref().is_some_and(|(owner,_)|!windows.contains(owner)){state.notice=None;}
         if state.pending.as_ref().is_some_and(|(owner,_)|!windows.contains(owner)){state.pending=None;}
     }

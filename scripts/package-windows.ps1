@@ -85,6 +85,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $root 'src-gpui/assets/licenses/LICENSE-STIX') -Destination (Join-Path $app 'LICENSE-STIX')
     Copy-Item -LiteralPath (Join-Path $root 'src-gpui/assets/licenses/LICENSE-Rendering') -Destination (Join-Path $app 'LICENSE-Rendering')
     Copy-Item -LiteralPath (Join-Path $root 'src-gpui/assets/licenses/LICENSE-Export') -Destination (Join-Path $app 'LICENSE-Export')
+    Copy-Item -LiteralPath (Join-Path $root 'src-gpui/assets/licenses/LICENSE-Windows') -Destination (Join-Path $app 'LICENSE-Windows')
     Copy-Item -LiteralPath (Join-Path $root 'sample.md') -Destination (Join-Path $app 'samples/sample.md')
     Copy-Item -LiteralPath (Join-Path $root 'assets/128x128.png') -Destination (Join-Path $app 'samples/assets/128x128.png')
     $installer = Join-Path $output "Nomo_${version}_x64-setup.exe"

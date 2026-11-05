@@ -15,6 +15,8 @@ mod open_profile;
 mod frame_profile;
 #[cfg(windows)]
 mod open_instance;
+#[cfg(windows)]
+mod windows_integration;
 mod embeds;
 mod images;
 mod image_import;
@@ -50,19 +52,41 @@ use gpui::{App, AppContext, Bounds, Menu, MenuItem, TitlebarOptions, WindowBound
 use std::path::PathBuf;
 use ui::workspace::{self, Workspace};
 
-struct QuitRequested(bool);
+#[derive(Clone, Copy)]
+enum QuitReason { Normal, #[cfg(windows)] Install }
+struct QuitRequested(Option<QuitReason>);
 impl gpui::Global for QuitRequested {}
-pub(crate) fn cancel_quit(cx:&mut App){cx.set_global(QuitRequested(false));}
+pub(crate) fn cancel_quit(cx:&mut App){cx.set_global(QuitRequested(None));}
 pub(crate) fn quit_workspaces(cx:&mut App){
-    cx.set_global(QuitRequested(true));
+    request_quit(QuitReason::Normal,cx);
+}
+#[cfg(windows)]
+pub(crate) fn quit_to_install(cx:&mut App){
+    for handle in cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()) {
+        if !handle.update(cx,|workspace,window,cx| workspace.can_quit_to_install(window,cx)).unwrap_or(false) { return; }
+    }
+    request_quit(QuitReason::Install,cx);
+}
+fn request_quit(reason: QuitReason,cx:&mut App){
+    cx.set_global(QuitRequested(Some(reason)));
     for handle in cx.windows().into_iter().filter_map(|window|window.downcast::<Workspace>()) {
+        if cx.global::<QuitRequested>().0.is_none() { break; }
         let _=handle.update(cx,|workspace,window,cx|{if workspace.request_quit(window,cx){window.remove_window();}});
     }
     finish_quit(cx);
 }
 fn finish_quit(cx:&mut App){
-    if !cx.try_global::<QuitRequested>().is_some_and(|request|request.0)||cx.windows().iter().any(|window|window.downcast::<Workspace>().is_some()){return;}
+    let Some(_reason)=cx.try_global::<QuitRequested>().and_then(|request| request.0) else{return;};
+    if cx.windows().iter().any(|window|window.downcast::<Workspace>().is_some()){return;}
     cancel_quit(cx);
+    #[cfg(windows)]
+    if matches!(_reason, QuitReason::Install) && let Err(error)=ui::updates::launch_after_close(cx) {
+        match try_open_workspace(Vec::new(),cx) {
+            Ok(handle)=>{ let _=handle.update(cx,|_,window,cx|ui::updates::show_error(error,window,cx)); }
+            Err(e)=>open_instance::show_error(&format!("{error}\n{e}")),
+        }
+        return;
+    }
     for handle in cx.windows(){let _=handle.update(cx,|_,window,_|window.remove_window());}
     cx.quit();
 }
