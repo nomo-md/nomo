@@ -67,6 +67,9 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std
 
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "=3.6.1", default-features = false, features = ["wayland-data-control"] }
+# 复用 arboard 已锁定的后端，对 HTML 管道与 X11 属性分片施加输入预算。
+wl-clipboard-rs = "=0.9.5"
+x11rb = { version = "=0.13.2", features = ["allow-unsafe-code", "randr"] }
 ashpd = { version = "=0.11.1", default-features = false, features = ["async-std"] }
 
 [target.'cfg(windows)'.dependencies]

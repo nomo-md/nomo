@@ -3,6 +3,9 @@ use gpui::App;
 #[cfg(target_os = "windows")]
 #[path = "clipboard_rich.rs"]
 mod rich;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "clipboard_native.rs"]
+mod native;
 
 pub(crate) fn write_png(bytes: Vec<u8>, cx: &App) -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -41,21 +44,32 @@ pub(crate) fn read_images(cx: &App) -> Result<Option<Vec<crate::image_import::Im
     }
 }
 
-pub(crate) fn write_rich(text: &str, html: &str, cx: &App) -> Result<(), String> {
+pub(crate) fn write_rich(text: &str, html: &str, cx: &mut App) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     { let _ = cx; rich::write(text, html) }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    { native::write(text, html, cx) }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     { let _ = html; write_text(text, cx) }
 }
 pub(crate) fn read_html() -> Option<String> {
     #[cfg(target_os = "windows")]
     { rich::read() }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        match native::read() {
+            Ok(html) => html,
+            Err(error) => { crate::app_logger::warn("Clipboard", &error); None }
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     { None }
 }
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn write_text(text: &str, cx: &App) -> Result<(), String> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    native::validate(text, "")?;
     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_owned()));
     if cx.read_from_clipboard().and_then(|item| item.text()).as_deref() == Some(text) {
         Ok(())

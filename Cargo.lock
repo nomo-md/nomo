@@ -3906,6 +3906,8 @@ dependencies = [
  "windows 0.62.2",
  "windows-registry",
  "windows-sys 0.61.2",
+ "wl-clipboard-rs",
+ "x11rb",
  "zip",
 ]
 
