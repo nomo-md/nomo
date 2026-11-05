@@ -76,7 +76,6 @@ pub enum ChromeUpdateState { Available, Downloading(u8), Downloaded }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChromeState {
     pub has_document: bool,
-    pub can_show_home: bool,
     pub can_undo: bool,
     pub can_redo: bool,
     pub mode: EditorMode,
@@ -97,7 +96,7 @@ pub struct ChromeState {
 impl Default for ChromeState {
     fn default() -> Self {
         Self {
-            has_document: false, can_show_home: false, can_undo: false, can_redo: false, mode: EditorMode::Semantic,
+            has_document: false, can_undo: false, can_redo: false, mode: EditorMode::Semantic,
             sidebar_visible: true, toolbar_visible: true, outline_visible: false,
             large_document: false, split_available: true, word_export_busy: false,
             toolbar_shortcut: "".into(), recent: Vec::new(), document_title: None, capabilities: Vec::new(), update: None,
@@ -556,11 +555,6 @@ impl Render for Chrome {
             right = right.child(self.basic_button("chrome-mini", &theme).child(icon(IconName::PictureInPicture2, 15.0, theme.fg))
                 .when(!mini_enabled, |el| el.opacity(0.45)).tooltip(tooltip(if mini_enabled { "Markdown Mini (Ctrl+Alt+M)" } else if cfg!(windows) { "打开文档并退出全屏后可使用 Markdown Mini" } else { "当前平台尚未接入 Markdown Mini" }))
                 .on_click(cx.listener(move |this, _, window, cx| { if mini_enabled { this.dismiss(window, cx); cx.emit(ChromeEvent::ToggleMini); } })));
-        }
-        if self.state.can_show_home {
-            right = right.child(self.icon_button("chrome-home", IconName::Home, &theme)
-                .tooltip(tooltip(if cfg!(target_os = "macos") { "返回主页 · ⌘⌥⇧H" } else { "返回主页 · Ctrl+Alt+Shift+H" }))
-                .on_click(cx.listener(|this, _, window, cx| { this.dismiss(window, cx); window.dispatch_action(Box::new(action::ShowHome), cx); })));
         }
         right = right.child(self.icon_button("chrome-theme", if theme.dark { IconName::Sun } else { IconName::Moon }, &theme)
                 .tooltip(tooltip("切换主题"))

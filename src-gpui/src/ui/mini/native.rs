@@ -1,11 +1,18 @@
 //! 原地切换同一个 HWND；只保存几何和窗口样式，不创建第二个窗口或正文快照。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MiniTarget { Mini, Main }
+
+pub(crate) enum MiniFrame { More, Settled(MiniTarget) }
+
 #[cfg(windows)]
 mod platform {
+    use super::{MiniFrame, MiniTarget};
+    use super::super::bounds_motion::{BoundsMotion, same_rect};
     use gpui::Window;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::Win32::{Foundation::HWND as ComHwnd, System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED}, UI::Shell::{ITaskbarList, TaskbarList}};
     use windows_sys::Win32::{Foundation::*, Graphics::{Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED},
-        Gdi::{GetMonitorInfoW, MonitorFromRect, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST}},
+        Gdi::{GetMonitorInfoW, MonitorFromRect, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL}},
         UI::{HiDpi::{GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI},
             Shell::{DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass}, WindowsAndMessaging::*}};
 
@@ -20,9 +27,40 @@ mod platform {
         style: isize,
         topmost: bool,
         restored: bool,
+        main_rect: RECT,
+        mini: MiniGeometry,
+        motion: Option<BoundsMotion>,
     }
 
     fn failure(action: &str) -> String { format!("{action}：{}", std::io::Error::last_os_error()) }
+
+    fn window_rect(hwnd: HWND) -> Result<RECT, String> {
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 { return Err(failure("读取窗口尺寸失败")); }
+        Ok(rect)
+    }
+
+    fn same_screen(a: RECT, b: RECT) -> bool {
+        let monitor = unsafe { MonitorFromRect(&a, MONITOR_DEFAULTTONULL) };
+        !monitor.is_null() && monitor == unsafe { MonitorFromRect(&b, MONITOR_DEFAULTTONULL) }
+    }
+
+    fn place_bounds(hwnd: HWND, rect: RECT) -> Result<(), String> {
+        if unsafe { SetWindowPos(hwnd, std::ptr::null_mut(), rect.left, rect.top, rect.right - rect.left,
+            rect.bottom - rect.top, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER) } == 0 {
+            return Err(failure("调整小窗过渡位置失败"));
+        }
+        Ok(())
+    }
+
+    fn drag_epoch(hwnd: HWND) -> Option<usize> {
+        let mut epoch = 0;
+        (unsafe { GetWindowSubclass(hwnd, Some(subclass), SUBCLASS, &mut epoch) } != 0).then_some(epoch)
+    }
+
+    fn controls_rect(hwnd: HWND, motion: &BoundsMotion, current: RECT) -> bool {
+        drag_epoch(hwnd) == Some(motion.drag_epoch) && same_rect(current, motion.last)
+    }
 
     fn set_transition_disabled(hwnd: HWND, disabled: bool) -> Result<(), String> {
         let value = i32::from(disabled);
@@ -72,19 +110,21 @@ mod platform {
     }
 
     impl MiniWindow {
-        pub(crate) fn enter(window: &Window, previous: Option<MiniGeometry>, pinned: bool) -> Result<Self, String> {
+        pub(crate) fn enter(window: &Window, previous: Option<MiniGeometry>, pinned: bool, animate: bool) -> Result<Self, String> {
             if window.is_fullscreen() { return Err("请先退出全屏，再打开 Markdown Mini".into()); }
             let RawWindowHandle::Win32(handle) = HasWindowHandle::window_handle(window).map_err(|error| error.to_string())?.as_raw()
                 else { return Err("当前窗口不支持 Markdown Mini".into()); };
             let hwnd = handle.hwnd.get() as HWND;
             let mut placement = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
             if unsafe { GetWindowPlacement(hwnd, &mut placement) } == 0 { return Err(failure("读取主窗口位置失败")); }
+            let main_rect = window_rect(hwnd)?;
             let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
             let topmost = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } & WS_EX_TOPMOST as isize != 0;
             let _transition = (placement.showCmd == SW_SHOWMAXIMIZED as u32).then(|| WindowTransition::suspend(hwnd)).transpose()?;
             // 先确认 Shell 可用；失败时还没有改动原窗口的尺寸、样式和置顶。
             taskbar(hwnd, false)?;
-            let mut state = Self { hwnd, placement, style, topmost, restored: false };
+            let mut state = Self { hwnd, placement, style, topmost, restored: false, main_rect, motion: None,
+                mini: MiniGeometry { rect: main_rect, scale: window.scale_factor() } };
             let result = (|| {
                 let monitor = unsafe { previous.map_or_else(|| MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), |geometry| MonitorFromRect(&geometry.rect, MONITOR_DEFAULTTONEAREST)) };
                 let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
@@ -103,20 +143,29 @@ mod platform {
                     .max((240.0 * scale).round() as i32 + frame).min(area.bottom - area.top);
                 let x = previous.map_or(area.left + (area.right - area.left - width) / 2, |g| g.rect.left).clamp(area.left, area.right - width);
                 let y = previous.map_or(area.top + (area.bottom - area.top - height) / 2, |g| g.rect.top).clamp(area.top, area.bottom - height);
+                let target_rect = RECT { left: x, top: y, right: x + width, bottom: y + height };
+                state.mini = MiniGeometry { rect: target_rect, scale };
+                let moving = animate && !same_rect(main_rect, target_rect) && same_screen(main_rect, target_rect);
+                let first = if moving { main_rect } else { target_rect };
                 // subclass 不引用 Rust 堆对象；只在小窗存在，销毁窗口时也会自行注销。
                 if unsafe { SetWindowSubclass(hwnd, Some(subclass), SUBCLASS, 0) } == 0 { return Err(failure("设置小窗尺寸约束失败")); }
                 set_style(hwnd, style & !((WS_MINIMIZEBOX | WS_MAXIMIZEBOX) as isize))?;
                 if unsafe { IsZoomed(hwnd) } != 0 {
-                    // 直接从最大化进入目标几何，避免先闪过一次正常窗口的尺寸。
+                    // 在原来的屏幕矩形解除最大化，避免先闪过最大化前的普通窗口。
                     let offset_x = info.rcWork.left - info.rcMonitor.left;
                     let offset_y = info.rcWork.top - info.rcMonitor.top;
                     let target = WINDOWPLACEMENT { showCmd: SW_SHOWNORMAL as u32, flags: 0,
-                        rcNormalPosition: RECT { left: x - offset_x, top: y - offset_y, right: x + width - offset_x, bottom: y + height - offset_y },
+                        rcNormalPosition: RECT { left: first.left - offset_x, top: first.top - offset_y,
+                            right: first.right - offset_x, bottom: first.bottom - offset_y },
                         ..placement };
                     if unsafe { SetWindowPlacement(hwnd, &target) } == 0 { return Err(failure("从最大化切换小窗失败")); }
                 }
-                if unsafe { SetWindowPos(hwnd, if pinned { HWND_TOPMOST } else { HWND_NOTOPMOST }, x, y, width, height,
+                if unsafe { SetWindowPos(hwnd, if pinned { HWND_TOPMOST } else { HWND_NOTOPMOST },
+                    first.left, first.top, first.right - first.left, first.bottom - first.top,
                     SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED) } == 0 { return Err(failure("切换小窗尺寸失败")); }
+                if moving {
+                    state.motion = Some(BoundsMotion::new(window_rect(hwnd)?, target_rect, MiniTarget::Mini, 0));
+                }
                 Ok(())
             })();
             if let Err(error) = result {
@@ -125,14 +174,72 @@ mod platform {
             Ok(state)
         }
 
-        pub(crate) fn geometry(&self) -> Option<MiniGeometry> {
-            let mut rect = RECT::default();
-            (unsafe { GetWindowRect(self.hwnd, &mut rect) } != 0).then(|| MiniGeometry {
-                rect, scale: (unsafe { GetDpiForWindow(self.hwnd) } as f32 / 96.0).max(0.1),
-            })
+        pub(crate) fn geometry(&self) -> MiniGeometry {
+            // 返回和快速折返都记住真正的小窗尺寸，不能把中间帧当成下次进入的位置。
+            match self.live_geometry() {
+                Ok(current) if self.motion.as_ref().is_some_and(|motion| controls_rect(self.hwnd, motion, current.rect)) => self.mini,
+                Ok(current) => current,
+                Err(error) => { eprintln!("{error}"); self.mini }
+            }
+        }
+
+        fn live_geometry(&self) -> Result<MiniGeometry, String> {
+            let rect = window_rect(self.hwnd)?;
+            let scale = (unsafe { GetDpiForWindow(self.hwnd) } as f32 / 96.0).max(0.1);
+            Ok(MiniGeometry { rect, scale })
         }
 
         pub(crate) fn set_pinned(&self, pinned: bool) -> Result<(), String> { pin(self.hwnd, pinned) }
+
+        pub(crate) fn moving_to(&self) -> Option<MiniTarget> { self.motion.as_ref().map(|m| m.target) }
+        pub(crate) fn progress(&self) -> Option<f32> { self.motion.as_ref().map(BoundsMotion::progress) }
+        pub(crate) fn resume_after_handoff(&mut self) {
+            if let Some(motion) = &mut self.motion { motion.resume_after_handoff(); }
+        }
+
+        pub(crate) fn transition_to(&mut self, target: MiniTarget, animate: bool) -> Result<bool, String> {
+            if let Some(motion) = &mut self.motion {
+                motion.redirect(target);
+                if animate { return Ok(true); }
+                if target == MiniTarget::Mini { self.settle_mini()?; }
+                return Ok(false);
+            }
+            if target == MiniTarget::Mini || !animate { return Ok(false); }
+            self.mini = self.live_geometry()?;
+            if same_rect(self.main_rect, self.mini.rect) || !same_screen(self.main_rect, self.mini.rect) { return Ok(false); }
+            let epoch = drag_epoch(self.hwnd).ok_or_else(|| failure("读取小窗拖动状态失败"))?;
+            self.motion = Some(BoundsMotion::new(self.main_rect, self.mini.rect, target, epoch));
+            Ok(true)
+        }
+
+        pub(crate) fn advance(&mut self, reduced: bool, handoff: bool) -> Result<(MiniFrame, bool), String> {
+            let Some(motion) = &mut self.motion else { return Ok((MiniFrame::Settled(MiniTarget::Mini), false)); };
+            let current = window_rect(self.hwnd)?;
+            // 用户拖动、系统贴靠或 DPI 调整优先，后续帧不再覆盖新的窗口位置。
+            if !controls_rect(self.hwnd, motion, current) {
+                self.motion = None;
+                return Ok((MiniFrame::Settled(MiniTarget::Mini), true));
+            }
+            let (rect, done) = motion.next(reduced, handoff);
+            if done && motion.target == MiniTarget::Main {
+                // 最后一帧统一恢复 WINDOWPLACEMENT（含最大化）、原编辑模式和焦点。
+                return Ok((MiniFrame::Settled(MiniTarget::Main), false));
+            }
+            let changed = !same_rect(rect, current);
+            if changed {
+                place_bounds(self.hwnd, rect)?;
+                motion.last = window_rect(self.hwnd)?;
+            }
+            if done {
+                self.motion = None;
+                Ok((MiniFrame::Settled(MiniTarget::Mini), changed))
+            } else { Ok((MiniFrame::More, changed)) }
+        }
+
+        pub(crate) fn settle_mini(&mut self) -> Result<(), String> {
+            self.motion = None;
+            place_bounds(self.hwnd, self.mini.rect)
+        }
 
         pub(crate) fn restore(&mut self) -> Result<(), String> {
             if self.restored { return Ok(()); }
@@ -162,8 +269,11 @@ mod platform {
         }
     }
 
-    unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, _: usize, _: usize) -> LRESULT {
+    unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, _: usize, epoch: usize) -> LRESULT {
         if message == WM_NCDESTROY { unsafe { RemoveWindowSubclass(hwnd, Some(subclass), SUBCLASS); } }
+        if message == WM_ENTERSIZEMOVE && unsafe { SetWindowSubclass(hwnd, Some(subclass), SUBCLASS, epoch.wrapping_add(1)) } == 0 {
+            eprintln!("{}", failure("记录小窗拖动状态失败"));
+        }
         let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
         if message == WM_GETMINMAXINFO && lparam != 0 {
             let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
@@ -189,8 +299,14 @@ pub(crate) struct MiniGeometry;
 pub(crate) struct MiniWindow;
 #[cfg(not(windows))]
 impl MiniWindow {
-    pub(crate) fn enter(_: &gpui::Window, _: Option<MiniGeometry>, _: bool) -> Result<Self, String> { Err("当前平台尚未接入 Markdown Mini 原生窗口".into()) }
-    pub(crate) fn geometry(&self) -> Option<MiniGeometry> { None }
+    pub(crate) fn enter(_: &gpui::Window, _: Option<MiniGeometry>, _: bool, _: bool) -> Result<Self, String> { Err("当前平台尚未接入 Markdown Mini 原生窗口".into()) }
+    pub(crate) fn geometry(&self) -> MiniGeometry { MiniGeometry }
     pub(crate) fn set_pinned(&self, _: bool) -> Result<(), String> { Err("当前平台不支持小窗置顶".into()) }
+    pub(crate) fn moving_to(&self) -> Option<MiniTarget> { None }
+    pub(crate) fn progress(&self) -> Option<f32> { None }
+    pub(crate) fn resume_after_handoff(&mut self) {}
+    pub(crate) fn transition_to(&mut self, _: MiniTarget, _: bool) -> Result<bool, String> { Ok(false) }
+    pub(crate) fn advance(&mut self, _: bool, _: bool) -> Result<(MiniFrame, bool), String> { Ok((MiniFrame::Settled(MiniTarget::Mini), false)) }
+    pub(crate) fn settle_mini(&mut self) -> Result<(), String> { Ok(()) }
     pub(crate) fn restore(&mut self) -> Result<(), String> { Ok(()) }
 }

@@ -89,13 +89,16 @@ impl SavedOutlinePosition {
             let reference_width = if restored_width > 900.0 && saved.left + OUTLINE_PANEL_WIDTH + OUTLINE_EDGE_GAP <= restored_width {
                 restored_width
             } else { width };
-            saved.save(reference_width, cx);
+            // 手动打开的窄栏可能容不下旧坐标，等能还原原位置时再补记右边距。
+            if saved.left + OUTLINE_PANEL_WIDTH + OUTLINE_EDGE_GAP <= reference_width {
+                saved.save(reference_width, cx);
+            }
         }
         Some(saved)
     }
 
     fn save(&mut self, area_width: f32, cx: &mut App) {
-        self.right = Some((area_width - OUTLINE_PANEL_WIDTH - self.left).max(OUTLINE_EDGE_GAP));
+        self.right = Some((area_width - panel_width(area_width) - self.left).max(OUTLINE_EDGE_GAP));
         Settings::set(cx, "outlinePanelPosition", serde_json::json!({
             "positioned": true, "left": self.left, "top": self.top, "right": self.right,
         }));
@@ -103,6 +106,10 @@ impl SavedOutlinePosition {
 }
 
 enum PanelInset { Left(f32), Right(f32) }
+
+fn panel_width(area_width: f32) -> f32 {
+    (area_width - 2.0 * OUTLINE_EDGE_GAP).clamp(0.0, OUTLINE_PANEL_WIDTH)
+}
 
 fn clamp_panel_inset(inset: f32, area: f32, panel: f32) -> f32 {
     inset.clamp(OUTLINE_EDGE_GAP, (area - panel - OUTLINE_EDGE_GAP).max(OUTLINE_EDGE_GAP))
@@ -113,7 +120,7 @@ fn panel_position(
     default_right: f32,
 ) -> (PanelInset, f32) {
     let width = f32::from(area.size.width);
-    let clamp_x = |inset| clamp_panel_inset(inset, width, OUTLINE_PANEL_WIDTH);
+    let clamp_x = |inset| clamp_panel_inset(inset, width, panel_width(width));
     let (horizontal, top) = if let Some((left, top)) = drag {
         (PanelInset::Left(clamp_x(left)), top)
     } else if let Some(saved) = saved {
@@ -123,7 +130,7 @@ fn panel_position(
         };
         (inset, saved.top)
     } else {
-        (PanelInset::Right(default_right), 168.0 - f32::from(area.origin.y))
+        (PanelInset::Right(clamp_x(default_right)), 168.0 - f32::from(area.origin.y))
     };
     (horizontal, clamp_panel_inset(top, f32::from(area.size.height), height))
 }
@@ -231,6 +238,25 @@ fn fading_outline_row(row: &OutlineVisualRow, theme: &Theme) -> AnyElement {
 }
 
 impl Workspace {
+    pub(super) fn outline_visible(&self, cx: &App) -> bool {
+        (!self.mini.active() || self.mini.shell_frame().is_some()) && self.outline_ui.bounds.get().is_some_and(|area| area.size.width > px(0.0)) && cx.global::<Settings>().show_outline
+            && self.document().is_some_and(|doc| doc.read(cx).outline_can_show())
+    }
+
+    pub(super) fn toggle_outline(&mut self, cx: &mut Context<Self>) {
+        self.set_outline_open(!self.outline_visible(cx), cx);
+    }
+
+    fn set_outline_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.mini.active() { return; }
+        let Some(document) = self.document() else { return; };
+        document.update(cx, |host, cx| host.set_manual_outline_open(open, cx));
+        if cx.global::<Settings>().show_outline != open {
+            Settings::set(cx, "outlineVisible", serde_json::json!(open));
+        }
+        cx.notify();
+    }
+
     fn begin_outline_projection_change(&mut self, cx: &mut Context<Self>) -> Option<Entity<DocumentHost>> {
         if !self.outline_ui.showing { return None; }
         let document = self.document()?;
@@ -307,7 +333,7 @@ impl Workspace {
         let settings = cx.global::<Settings>().clone();
         let area = self.outline_ui.bounds.get()?;
         let width = f32::from(area.size.width);
-        let can_show = document.update(cx, |host, cx| host.update_outline_layout(width, settings.content_width_percent, cx));
+        let can_show = width > 0.0 && document.read(cx).outline_can_show();
         let visible = settings.show_outline && can_show;
         let reduced = self.explorer.reduce_motion;
         if visible != self.outline_ui.showing {
@@ -326,7 +352,8 @@ impl Workspace {
             }
         }
         if !can_show { self.outline_ui.visibility.reset(); self.outline_ui.exit_snapshot = None; }
-        document.update(cx, |host, cx| host.set_outline_enabled(visible, settings.outline_level, cx));
+        // 小窗过渡只绘制已有分页；结束后才恢复查询，避免把目录或大纲重载放进动画热路径。
+        if !self.mini.active() { document.update(cx, |host, cx| host.set_outline_enabled(visible, settings.outline_level, cx)); }
         if !visible && !self.outline_ui.visibility.running() {
             self.outline_ui.exit_snapshot = None;
             return None;
@@ -369,7 +396,7 @@ impl Workspace {
         let scroll = self.outline_scroll.0.borrow().base_handle.clone();
         let top_index = scroll.logical_scroll_top().0;
         let scroll_y = f32::from(scroll.offset().y);
-        if visible { document.update(cx, |host, cx| host.request_outline_page(top_index, cx)); }
+        if visible && !self.mini.active() { document.update(cx, |host, cx| host.request_outline_page(top_index, cx)); }
         let count = snapshot.count + usize::from(!snapshot.complete && snapshot.count > 0);
         let area_height = f32::from(area.size.height);
         let notice_height = if snapshot.error.is_some() || snapshot.incomplete { 40.0 } else { 0.0 };
@@ -386,7 +413,7 @@ impl Workspace {
         self.outline_ui.list_height = list_height;
         let height = list_height + 54.0 + bottom_padding + notice_height;
         self.outline_ui.panel_height = height;
-        let visibility = self.outline_ui.visibility.value();
+        let visibility = self.outline_ui.visibility.value() * self.mini.shell_frame().map_or(1.0, |frame| frame.visibility);
         let active = snapshot.active_byte;
         let active_motion = self.outline_ui.active_motion.clone();
         let revision = snapshot.revision;
@@ -508,7 +535,7 @@ impl Workspace {
         let bulk_expand = snapshot.has_collapsed;
         let bulk_hover = self.outline_ui.bulk_hover.value();
         let bulk_border = motion::color(theme.border, motion::color(theme.border, theme.accent, 0.38), bulk_hover);
-        let bulk = div().id(if bulk_expand { "outline-bulk-expand" } else { "outline-bulk-default" }).size(px(28.0)).flex().items_center().justify_center().rounded(px(4.0))
+        let bulk = div().id(if bulk_expand { "outline-bulk-expand" } else { "outline-bulk-default" }).size(px(28.0)).flex_none().flex().items_center().justify_center().rounded(px(4.0))
             .border_1().border_color(bulk_border).bg(theme.accent.opacity(0.08 * bulk_hover)).cursor_pointer()
             .tooltip(tooltip(if bulk_expand { "全部展开" } else { "恢复默认展开层级" }))
             .child(icon(if bulk_expand { IconName::ChevronsUpDown } else { IconName::ChevronsDownUp }, 15.0,
@@ -520,7 +547,7 @@ impl Workspace {
             .on_click(cx.listener(move |workspace, _, _, cx| { cx.stop_propagation(); let level = if bulk_expand { 6 } else { cx.global::<Settings>().outline_level }; workspace.set_outline_level_animated(level,cx); }));
         let header = div().h(px(54.0)).px(px(14.0)).flex().items_center().justify_between()
             .cursor(outline_drag_cursor(false))
-            .child(div().text_size(px(14.0)).font_weight(FontWeight::EXTRA_BOLD).text_color(theme.heading).child("文档大纲"))
+            .child(div().min_w_0().truncate().text_size(px(14.0)).font_weight(FontWeight::EXTRA_BOLD).text_color(theme.heading).child("文档大纲"))
             .when(snapshot.has_expandable, |el|el.child(bulk))
             .on_mouse_down(MouseButton::Left, cx.listener(move |workspace, event: &gpui::MouseDownEvent, window, cx| {
                 if !workspace.outline_ui.showing { return; }
@@ -555,7 +582,7 @@ impl Workspace {
         let default_right = if mode == EditorMode::Split { (width * 0.035).clamp(32.0, 160.0) } else { OutlineLayout::RIGHT_INSET };
         let (inset, top) = panel_position(area, height, saved.as_ref(), drag, default_right);
         let top = if reduced { top } else { top - (1.0 - visibility) * 4.0 };
-        let panel = div().absolute().top(px(top)).w(px(OUTLINE_PANEL_WIDTH))
+        let panel = div().absolute().top(px(top)).w(px(panel_width(width)))
             .on_children_prepainted(move |bounds, _, _| panel_bounds.set(bounds.first().copied()));
         let panel = match inset { PanelInset::Left(x) => panel.left(px(x)), PanelInset::Right(x) => panel.right(px(x)) };
         let holding = self.outline_ui.panel_drag.is_some() || drag_visual.is_some();
@@ -665,7 +692,7 @@ impl Workspace {
         if let Some(drag) = self.outline_ui.panel_drag.take() {
             if drag.moved && let Some(area) = self.outline_ui.bounds.get() {
                 let width = f32::from(area.size.width);
-                let left = clamp_panel_inset(drag.current.0, width, OUTLINE_PANEL_WIDTH);
+                let left = clamp_panel_inset(drag.current.0, width, panel_width(width));
                 let top = clamp_panel_inset(drag.current.1, f32::from(area.size.height), self.outline_ui.panel_height);
                 SavedOutlinePosition { left, top, right: None }.save(width, cx);
             }
@@ -722,7 +749,7 @@ impl Workspace {
                         "expand" | "collapse" => workspace.set_outline_level_animated(if action=="expand" {6}else{1},cx),
                         "default" => { let level = cx.global::<Settings>().outline_level; workspace.set_outline_level_animated(level,cx); },
                         "reset" => workspace.reset_outline_position(cx),
-                        "hide" => Settings::set(cx,"outlineVisible",serde_json::json!(false)),
+                        "hide" => workspace.set_outline_open(false, cx),
                         _ => {},
                     }
                     cx.notify();

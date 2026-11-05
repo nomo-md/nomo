@@ -6,6 +6,14 @@ use label::TreeLabel;
 
 impl Workspace {
     pub(super) fn render_sidebar_animated(&mut self, visible: bool, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if let Some(frame) = self.mini.shell_frame() {
+            if frame.sidebar_width <= px(0.0) { return None; }
+            let sidebar = self.render_explorer_sidebar(f32::from(frame.sidebar_width), theme, cx);
+            return Some(div().relative().h_full().w(frame.sidebar_width * frame.visibility).flex_none().overflow_hidden()
+                .child(div().relative().h_full().w(frame.sidebar_width).left(px(-12.0 * (1.0 - frame.visibility)))
+                    .opacity(frame.visibility).child(sidebar))
+                .child(div().absolute().inset_0().occlude()).into_any_element());
+        }
         if self.explorer.reduce_motion {
             self.explorer.sidebar_target = Some(visible);
             self.explorer.sidebar_motion = None;

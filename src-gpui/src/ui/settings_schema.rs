@@ -141,7 +141,7 @@ pub const CATEGORIES: &[Category] = &[
     Category {
         title: "统计与大纲", icon: IconName::ChartColumn,
         page: Page::Groups(&[group("统计与导航", &[
-            item("outlineVisible", "显示文档大纲", "在编辑区右侧显示标题导航。空间不足时自动隐藏，空间恢复后重新显示。", Control::Toggle, Support::Full),
+            item("outlineVisible", "显示文档大纲", "在编辑区右侧显示标题导航。空间不足时自动隐藏，仍可用工具栏的大纲按钮手动打开。", Control::Toggle, Support::Full),
             item("writingStatsVisible", "显示文档统计", "在正文右下角显示当前文档的轻量统计。", Control::Toggle, Support::Full),
             item("writingStatsMetric", "默认统计类型", "决定状态栏默认展示行数、词数、字数或字符数。", Control::Choice(&[("lines", "行数"), ("words", "词数"), ("visibleChars", "字数"), ("chars", "字符")]), Support::Full),
             item("readingTimeVisible", "阅读时间", "在统计弹层中显示由当前 Markdown 派生的阅读时长。", Control::Toggle, Support::Full),

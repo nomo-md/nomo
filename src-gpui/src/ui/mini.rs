@@ -6,7 +6,9 @@ use gpui::{prelude::*, div, point, px, App, BoxShadow, Context, EventEmitter, Fo
 use std::time::Duration;
 
 mod native;
-pub(crate) use native::{MiniGeometry, MiniWindow};
+#[cfg(windows)]
+mod bounds_motion;
+pub(crate) use native::{MiniFrame, MiniGeometry, MiniTarget, MiniWindow};
 
 #[derive(Clone, Copy)]
 pub(crate) enum MiniEvent { Pin, Return }

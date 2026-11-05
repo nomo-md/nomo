@@ -3,10 +3,13 @@ use super::*;
 use crate::settings::{EditorMode, Settings};
 use std::{sync::atomic::{AtomicU64, Ordering}, time::{Duration, Instant}};
 
+fn mini_paper_gutter(width: f32) -> f32 { (width * 0.05).clamp(18.0, 30.0) }
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum OutlineLayout {
     Visible { shift_fraction: f32 },
     Hidden,
+    ManualOverlay,
 }
 
 impl OutlineLayout {
@@ -14,40 +17,56 @@ impl OutlineLayout {
     pub(crate) const RIGHT_INSET: f32 = 16.0;
     pub(super) const CENTERED: Self = Self::Visible { shift_fraction: 0.0 };
 
-    fn for_column(self, width: f32, percent: f32) -> Self {
+    pub(super) fn with_manual_open(self, open: bool) -> Self {
+        if open { Self::ManualOverlay } else if self == Self::ManualOverlay { Self::Hidden } else { self }
+    }
+
+    fn for_area(self, width: f32, percent: f32, split: bool) -> Self {
+        // 用户在空间不足时点开的浮层保留到关闭或自然放得下，只影响当前文档。
+        let when_narrow = if self == Self::ManualOverlay { Self::ManualOverlay } else { Self::Hidden };
+        if split { return if width > 900.0 { Self::CENTERED } else { when_narrow }; }
         let right_margin = (width - width * percent) / 2.0;
         let missing = Self::PANEL_WIDTH + Self::RIGHT_INSET + 12.0 - right_margin;
         let max_shift = (width * 0.03).min(48.0);
         // 重新显示大纲时多等 8px 余量，避免调整正文或侧栏宽度时反复显隐。
-        let threshold = if self == Self::Hidden { (max_shift - 8.0).max(0.0) } else { max_shift };
-        if missing > threshold { Self::Hidden } else { Self::Visible { shift_fraction: missing.max(0.0) / width } }
+        let threshold = if matches!(self, Self::Visible { .. }) { max_shift } else { (max_shift - 8.0).max(0.0) };
+        if missing > threshold { when_narrow } else { Self::Visible { shift_fraction: missing.max(0.0) / width } }
     }
 }
 
 #[test]
 fn outline_content_column_preserves_percentage_and_outline_clearance() {
-    use OutlineLayout::{Hidden, Visible};
+    use OutlineLayout::{Hidden, ManualOverlay, Visible};
     let initial = OutlineLayout::CENTERED;
     for width in [420.0, 900.0, 1000.0, 1200.0, 1600.0, 4000.0] {
         for percent in 30..=100 {
             let fraction = percent as f32 / 100.0;
             let margin = (width - width * fraction) / 2.0;
             let max_shift = (width * 0.03_f32).min(48.0);
-            match initial.for_column(width, fraction) {
+            match initial.for_area(width, fraction, false) {
                 Visible { shift_fraction } => {
                     let text_shift = width * shift_fraction;
                     assert!(text_shift <= max_shift + 0.01 && margin >= text_shift);
                     assert!((margin + text_shift) >= 248.0 - 0.01);
                 }
                 Hidden => assert!(margin + max_shift < 248.0),
+                ManualOverlay => panic!("自动布局不能自行打开浮层"),
             }
         }
     }
-    assert_eq!(initial.for_column(1200.0, 0.60), Visible { shift_fraction: 8.0 / 1200.0 });
-    assert_eq!(initial.for_column(1200.0, 0.75), Hidden);
-    assert_eq!(initial.for_column(1600.0, 0.75), Visible { shift_fraction: 48.0 / 1600.0 });
-    assert_eq!(Hidden.for_column(1600.0, 0.75), Hidden);
-    assert_eq!(Hidden.for_column(1600.0, 0.74), Visible { shift_fraction: 40.0 / 1600.0 });
+    assert_eq!(initial.for_area(1200.0, 0.60, false), Visible { shift_fraction: 8.0 / 1200.0 });
+    let hidden = initial.for_area(1200.0, 0.75, false);
+    assert_eq!(hidden, Hidden);
+    assert_eq!(initial.for_area(1600.0, 0.75, false), Visible { shift_fraction: 48.0 / 1600.0 });
+    assert_eq!(hidden.for_area(1600.0, 0.75, false), Hidden);
+    assert_eq!(hidden.for_area(1600.0, 0.74, false), Visible { shift_fraction: 40.0 / 1600.0 });
+    let manual = hidden.with_manual_open(true);
+    assert_eq!(manual.for_area(1200.0, 0.90, false), ManualOverlay);
+    assert_eq!(manual.for_area(800.0, 0.60, true), ManualOverlay);
+    assert_eq!(manual.with_manual_open(false).for_area(1200.0, 0.90, false), Hidden);
+    let automatic = manual.for_area(1600.0, 0.60, false);
+    assert_eq!(automatic, initial);
+    assert_eq!(automatic.for_area(1200.0, 0.90, false), Hidden);
 }
 
 #[derive(Clone, Copy)]
@@ -315,19 +334,71 @@ impl DocumentHost {
         }
         cx.notify();
     }
+    fn prepare_paper_reflow(&mut self, cx: &mut Context<Self>) {
+        let edges: Vec<_> = self.panes.iter().enumerate().map(|(i, pane)| {
+            let offset = -pane.scroll.offset().y;
+            if offset <= px(0.5) { Some(ReadingEdge::Top) }
+            else if offset >= pane.scroll.max_offset().y - px(0.5) && self.visible_source_bounds(i, self.total_bytes, cx).is_some() {
+                Some(ReadingEdge::Bottom)
+            } else { None }
+        }).collect();
+        self.prepare_zoom(None, cx);
+        // 文首和文末跟随纸面边缘，中间位置跟随原来可见的文字。
+        for (pane, edge) in self.panes.iter_mut().zip(edges) {
+            match edge {
+                Some(ReadingEdge::Top) => { pane.reading_restore = None; pane.scroll.set_offset(gpui::point(px(0.0), px(0.0))); }
+                Some(ReadingEdge::Bottom) => pane.reading_restore = Some(ReadingAnchor { byte: self.total_bytes, fraction: 1.0,
+                    revision: None, view_only: true, edge, motion: None }),
+                None => {}
+            }
+        }
+    }
+
     /// 小窗只调整已挂载 Pane 的纸面留白，复用阅读锚点与窗口预算。
     pub(crate) fn set_mini_layout(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.mini_layout == active { return; }
-        let at_top: Vec<_> = self.panes.iter().map(|pane| pane.scroll.offset().y >= px(-0.5)).collect();
-        self.prepare_zoom(None, cx);
-        // 文档顶部保持顶部，避免缩窄换行后为了追随屏幕中线而把标题滚出视口。
-        for (pane, at_top) in self.panes.iter_mut().zip(at_top) {
-            if at_top { pane.reading_restore = None; pane.scroll.set_offset(gpui::point(px(0.0), px(0.0))); }
-        }
+        if self.mini_paper_padding.is_none() { self.prepare_paper_reflow(cx); }
+        self.mini_paper_padding = None;
         self.mini_layout = active;
         self.suspend_outline_for_mini(active, cx);
         self.control.update(cx, |view, cx| view.dismiss_quick_insert(cx));
         cx.notify();
+    }
+
+    fn outline_column_shift(&self, settings: &Settings) -> f32 {
+        if settings.show_outline && let OutlineLayout::Visible { shift_fraction } = self.outline_layout { shift_fraction } else { 0.0 }
+    }
+
+    pub(crate) fn set_mini_paper_frame(&mut self, frame: Option<(gpui::Pixels, f32)>, cx: &mut Context<Self>) {
+        // 原模式切换申请的首帧预量也用此帧宽度，之后走正常可视区布局。
+        if let Some((width, _)) = frame && self.panes.len() == 1 && self.panes[0].layout_width.is_some() {
+            self.panes[0].layout_width = Some(f32::from(width));
+        }
+        let padding = frame.map(|(width, progress)| {
+            let width = f32::from(width);
+            let settings = cx.global::<Settings>();
+            let margin = (1.0 - settings.content_width_percent) * 0.5;
+            let left = (margin - self.outline_column_shift(settings)).max(0.0);
+            let mini = mini_paper_gutter(width);
+            let mix = |a: f32, b: f32| px(a + (b - a) * progress);
+            gpui::Edges { left: mix(width * left, mini), right: mix(width * (margin * 2.0 - left), mini),
+                top: mix(32.0, 48.0), bottom: mix(32.0, 56.0) }
+        });
+        if self.mini_paper_padding == padding { return; }
+        // 开始展开时在小窗里取一次锚点。滚动或输入若主动取消锚点，后续帧不重新捕获。
+        if self.mini_paper_padding.is_none() && self.panes.iter().any(|p| p.reading_restore.is_none() && p.scroll.offset().y < px(-0.5)) {
+            self.prepare_paper_reflow(cx);
+        }
+        self.mini_paper_padding = padding;
+        cx.notify();
+    }
+
+    fn paper_padding(&self, width: f32) -> gpui::Edges<gpui::Pixels> {
+        self.mini_paper_padding.unwrap_or_else(|| {
+            let gutter = px(if self.mini_layout { mini_paper_gutter(width) } else if self.panes.len() == 2 { 32.0 } else { 0.0 });
+            gpui::Edges { left: gutter, right: gutter, top: px(if self.mini_layout { 48.0 } else { 32.0 }),
+                bottom: px(if self.mini_layout { 56.0 } else { 32.0 }) }
+        })
     }
     pub(super) fn invalidate_other_panes(&mut self, cx:&mut Context<Self>) {
         for pane in 0..self.panes.len() {
@@ -596,7 +667,7 @@ impl DocumentHost {
             if f32::from(target-old.y).abs()>0.5 {
                 self.panes[pane].scroll.set_offset(gpui::point(old.x,target));
                 self.schedule_pane(pane,16,cx);cx.notify();
-            } else if self.pane_visible_ready(pane,cx) {self.panes[pane].reading_restore=None;}
+            } else if self.mini_paper_padding.is_none() && self.pane_visible_ready(pane,cx) {self.panes[pane].reading_restore=None;}
             return;
         }
         let located=self.panes[pane].viewport.mounts.iter().find_map(|mount| {
@@ -631,7 +702,9 @@ impl DocumentHost {
             if f32::from(target-old.y).abs()>0.5 {
                 self.panes[pane].scroll.set_offset(gpui::point(old.x,target));
                 self.schedule_pane(pane,16,cx);cx.notify();
-            } else if measured && (self.pane_visible_ready(pane,cx) || anchor.view_only) {self.panes[pane].reading_restore=None;}
+            } else if measured && self.mini_paper_padding.is_none() && (self.pane_visible_ready(pane,cx) || anchor.view_only) {
+                self.panes[pane].reading_restore=None;
+            }
         } else {
             // 目标被预算回收或布局失效后走既有加载定位，不继续穿过占位内容做动画。
             if let Some(anchor)=&mut self.panes[pane].reading_restore { anchor.motion=None; }
@@ -850,14 +923,20 @@ impl DocumentHost {
             },
         ).absolute().right_0().top_0().w(px(12.0)).h_full()
     }
-    pub(crate) fn update_outline_layout(&mut self, width: f32, percent: f32, cx: &mut Context<Self>) -> bool {
-        let layout = if self.panes.len() == 1 { self.outline_layout.for_column(width, percent) }
-            else if width > 900.0 { OutlineLayout::CENTERED } else { OutlineLayout::Hidden };
+    pub(crate) fn set_manual_outline_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.outline_layout = self.outline_layout.with_manual_open(open);
+        cx.notify();
+    }
+
+    pub(crate) fn outline_can_show(&self) -> bool { self.outline_layout != OutlineLayout::Hidden }
+
+    pub(crate) fn update_outline_layout(&mut self, width: f32, percent: f32, cx: &mut Context<Self>) {
+        let previous = if cx.global::<Settings>().show_outline { self.outline_layout } else { self.outline_layout.with_manual_open(false) };
+        let layout = previous.for_area(width, percent, self.panes.len() == 2);
         if layout != self.outline_layout {
             self.outline_layout = layout;
             cx.notify();
         }
-        layout != OutlineLayout::Hidden
     }
 
     fn render_pane(&self, pane:usize, cx:&Context<Self>) -> gpui::AnyElement {
@@ -865,12 +944,13 @@ impl DocumentHost {
         let id=self.panes[pane].id;
         let width=self.panes[pane].layout_width.unwrap_or_else(||f32::from(self.panes[pane].scroll.bounds().size.width));
         let settings=cx.global::<Settings>();
+        let padding = self.paper_padding(width);
         let single_column = !self.mini_layout && self.panes.len() == 1;
         let mut document_body = div().children(self.pane_children(pane,cx))
             .w(gpui::relative(if single_column { settings.content_width_percent } else { 1.0 })).mx_auto();
-        if single_column && settings.show_outline && let OutlineLayout::Visible { shift_fraction } = self.outline_layout
-            && shift_fraction > 0.0 {
-            let left = (1.0 - settings.content_width_percent) / 2.0 - shift_fraction;
+        let shift = self.outline_column_shift(settings);
+        if single_column && shift > 0.0 {
+            let left = (1.0 - settings.content_width_percent) / 2.0 - shift;
             document_body = document_body.ml(gpui::relative(left.max(0.0)));
         }
         let zoom_host = cx.entity().downgrade();
@@ -907,8 +987,7 @@ impl DocumentHost {
         });})
             .id(("document-pane",id)).size_full().min_w_0().min_h_0().overflow_y_scroll()
             .track_scroll(&self.panes[pane].scroll)
-            .pt(px(if self.mini_layout {48.0}else{32.0})).pb(px(if self.mini_layout {56.0}else{32.0}))
-            .px(px(if self.mini_layout {(width*0.05).clamp(18.0,30.0)}else if self.panes.len()==2 {32.0}else{0.0}))
+            .pt(padding.top).pb(padding.bottom).pl(padding.left).pr(padding.right)
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |host, event, window, cx| {
                 host.paper_mouse_down(pane, event, window, cx);
             }))
@@ -945,9 +1024,9 @@ impl DocumentHost {
             if height<=0.0 {continue;}
             let width=width.or_else(|| (bounds.size.width>px(0.0)).then_some(f32::from(bounds.size.width)));
             let settings=cx.global::<Settings>();
+            let padding=self.paper_padding(width.unwrap_or_default());
             let content_width=width.map(|width| {
-                let content=if self.mini_layout {width-2.0*(width*0.05).clamp(18.0,30.0)}
-                    else if self.panes.len()==2 {width-64.0}
+                let content=if self.mini_layout || self.panes.len()==2 {width-f32::from(padding.left+padding.right)}
                     else {width * settings.content_width_percent};
                 (content*window.scale_factor()).round()/window.scale_factor()
             });
@@ -967,7 +1046,7 @@ impl DocumentHost {
             if anchor.motion.is_some() {continue;}
             let total=if self.panes[pane].viewport.groups.is_empty() {self.panes[pane].viewport.mounts.first().map_or(0.0,|mount|mount.height)}
                 else {self.panes[pane].viewport.heights.total()};
-            let (padding_top,padding_bottom)=if self.mini_layout {(48.0,56.0)}else{(32.0,32.0)};
+            let (padding_top,padding_bottom)=(f32::from(padding.top),f32::from(padding.bottom));
             let max=(total+padding_top+padding_bottom-height).max(0.0);
             let top=match anchor.edge {
                 Some(ReadingEdge::Top)=>0.0,

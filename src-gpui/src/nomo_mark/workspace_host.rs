@@ -73,6 +73,7 @@ impl DocumentHost {
             queries: Default::default(),
             embedded: true,
             mini_layout: false,
+            mini_paper_padding: None,
             outline_layout: OutlineLayout::CENTERED,
             closed: false,
             control: control.clone(),
@@ -186,6 +187,7 @@ impl DocumentHost {
             self.schedule_metadata(cx);
             self.schedule_toc(300, false, cx);
         } else {
+            self.outline_layout = self.outline_layout.with_manual_open(false);
             self.cancel_queries(cx);
         }
         Ok(())

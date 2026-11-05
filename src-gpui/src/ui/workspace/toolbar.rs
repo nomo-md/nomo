@@ -98,6 +98,12 @@ pub(super) fn diagram_template(kind: crate::ui::chrome::DiagramKind, default_typ
 
 impl Workspace {
     pub(super) fn render_toolbar_animated(&mut self, visible: bool, theme: &Theme, mode: EditorMode, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if let Some(frame) = self.mini.shell_frame() {
+            return (frame.toolbar_height > px(0.0)).then(|| {
+                let toolbar = self.render_toolbar(theme, frame.mode, cx).into_any_element();
+                mini::shell_row(toolbar, frame.toolbar_height, frame.visibility)
+            });
+        }
         if self.explorer.reduce_motion {
             self.toolbar_target = Some(visible);
             self.toolbar_motion = None;
@@ -277,7 +283,7 @@ impl Workspace {
         if mode == EditorMode::Split {
             right.push(tool("split-guide", IconName::ScanLine, "显示 / 隐藏分栏对齐线", self.split_guide_visible, |w, _, cx| { w.split_guide_visible = !w.split_guide_visible; cx.notify(); }, cx));
         }
-        right.push(tool("outline", IconName::ListTree, "文档大纲 ⌘⌥O", settings.show_outline, |_, _, cx| Settings::toggle(cx, "outlineVisible"), cx));
+        right.push(tool("outline", IconName::ListTree, "文档大纲 ⌘⌥O", self.outline_visible(cx), |w, _, cx| w.toggle_outline(cx), cx));
         right.push(tool("hide-toolbar", IconName::ChevronUp, "隐藏工具栏 ⌘⇧B", false, |w, _, cx| w.toggle_toolbar(cx), cx));
         let scroll_offset = self.toolbar_scroll.offset().x;
         let scroll_max = self.toolbar_scroll.max_offset().x;

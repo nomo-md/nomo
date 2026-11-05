@@ -11,7 +11,7 @@
 | Windows 组合标签 | `src-gpui/src/ui/workspace/comparison.rs`、`comparison_ui.rs`、`comparison_close.rs`、`comparison_drag.rs`、`comparison_layout.rs` | 展示项与文档会话分离；双文档焦点、标签/成员拖放、批量关闭、跨窗归属移交及按需恢复 |
 | 编辑收尾与文档切换 | `src-gpui/src/ui/workspace/document_transition.rs`、`nomo_mark/workspace_host.rs`、`nomo_mark/object_ui.rs` | 组字和对象草稿收尾、确认后继续切换或关闭；单个待执行意图、临时订阅，无正文镜像或轮询 |
 | 浮动缩放与统计 | `src-gpui/src/ui/workspace/status.rs` | 原版右下角按钮、向上弹层、四种统计、阅读时间与缩放；复用会话统计和阅读锚点，不持有正文 |
-| Markdown Mini 小窗 | `src-gpui/src/ui/workspace/mini.rs`、`ui/mini.rs`、`ui/mini/native.rs` | Windows 原地切换、置顶与几何恢复；悬停控制条独立重绘，复用当前会话和阅读锚点；返回时释放控制条与原生回调 |
+| Markdown Mini 小窗 | `src-gpui/src/ui/workspace/mini.rs`、`ui/mini.rs`、`ui/mini/{native,bounds_motion}.rs`、`nomo_mark/window_panes.rs` | Windows 窗框、正文与文件树／顶部栏共用进度收放并支持折返。语义正文沿阅读锚点换行，源码或双栏在中段换版。置顶和几何恢复复用原窗口 |
 | 打开耗时采样 | `src-gpui/src/open_profile.rs`、`ui/workspace.rs`、`nomo_mark/view.rs` | 显式启用；记录会话、首窗口、首帧和语义恢复，不记录正文或路径 |
 | 帧耗时采样 | `src-gpui/src/frame_profile.rs`、`ui/workspace.rs`、`scripts/gen-perf-doc.py` | `NOMO_FRAME_PROFILE` 显式启用；有界样本、帧耗时与按键上屏的中位数／p95，固定种子百万字样本 |
 | 文件树 | `src-gpui/src/ui/file_tree.rs`、`ui/workspace/explorer.rs`、`explorer_ui.rs`、`explorer_label.rs`、`explorer_actions.rs`、`explorer_search.rs` | 目录快照预算、后台按需刷新、虚拟滚动、名称省略、交互和键盘搜索；重命名同步现有文档会话 |
@@ -47,7 +47,7 @@
 | 脚注悬停预览 | `src-gpui/src/nomo_mark/footnote_preview.rs`、`workspace_queries.rs` | 共享结构索引定位，最多读取 8 KiB／显示 360 字；提示关闭、文档隐藏和后续悬停取消旧请求 |
 | 键盘与局部资源失效 | `src-gpui/src/nomo_mark/keyboard.rs`、`keyboard_session.rs`、`navigation.rs`、`resources.rs` | 按词、行、文档与翻页动作；有界跨窗查询；按资源依赖失效，无全文镜像 |
 | 连续窗口与预算 | `src-gpui/src/nomo_mark/native_port.rs`、`session_actions.rs`、`session_window.rs`、`viewport_ui.rs`、`resident_budget.rs` | 正式/开发共用会话连接、大编辑重分配、超大结构原文分片、失败重试、预取、回收和驻留预算 |
-| 同会话单栏/双栏 | `src-gpui/src/nomo_mark/window_panes.rs`、`src-gpui/src/ui/workspace/outline.rs` | 按需 Pane、唯一输入控件、全局导航、局部窗口同步、模式/历史阅读锚点与取消，不持有完整正文/历史。单栏按编辑区百分比排正文，右侧空间不足时自动隐藏大纲 |
+| 同会话单栏/双栏 | `src-gpui/src/nomo_mark/window_panes.rs`、`src-gpui/src/ui/workspace/outline.rs` | 按需 Pane、唯一输入控件、全局导航、局部窗口同步、模式/历史阅读锚点与取消，不持有完整正文/历史。单栏按编辑区百分比排正文，大纲可自动隐藏或手动浮在当前编辑区右侧 |
 | 页面全文查询 | `src-gpui/src/nomo_mark/workspace_queries.rs` | 后台搜索分页、全文统计、大纲；查找与批量替换独立调度，按文档校验请求身份与修订 |
 | 工具栏文档命令与语言 | `src-gpui/src/nomo_mark/toolbar_commands.rs`、`toolbar_global.rs`、`semantic_selection.rs`、`semantic_global.rs`、`toc_update.rs`、`src-gpui/src/ui/toolbar_i18n.rs`、`src-gpui/resources/toolbar-locales.json` | 脚注和目录分页、派生事务、跨窗口语义补丁、四种界面语言；按需和预算内处理 |
 | 开发界面 | `src-gpui/src/nomo_mark/demo.rs`、`development_ui.rs` | feature 只控制开发入口和调试工具条 |

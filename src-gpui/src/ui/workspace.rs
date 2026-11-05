@@ -1026,7 +1026,7 @@ impl Workspace {
                 if workspace.request_close_window(window, cx) { window.remove_window(); }
             }) { return false; }
         }
-        if self.mini.active() { self.toggle_mini(window,cx); return false; }
+        if self.mini.active() { self.return_from_mini(window,cx); return false; }
         if !self.application_dialogs.close_approved {self.choose_close_behavior(window,cx);return false;}
         if !self.opening.is_empty() || !self.open_requests.pending.is_empty() {self.notice=Some("文档仍在打开，请稍后关闭".into());cx.notify();return false;}
         if self.tabs.is_empty() {
@@ -1768,6 +1768,9 @@ impl Render for Workspace {
             None => {}
         }
         let mini = self.mini.active();
+        let mini_frame = self.mini.shell_frame();
+        let shell_visible = !mini || mini_frame.is_some();
+        let shell_visibility = mini_frame.map_or(if mini { 0.0 } else { 1.0 }, |frame| frame.visibility);
         // 确认框期间保留待显示消息，避免 Toast 在被遮挡时已经计时结束。
         if !window.has_active_prompt() {
             let failure = self.failure_notice.take();
@@ -1799,27 +1802,34 @@ impl Render for Workspace {
             if let Some(document)=self.document(){document.update(cx,|host,cx|host.set_workspace_focus(true,cx));}
         }
         if mode.is_none() { self.outline_ui.clear_document(); }
+        if !mini && let Some(area) = self.outline_ui.bounds.get() && let Some(document) = self.document() {
+            document.update(cx, |host, cx| host.update_outline_layout(f32::from(area.size.width), settings.content_width_percent, cx));
+        }
+        let outline_visible = self.outline_visible(cx);
         let status=self.document().map(|document|document.read(cx).status().clone());
         // 编辑页始终保留标签栏，单个文档也通过标签显示名称与修改状态。
-        let show_tabs = !self.home_visible && !mini;
+        let show_tabs = !self.home_visible && shell_visible;
         self.surface.set_rail_hidden(!show_tabs);
         let recent = self.library.read(cx).snapshot.recent.iter().take(10).map(|entry| crate::ui::chrome::ChromeRecentEntry {
             path: entry.path.clone(), label: home::entry_name(&entry.path), folder: false, missing: false,
         }).collect();
         self.chrome.update(cx,|chrome,cx|chrome.set_state(ChromeState {
-            can_show_home: !self.home_visible,
             has_document:status.is_some(), can_undo:status.as_ref().is_some_and(|s|s.can_undo),
             can_redo:status.as_ref().is_some_and(|s|s.can_redo),mode:mode.unwrap_or(EditorMode::Semantic),
             sidebar_visible:settings.show_sidebar, toolbar_visible:settings.show_toolbar,
-            outline_visible:settings.show_outline,split_available:self.active_pair().is_none(),
+            outline_visible,split_available:self.active_pair().is_none(),
             toolbar_shortcut: crate::ui::shortcuts::current("toggle-toolbar", cx).into(),
             recent, update:crate::ui::updates::chrome_state(cx),
             capabilities:vec![ChromeCapability::Recent,ChromeCapability::NewWindow,ChromeCapability::HeadingLevels,ChromeCapability::HeadingAdjustment,ChromeCapability::ClearFormatting,ChromeCapability::LinkPicker,ChromeCapability::TablePicker,ChromeCapability::MathInline,ChromeCapability::Callout,ChromeCapability::Details,ChromeCapability::InlineComment,ChromeCapability::BlockComment,ChromeCapability::FrontMatter,ChromeCapability::Diagrams,ChromeCapability::Footnote,ChromeCapability::Toc,ChromeCapability::UnavailableNotice,ChromeCapability::ResetOutlinePosition]
                 .into_iter().chain([ChromeCapability::SoftwareUpdate]).chain([ChromeCapability::ExportHtml, ChromeCapability::ExportPdf, ChromeCapability::ExportWord].into_iter().filter(|_| self.export_job.is_none())).chain((cfg!(windows) && self.active_pair().is_none() && status.is_some() && !window.is_fullscreen()).then_some(ChromeCapability::Mini)).collect(),
             ..Default::default()
         },cx));
-        let tabs = show_tabs.then(|| self.render_tabs(&theme, cx).into_any_element());
-        let sidebar = if self.home_visible || mini { None } else { self.render_sidebar_animated(settings.show_sidebar, &theme, window, cx) };
+        let chrome = shell_visible.then(|| mini::shell_row(self.chrome.clone().into_any_element(), px(crate::ui::chrome::TITLEBAR_HEIGHT), shell_visibility));
+        let tabs = show_tabs.then(|| {
+            let tabs = self.render_tabs(&theme, cx).into_any_element();
+            mini::shell_row(tabs, px(TAB_RAIL_HEIGHT), shell_visibility)
+        });
+        let sidebar = if self.home_visible || !shell_visible { None } else { self.render_sidebar_animated(settings.show_sidebar, &theme, window, cx) };
         let main: AnyElement = if self.home_visible {
             let count = self.tabs.len();
             let offer_restore = count==0 && self.has_saved_layout(cx);
@@ -1830,11 +1840,11 @@ impl Render for Workspace {
         } else { match mode {
             None => self.render_empty(&theme, cx).into_any_element(),
             Some(mode) => {
-                let toolbar = if mini { None } else { self.render_toolbar_animated(settings.show_toolbar, &theme, mode, cx) };
+                let toolbar = if !shell_visible { None } else { self.render_toolbar_animated(settings.show_toolbar, &theme, mode, cx) };
                 let tab = self.tab().expect("active tab");
                 tab.document.update(cx, |host, _| host.set_save_directory(self.tree.as_ref().map(|tree|tree.root.as_path())));
                 let editors = if let Some(pair)=self.active_pair() { self.render_comparison(pair, &theme, window, cx) } else { div().size_full().child(tab.document.clone()).into_any_element() };
-                let outline = if mini || self.active_pair().is_some() { None } else { self.render_outline_panel(&theme, mode, window, cx) };
+                let outline = if !shell_visible || self.active_pair().is_some() { None } else { self.render_outline_panel(&theme, mini_frame.map_or(mode, |frame| frame.mode), window, cx) };
                 let measured = self.outline_ui.bounds.clone();
                 let weak = cx.entity().downgrade();
                 let outline_measure = gpui::canvas(move |bounds, window, _| {
@@ -1850,8 +1860,9 @@ impl Render for Workspace {
                         window.paint_quad(gpui::fill(gpui::Bounds::new(origin, gpui::size(bounds.size.width, px(1.0))), gpui::rgba(0xef4444b8)));
                     }).absolute().size_full()
                 });
-                let reveal_toolbar = (!mini && !settings.show_toolbar && self.toolbar_motion.is_none()).then(|| {
+                let reveal_toolbar = (shell_visible && !settings.show_toolbar && self.toolbar_motion.is_none()).then(|| {
                     div().id("reveal-toolbar").absolute().top_0().right(px(16.0)).w(px(32.0)).h(px(18.0))
+                        .opacity(shell_visibility)
                         .flex().items_center().justify_center().rounded_b(px(4.0)).border_1()
                         .border_color(theme.border).bg(theme.rail_bg).cursor_pointer()
                         .hover(|style| style.bg(theme.hover))
@@ -1865,7 +1876,8 @@ impl Render for Workspace {
                     .flex_col()
                     .children(toolbar)
                     .child(div().relative().flex_1().min_h_0()
-                        .children((!mini && self.active_pair().is_none()).then_some(outline_measure)).child(editors).children(outline)
+                        .children((shell_visible && self.active_pair().is_none()).then_some(outline_measure))
+                        .child(self.mini.render_paper(editors, &theme)).children(outline)
                         .children(search).children(split_guide).children(reveal_toolbar))
                     .into_any_element()
             }
@@ -1878,7 +1890,8 @@ impl Render for Workspace {
         let outline_drag_preview = self.render_outline_drag_preview(&theme);
         let toast = self.toast.clone().filter(|_|!window.has_active_prompt()).map(|toast| gpui::deferred(toast).with_priority(9));
         let update_notice=if window.has_active_prompt(){None}else{crate::ui::updates::render_notice(window,cx).map(|notice|gpui::deferred(notice).with_priority(10))};
-        let status = if mini { None } else { self.render_status_controls(&theme, window, cx) };
+        let status = if !shell_visible { None } else { self.render_status_controls(&theme, window, cx)
+            .map(|status| div().absolute().inset_0().opacity(shell_visibility).child(status).into_any_element()) };
         let status_popup = self.render_status_popup(&theme, cx);
         let mini_bar = self.render_mini_bar(cx);
         let root = div().id("workspace");
@@ -1953,7 +1966,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &ModeSemantic, window, cx| w.set_mode(EditorMode::Semantic, window, cx)))
             .on_action(cx.listener(|w, _: &ModeSource, window, cx| w.set_mode(EditorMode::Source, window, cx)))
             .on_action(cx.listener(|w, _: &ModeSplit, window, cx| w.set_mode(EditorMode::Split, window, cx)))
-            .on_action(cx.listener(|_, _: &ToggleOutline, _, cx| Settings::toggle(cx, "outlineVisible")))
+            .on_action(cx.listener(|w, _: &ToggleOutline, _, cx| w.toggle_outline(cx)))
             .on_action(cx.listener(|_, _: &ToggleSidebar, _, cx| Settings::toggle(cx, "sidebarHidden")))
             .on_action(cx.listener(|w, _: &ToggleToolbar, _, cx| w.toggle_toolbar(cx)))
             .on_action(cx.listener(|_, _: &ToggleTheme, _, cx| Theme::toggle(cx)))
@@ -1993,7 +2006,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &crate::editor::Undo, _, cx| {if let Some(doc)=w.document(){doc.update(cx,|h,cx|h.undo_redo(false,cx));}}))
             .on_action(cx.listener(|w, _: &crate::editor::Redo, _, cx| {if let Some(doc)=w.document(){doc.update(cx,|h,cx|h.undo_redo(true,cx));}}))
             .on_action(cx.listener(|_, _: &Quit, _, cx|cx.defer(crate::quit_workspaces)))
-            .when(!mini, |el| el.child(self.chrome.clone()))
+            .children(chrome)
             .children(mini_bar)
             .children(popover)
             .children(toolbar_popup)
@@ -2003,8 +2016,7 @@ impl Render for Workspace {
             .children(update_notice)
             .children(status_popup)
             .child(
-                if mini { div().flex_1().min_h_0().relative().child(main).into_any_element() }
-                else if self.home_visible { main } else {
+                if self.home_visible { main } else {
                 div()
                     .flex_1()
                     .min_h(px(0.0))
@@ -2019,7 +2031,7 @@ impl Render for Workspace {
                             .h_full()
                             .flex()
                             .flex_col()
-                            .child(self.surface.background(theme.clone(), animate_ui))
+                            .when(shell_visible, |el| el.child(mini::surface_layer(self.surface.background(theme.clone(), animate_ui), shell_visibility)))
                             .children(tabs)
                             .child(
                                 div()
@@ -2027,11 +2039,11 @@ impl Render for Workspace {
                                     .min_h(px(0.0))
                                     .min_w(px(0.0))
                                     .bg(theme.surface)
-                                    .rounded_tl(px(12.0))
+                                    .rounded_tl(px(12.0 * shell_visibility))
                                     .overflow_hidden()
                                     .child(main),
                             )
-                            .child(self.surface.outline(theme))
+                            .when(shell_visible, |el| el.child(mini::surface_layer(self.surface.outline(theme), shell_visibility)))
                             .children(status),
                     ).into_any_element()
                 },
