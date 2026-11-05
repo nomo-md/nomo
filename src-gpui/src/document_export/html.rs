@@ -18,6 +18,7 @@ pub(super) struct Renderer<'a, 'file> {
     pub(super) resource_bytes: usize,
     pub(super) resource_count: usize,
     pub(super) embed_count: usize,
+    pub(super) remote: super::remote::RemoteImages,
     slugs: BTreeSet<String>,
     suffixes: BTreeMap<String, usize>,
     headings: usize,
@@ -29,7 +30,7 @@ pub(super) struct Renderer<'a, 'file> {
 }
 impl<'a, 'file> Renderer<'a, 'file> {
     pub(super) fn new(output: &'a mut Output<'file>, appearance: &'a Appearance, path: Option<&'a Path>, report: &'a mut ExportReport) -> Self {
-        Self { output, appearance, path, report, resource_bytes: 0, resource_count: 0, embed_count: 0,
+        Self { output, appearance, path, report, resource_bytes: 0, resource_count: 0, embed_count: 0, remote: Default::default(),
             slugs: BTreeSet::new(), suffixes: BTreeMap::new(), headings: 0, footnotes: BTreeMap::new(),
             references: Arc::new(BTreeMap::new()), events: 0, suppressed: None, comment: false }
     }

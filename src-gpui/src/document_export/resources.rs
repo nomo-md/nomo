@@ -1,4 +1,4 @@
-//! 导出媒体逐项读取，不建立媒体缓存；网络图片保留链接，不隐式下载。
+//! HTML 导出媒体逐项读取并内嵌，不建立图片缓存；网络读取失败时保留链接并警告。
 use super::{MAX_RESOURCE_BYTES, MAX_RESOURCE_TOTAL, html::{Renderer, color}};
 use crate::nomo_mark::image_properties::ImageProperties;
 use std::{fs::File, io::Read, path::Path};
@@ -23,18 +23,9 @@ impl Renderer<'_, '_> {
         self.resource_count += 1;
         if self.resource_count > 2048 { return Err("图片数量超过 HTML 导出预算。".into()); }
         enum Source { Url(String), Bytes(&'static str, Vec<u8>) }
+        let remote = super::remote::url(props.src.trim());
         let source = (|| -> Result<Source, String> {
             let src = props.src.trim();
-            if src.starts_with("//") && !src.chars().any(char::is_control) {
-                self.report.warn("网络图片保留链接，查看时需要联网");
-                return Ok(Source::Url(format!("https:{src}")));
-            }
-            if let Ok(url) = url::Url::parse(src) {
-                if matches!(url.scheme(), "http" | "https") {
-                    self.report.warn("网络图片保留链接，查看时需要联网");
-                    return Ok(Source::Url(url.into()));
-                }
-            }
             if let Some(data) = src.strip_prefix("data:") {
                 let (header, body) = data.split_once(',').ok_or("无效图片 data URL")?;
                 if !matches!(header, "image/png;base64" | "image/jpeg;base64" | "image/gif;base64" | "image/webp;base64" | "image/bmp;base64" | "image/svg+xml;base64")
@@ -45,12 +36,18 @@ impl Renderer<'_, '_> {
                 if self.resource_bytes > MAX_RESOURCE_TOTAL { return Err("图片总量超出预算".into()); }
                 return Ok(Source::Url(src.into()));
             }
-            let path = crate::images::resolve_source(src, self.path.and_then(Path::parent)).ok_or("无法定位本地图片")?;
-            let file = File::open(path).map_err(|e| e.to_string())?;
-            let metadata = file.metadata().map_err(|e| e.to_string())?;
-            if !metadata.is_file() || metadata.len() > MAX_RESOURCE_BYTES as u64 { return Err("图片不是普通文件或超过 8 MiB".into()); }
-            let mut bytes = Vec::new();
-            file.take(MAX_RESOURCE_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            if self.resource_bytes >= MAX_RESOURCE_TOTAL { return Err("图片总量超出 32 MiB".into()); }
+            let bytes = if let Some(url) = remote.as_ref() {
+                self.remote.read(url.clone(), || self.output.check(), self.report)?
+            } else {
+                let path = crate::images::resolve_source(src, self.path.and_then(Path::parent)).ok_or("无法定位本地图片")?;
+                let file = File::open(path).map_err(|e| e.to_string())?;
+                let metadata = file.metadata().map_err(|e| e.to_string())?;
+                if !metadata.is_file() || metadata.len() > MAX_RESOURCE_BYTES as u64 { return Err("图片不是普通文件或超过 8 MiB".into()); }
+                let mut bytes = Vec::new();
+                file.take(MAX_RESOURCE_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+                bytes
+            };
             if bytes.len() > MAX_RESOURCE_BYTES { return Err("图片超过 8 MiB".into()); }
             let mime = match image::guess_format(&bytes) {
                 Ok(image::ImageFormat::Png) => "image/png", Ok(image::ImageFormat::Jpeg) => "image/jpeg",
@@ -62,8 +59,13 @@ impl Renderer<'_, '_> {
             if self.resource_bytes > MAX_RESOURCE_TOTAL { return Err("图片总量超出 32 MiB".into()); }
             Ok(Source::Bytes(mime, bytes))
         })();
+        self.output.check()?;
         let source = match source {
             Ok(source) => source,
+            Err(_) if remote.is_some() => {
+                self.report.warn("部分网络图片未能嵌入，已保留远程链接；查看时仍需联网");
+                Source::Url(remote.unwrap().into())
+            }
             Err(_) => {
                 self.report.warn("部分本地图片缺失、格式不支持或超过媒体预算，已保留说明");
                 self.output.raw("<span class=\"resource-missing\" title=\"")?; self.output.attr(&props.src)?;

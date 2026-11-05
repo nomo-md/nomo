@@ -1,4 +1,4 @@
-//! 离线媒体逐张解码，每处排版与可复用的 PNG 分开保存。
+//! 导出媒体逐张解码，每处排版与可复用的 PNG 分开保存。
 use super::{Appearance, ExportReport, Job, MAX_OUTPUT_BYTES, MAX_RESOURCE_BYTES, model::*};
 use base64::Engine;
 use image::{ImageDecoder, ImageEncoder, RgbaImage};
@@ -87,15 +87,16 @@ pub(super) fn link(value: &str, path: Option<&Path>) -> Option<String> {
 }
 pub(super) fn prepare(model: &mut Model, path: Option<&Path>, appearance: &Appearance, job: &Job, report: &mut ExportReport) -> Result<PreparedMedia, String> {
     let mut state = Media { prepared: PreparedMedia::default(), sources: HashMap::new(), images_by_pixels: HashMap::new(),
-        count: 0, enhancements: 0, path, appearance, job, report };
+        remote: Default::default(), count: 0, enhancements: 0, path, appearance, job, report };
     state.blocks(&mut model.blocks)?;
     for blocks in model.footnotes.values_mut() { state.blocks(blocks)?; }
     Ok(state.prepared)
 }
 struct Media<'a> {
     prepared: PreparedMedia,
-    sources: HashMap<(SourceKind, [u8; 32]), Picture>,
+    sources: HashMap<(SourceKind, [u8; 32]), Option<Picture>>,
     images_by_pixels: HashMap<[u8; 32], usize>,
+    remote: super::remote::RemoteImages,
     count: usize, enhancements: usize, path: Option<&'a Path>, appearance: &'a Appearance,
     job: &'a Job<'a>, report: &'a mut ExportReport,
 }
@@ -127,13 +128,13 @@ impl Media<'_> {
         }
         Ok(())
     }
-    fn picture(&mut self, kind: SourceKind, source: &str, render: impl FnOnce(&Self) -> Result<Bitmap, String>) -> Result<Option<Picture>, String> {
+    fn picture(&mut self, kind: SourceKind, source: &str, render: impl FnOnce(&mut Self) -> Result<Bitmap, String>) -> Result<Option<Picture>, String> {
         let key = (kind, Sha256::digest(source.as_bytes()).into());
-        if let Some(&picture) = self.sources.get(&key) { return Ok(Some(picture)); }
+        if let Some(&picture) = self.sources.get(&key) { return Ok(picture); }
         let bitmap = render(self);
         self.job.check()?;
         // 无效或不可访问的源沿用替代文字。有效图像的编码、暂存错误必须终止原子导出。
-        let Ok(Bitmap { pixels, width, height }) = bitmap else { return Ok(None); };
+        let Ok(Bitmap { pixels, width, height }) = bitmap else { self.sources.insert(key, None); return Ok(None); };
         let mut hash = Sha256::new();
         hash.update(pixels.width().to_be_bytes());
         hash.update(pixels.height().to_be_bytes());
@@ -147,7 +148,7 @@ impl Media<'_> {
             id
         };
         let picture = Picture { id, width, height };
-        self.sources.insert(key, picture);
+        self.sources.insert(key, Some(picture));
         Ok(Some(picture))
     }
 
@@ -170,7 +171,7 @@ impl Media<'_> {
                     match self.picture(SourceKind::Image, src, |media| media.image(src))? {
                         Some(picture) => self.place(picture, true, &props.alt, &props.width, &props.align),
                         None => {
-                            self.report.warn("部分图片无法嵌入，已保留替代文字和可用链接；网络图片不自动下载");
+                            self.report.warn("部分图片读取失败、格式不支持或超过媒体预算，已保留替代文字和可用链接");
                             run.style.link = link(src, self.path);
                             Content::Text(format!("[图片：{}]", if props.alt.is_empty() { "无法嵌入" } else { &props.alt }))
                         }
@@ -195,9 +196,10 @@ impl Media<'_> {
         }
         Ok(())
     }
-    fn image(&self, source: &str) -> Result<Bitmap, String> {
-        if source.starts_with("//") || url::Url::parse(source).is_ok_and(|url| matches!(url.scheme(), "http" | "https")) { return Err("网络图片不自动下载".into()); }
-        let bytes = if let Some(data) = source.strip_prefix("data:") {
+    fn image(&mut self, source: &str) -> Result<Bitmap, String> {
+        let bytes = if let Some(url) = super::remote::url(source) {
+            self.remote.read(url, || self.job.check(), self.report)?
+        } else if let Some(data) = source.strip_prefix("data:") {
             let (header, content) = data.split_once(',').ok_or("无效图片 data URL")?;
             if !matches!(header, "image/png;base64" | "image/jpeg;base64" | "image/gif;base64" | "image/webp;base64" | "image/bmp;base64" | "image/svg+xml;base64")
                 || content.len() > MAX_RESOURCE_BYTES * 4 / 3 + 4 { return Err("图片 data URL 超过预算".into()); }

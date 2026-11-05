@@ -7,6 +7,7 @@ use std::{fs::File, io::{BufWriter, Write}, path::{Path, PathBuf}, sync::{Arc, a
 
 mod html;
 mod resources;
+mod remote;
 mod model;
 mod media;
 mod pdf;
