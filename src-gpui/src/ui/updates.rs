@@ -1,4 +1,4 @@
-//! 检查官方 Release。Windows 安装版在应用内下载并确认重启；便携版保留单独的下载入口。
+//! 检查官方 Release；MSIX 由 Microsoft Store 更新，安装版和便携版保留既有更新入口。
 use super::{dialogs::{self, SecondaryDialog, SecondaryKind, SecondaryAction as A, Tone}, components::IconName, toolbar_i18n::{ToolbarLocale, UiMessage}};
 use crate::settings::Settings;
 use gpui::{App, AppContext, AnyWindowHandle, Entity, Global, Task, Window, IntoElement};
@@ -53,6 +53,12 @@ pub(crate) fn startup(window:&mut Window,cx:&mut App) {
 }
 pub(crate) fn check(window:&mut Window,cx:&mut App,startup:bool) {
     if busy(cx)||window.has_active_prompt(){return;}
+    #[cfg(windows)]
+    match crate::windows_integration::current_package_family_name() {
+        Ok(Some(_)) => { if !startup { show_store_update(window,cx); } return; }
+        Err(error) => { if startup { eprintln!("[Update] {error}"); } else { show_error(error,window,cx); } return; }
+        Ok(None) => {},
+    }
     if cx.try_global::<Updates>().is_none(){cx.set_global(Updates::default());}
     cx.global_mut::<Updates>().busy=true;
     let previous=cx.global::<Settings>().string("nativeReleaseNotesVersion");
@@ -82,6 +88,18 @@ pub(crate) fn check(window:&mut Window,cx:&mut App,startup:bool) {
     });
     cx.global_mut::<Updates>().task=Some(task);
     cx.refresh_windows();
+}
+#[cfg(windows)]
+fn show_store_update(window:&mut Window,cx:&mut App) {
+    let title=UiMessage::new("updates.storeTitle");
+    let message=UiMessage::new("updates.storeMessage");
+    let open=UiMessage::new("updates.storeOpen");
+    let dialog=SecondaryDialog {kind:SecondaryKind::Update,title:title.into(),message:message.into(),detail:Some(UiMessage::raw(format!("Nomo {}",env!("CARGO_PKG_VERSION")))),notes:None,
+        actions:vec![A::new(UiMessage::toolbar("close"),IconName::Close,Tone::Normal),A::new(open,IconName::ExternalLink,Tone::Primary)],cancel:0,remember:None,leading:Vec::new()};
+    let response=dialogs::choose(dialog,window,cx);
+    window.to_async(cx).spawn(async move |context| {let choice=response.await;if choice.index==1 {let _=context.update(|window,cx| {
+        if let Err(error)=crate::windows_integration::open_store_updates(){show_error(error,window,cx);}
+    });}}).detach();
 }
 pub(crate) fn present_pending(window:&mut Window,cx:&mut App)->bool {
     let matches=cx.try_global::<Updates>().and_then(|state|state.pending.as_ref()).is_some_and(|(owner,_)|*owner==window.window_handle());

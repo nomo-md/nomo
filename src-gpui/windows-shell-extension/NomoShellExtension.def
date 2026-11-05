@@ -1,0 +1,5 @@
+LIBRARY "NomoShellExtension"
+
+EXPORTS
+    DllCanUnloadNow PRIVATE
+    DllGetClassObject PRIVATE
