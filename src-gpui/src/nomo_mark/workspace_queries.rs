@@ -21,6 +21,7 @@ pub struct SearchState {
 }
 #[derive(Default)]
 pub(super) struct Queries {
+    pub lint: super::markdown_lint::LintState,
     footnote_request: WindowRequest,
     pub search: SearchState,
     pub outline_state: super::outline_queries::OutlineState,
@@ -106,6 +107,7 @@ impl DocumentHost {
         &self.queries.search
     }
     pub(super) fn cancel_queries(&mut self, cx: &mut Context<Self>) {
+        self.queries.lint.cancel();
         self.metadata.save_dialog.cancel();
         self.queries.footnote_request.cancel();
         self.queries.search.serial += 1;
@@ -133,6 +135,7 @@ impl DocumentHost {
         self.queries.serial += 1;
     }
     pub(super) fn schedule_metadata(&mut self, cx: &mut Context<Self>) {
+        self.sync_lint(cx);
         self.refresh_outline(cx);
         self.schedule_stats(cx);
     }

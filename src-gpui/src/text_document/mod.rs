@@ -5,6 +5,7 @@ mod chunk_reader;
 mod edit_journal;
 mod markdown_codec;
 mod markdown_history;
+pub(crate) mod markdown_lint;
 mod markdown_search;
 pub(crate) mod markdown_session;
 mod piece_tree;

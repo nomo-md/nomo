@@ -89,8 +89,8 @@ pub const CATEGORIES: &[Category] = &[
                 item("quickInsertTrigger", "settings.quickInsertTrigger.label", "settings.quickInsertTrigger.description", Control::Text { placeholder: "/", compact: true }, Support::Full),
             ]),
             Group { title: "settings.group.lint", badge: "Beta", items: &[
-                item("markdownLintEnabled", "settings.markdownLintEnabled.label", "settings.markdownLintEnabled.description", Control::Toggle, Support::None("settings.unsupported")),
-                item("markdownLintRuleSet", "settings.markdownLintRuleSet.label", "settings.markdownLintRuleSet.description", Control::Choice(&[("relaxed", "settings.markdownLintRuleSet.choice.relaxed"), ("default", "settings.markdownLintRuleSet.choice.default")]), Support::None("settings.unsupported")),
+                item("markdownLintEnabled", "settings.markdownLintEnabled.label", "settings.markdownLintEnabled.description", Control::Toggle, Support::Full),
+                item("markdownLintRuleSet", "settings.markdownLintRuleSet.label", "settings.markdownLintRuleSet.description", Control::Choice(&[("relaxed", "settings.markdownLintRuleSet.choice.relaxed"), ("default", "settings.markdownLintRuleSet.choice.default")]), Support::Full),
             ] },
         ]),
     },

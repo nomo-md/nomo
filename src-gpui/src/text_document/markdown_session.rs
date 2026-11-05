@@ -1,6 +1,7 @@
 //! Markdown 会话：完整源文本、历史及快照独立于 WebView 生命周期。
 pub(super) mod search;
 mod structure;
+mod lint;
 mod outline_move;
 pub(crate) use outline_move::{OutlineMove, OutlinePlacement};
 mod toc;

@@ -2,11 +2,13 @@
 use super::*;
 use crate::ui::{components::status_slider, popup::status_popup, toolbar_i18n::ToolbarLocale};
 use gpui::{BoxShadow, Bounds, Div, EntityId, KeyDownEvent, Pixels, Stateful, point, relative, rgba};
+#[path = "markdown_lint.rs"]
+mod markdown_lint;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Panel { Zoom, Stats }
+enum Panel { Zoom, Stats, Lint }
 impl Panel {
-    fn index(self) -> usize { if self == Self::Zoom { 0 } else { 1 } }
+    fn index(self) -> usize { match self { Self::Zoom => 0, Self::Stats => 1, Self::Lint => 2 } }
 }
 
 pub(super) struct StatusUi {
@@ -15,11 +17,11 @@ pub(super) struct StatusUi {
     generation: usize,
     document: Option<EntityId>,
     locale: &'static str,
-    anchors: [Rc<Cell<Option<Bounds<Pixels>>>>; 2],
-    triggers: [FocusHandle; 2],
+    anchors: [Rc<Cell<Option<Bounds<Pixels>>>>; 3],
+    triggers: [FocusHandle; 3],
     focus: FocusHandle,
-    hover: [bool; 2],
-    motion: [ScalarMotion; 2],
+    hover: [bool; 3],
+    motion: [ScalarMotion; 3],
     metric_hover: [bool; 4],
     metric_motion: [ScalarMotion; 4],
     step_hover: [bool; 2],
@@ -32,6 +34,7 @@ pub(super) struct StatusUi {
     last_zoom: Option<i64>,
     pulse: Option<Instant>,
     stats: StatsTransition,
+    lint_hint: bool,
 }
 
 impl StatusUi {
@@ -40,13 +43,14 @@ impl StatusUi {
             open: None, opened: Instant::now(), generation: 0, document: None, locale: "",
             anchors: std::array::from_fn(|_| Rc::new(Cell::new(None))),
             triggers: std::array::from_fn(|_| cx.focus_handle()), focus: cx.focus_handle(),
-            hover: [false; 2], motion: [ScalarMotion::default(); 2],
+            hover: [false; 3], motion: [ScalarMotion::default(); 3],
             metric_hover: [false; 4], metric_motion: [ScalarMotion::default(); 4],
             step_hover: [false; 2], step_motion: [ScalarMotion::default(); 2],
             slider_motion: ScalarMotion::default(),
             selected: 0, keyboard_selection: false, dragging: false, slider_hover: false,
             last_zoom: None, pulse: None,
             stats: StatsTransition::default(),
+            lint_hint: false,
         }
     }
 }
@@ -129,6 +133,7 @@ impl Workspace {
             Settings::set_with(cx, "zoomPercent", serde_json::json!(percent), true);
         }
         self.status_ui.open = None;
+        self.status_ui.lint_hint = false;
         self.status_ui.dragging = false;
         self.status_ui.slider_hover = false;
         self.status_ui.metric_hover = [false; 4];
@@ -150,7 +155,7 @@ impl Workspace {
             self.status_ui.open = Some(panel);
             self.status_ui.opened = Instant::now();
             self.status_ui.generation = self.status_ui.generation.wrapping_add(1);
-            self.status_ui.selected = METRICS.iter().position(|m| m.0 == cx.global::<Settings>().stats_metric).unwrap_or(1);
+            self.status_ui.selected = if panel == Panel::Lint { 0 } else { METRICS.iter().position(|m| m.0 == cx.global::<Settings>().stats_metric).unwrap_or(1) };
             self.status_ui.keyboard_selection = false;
             window.focus(&self.status_ui.focus, cx);
         }
@@ -177,19 +182,22 @@ impl Workspace {
     }
 
     pub(super) fn render_status_controls(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if let Some(document) = self.document() { document.update(cx, |host, cx| host.sync_stats_visibility(cx)); }
+        if let Some(document) = self.document() { document.update(cx, |host, cx| { host.sync_stats_visibility(cx); host.sync_lint(cx); }); }
         let document = self.document().map(|doc| doc.entity_id());
-        let visible = document.is_some() && cx.global::<Settings>().stats_visible;
+        let stats_visible = cx.global::<Settings>().stats_visible;
+        let lint_visible = cx.global::<Settings>().bool("markdownLintEnabled");
+        let visible = document.is_some() && (stats_visible || lint_visible);
         let locale = ToolbarLocale::current(cx);
         let language = locale.text("status_stats");
-        if !visible || document != self.status_ui.document || language != self.status_ui.locale {
+        let panel_hidden = match self.status_ui.open { Some(Panel::Lint) => !lint_visible, Some(_) => !stats_visible, None => false };
+        if !visible || panel_hidden || document != self.status_ui.document || language != self.status_ui.locale {
             let focused = self.status_ui.focus.contains_focused(window, cx)
                 || self.status_ui.triggers.iter().any(|focus| focus.contains_focused(window, cx));
             self.close_status(cx);
             self.status_ui.document = document;
             self.status_ui.locale = language;
-            self.status_ui.hover = [false; 2];
-            self.status_ui.motion = [ScalarMotion::default(); 2];
+            self.status_ui.hover = [false; 3];
+            self.status_ui.motion = [ScalarMotion::default(); 3];
             self.status_ui.last_zoom = None;
             self.status_ui.pulse = None;
             self.status_ui.stats = StatsTransition::default();
@@ -225,9 +233,11 @@ impl Workspace {
                 scale = 1.0 - amount + amount * eased;
             }
         }
-        for index in 0..2 {
+        for index in 0..3 {
             let active = self.status_ui.hover[index] || self.status_ui.open.is_some_and(|panel| panel.index() == index);
             self.status_ui.motion[index].set(active, reduced, Duration::from_millis(140));
+        }
+        for index in 0..2 {
             let enabled = if index == 0 { percent > 80 } else { percent < 160 };
             self.status_ui.step_motion[index].set(enabled && self.status_ui.step_hover[index], reduced, Duration::from_millis(120));
         }
@@ -246,8 +256,10 @@ impl Workspace {
         let controls = div().absolute().right(px(16.0)).bottom(px(14.0))
             .flex().items_center().gap(px(8.0))
             .children(animate.then(motion::theme_frame))
-            .child(self.status_trigger(Panel::Zoom, format!("{percent}%"), scale, theme, cx))
-            .child(self.status_trigger(Panel::Stats, label, 1.0, theme, cx));
+            .when(stats_visible, |controls| controls
+                .child(self.status_trigger(Panel::Zoom, format!("{percent}%"), scale, theme, cx))
+                .child(self.status_trigger(Panel::Stats, label, 1.0, theme, cx)))
+            .when(lint_visible, |controls| controls.child(self.status_trigger(Panel::Lint, self.lint_label(cx), 1.0, theme, cx)));
         Some(gpui::deferred(controls).with_priority(3).into_any_element())
     }
 
@@ -255,6 +267,8 @@ impl Workspace {
         let index = panel.index();
         let hover = self.status_ui.motion[index].value();
         let locale = ToolbarLocale::current(cx);
+        let title = if panel == Panel::Lint { markdown_lint::text(locale, "title") }
+            else { locale.text(if index == 0 { "status_zoom" } else { "status_word_count" }) };
         let mono = crate::theme::font_for(crate::theme::Family::Mono, false, false).family;
         let bounds = self.status_ui.anchors[index].clone();
         let background = motion::color(motion::color(theme.surface, theme.rail_bg, 0.06), theme.surface, hover);
@@ -267,7 +281,7 @@ impl Workspace {
             else { div().child(label) };
         // 外层保留稳定命中区域，内层缩放不会挤动相邻按钮或重新定位弹层。
         div().id(("status-trigger", index)).relative().min_w(px(if index == 0 { 52.0 } else { 58.0 }))
-            .role(gpui::Role::Button).aria_label(locale.text(if index == 0 { "status_zoom" } else { "status_word_count" }))
+            .role(gpui::Role::Button).aria_label(title)
             .aria_expanded(self.status_ui.open == Some(panel))
             .h(px(28.0)).px(px(10.0)).flex_none().rounded(px(8.0)).cursor_pointer()
             .font_family(mono).font_weight(FontWeight::MEDIUM).text_size(px(13.0))
@@ -275,7 +289,7 @@ impl Workspace {
             .focus_visible(|style| style.shadow(vec![BoxShadow { inset: false,
                 color: theme.accent.opacity(0.45), offset: point(px(0.0), px(0.0)),
                 blur_radius: px(0.0), spread_radius: px(3.0) }]))
-            .tooltip(tooltip(locale.text(if index == 0 { "status_zoom" } else { "status_word_count" })))
+            .tooltip(tooltip(title))
             .child(div().opacity(0.0).whitespace_nowrap().child(reserved))
             .child(div().absolute().top_0().left_0().size_full().flex().items_center().justify_center()
                 .child(div().relative().top(px(if self.explorer.reduce_motion { 0.0 } else { -hover }))
@@ -301,6 +315,7 @@ impl Workspace {
 
     pub(super) fn render_status_popup(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let kind = self.status_ui.open?;
+        if kind == Panel::Lint { return self.render_lint_popup(theme, cx); }
         let locale = ToolbarLocale::current(cx);
         let reduced = self.explorer.reduce_motion;
         let progress = if reduced { 1.0 } else { (self.status_ui.opened.elapsed().as_secs_f32() / 0.14).min(1.0) };

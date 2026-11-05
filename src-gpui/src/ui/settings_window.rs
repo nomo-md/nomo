@@ -202,7 +202,9 @@ impl SettingsWindow {
         let settings = cx.global::<Settings>().clone();
         let key = item.key;
         let width = control_width(viewport);
-        let enabled = !matches!(item.support, Support::None(_)) && (key != "quickInsertTrigger" || settings.bool("quickInsertEnabled"));
+        let enabled = !matches!(item.support, Support::None(_))
+            && (key != "quickInsertTrigger" || settings.bool("quickInsertEnabled"))
+            && (key != "markdownLintRuleSet" || settings.bool("markdownLintEnabled"));
         let value = display_value(&settings, key);
         match &item.control {
             Control::Toggle => {

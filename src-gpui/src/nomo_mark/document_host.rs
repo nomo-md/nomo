@@ -30,6 +30,8 @@ mod toolbar_global;
 mod toc_update;
 #[path = "workspace_queries.rs"]
 mod workspace_queries;
+#[path = "markdown_lint.rs"]
+mod markdown_lint;
 #[path = "outline_queries.rs"]
 mod outline_queries;
 #[path = "quick_insert_host.rs"]
