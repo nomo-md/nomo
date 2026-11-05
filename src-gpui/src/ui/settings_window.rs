@@ -21,6 +21,8 @@ use std::time::Duration;
 
 #[path = "settings_pages.rs"]
 mod pages;
+#[path = "settings_fonts.rs"]
+mod fonts;
 #[path = "settings_shortcuts.rs"]
 mod shortcut_fields;
 use pages::{display_value, item_is_visible, readonly_input, section_heading, unavailable_action};
@@ -88,13 +90,14 @@ pub struct SettingsWindow {
     caption_focus: window_chrome::CaptionFocus,
     category: usize,
     open_select: Option<&'static str>,
+    font_picker: Option<(Entity<fonts::FontPicker>, Subscription)>,
     dragging: Option<&'static str>,
     /// 上限为当前分区开关数，切换分区即清空；窗口关闭时一并释放。
     toggles: HashMap<&'static str, ScalarMotion>,
     fields: HashMap<&'static str, Entity<TextField>>,
-    /// 仅当前文本设置的校验结果，不缓存系统字体列表。
+    /// 文本设置（快捷插入符号、图片宽度等）的校验结果。
     shortcut_errors: HashMap<&'static str, String>,
-    font_errors: HashMap<&'static str, &'static str>,
+    field_errors: HashMap<&'static str, &'static str>,
     scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
     image_test: Option<crate::image_import::ImportCancellation>,
@@ -118,6 +121,12 @@ impl SettingsWindow {
                 let field = field.read(cx);
                 field.focus_handle(cx).is_focused(window) && (field.is_composing()
                     || (super::shortcuts::SHORTCUTS.iter().any(|shortcut| shortcut.id == *key)
+        if let Some((picker, _)) = &self.font_picker {
+            if picker.read(cx).composing(cx) { cx.propagate(); return; }
+            self.font_picker = None;
+            window.focus(&self.focus, cx);
+            cx.stop_propagation(); cx.notify(); return;
+        }
                         && field.content != super::shortcuts::current(key, cx)))
             });
             if editing { cx.propagate(); return; }
@@ -131,8 +140,8 @@ impl SettingsWindow {
             focus: cx.focus_handle(),
             #[cfg(target_os = "windows")]
             caption_focus: window_chrome::CaptionFocus::new(cx),
-            category: 0, open_select: None, dragging: None,
-            toggles: HashMap::new(), fields: HashMap::new(), font_errors: HashMap::new(), shortcut_errors: HashMap::new(),
+            category: 0, open_select: None, font_picker: None, dragging: None,
+            toggles: HashMap::new(), fields: HashMap::new(), field_errors: HashMap::new(), shortcut_errors: HashMap::new(),
             scroll: ScrollHandle::new(), _subscriptions: Vec::new(),
             image_test: None, image_test_message: None,
         }
@@ -141,12 +150,10 @@ impl SettingsWindow {
     fn field(&mut self, item: &'static Item, placeholder: &'static str, cx: &mut Context<Self>) -> Entity<TextField> {
         if let Some(field) = self.fields.get(item.key) { return field.clone(); }
         let current = cx.global::<Settings>().string(item.key);
-        let font = matches!(item.control, Control::FontFamily);
         let field = cx.new(|cx| {
             let mut field = TextField::new(placeholder, cx);
             field.set_settings_style();
-            if font { field.reserve_clear_button(); }
-            if matches!(item.key, "monoFontFamily" | "quickInsertTrigger") { field.set_settings_monospace(); }
+            if item.key == "quickInsertTrigger" { field.set_settings_monospace(); }
             field.content = current;
             field
         });
@@ -158,18 +165,11 @@ impl SettingsWindow {
                 if key=="quickInsertTrigger" || key=="imageHandlingSettings.defaultImageWidth" {
                     let invalid=if key=="quickInsertTrigger" {!crate::nomo_mark::quick_insert::valid_trigger(&value)}else{crate::image_import::normalize_width(&value).is_none()};
                     field.update(cx,|field,cx|field.set_invalid(invalid,cx));
-                    if invalid {this.font_errors.insert(key,if key=="quickInsertTrigger" {"请输入一个标点或符号。"}else{"请输入像素宽度或百分比，例如 480px、50%。"});}
-                    else {this.font_errors.remove(key);let value=if key=="imageHandlingSettings.defaultImageWidth" {crate::image_import::normalize_width(&value).unwrap()}else{value};Settings::set(cx,key,json!(value));}
+                    if invalid {this.field_errors.insert(key,if key=="quickInsertTrigger" {"请输入一个标点或符号。"}else{"请输入像素宽度或百分比，例如 480px、50%。"});}
+                    else {this.field_errors.remove(key);let value=if key=="imageHandlingSettings.defaultImageWidth" {crate::image_import::normalize_width(&value).unwrap()}else{value};Settings::set(cx,key,json!(value));}
                     cx.notify();return;
                 }
-                let invalid = font && value.chars().any(|ch| matches!(ch, '"' | '\'' | ',' | '(' | ')' | ';' | '!'));
-                field.update(cx, |field, cx| field.set_invalid(invalid, cx));
-                if invalid {
-                    this.font_errors.insert(key, "请输入单个字体名称，不能包含引号、逗号、括号、分号或感叹号。");
-                } else {
-                    this.font_errors.remove(key);
-                    Settings::set(cx, key, json!(value));
-                }
+                Settings::set(cx, key, json!(value));
                 cx.notify();
             }
         }));
@@ -273,7 +273,7 @@ impl SettingsWindow {
                     readonly_input(text.to_string(), width, theme).into_any_element()
                 }
             }
-            Control::FontFamily => self.render_font_control(item, theme, width.min(220.0), cx),
+            Control::FontFamily => self.render_font_control(item, theme, width, viewport, cx),
             Control::Number { unit } => div().flex().items_center().gap(px(10.0))
                 .child(readonly_input(value.as_i64().unwrap_or_default().to_string(), width.min(180.0), theme))
                 .child(div().text_size(px(13.0)).font_family(crate::theme::font_for(crate::theme::Family::Mono, false, false).family)
@@ -325,7 +325,7 @@ impl SettingsWindow {
             Support::Partial(reason) | Support::None(reason) => Some(*reason),
         };
         let control = self.render_control(item, theme, viewport, cx);
-        let error = self.font_errors.get(item.key).copied();
+        let error = self.field_errors.get(item.key).copied();
         let (label, description) = if item.key == "ctrlWheelZoomEnabled" && cfg!(target_os = "macos") {
             ("⌘ 滚轮缩放", "按住 ⌘ 并滚动鼠标滚轮调整缩放。")
         } else { (item.label, item.description) };
@@ -412,6 +412,7 @@ impl Render for SettingsWindow {
             .when(!compact, |el| el.child(div().text_size(px(14.0)).font_weight(FontWeight::BOLD).child("偏好设置")));
         #[cfg(target_os = "windows")]
         { nav_drag = nav_drag.child(window_chrome::drag_surface("settings-nav-drag")); }
+                        this.font_picker = None;
         #[cfg(not(target_os = "windows"))]
         { nav_drag = nav_drag.on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.start_window_move()); }
 

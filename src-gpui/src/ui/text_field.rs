@@ -30,7 +30,6 @@ pub struct TextField {
     last_bounds: Option<Bounds<Pixels>>,
     popover_style: bool,
     settings_style: bool,
-    clear_button: bool,
     settings_mono: bool,
     emoji_search_style: bool,
     code_language_style: bool,
@@ -59,7 +58,6 @@ impl TextField {
             last_bounds: None,
             popover_style: false,
             settings_style: false,
-            clear_button: false,
             settings_mono: false,
             emoji_search_style: false,
             code_language_style: false,
@@ -98,9 +96,6 @@ impl TextField {
         self.popover_style = true;
         self.settings_style = true;
         self.set_tab_stop();
-    }
-    pub fn reserve_clear_button(&mut self) {
-        self.clear_button = true;
     }
     pub fn set_settings_monospace(&mut self) {
         self.settings_mono = true;
@@ -261,8 +256,8 @@ impl EntityInputHandler for TextField {
         self.marked.as_ref().map(|range| self.range_to_utf16(range))
     }
 
-    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
-        self.marked = None;
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.marked.take().is_some() { cx.emit(FieldEvent::Changed); cx.notify(); }
     }
 
     fn replace_text_in_range(&mut self, range_utf16: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
@@ -325,7 +320,6 @@ impl Render for TextField {
             .cursor(CursorStyle::IBeam)
             .h(px(if self.code_language_style {30.0}else if self.popover_style {34.0}else{26.0}))
             .px(px(if self.emoji_search_style {0.0}else if self.popover_style || self.code_language_style {10.0}else{8.0}))
-            .when(self.clear_button, |el| el.pr(px(30.0)))
             .rounded(px(if self.popover_style {4.0}else{6.0}))
             .bg(if self.emoji_search_style {theme.rail_bg}else if self.popover_style && !self.settings_style {theme.app_bg}else{theme.surface})
             .border_1()

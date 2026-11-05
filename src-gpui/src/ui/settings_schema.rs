@@ -100,9 +100,9 @@ pub const CATEGORIES: &[Category] = &[
                 item("colorThemeId", "配色主题", "", Control::ThemePicker, Support::Full),
             ]),
             group("字体", &[
-                item("uiFontFamily", "界面字体", "用于菜单、侧栏、工具栏和设置窗口。", Control::FontFamily, Support::Full),
-                item("documentFontFamily", "正文字体", "用于编辑区正文，以及导出的 HTML 和 PDF。", Control::FontFamily, Support::Full),
-                item("monoFontFamily", "代码字体", "用于代码块、行内代码和源码模式。", Control::FontFamily, Support::Full),
+                item("uiFontFamily", "界面字体", "搜索本机已安装的字体，用于菜单、侧栏、工具栏和设置窗口。", Control::FontFamily, Support::Full),
+                item("documentFontFamily", "正文字体", "从本机字体中选择，用于编辑区正文及导出的 HTML 和 PDF。", Control::FontFamily, Support::Full),
+                item("monoFontFamily", "代码字体", "从本机字体中选择，用于代码块、行内代码和源码模式。", Control::FontFamily, Support::Full),
             ]),
             group("视觉缩放", &[
                 item("zoomPercent", "缩放级别", "调整正文编辑区和源码模式的整体显示比例。", Control::Range { min: 80.0, max: 160.0, step: 5.0, unit: "%" }, Support::Full),

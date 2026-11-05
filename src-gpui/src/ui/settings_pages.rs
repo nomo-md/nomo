@@ -112,26 +112,6 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    pub(super) fn render_font_control(&mut self, item: &'static Item, theme: &Theme, width: f32, cx: &mut Context<Self>) -> AnyElement {
-        let field = self.field(item, "跟随主题", cx);
-        let populated = !field.read(cx).content.is_empty();
-        let key = item.key;
-        div().relative().w(px(width)).flex().child(field)
-            .when(populated, |el| el.child(div().id(eid("font-reset", key)).absolute().top(px(7.0)).right(px(5.0))
-                .size(px(20.0)).rounded(px(2.0)).flex().items_center().justify_center().cursor_pointer()
-                .hover(|style| style.bg(theme.hover)).tooltip(tooltip("恢复主题字体"))
-                .child(icon(IconName::Close, 14.0, theme.muted))
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    cx.stop_propagation();
-                    if let Some(field) = this.fields.get(key) {
-                        field.update(cx, |field, cx| field.set_text("", cx));
-                        window.focus(&field.focus_handle(cx), cx);
-                    }
-                }))))
-            .into_any_element()
-    }
-
     pub(super) fn render_about(&mut self, theme: &Theme, viewport: gpui::Size<gpui::Pixels>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut items = vec![div().w_full().max_w(px(640.0)).flex().flex_col()
             .child(div().mb(px(14.0)).flex().items_center().gap(px(14.0))
