@@ -1,12 +1,20 @@
 //! 小窗仅改变当前文档的呈现；会话、保存、历史和后台标签保持原有归属。
 use super::*;
-use crate::ui::mini::{MiniBar, MiniEvent, MiniFrame, MiniGeometry, MiniTarget, MiniTitle, MiniWindow};
+use crate::ui::mini::{MiniBar, MiniEvent, MiniFrame, MiniGeometry, MiniPin, MiniTarget, MiniTitle, MiniWindow};
 
 pub(super) struct MiniState {
     session: Option<MiniSession>,
     geometry: Option<MiniGeometry>,
     pinned: bool,
     frame_pending: bool,
+    // 返回主界面后仍可确认原生恢复，不持有旧 DocumentHost 或控制条。
+    restoring: Option<Box<MiniWindow>>,
+    #[cfg(target_os = "linux")]
+    confirmation_task: Option<Task<()>>,
+    #[cfg(target_os = "macos")]
+    native_task: Option<Task<()>>,
+    #[cfg(target_os = "macos")]
+    native_task_epoch: u64,
 }
 
 struct MiniSession {
@@ -68,7 +76,10 @@ impl MiniSession {
 }
 
 impl Default for MiniState {
-    fn default() -> Self { Self { session: None, geometry: None, pinned: true, frame_pending: false } }
+    fn default() -> Self { Self { session: None, geometry: None, pinned: true, frame_pending: false,
+        restoring: None, #[cfg(target_os = "linux")] confirmation_task: None,
+        #[cfg(target_os = "macos")] native_task: None,
+        #[cfg(target_os = "macos")] native_task_epoch: 0 } }
 }
 
 impl MiniState {
@@ -103,31 +114,47 @@ fn set_document_layout(document: &Entity<DocumentHost>, previous: EditorMode, mi
     })
 }
 
+fn mini_failure(error: &crate::ui::toolbar_i18n::UiMessage, cx: &App) -> SharedString {
+    let locale = ToolbarLocale::current(cx);
+    locale.app_format("mini.operationFailed", &[("error", &error.render(locale))]).into()
+}
+
 impl Workspace {
     fn mini_title(&self, cx: &App) -> Option<MiniTitle> {
         let document = self.document()?;
         let host = document.read(cx);
-        Some(MiniTitle { name: host.title().into(), dirty: host.is_dirty(cx),
-            external: self.external_save_blocked(&document, cx), pinned: self.mini.pinned })
+        Some(MiniTitle { name: host.display_title(cx).into(), dirty: host.is_dirty(cx),
+            external: self.external_save_blocked(&document, cx),
+            pin: self.mini.session.as_ref().map_or(MiniPin::Ready(self.mini.pinned), |session| session.window.pin_state()) })
     }
 
     pub(super) fn toggle_mini(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_pair().is_some() { return; }
         if window.has_active_prompt() || self.closing_window { return; }
+        if let Some(restoring) = &mut self.mini.restoring {
+            match restoring.restore(window) {
+                Ok(true) => self.mini.restoring = None,
+                Ok(false) => {
+                    self.notice = Some(ToolbarLocale::current(cx).app_text("mini.restoring").into());
+                    self.schedule_mini_frame(window, cx); cx.notify(); return;
+                }
+                Err(error) => { self.failure_notice = Some(mini_failure(&error, cx)); cx.notify(); return; }
+            }
+        }
         if let Some(session) = &self.mini.session {
             let target = if session.window.moving_to() == Some(MiniTarget::Main) { MiniTarget::Mini } else { MiniTarget::Main };
             self.switch_mini_target(target, window, cx);
             return;
         }
-        if !cfg!(windows) || window.is_fullscreen() {
-            self.notice = Some(if cfg!(windows) { "请先退出全屏，再打开 Markdown Mini" } else { "当前平台尚未接入 Markdown Mini" }.into());
+        if let Some(reason) = crate::ui::mini::unavailable_reason_key(window) {
+            self.notice = Some(ToolbarLocale::current(cx).app_text(reason).into());
             cx.notify(); return;
         }
         if !self.opening.is_empty() {
-            self.notice = Some("文档仍在打开，请稍后切换小窗".into()); cx.notify(); return;
+            self.notice = Some(ToolbarLocale::current(cx).app_text("mini.opening").into()); cx.notify(); return;
         }
         let Some(document) = self.document() else { return; };
-        if let Err(error) = document.read(cx).ready(cx) { self.notice = Some(error.to_string().into()); cx.notify(); return; }
+        if let Err(error) = document.read(cx).ready(cx) { self.notice = Some(ToolbarLocale::current(cx).error(&error).into()); cx.notify(); return; }
         let previous_mode = self.tabs[self.active].mode;
         let main_viewport = window.viewport_size();
         let main_paper = self.outline_ui.bounds.get().filter(|bounds| !bounds.is_empty())
@@ -137,15 +164,20 @@ impl Workspace {
             Ok(native) => native,
             Err(error) => {
                 window.bounds_changed(cx);
-                self.failure_notice = Some(error.into());
+                self.failure_notice = Some(mini_failure(&error, cx));
                 cx.notify(); return;
             }
         };
         let paper_mini = previous_mode == EditorMode::Semantic || native.progress().is_none();
         if paper_mini && let Err(error) = set_document_layout(&document, previous_mode, true, cx) {
-            let rollback = native.restore();
+            let rollback = native.restore(window);
             window.bounds_changed(cx);
-            self.failure_notice = Some(match rollback { Ok(()) => error.to_string(), Err(restore) => format!("{error}；恢复主窗口失败：{restore}") }.into());
+            self.failure_notice = Some(match &rollback { Ok(_) => ToolbarLocale::current(cx).error(&error), Err(restore) => ToolbarLocale::current(cx).app_format("mini.mainRollbackFailed", &[("error", &ToolbarLocale::current(cx).error(&error)), ("restore", &restore.render(ToolbarLocale::current(cx)))]) }.into());
+            #[cfg(windows)]
+            let retain_restore = matches!(rollback, Ok(false));
+            #[cfg(not(windows))]
+            let retain_restore = !matches!(rollback, Ok(true));
+            if retain_restore { self.mini.restoring = Some(Box::new(native)); self.schedule_mini_frame(window, cx); }
             cx.notify(); return;
         }
         // Win32 在 SetWindowPos 内同步派发尺寸事件；此时 GPUI 正借出当前 Window，
@@ -163,17 +195,22 @@ impl Workspace {
         self.outline_ui.suspend_for_mini();
         self.suspend_tree(cx);
         self.explorer.sidebar_motion = None;
-        let title = self.mini_title(cx).expect("active Mini document");
+        let mut title = self.mini_title(cx).expect("active Mini document");
+        title.pin = native.pin_state();
+        if let Some(notice) = native.take_notice(ToolbarLocale::current(cx)) { self.notice = Some(notice.into()); }
         let bar = cx.new(|cx| MiniBar::new(title, window, cx));
         let subscription = cx.subscribe_in(&bar, window, |workspace, _, event, window, cx| match event {
             MiniEvent::Return => workspace.return_from_mini(window, cx),
             MiniEvent::Pin => {
-                let Some(session) = &workspace.mini.session else { return; };
-                let next = !workspace.mini.pinned;
-                match session.window.set_pinned(next) {
-                    Ok(()) => workspace.mini.pinned = next,
-                    Err(error) => workspace.failure_notice = Some(error.into()),
+                let Some(session) = &mut workspace.mini.session else { return; };
+                let MiniPin::Ready(pinned) = session.window.pin_state() else { return; };
+                match session.window.set_pinned(!pinned, window) {
+                    Ok(()) => {
+                        if let MiniPin::Ready(pinned) = session.window.pin_state() { workspace.mini.pinned = pinned; }
+                    }
+                    Err(error) => workspace.failure_notice = Some(mini_failure(&error, cx)),
                 }
+                workspace.schedule_mini_frame(window, cx);
                 cx.notify();
             }
         });
@@ -220,10 +257,10 @@ impl Workspace {
     fn switch_mini_target(&mut self, target: MiniTarget, window: &mut Window, cx: &mut Context<Self>) {
         if window.has_active_prompt() || self.closing_window { return; }
         if target == MiniTarget::Main && let Some(document) = self.document() && let Err(error) = document.read(cx).ready(cx) {
-            self.notice = Some(error.to_string().into()); cx.notify(); return;
+            self.notice = Some(ToolbarLocale::current(cx).error(&error).into()); cx.notify(); return;
         }
         let Some(session) = &mut self.mini.session else { return; };
-        match session.window.transition_to(target, !cx.global::<MotionPreference>().reduced) {
+        match session.window.transition_to(target, !cx.global::<MotionPreference>().reduced, window) {
             Ok(true) => {
                 self.update_paper_frame(window, cx);
                 self.schedule_mini_frame(window, cx);
@@ -235,7 +272,7 @@ impl Workspace {
             }
             Err(error) => {
                 window.bounds_changed(cx);
-                self.failure_notice = Some(error.into());
+                self.failure_notice = Some(mini_failure(&error, cx));
                 if target == MiniTarget::Main { self.finish_mini_return(window, cx); }
             }
         }
@@ -243,25 +280,105 @@ impl Workspace {
     }
 
     fn schedule_mini_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mini.frame_pending || !self.mini.session.as_ref().is_some_and(|s| s.window.moving_to().is_some()) { return; }
+        let pending = self.mini.restoring.as_deref().or_else(|| self.mini.session.as_ref().map(|s| &s.window))
+            .is_some_and(|native| native.moving_to().is_some());
+        #[cfg(target_os = "macos")]
+        if !pending {
+            self.mini.native_task_epoch = self.mini.native_task_epoch.wrapping_add(1);
+            self.mini.native_task.take();
+            self.mini.frame_pending = false;
+        }
+        if !pending { return; }
+        #[cfg(not(target_os = "macos"))]
+        if self.mini.frame_pending { return; }
+        #[cfg(target_os = "macos")]
+        self.mini.native_task.take();
         self.mini.frame_pending = true;
+        #[cfg(target_os = "linux")]
+        {
+            // 每次仅一个可取消任务；只确认当前快照，未完成请求在平台层有总时限。
+            self.mini.confirmation_task = Some(cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(40)).await;
+                let _ = this.update_in(cx, |workspace, window, cx| workspace.advance_mini_frame(window, cx));
+            }));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.mini.native_task_epoch = self.mini.native_task_epoch.wrapping_add(1);
+            let epoch = self.mini.native_task_epoch;
+            // prepare / complete 的 update_in 只读原生属性、更新 Rust 状态。
+            // run 在两次借用之间执行，AppKit 的同步 resize / display 回调可安全进入 GPUI。
+            self.mini.native_task = Some(cx.spawn_in(window, async move |this, cx| {
+                let operation = this.update_in(cx, |workspace, window, cx| {
+                    if workspace.mini.native_task_epoch != epoch { return None; }
+                    let operation = workspace.mini.restoring.as_deref()
+                        .or_else(|| workspace.mini.session.as_ref().map(|s| &s.window))
+                        .and_then(|native| native.prepare_native_operation(window));
+                    if operation.is_none() {
+                        workspace.mini.native_task.take();
+                        workspace.advance_mini_frame(window, cx);
+                    }
+                    operation
+                }).ok().flatten();
+                let Some(operation) = operation else { return; };
+                operation.run();
+                let _ = this.update_in(cx, |workspace, window, cx| {
+                    // 原生回调可能已关闭旧会话并创建新请求；旧任务不能取消新任务。
+                    if workspace.mini.native_task_epoch != epoch { return; }
+                    workspace.mini.native_task.take();
+                    workspace.mini.frame_pending = false;
+                    let current = workspace.mini.restoring.as_deref()
+                        .or_else(|| workspace.mini.session.as_ref().map(|s| &s.window))
+                        .is_some_and(|native| native.accepts_native_operation(&operation, window));
+                    if current { workspace.advance_mini_frame(window, cx); }
+                    else { workspace.schedule_mini_frame(window, cx); }
+                });
+            }));
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
         // 只排一帧；回调不持有 HWND、会话或视图，退出或折返后仅查看当前状态。
         let weak = cx.weak_entity();
         window.on_next_frame(move |window, cx| {
             let _ = weak.update(cx, |workspace, cx| workspace.advance_mini_frame(window, cx));
         });
+        }
     }
 
     fn advance_mini_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.mini.frame_pending = false;
+        #[cfg(target_os = "linux")]
+        self.mini.confirmation_task.take();
+        if let Some(restoring) = &mut self.mini.restoring {
+            let result = restoring.advance(true, false, window);
+            let pending_only = matches!(&result, Ok((MiniFrame::More, false)));
+            if let Some(notice) = restoring.take_notice(ToolbarLocale::current(cx)) { self.notice = Some(notice.into()); }
+            match result {
+                Ok((MiniFrame::More, _)) => self.schedule_mini_frame(window, cx),
+                Ok((MiniFrame::Settled(MiniTarget::Main), _)) => { self.mini.restoring = None; }
+                Ok((MiniFrame::Settled(MiniTarget::Mini), _)) => {
+                    self.failure_notice = Some(ToolbarLocale::current(cx).app_text("mini.restorePending").into());
+                }
+                Err(error) => { self.failure_notice = Some(mini_failure(&error, cx)); }
+            }
+            if !pending_only { window.bounds_changed(cx); cx.notify(); }
+            return;
+        }
         let Some(session) = &mut self.mini.session else { return; };
         let Some(target) = session.window.moving_to() else { return; };
         let handoff = session.previous_mode != EditorMode::Semantic;
-        match session.window.advance(cx.global::<MotionPreference>().reduced, handoff) {
+        let result = session.window.advance(cx.global::<MotionPreference>().reduced, handoff, window);
+        if target == MiniTarget::Mini && (!cfg!(target_os = "macos") || result.is_ok())
+            && let MiniPin::Ready(pinned) = session.window.pin_state() { self.mini.pinned = pinned; }
+        if let Some(notice) = session.window.take_notice(ToolbarLocale::current(cx)) { self.notice = Some(notice.into()); }
+        match result {
             Ok((frame, changed)) => {
                 if changed { window.bounds_changed(cx); }
                 match frame {
                     MiniFrame::More => {
+                        #[cfg(target_os = "linux")]
+                        self.schedule_mini_frame(window, cx);
+                        #[cfg(not(target_os = "linux"))]
                         if self.present_mini_frame(window, cx) { self.schedule_mini_frame(window, cx); }
                     }
                     MiniFrame::Settled(MiniTarget::Main) => self.finish_mini_return(window, cx),
@@ -269,9 +386,19 @@ impl Workspace {
                 }
             }
             Err(error) => {
-                self.failure_notice = Some(error.into());
+                self.failure_notice = Some(mini_failure(&error, cx));
+                #[cfg(windows)]
+                {
                 if target == MiniTarget::Main { self.finish_mini_return(window, cx); }
                 else { self.recover_mini_bounds(window, cx); }
+                }
+                #[cfg(not(windows))]
+                { let _ = target; window.bounds_changed(cx); }
+                #[cfg(target_os = "macos")]
+                if self.mini.session.as_ref().is_some_and(|session| session.window.native_is_restored()) {
+                    // 进入失败且原生回滚成功时，也退回原文档布局；失败快照仍由恢复路径保留。
+                    self.leave_mini(window, cx);
+                }
                 cx.notify();
             }
         }
@@ -279,7 +406,7 @@ impl Workspace {
 
     fn present_mini_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if let Err(error) = self.sync_paper_layout(window, cx) {
-            self.failure_notice = Some(error.to_string().into());
+            self.failure_notice = Some(ToolbarLocale::current(cx).error(&error).into());
             // 换版被输入事务拒绝时，退回仍能编辑的那一侧，不逐帧重试。
             if self.mini.session.as_ref().is_some_and(|session| session.paper_mini) {
                 self.recover_mini_bounds(window, cx);
@@ -305,15 +432,18 @@ impl Workspace {
 
     fn recover_mini_bounds(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = &mut self.mini.session else { return; };
-        if session.window.moving_to().is_some() && let Err(error) = session.window.settle_mini() {
+        if (session.window.moving_to().is_some() || cfg!(target_os = "macos")) && let Err(error) = session.window.settle_mini(window) {
             let reason = self.failure_notice.take().or_else(|| self.notice.take());
-            self.failure_notice = Some(reason.map_or_else(|| error.clone(), |reason| format!("{reason}；{error}")).into());
+            let error = error.render(ToolbarLocale::current(cx));
+            self.failure_notice = Some(reason.map_or_else(|| error.clone(), |reason| ToolbarLocale::current(cx).app_format("mini.additionalFailure", &[("reason", &reason), ("error", &error)])).into());
         }
         window.bounds_changed(cx);
         if let Err(error) = self.sync_paper_layout(window, cx) {
             let reason = self.failure_notice.take().or_else(|| self.notice.take());
-            self.failure_notice = Some(reason.map_or_else(|| error.to_string(), |reason| format!("{reason}；{error}")).into());
+            let error = ToolbarLocale::current(cx).error(&error);
+            self.failure_notice = Some(reason.map_or_else(|| error.clone(), |reason| ToolbarLocale::current(cx).app_format("mini.additionalFailure", &[("reason", &reason), ("error", &error)])).into());
         }
+        self.schedule_mini_frame(window, cx);
         cx.notify();
     }
 
@@ -324,25 +454,33 @@ impl Workspace {
         let previous_mode = session.previous_mode;
         let was_mini = session.paper_mini;
         if was_mini {
-            if let Err(error) = document.read(cx).ready(cx) { self.notice = Some(error.to_string().into()); cx.notify(); return false; }
+            if let Err(error) = document.read(cx).ready(cx) { self.notice = Some(ToolbarLocale::current(cx).error(&error).into()); cx.notify(); return false; }
             if let Err(error) = set_document_layout(&document, previous_mode, false, cx) {
-                self.failure_notice = Some(error.to_string().into()); cx.notify(); return false;
+                self.failure_notice = Some(ToolbarLocale::current(cx).error(&error).into()); cx.notify(); return false;
             }
         }
         let session = self.mini.session.as_mut().expect("Mini session");
-        let geometry = session.window.geometry();
-        if let Err(error) = session.window.restore() {
+        let geometry = session.window.geometry(window);
+        let restored = match session.window.restore(window) {
+            Ok(restored) => restored,
+            Err(error) => {
             window.bounds_changed(cx);
             let rollback = if was_mini { set_document_layout(&document, previous_mode, true, cx) } else { Ok(()) };
-            self.failure_notice = Some(match rollback { Ok(()) => error, Err(restore) => format!("{error}；恢复小窗编辑模式失败：{restore}") }.into());
+            self.failure_notice = Some(match rollback { Ok(()) => error.render(ToolbarLocale::current(cx)), Err(restore) => ToolbarLocale::current(cx).app_format("mini.editorRollbackFailed", &[("error", &error.render(ToolbarLocale::current(cx))), ("restore", &ToolbarLocale::current(cx).error(&restore))]) }.into());
             cx.notify(); return false;
-        }
+            }
+        };
         window.bounds_changed(cx);
         self.mini.geometry = Some(geometry);
-        self.mini.session = None;
+        let session = self.mini.session.take().expect("Mini session");
+        if !restored {
+            self.mini.restoring = Some(Box::new(session.window));
+            self.notice = Some(ToolbarLocale::current(cx).app_text("mini.confirmRestore").into());
+        }
         self.tabs[self.active].mode = previous_mode;
         self.resume_tree(cx);
         if !window.has_active_prompt() { window.focus(&document.focus_handle(cx), cx); }
+        self.schedule_mini_frame(window, cx);
         cx.notify();
         true
     }

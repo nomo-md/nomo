@@ -557,7 +557,7 @@ impl Render for Chrome {
         if self.state.has_document {
             let mini_enabled = self.capable(ChromeCapability::Mini);
             right = right.child(self.basic_button("chrome-mini", &theme).child(icon(IconName::PictureInPicture2, 15.0, theme.fg))
-                .when(!mini_enabled, |el| el.opacity(0.45)).tooltip(tooltip(if mini_enabled { "Markdown Mini (Ctrl+Alt+M)" } else if cfg!(windows) { "打开文档并退出全屏后可使用 Markdown Mini" } else { "当前平台尚未接入 Markdown Mini" }))
+                .when(!mini_enabled, |el| el.opacity(0.45)).tooltip(tooltip(if mini_enabled { "Markdown Mini (Ctrl+Alt+M)" } else { super::mini::unavailable_reason_key(window).map(|key| locale.app_text(key)).unwrap_or(locale.app_text("chrome.miniBusy")) }))
                 .on_click(cx.listener(move |this, _, window, cx| { if mini_enabled { this.dismiss(window, cx); cx.emit(ChromeEvent::ToggleMini); } })));
         }
         right = right.child(self.icon_button("chrome-theme", if theme.dark { IconName::Sun } else { IconName::Moon }, &theme)

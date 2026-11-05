@@ -1,4 +1,4 @@
-//! 原地切换同一个 HWND；只保存几何和窗口样式，不创建第二个窗口或正文快照。
+//! 原地切换同一个原生窗口；只保存几何和窗口属性，不创建第二个窗口或正文快照。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MiniTarget { Mini, Main }
 
@@ -289,24 +289,129 @@ mod platform {
     }
 }
 
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(windows)]
-pub(crate) use platform::{MiniGeometry, MiniWindow};
+use platform as backend;
+#[cfg(target_os = "macos")]
+use macos as backend;
+#[cfg(target_os = "linux")]
+use linux as backend;
 
-#[cfg(not(windows))]
-#[derive(Clone, Copy)]
-pub(crate) struct MiniGeometry;
-#[cfg(not(windows))]
-pub(crate) struct MiniWindow;
-#[cfg(not(windows))]
+pub(crate) use backend::MiniGeometry;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::NativeOperation as MacMiniOperation;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MiniPin {
+    Ready(bool),
+    Pending(bool),
+    Unavailable(&'static str),
+}
+
+impl MiniPin {
+    pub(crate) fn pinned(self) -> bool { matches!(self, Self::Ready(true) | Self::Pending(true)) }
+}
+
+pub(crate) fn unavailable_reason(window: &gpui::Window) -> Option<&'static str> {
+    unavailable_reason_key(window).map(|key| crate::ui::toolbar_i18n::ToolbarLocale::fallback().app_text(key))
+}
+
+pub(crate) fn unavailable_reason_key(window: &gpui::Window) -> Option<&'static str> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if window.is_fullscreen() || window.is_simple_fullscreen() {
+        return Some("mini.fullscreen");
+    }
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return Some("mini.windowUnavailable"); };
+    let supported = match handle.as_raw() {
+        #[cfg(windows)]
+        RawWindowHandle::Win32(_) => true,
+        #[cfg(target_os = "macos")]
+        RawWindowHandle::AppKit(_) => true,
+        #[cfg(target_os = "linux")]
+        RawWindowHandle::Xcb(_) | RawWindowHandle::Wayland(_) => true,
+        _ => false,
+    };
+    (!supported).then_some("mini.backendUnavailable")
+}
+
+/// 非 Windows 快照不持有原生对象或旧视图；macOS 任务只临时保留经过校验的原生对象。
+pub(crate) struct MiniWindow {
+    inner: backend::MiniWindow,
+    #[cfg(windows)]
+    pinned: bool,
+}
+
 impl MiniWindow {
-    pub(crate) fn enter(_: &gpui::Window, _: Option<MiniGeometry>, _: bool, _: bool) -> Result<Self, String> { Err("当前平台尚未接入 Markdown Mini 原生窗口".into()) }
-    pub(crate) fn geometry(&self) -> MiniGeometry { MiniGeometry }
-    pub(crate) fn set_pinned(&self, _: bool) -> Result<(), String> { Err("当前平台不支持小窗置顶".into()) }
-    pub(crate) fn moving_to(&self) -> Option<MiniTarget> { None }
-    pub(crate) fn progress(&self) -> Option<f32> { None }
-    pub(crate) fn resume_after_handoff(&mut self) {}
-    pub(crate) fn transition_to(&mut self, _: MiniTarget, _: bool) -> Result<bool, String> { Ok(false) }
-    pub(crate) fn advance(&mut self, _: bool, _: bool) -> Result<(MiniFrame, bool), String> { Ok((MiniFrame::Settled(MiniTarget::Mini), false)) }
-    pub(crate) fn settle_mini(&mut self) -> Result<(), String> { Ok(()) }
-    pub(crate) fn restore(&mut self) -> Result<(), String> { Ok(()) }
+    #[cfg(target_os = "macos")]
+    pub(crate) fn prepare_native_operation(&self, window: &gpui::Window) -> Option<MacMiniOperation> {
+        self.inner.prepare_operation(window)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn accepts_native_operation(&self, operation: &MacMiniOperation, window: &gpui::Window) -> bool {
+        self.inner.accepts_operation(operation, window)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn native_is_restored(&self) -> bool { self.inner.is_restored() }
+
+    pub(crate) fn enter(window: &mut gpui::Window, previous: Option<MiniGeometry>, pinned: bool, animate: bool) -> Result<Self, crate::ui::toolbar_i18n::UiMessage> {
+        if let Some(reason) = unavailable_reason_key(window) { return Err(crate::ui::toolbar_i18n::UiMessage::new(reason)); }
+        Ok(Self { inner: backend::MiniWindow::enter(window, previous, pinned, animate)?, #[cfg(windows)] pinned })
+    }
+
+    pub(crate) fn geometry(&self, window: &gpui::Window) -> MiniGeometry {
+        #[cfg(windows)] { let _ = window; self.inner.geometry() }
+        #[cfg(not(windows))] { self.inner.geometry(window) }
+    }
+
+    pub(crate) fn pin_state(&self) -> MiniPin {
+        #[cfg(windows)] { MiniPin::Ready(self.pinned) }
+        #[cfg(not(windows))] { self.inner.pin_state() }
+    }
+
+    pub(crate) fn set_pinned(&mut self, pinned: bool, window: &mut gpui::Window) -> Result<(), crate::ui::toolbar_i18n::UiMessage> {
+        #[cfg(windows)] { let _ = window; self.inner.set_pinned(pinned)?; self.pinned = pinned; Ok(()) }
+        #[cfg(not(windows))] { self.inner.set_pinned(pinned, window).map_err(crate::ui::toolbar_i18n::UiMessage::raw) }
+    }
+
+    pub(crate) fn take_notice(&mut self, locale: crate::ui::toolbar_i18n::ToolbarLocale) -> Option<String> {
+        #[cfg(windows)] { let _ = locale; None }
+        #[cfg(target_os = "macos")] { let _ = locale; self.inner.take_notice() }
+        #[cfg(target_os = "linux")] { self.inner.take_notice(locale) }
+    }
+
+    pub(crate) fn moving_to(&self) -> Option<MiniTarget> { self.inner.moving_to() }
+    pub(crate) fn progress(&self) -> Option<f32> { self.inner.progress() }
+    pub(crate) fn resume_after_handoff(&mut self) { self.inner.resume_after_handoff(); }
+
+    pub(crate) fn transition_to(&mut self, target: MiniTarget, animate: bool, window: &mut gpui::Window) -> Result<bool, crate::ui::toolbar_i18n::UiMessage> {
+        #[cfg(windows)] { let _ = window; self.inner.transition_to(target, animate).map_err(crate::ui::toolbar_i18n::UiMessage::raw) }
+        #[cfg(not(windows))] {
+            if window.is_fullscreen() || window.is_simple_fullscreen() { return Err(crate::ui::toolbar_i18n::UiMessage::new("mini.switchFullscreen")); }
+            self.inner.transition_to(target, animate, window).map_err(crate::ui::toolbar_i18n::UiMessage::raw)
+        }
+    }
+
+    pub(crate) fn advance(&mut self, reduced: bool, handoff: bool, window: &mut gpui::Window) -> Result<(MiniFrame, bool), crate::ui::toolbar_i18n::UiMessage> {
+        #[cfg(windows)] { let _ = window; self.inner.advance(reduced, handoff).map_err(crate::ui::toolbar_i18n::UiMessage::raw) }
+        #[cfg(not(windows))] { self.inner.advance(reduced, handoff, window).map_err(crate::ui::toolbar_i18n::UiMessage::raw) }
+    }
+
+    pub(crate) fn settle_mini(&mut self, window: &mut gpui::Window) -> Result<(), crate::ui::toolbar_i18n::UiMessage> {
+        #[cfg(windows)] { let _ = window; self.inner.settle_mini().map_err(crate::ui::toolbar_i18n::UiMessage::raw) }
+        #[cfg(not(windows))] { self.inner.settle_mini(window).map_err(crate::ui::toolbar_i18n::UiMessage::raw) }
+    }
+
+    /// false 表示请求尚待窗口管理器确认，调用方必须保留快照并继续有期限的确认。
+    pub(crate) fn restore(&mut self, window: &mut gpui::Window) -> Result<bool, crate::ui::toolbar_i18n::UiMessage> {
+        #[cfg(windows)] { let _ = window; self.inner.restore().map(|()| true).map_err(crate::ui::toolbar_i18n::UiMessage::raw) }
+        #[cfg(not(windows))] {
+            if window.is_fullscreen() || window.is_simple_fullscreen() { return Err(crate::ui::toolbar_i18n::UiMessage::new("mini.restoreFullscreen")); }
+            self.inner.restore(window).map_err(crate::ui::toolbar_i18n::UiMessage::raw)
+        }
+    }
 }

@@ -1823,7 +1823,7 @@ impl Render for Workspace {
             toolbar_shortcut: crate::ui::shortcuts::current("toggle-toolbar", cx).into(),
             recent, update:crate::ui::updates::chrome_state(cx),
             capabilities:vec![ChromeCapability::Recent,ChromeCapability::NewWindow,ChromeCapability::HeadingLevels,ChromeCapability::HeadingAdjustment,ChromeCapability::ClearFormatting,ChromeCapability::LinkPicker,ChromeCapability::TablePicker,ChromeCapability::MathInline,ChromeCapability::Callout,ChromeCapability::Details,ChromeCapability::InlineComment,ChromeCapability::BlockComment,ChromeCapability::FrontMatter,ChromeCapability::Diagrams,ChromeCapability::Footnote,ChromeCapability::Toc,ChromeCapability::UnavailableNotice,ChromeCapability::ResetOutlinePosition]
-                .into_iter().chain([ChromeCapability::SoftwareUpdate]).chain([ChromeCapability::ExportHtml, ChromeCapability::ExportPdf, ChromeCapability::ExportWord].into_iter().filter(|_| self.export_job.is_none())).chain((cfg!(windows) && self.active_pair().is_none() && status.is_some() && !window.is_fullscreen()).then_some(ChromeCapability::Mini)).collect(),
+                .into_iter().chain([ChromeCapability::SoftwareUpdate]).chain([ChromeCapability::ExportHtml, ChromeCapability::ExportPdf, ChromeCapability::ExportWord].into_iter().filter(|_| self.export_job.is_none())).chain((self.active_pair().is_none() && status.is_some() && crate::ui::mini::unavailable_reason(window).is_none()).then_some(ChromeCapability::Mini)).collect(),
             ..Default::default()
         },cx));
         let chrome = shell_visible.then(|| mini::shell_row(self.chrome.clone().into_any_element(), px(crate::ui::chrome::TITLEBAR_HEIGHT), shell_visibility));
