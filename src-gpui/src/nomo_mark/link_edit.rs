@@ -3,6 +3,9 @@ use super::{commands::EditResult, mapping::local_range, nomo_syntax::html_tag, p
 use pulldown_cmark::{Event, Tag};
 use std::{collections::BTreeMap, ops::Range};
 
+#[path = "link_selection.rs"]
+mod selection;
+
 #[derive(Clone)]
 pub(crate) struct LinkDraft {
     pub text: String,
@@ -13,6 +16,8 @@ pub(crate) struct LinkDraft {
     title: String,
     html: bool,
     attrs: BTreeMap<String,String>,
+    selection: Option<DocumentSelection>,
+    reversed: bool,
 }
 impl LinkDraft {
     pub(crate) fn display_href(&self) -> String {
@@ -31,53 +36,46 @@ impl LinkDraft {
         if parsed.context.reference_pending(&selected) {
             return Err(ControlError::NeedsContext("引用目标仍在准备，暂不能编辑链接地址".into()));
         }
-        let contains=|range:&Range<usize>|range.start<=selected.start && selected.end<=range.end;
+        let links = Self::links(parsed)?;
+        if let Some(link) = links.iter().find(|link| link.range.start <= selected.start && selected.end <= link.range.end
+            && (selected.is_empty() || selected == link.content || selected == link.range)) {
+            let mut draft = link.clone();
+            draft.text = plain_text(parsed, &draft.content);
+            draft.reversed = selection.anchor_byte > selection.head_byte;
+            return Ok(draft);
+        }
+        if !selected.is_empty() {
+            return selection::begin(parsed, selection, selected, &links);
+        }
+        if parsed.nodes.iter().any(|node|node.kind=="code" && node.source.start<=selected.start && selected.end<=node.source.end) {
+            return Err(ControlError::Unsupported("代码块内不能应用链接格式".into()));
+        }
+        Ok(Self {text:String::new(),href:String::new(),active:false,
+            range:selected.clone(),content:selected.clone(),title:String::new(),html:parsed.html_cell_at(selected.start).is_some(),attrs:BTreeMap::new(),selection:None,reversed:false})
+    }
+
+    fn links(parsed: &ParsedWindow) -> Result<Vec<Self>, ControlError> {
+        let mut links = Vec::new();
         for (event,range) in &parsed.events {
             let Event::Start(Tag::Link{dest_url,title,..})=event else {continue;};
-            if !contains(range) {continue;}
             let raw=&parsed.source[range.clone()];
             let content=if raw.starts_with('<') && raw.ends_with('>') {range.start+1..range.end-1}
                 else if raw.starts_with('[') {
                     let end=label_end(raw).ok_or_else(||ControlError::NeedsContext("链接标签边界无效".into()))?;
                     range.start+1..range.start+end
                 } else {range.clone()};
-            // 在链接内部选中一段时保留准确选区，不能偷偷扩大到整条链接。
-            if !selected.is_empty() && selected!=content && selected!=*range {
-                return Err(ControlError::Unsupported("部分链接选区编辑尚待接入；请将光标放入链接后编辑整条链接".into()));
-            }
-            return Ok(Self {text:plain_text(parsed,&content),href:dest_url.to_string(),active:true,
-                range:range.clone(),content,title:title.to_string(),html:false,attrs:BTreeMap::new()});
+            links.push(Self {text:String::new(),href:dest_url.to_string(),active:true,
+                range:range.clone(),content,title:title.to_string(),html:false,attrs:BTreeMap::new(),selection:None,reversed:false});
         }
-        let html_cell=parsed.html_cell_at(selected.start).filter(|cell| selected.end <= cell.content.end);
-        let html_span=parsed.inline.iter().chain(html_cell.into_iter().flat_map(|cell|&cell.spans))
-            .find(|span|span.format==InlineFormat::Link && contains(&span.range()));
-        if let Some(span)=html_span {
+        for span in parsed.inline.iter().filter(|span|span.format==InlineFormat::Link) {
             if let Some(tag)=html_tag(&parsed.source,span.open.start).filter(|tag|tag.name=="a") {
-                if !selected.is_empty() && selected!=span.content && selected!=span.range() {
-                    return Err(ControlError::Unsupported("部分链接选区编辑尚待接入；请将光标放入链接后编辑整条链接".into()));
-                }
                 let attrs:BTreeMap<_,_>=tag.attrs.into_iter().map(|(name,value)|(name,html_escape::decode_html_entities(&value).into_owned())).collect();
-                return Ok(Self {text:html_text(&parsed.source[span.content.clone()]),href:attrs.get("href").cloned().unwrap_or_default(),
-                    active:true,range:span.range(),content:span.content.clone(),title:attrs.get("title").cloned().unwrap_or_default(),html:true,attrs});
+                links.push(Self {text:String::new(),href:attrs.get("href").cloned().unwrap_or_default(),
+                    active:true,range:span.range(),content:span.content.clone(),title:attrs.get("title").cloned().unwrap_or_default(),html:true,attrs,selection:None,reversed:false});
             }
         }
-        if parsed.inline.iter().any(|span|span.format==InlineFormat::Link && span.intersects(&selected)) {
-            return Err(ControlError::Unsupported("跨链接选区的链接合并尚待接入".into()));
-        }
-        // 不把半个格式定界符带进链接标签；完整内联标记或同一格式内部的选区均可保留。
-        if parsed.inline.iter().any(|span|span.intersects(&selected)
-            && !(selected.start<=span.open.start && span.close.end<=selected.end)
-            && !(span.content.start<=selected.start && selected.end<=span.content.end)) {
-            return Err(ControlError::Unsupported("跨行内格式边界的链接编辑尚待接入".into()));
-        }
-        if parsed.nodes.iter().any(|node|node.kind=="code" && node.source.start<=selected.start && selected.end<=node.source.end) {
-            return Err(ControlError::Unsupported("代码块内不能应用链接格式".into()));
-        }
-        if parsed.source[selected.clone()].contains('\n') {
-            return Err(ControlError::Unsupported("跨行或跨段链接格式尚待接入".into()));
-        }
-        Ok(Self {text:if html_cell.is_some() {html_text(&parsed.source[selected.clone()])}else{plain_text(parsed,&selected)},href:String::new(),active:false,
-            range:selected.clone(),content:selected,title:String::new(),html:html_cell.is_some(),attrs:BTreeMap::new()})
+        links.sort_by_key(|link| (link.range.start, link.range.end));
+        Ok(links)
     }
     pub fn edit(&self, parsed:&ParsedWindow, text:&str, href:Option<&str>) -> Result<EditResult,ControlError> {
         let raw=parsed.source.get(self.content.clone()).ok_or(ControlError::InvalidRange)?;
@@ -88,12 +86,15 @@ impl LinkDraft {
         let shown=if text.trim().is_empty() {
             if self.text.is_empty() {href.as_deref().unwrap_or("")}else{&self.text}
         }else{text};
+        if let Some(selected) = self.selection {
+            return selection::edit(self, parsed, selected, shown, href.as_deref());
+        }
         let table_cell=parsed.events.iter().any(|(event,range)|matches!(event,Event::Start(Tag::TableCell)) && range.start<=self.range.start && self.range.end<=range.end);
         let body=if shown==self.text {raw.to_owned()}else if self.html {html_escape::encode_text(shown).to_string()}else{escape_label(shown)};
         let body=if table_cell && !self.html {escape_table_pipes(&body)}else{body};
         if same_target && (body == raw || parsed.source.get(self.content.end..self.range.end).is_some_and(|tail| tail.starts_with("]("))) {
             let start = parsed.identity.from_byte + self.content.start as u64;
-            let selection = DocumentSelection { anchor_byte: start, head_byte: start + body.len() as u64 };
+            let selection = self.result_selection(start, start + body.len() as u64);
             let edits = if body == raw { Vec::new() } else {
                 vec![SourceEdit { from_byte: start, to_byte: start + raw.len() as u64, inserted_text: body }]
             };
@@ -116,7 +117,11 @@ impl LinkDraft {
         let content_start=if remove {0}else if self.html {replacement.find('>').map_or(0,|at|at+1)}else{1};
         let selected_bytes=if remove {raw.len()}else{body.len()};
         Ok(EditResult {edits:vec![SourceEdit {from_byte:base,to_byte:parsed.identity.from_byte+self.range.end as u64,inserted_text:replacement.clone()}],
-            selection:DocumentSelection {anchor_byte:base+content_start as u64,head_byte:base+(content_start+selected_bytes) as u64},template_update:None})
+            selection:self.result_selection(base+content_start as u64,base+(content_start+selected_bytes) as u64),template_update:None})
+    }
+    fn result_selection(&self, start: u64, end: u64) -> DocumentSelection {
+        if self.reversed { DocumentSelection { anchor_byte: end, head_byte: start } }
+        else { DocumentSelection { anchor_byte: start, head_byte: end } }
     }
 }
 
@@ -176,9 +181,23 @@ pub(super) fn label_end(raw:&str)->Option<usize> {
     }None
 }
 fn plain_text(parsed:&ParsedWindow, range:&Range<usize>)->String {
+    if parsed.html_cell_at(range.start).is_some_and(|cell| range.end <= cell.content.end) {
+        return html_text(&parsed.source[range.clone()]);
+    }
     let mut result=String::new();
     for (event,source) in &parsed.events {
         if source.end<=range.start || range.end<=source.start {continue;}
+        if let Event::Code(text) = event {
+            if let Some(span) = parsed.inline.iter().find(|span| span.format == InlineFormat::Code && span.range() == *source) {
+                let raw = &parsed.source[span.content.clone()];
+                let padded = raw.starts_with(' ') && raw.ends_with(' ') && raw.len() > 2 && raw.chars().any(|ch| ch != ' ');
+                let content = span.content.start + usize::from(padded)..span.content.end - usize::from(padded);
+                let from = content.start.max(range.start);
+                let to = content.end.min(range.end);
+                if from < to { result.push_str(&parsed.source[from..to].replace("\r\n", " ").replace(['\r', '\n'], " ")); }
+            } else { result.push_str(text); }
+            continue;
+        }
         if source.start<range.start || source.end>range.end {
             if let Event::Text(text)=event {
                 if parsed.source.get(source.clone())==Some(text.as_ref()) {

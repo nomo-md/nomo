@@ -84,6 +84,7 @@ impl DocumentHost {
             saving: false,
             production: true,
             navigating: false,
+            attachment_open: None,
             request: Default::default(),
             panes: vec![window_panes::Pane::new(control.clone(), subscription, mode)],
             active_pane: 0, split_ratio: 0.5, split_dragging: false, split_focus: cx.focus_handle(),
@@ -298,6 +299,7 @@ impl DocumentHost {
     /// 会话已由批量事务关闭或移交，只拆除旧控件和任务。
     pub(crate) fn release_closed_view(&mut self, discard: bool, cx: &mut Context<Self>) -> Result<(), ControlError> {
         self.closed = true;
+        self.attachment_open = None;
         self.quick.cancel();
         self.request.cancel();
         self.pause_viewport(cx);

@@ -32,7 +32,7 @@ pub fn opposite(format: InlineFormat) -> Option<InlineFormat> {
 }
 
 /// 表格、标题和列表正文分别处理；围栏、列表标记和块之间的换行不进入格式命令。
-fn blocks(parsed: &ParsedWindow, selection: &Range<usize>) -> Vec<Range<usize>> {
+pub(super) fn blocks(parsed: &ParsedWindow, selection: &Range<usize>) -> Vec<Range<usize>> {
     let mut stack = Vec::new();
     let mut ranges = BTreeMap::<usize, Range<usize>>::new();
     for (event, range) in &parsed.events {
@@ -108,21 +108,21 @@ fn blocks(parsed: &ParsedWindow, selection: &Range<usize>) -> Vec<Range<usize>> 
 }
 
 #[derive(Default)]
-struct Changes {
-    deletions: Vec<Range<usize>>,
-    literal_edits: Vec<SourceEdit>,
+pub(super) struct Changes {
+    pub(super) deletions: Vec<Range<usize>>,
+    pub(super) literal_edits: Vec<SourceEdit>,
     // order keeps closing delimiters before opening delimiters at a shared endpoint.
     insertions: BTreeMap<usize, Vec<(i64, String)>>,
 }
 impl Changes {
-    fn insert(&mut self, at: usize, order: i64, text: String) {
+    pub(super) fn insert(&mut self, at: usize, order: i64, text: String) {
         self.insertions.entry(at).or_default().push((order, text));
     }
     fn remove(&mut self, span: &InlineSpan) {
         self.deletions
             .extend([span.open.clone(), span.close.clone()]);
     }
-    fn wrap(&mut self, range: Range<usize>, pair: (String, String)) {
+    pub(super) fn wrap(&mut self, range: Range<usize>, pair: (String, String)) {
         self.wrap_at_order(range.clone(), pair, range.start);
     }
     fn wrap_at_order(&mut self, range: Range<usize>, pair: (String, String), outer_start: usize) {
@@ -130,7 +130,12 @@ impl Changes {
         self.insert(range.start, i64::MAX / 2 + order, pair.0);
         self.insert(range.end, -order - 1, pair.1);
     }
-    fn finish(mut self, base: u64) -> Result<Vec<SourceEdit>, ControlError> {
+    pub(super) fn finish(self, base: u64) -> Result<Vec<SourceEdit>, ControlError> {
+        self.finish_at(base, None).map(|(edits, _)| edits)
+    }
+    /// 指定插入项的输出坐标随相邻删除合并一起计算，供替换文字后恢复精确选区。
+    pub(super) fn finish_at(mut self, base: u64, anchor: Option<(usize, i64)>) -> Result<(Vec<SourceEdit>, Option<u64>), ControlError> {
+        let mut mapped = None;
         self.deletions.sort_by_key(|r| (r.start, r.end));
         self.deletions.dedup();
         let mut ranges: Vec<Range<usize>> = Vec::new();
@@ -153,7 +158,8 @@ impl Changes {
             for at in positions {
                 if let Some(mut values) = self.insertions.remove(&at) {
                     values.sort_by_key(|(order, _)| *order);
-                    for (_, value) in values {
+                    for (order, value) in values {
+                        if anchor == Some((at, order)) { mapped = Some((base + range.start as u64, text.len())); }
                         text.push_str(&value);
                     }
                 }
@@ -166,10 +172,15 @@ impl Changes {
         }
         for (at, mut values) in self.insertions {
             values.sort_by_key(|(order, _)| *order);
+            let mut inserted_text = String::new();
+            for (order, value) in values {
+                if anchor == Some((at, order)) { mapped = Some((base + at as u64, inserted_text.len())); }
+                inserted_text.push_str(&value);
+            }
             edits.push(SourceEdit {
                 from_byte: base + at as u64,
                 to_byte: base + at as u64,
-                inserted_text: values.into_iter().map(|(_, s)| s).collect(),
+                inserted_text,
             });
         }
         edits.extend(self.literal_edits);
@@ -181,11 +192,16 @@ impl Changes {
         {
             return Err(ControlError::Unsupported("格式补丁范围发生重叠".into()));
         }
-        Ok(edits)
+        let mapped = mapped.map(|(from, offset)| {
+            let shift: i128 = edits.iter().take_while(|edit| edit.from_byte < from)
+                .map(|edit| edit.inserted_text.len() as i128 - (edit.to_byte - edit.from_byte) as i128).sum();
+            (from as i128 + shift + offset as i128) as u64
+        });
+        Ok((edits, mapped))
     }
 }
 
-fn remove_selected(changes: &mut Changes, span: &InlineSpan, range: &Range<usize>, markers: &[Range<usize>]) {
+pub(super) fn remove_selected(changes: &mut Changes, span: &InlineSpan, range: &Range<usize>, markers: &[Range<usize>]) {
     // 嵌套格式的定界符不属于未选中的正文，不能为它们重建空 HTML 包裹。
     let has_text = |range: Range<usize>| {
         let next = markers.partition_point(|marker| marker.end <= range.start);
@@ -287,7 +303,7 @@ fn merge_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
     merged
 }
 
-fn marker_ranges(parsed: &ParsedWindow) -> Vec<Range<usize>> {
+pub(super) fn marker_ranges(parsed: &ParsedWindow) -> Vec<Range<usize>> {
     merge_ranges(parsed.inline.iter().flat_map(|span| [span.open.clone(), span.close.clone()]).collect())
 }
 

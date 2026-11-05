@@ -61,6 +61,7 @@ pub struct DocumentHost {
     saving: bool,
     production: bool,
     navigating: bool,
+    attachment_open: Option<gpui::Task<()>>,
     request: super::session_window::WindowRequest,
     total_bytes: u64,
     panes: Vec<window_panes::Pane>,
@@ -133,6 +134,7 @@ impl DocumentHost {
             saving: false,
             production,
             navigating: false,
+            attachment_open: None,
             request: Default::default(),
             total_bytes: status.byte_length,
             panes: vec![window_panes::Pane::new(control.clone(), subscription, ViewMode::Semantic)],
@@ -369,6 +371,7 @@ impl DocumentHost {
                 use super::link_target::{self, LinkTarget};
                 match link_target::resolve(url, self.path().as_deref()) {
                     Ok(LinkTarget::External(url)) => cx.open_url(&url),
+                    Ok(LinkTarget::Attachment(path)) => self.open_attachment(path, cx),
                     Ok(LinkTarget::Anchor(anchor)) if self.production => self.anchor(anchor, cx),
                     Ok(LinkTarget::Markdown { path, anchor }) if self.embedded => {
                         cx.emit(DocumentEvent::OpenMarkdownLink { path, anchor });
@@ -407,6 +410,25 @@ impl DocumentHost {
             _ => {}
         }
         cx.notify();
+    }
+    fn open_attachment(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        if self.closed || self.attachment_open.is_some() { return; }
+        let check = cx.background_executor().spawn(async move { super::link_target::prepare_attachment(&path) });
+        self.attachment_open = Some(cx.spawn(async move |this, cx| {
+            let result = check.await;
+            let _ = this.update(cx, |host, cx| {
+                host.attachment_open = None;
+                if host.closed { return; }
+                match result {
+                    Ok(path) => cx.open_with_system(&path),
+                    Err(message) => {
+                        host.message = message.clone();
+                        cx.emit(DocumentEvent::Failure(message));
+                        cx.notify();
+                    }
+                }
+            });
+        }));
     }
     pub(super) fn selection_changed(&mut self, cx:&mut Context<Self>) {
         self.panes[self.active_pane].reveal_selection=true;
