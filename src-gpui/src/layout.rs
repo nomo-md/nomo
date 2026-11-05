@@ -110,6 +110,8 @@ pub struct InlineStyle {
     /// 行内代码的圆角底色。
     pub code_bg: bool,
     pub footnote: bool,
+    /// 语义层明确排除链接、代码或非英文语言；默认普通正文允许英文候选。
+    pub no_hyphenation: bool,
     /// 文字底色：0 无，1 为 `<mark>` 默认高亮，2–8 对应调色板 0–6 的背景色。
     pub bg: u8,
     /// 基线偏移：1 为上标，-1 为下标；字形与字宽同步缩至 0.75em。
@@ -235,6 +237,25 @@ pub struct VisualLine {
     pub end: usize,
     origin_x: f32,
     glues: Vec<(usize, f32)>,
+    trim_end: f32,
+    hang: f32,
+    hyphen: Option<HyphenGlyph>,
+}
+
+/// 连字符没有源码字节，只属于选定视觉行；不可加入 text 或源字形数组。
+#[derive(Clone, Copy)]
+struct HyphenGlyph {
+    font_id: FontId,
+    id: GlyphId,
+    font_size: f32,
+    width: f32,
+    color: ColorRole,
+    lift: f32,
+}
+
+struct DiscretionaryHyphen {
+    at: usize,
+    glyph: HyphenGlyph,
 }
 
 pub struct TextLayout {
@@ -294,7 +315,8 @@ impl TextLayout {
     pub fn estimated_bytes(&self) -> usize {
         self.text.len()
             + self.glyphs.len() * std::mem::size_of::<Glyph>()
-            + self.lines.iter().map(|line| 48 + line.glues.len() * 16).sum::<usize>()
+            + self.lines.capacity() * std::mem::size_of::<VisualLine>()
+            + self.lines.iter().map(|line| line.glues.capacity() * std::mem::size_of::<(usize, f32)>()).sum::<usize>()
             + self.styles.len() * 48
             + self.objects.capacity() * std::mem::size_of::<InlineObject>()
             + self.objects.iter().map(|o| match &o.key { InlineAsset::Image(path) => path.as_os_str().len(), InlineAsset::Comment { label: Some(label), .. } => label.0.estimated_bytes(), _ => 0 }).sum::<usize>()
@@ -318,7 +340,10 @@ impl TextLayout {
             .take_while(|(at, _)| *at <= offset)
             .last()
             .map_or(0.0, |(_, shift)| *shift);
-        self.shaped_x(offset) - line.origin_x + extra
+        let edge = if offset == line.end {
+            line.hyphen.map_or(0.0, |hyphen| hyphen.width) - line.trim_end
+        } else { 0.0 };
+        self.shaped_x(offset) - line.origin_x + extra + edge
     }
 
     pub fn line_for_offset(&self, offset: usize) -> usize {
@@ -341,6 +366,11 @@ impl TextLayout {
     pub fn offset_at(&self, x: f32, y: f32) -> usize {
         let line_index = ((y / self.line_height).floor().max(0.0) as usize).min(self.lines.len() - 1);
         let line = &self.lines[line_index];
+        if let Some(hyphen) = line.hyphen {
+            // 整个虚拟字形都命中原来的断词边界，不制造一个可移动到的新字符。
+            let right = self.x_in_line(line, line.end);
+            if x >= right - hyphen.width { return line.end; }
+        }
         let from = self.glyphs.partition_point(|glyph| glyph.index < line.start);
         let mut best = (line.start, f32::INFINITY);
         let candidates = self.glyphs[from..]
@@ -369,8 +399,9 @@ impl TextLayout {
             let end = range.end.min(line.end);
             if start < end {
                 rects.push((index, self.x_in_line(line, start), self.x_in_line(line, end)));
-            } else if start == end && range.end > line.end && range.start <= line.end {
-                // 选区跨越本行末尾：补一个窄条，表示换行符被选中。
+            } else if start == end && range.end > line.end && range.start <= line.end
+                && self.lines.get(index + 1).is_some_and(|next| next.start > line.end) {
+                // 只有实际换行／被折掉的空白才占源码。共享断词边界不能凭空多选一个字符。
                 let x = self.x_in_line(line, line.end);
                 rects.push((index, x, x + self.font_size * 0.3));
             }
@@ -451,6 +482,11 @@ impl TextLayout {
                 } else {
                     window.paint_glyph(at, glyph.font_id, glyph.id, font_size, color)
                 };
+            }
+            if let Some(hyphen) = line.hyphen {
+                let x = self.x_in_line(line, line.end) - hyphen.width;
+                let _ = window.paint_glyph(point(origin.x + px(x), origin.y + px(baseline + hyphen.lift)),
+                    hyphen.font_id, hyphen.id, px(hyphen.font_size), hyphen.color.resolve(theme));
             }
             // 删除线与下划线按样式区间逐行绘制。
             for (range, style) in &self.styles {
@@ -629,7 +665,7 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
     for logical in layout.text.split('\n') {
         let text = logical.strip_suffix('\r').unwrap_or(logical);
         if spec.wrap == Wrap::None {
-            layout.lines.push(VisualLine { start, end: start + text.len(), origin_x: layout.shaped_x(start), glues: Vec::new() });
+            layout.lines.push(VisualLine { start, end: start + text.len(), origin_x: layout.shaped_x(start), glues: Vec::new(), trim_end: 0.0, hang: 0.0, hyphen: None });
             start += logical.len() + 1;
             continue;
         }
@@ -640,7 +676,7 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
         }
         // 每个逻辑行的行尾空格都必须保留宽度和光标位置。
         for item in items.iter_mut().rev() {
-            if item.from == item.to || !layout.text[item.from..item.to].bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
+            if item.from == item.to || !layout.text[item.from..item.to].chars().all(char::is_whitespace) {
                 break;
             }
             item.kind = ItemKind::Box;
@@ -661,59 +697,176 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
             } else { atomic.push(item); item_index += 1; }
         }
         items = atomic;
-        split_oversized_boxes(&mut items, &layout, width);
+        let hyphens = if spec.wrap == Wrap::KnuthPlass && items.len() <= kp::MAX_KP_ITEMS {
+            english_breaks(&layout, start..start + text.len(), spec, window)
+        } else { Vec::new() };
+        split_at_hyphens(&mut items, &layout, &hyphens);
+        split_oversized_boxes(&mut items, &layout, width, &hyphens);
+        let edges = if spec.wrap == Wrap::KnuthPlass { punctuation_edges(&items, &layout, window) } else { Vec::new() };
+        let mut hyphen_index = 0;
+        let breaks: Vec<_> = items.iter().enumerate().filter_map(|(index, item)| {
+            while hyphen_index < hyphens.len() && hyphens[hyphen_index].at < item.to { hyphen_index += 1; }
+            hyphens.get(hyphen_index).filter(|hyphen| hyphen.at == item.to
+                && matches!(item.kind, ItemKind::Box) && item.from < item.to)
+                .map(|hyphen| kp::Hyphen { at: index + 1, width: hyphen.glyph.width })
+        }).collect();
         if items.is_empty() {
-            layout.lines.push(VisualLine { start, end: start, origin_x: layout.shaped_x(start), glues: Vec::new() });
+            layout.lines.push(VisualLine { start, end: start, origin_x: layout.shaped_x(start), glues: Vec::new(), trim_end: 0.0, hang: 0.0, hyphen: None });
         } else {
             let lines = match spec.wrap {
                 Wrap::None => unreachable!("unwrapped lines are handled before line breaking"),
-                Wrap::KnuthPlass => kp::break_lines(&items, width),
+                Wrap::KnuthPlass => if edges.is_empty() && breaks.is_empty() { kp::break_lines(&items, width) }
+                    else { kp::break_lines_with(&items, width, &edges, &breaks) },
                 Wrap::Greedy => kp::greedy_lines(&items, width),
             };
             layout.lines.reserve(lines.len());
             for line in &lines {
-                let visual = visual_line(&layout, &items, line);
+                let visual = visual_line(&layout, &items, line, &edges, &hyphens);
                 layout.lines.push(visual);
             }
         }
         start += logical.len() + 1;
     }
-    layout.max_width = layout.lines.iter().map(|line| layout.x_in_line(line, line.end)).fold(0.0, f32::max);
+    layout.max_width = layout.lines.iter().map(|line| (layout.x_in_line(line, line.end) - line.hang).max(0.0)).fold(0.0, f32::max);
     layout
 }
 
-/// 把宽于整行的词盒拆成逐字素的盒，中间插入零宽不可伸缩胶，使超长 URL 或不可断串能按字符换行。
-fn split_oversized_boxes(items: &mut Vec<Item>, layout: &TextLayout, width: f32) {
-    if !items.iter().any(|item| matches!(item.kind, ItemKind::Box) && item.width > width) {
-        return;
-    }
-    use unicode_segmentation::UnicodeSegmentation;
-    let mut output = Vec::with_capacity(items.len() * 2);
-    for item in items.drain(..) {
-        if !(matches!(item.kind, ItemKind::Box) && item.width > width)
-            || layout.styles.iter().any(|(range, style)| style.code_bg && item.from < range.end && range.start < item.to) {
-            output.push(item);
-            continue;
+/// 单次可见段落最多识别 64 KiB、4,096 个断词候选；不缓存正文词语。
+fn english_breaks(layout: &TextLayout, range: Range<usize>, spec: &ParaSpec, window: &Window) -> Vec<DiscretionaryHyphen> {
+    if range.len() > 64 * 1024 || matches!(spec.family, Family::Mono | Family::Code) { return Vec::new(); }
+    let mut output = Vec::new();
+    let mut glyph_cache = HashMap::new();
+    kp::hyphenation::for_each_word(&layout.text[range.clone()], |word| {
+        if output.len() >= 4096 { return; }
+        let word = range.start + word.start..range.start + word.end;
+        let first_style = layout.styles.partition_point(|(span, _)| span.end <= word.start);
+        if layout.styles[first_style..].iter().take_while(|(span, _)| span.start < word.end)
+            .any(|(_, style)| style.no_hyphenation || style.mono || style.code_bg || style.footnote || style.color == ColorRole::Link) {
+            return;
         }
-        let word = &layout.text[item.from..item.to];
-        let mut first = true;
-        for (offset, grapheme) in word.grapheme_indices(true) {
-            let from = item.from + offset;
-            let to = from + grapheme.len();
-            if !first {
-                output.push(Item { kind: ItemKind::Glue { stretch: 0.0, shrink: 0.0 }, from, to: from, width: 0.0 });
+        for offset in kp::hyphenation::points(&layout.text[word.clone()]) {
+            if output.len() >= 4096 { break; }
+            let at = word.start + offset;
+            let next = layout.glyphs.partition_point(|glyph| glyph.index < at);
+            if layout.glyphs.get(next).is_none_or(|glyph| glyph.index != at) || next == 0 { continue; }
+            let previous = layout.glyphs[next - 1];
+            // 连字内部或零 advance 边界不参与断词，维持既有塑形簇的点击与 IME 坐标。
+            if previous.object || layout.glyphs[next].x <= previous.x { continue; }
+            let style_index = layout.styles.partition_point(|(span, _)| span.end <= at - 1);
+            let style = layout.styles.get(style_index).map(|(_, style)| *style).unwrap_or_default();
+            let key = (style.bold, style.extra_bold, style.italic, previous.font_size.to_bits());
+            if !glyph_cache.contains_key(&key) {
+                if glyph_cache.len() >= 64 { continue; }
+                let mut font = font_for(spec.family, style.bold, style.italic);
+                if style.extra_bold { font.weight = gpui::FontWeight::EXTRA_BOLD; }
+                let run = TextRun { len: 1, font, color: Hsla::black(), background_color: None, underline: None, strikethrough: None };
+                let shaped = window.text_system().layout_line("-", px(previous.font_size), &[run], None);
+                let mark = shaped.runs.first().filter(|run| shaped.runs.len() == 1 && run.glyphs.len() == 1)
+                    .filter(|_| f32::from(shaped.width).is_finite() && f32::from(shaped.width) > 0.0)
+                    .map(|run| HyphenGlyph { font_id: run.font_id, id: run.glyphs[0].id,
+                        font_size: previous.font_size, width: f32::from(shaped.width), color: style.color, lift: 0.0 });
+                glyph_cache.insert(key, mark);
             }
-            first = false;
-            output.push(Item { kind: ItemKind::Box, from, to, width: layout.shaped_x(to) - layout.shaped_x(from) });
+            if let Some(mut glyph) = glyph_cache.get(&key).copied().flatten() {
+                glyph.color = style.color;
+                glyph.lift = match style.shift { 1 => -layout.font_size * 0.35, -1 => layout.font_size * 0.22, _ => 0.0 };
+                output.push(DiscretionaryHyphen { at, glyph });
+            }
         }
+    });
+    output
+}
+
+fn split_at_hyphens(items: &mut Vec<Item>, layout: &TextLayout, hyphens: &[DiscretionaryHyphen]) {
+    if hyphens.is_empty() { return; }
+    let mut output = Vec::with_capacity(items.len() + hyphens.len());
+    let mut index = 0;
+    for item in items.drain(..) {
+        let mut from = item.from;
+        while index < hyphens.len() && hyphens[index].at <= from { index += 1; }
+        while matches!(item.kind, ItemKind::Box) && index < hyphens.len() && hyphens[index].at < item.to {
+            let to = hyphens[index].at;
+            output.push(Item { kind: ItemKind::Box, from, to, width: layout.shaped_x(to) - layout.shaped_x(from) });
+            from = to;
+            index += 1;
+        }
+        output.push(if from == item.from { item } else {
+            Item { kind: item.kind, from, to: item.to, width: layout.shaped_x(item.to) - layout.shaped_x(from) }
+        });
     }
     *items = output;
 }
 
-fn visual_line(layout: &TextLayout, items: &[Item], line: &kp::Line) -> VisualLine {
+/// 紧急字素断行只处理仍超宽的盒；禁则、NBSP、对象及塑形簇继续保持原子性。
+fn split_oversized_boxes(items: &mut Vec<Item>, layout: &TextLayout, width: f32, hyphens: &[DiscretionaryHyphen]) {
+    let break_width = |at| hyphens.binary_search_by_key(&at, |hyphen| hyphen.at).ok().map_or(0.0, |index| hyphens[index].glyph.width);
+    if !items.iter().any(|item| matches!(item.kind, ItemKind::Box) && item.width + break_width(item.to) > width) { return; }
+    let mut output = Vec::with_capacity(items.len());
+    for item in items.drain(..) {
+        if !matches!(item.kind, ItemKind::Box) || item.width + break_width(item.to) <= width
+            || layout.styles.iter().any(|(range, style)| (style.code_bg || style.footnote) && item.from < range.end && range.start < item.to) {
+            output.push(item);
+            continue;
+        }
+        let word = &layout.text[item.from..item.to];
+        let mut from = item.from;
+        let mut previous = "";
+        for (offset, grapheme) in word.grapheme_indices(true) {
+            let at = item.from + offset;
+            let glyph = layout.glyphs.partition_point(|glyph| glyph.index < at);
+            if at > from && kp::can_break_between(previous, grapheme)
+                && layout.glyphs.get(glyph).is_some_and(|glyph| glyph.index == at) {
+                output.push(Item { kind: ItemKind::Box, from, to: at, width: layout.shaped_x(at) - layout.shaped_x(from) });
+                output.push(Item { kind: ItemKind::Glue { stretch: 0.0, shrink: 0.0 }, from: at, to: at, width: 0.0 });
+                from = at;
+            }
+            previous = grapheme;
+        }
+        output.push(Item { kind: ItemKind::Box, from, to: item.to, width: layout.shaped_x(item.to) - layout.shaped_x(from) });
+    }
+    *items = output;
+}
+
+/// 字形墨迹边界限定可裁的留白，保留完整字形；测量缓存只活到本段完成，最多 128 项。
+fn punctuation_edges(items: &[Item], layout: &TextLayout, window: &Window) -> Vec<kp::Edges> {
+    if items.len() > kp::MAX_KP_ITEMS { return Vec::new(); }
+    let mut metrics = HashMap::new();
+    let mut edges = Vec::new();
+    for (item_index, item) in items.iter().enumerate() {
+        if !matches!(item.kind, ItemKind::Box) || item.from == item.to { continue; }
+        let text = &layout.text[item.from..item.to];
+        let opening = kp::no_line_end(text);
+        let closing = kp::no_line_start(text);
+        if !(opening || closing) || text.chars().count() != 1 { continue; }
+        let style_index = layout.styles.partition_point(|(range, _)| range.end <= item.from);
+        if layout.styles.get(style_index).is_some_and(|(_, style)| style.code_bg || style.footnote) { continue; }
+        let index = layout.glyphs.partition_point(|glyph| glyph.index < item.from);
+        let Some(glyph) = layout.glyphs.get(index).filter(|glyph| glyph.index == item.from && !glyph.object) else { continue; };
+        let ch = text.chars().next().unwrap();
+        let key = (glyph.font_id, glyph.font_size.to_bits(), ch);
+        if !metrics.contains_key(&key) {
+            if metrics.len() >= 128 { continue; }
+            let bounds = window.text_system().typographic_bounds(glyph.font_id, px(glyph.font_size), ch).ok()
+                .map(|bounds| (f32::from(bounds.origin.x), f32::from(bounds.origin.x + bounds.size.width)))
+                .filter(|(left, right)| left.is_finite() && right.is_finite());
+            metrics.insert(key, bounds);
+        }
+        let Some((left, right)) = metrics.get(&key).copied().flatten() else { continue; };
+        let trim_start = if opening { left.max(0.0).min(glyph.font_size * 0.5).min(item.width.max(0.0)) } else { 0.0 };
+        let trim_end = if closing { (item.width - right).max(0.0).min(glyph.font_size * 0.5).min(item.width.max(0.0)) } else { 0.0 };
+        let hang = if "，。、；：！？".contains(ch) { (item.width - trim_end).max(0.0).min(glyph.font_size * 0.5) } else { 0.0 };
+        if trim_start > 0.0 || trim_end > 0.0 || hang > 0.0 {
+            if edges.is_empty() { edges.resize(items.len(), kp::Edges::default()); }
+            edges[item_index] = kp::Edges { trim_start, trim_end, hang };
+        }
+    }
+    edges
+}
+
+fn visual_line(layout: &TextLayout, items: &[Item], line: &kp::Line, edges: &[kp::Edges], hyphens: &[DiscretionaryHyphen]) -> VisualLine {
     if line.items.is_empty() {
         let at = items.get(line.items.start).map_or(layout.text.len(), |item| item.from);
-        return VisualLine { start: at, end: at, origin_x: layout.shaped_x(at), glues: Vec::new() };
+        return VisualLine { start: at, end: at, origin_x: layout.shaped_x(at), glues: Vec::new(), trim_end: 0.0, hang: 0.0, hyphen: None };
     }
     let start = items[line.items.start].from;
     let end = items[line.items.end - 1].to;
@@ -722,12 +875,15 @@ fn visual_line(layout: &TextLayout, items: &[Item], line: &kp::Line) -> VisualLi
     for item in &items[line.items.clone()] {
         if let ItemKind::Glue { stretch, shrink } = item.kind {
             shift += if line.ratio >= 0.0 { line.ratio * stretch } else { line.ratio * shrink };
-            if shift != 0.0 {
-                glues.push((item.to, shift));
-            }
+            if shift != 0.0 { glues.push((item.to, shift)); }
         }
     }
-    VisualLine { start, end, origin_x: layout.shaped_x(start), glues }
+    let first = edges.get(line.items.start).copied().unwrap_or_default();
+    let last = edges.get(line.items.end - 1).copied().unwrap_or_default();
+    let hyphen = (line.items.end < items.len())
+        .then(|| hyphens.binary_search_by_key(&end, |hyphen| hyphen.at).ok().map(|index| hyphens[index].glyph)).flatten();
+    VisualLine { start, end, origin_x: layout.shaped_x(start) + first.trim_start, glues,
+        trim_end: last.trim_end, hang: last.hang, hyphen }
 }
 
 /// 绘制一个圆角矩形（可带描边），坐标为窗口坐标。

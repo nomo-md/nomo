@@ -530,6 +530,7 @@ struct InlineState {
     sub: u8,
     /// `<span style>` / `<font color>` 的颜色栈：(文字调色板序号, 背景调色板序号)。
     colors: Vec<(Option<u8>, Option<u8>)>,
+    language: HyphenationLanguage,
 }
 
 impl InlineState {
@@ -539,6 +540,7 @@ impl InlineState {
         style.italic |= self.italic > 0;
         style.strike |= self.strike > 0;
         style.underline |= self.underline > 0;
+        style.no_hyphenation |= self.code > 0 || self.link > 0 || self.language.excluded();
         if self.code > 0 { style.mono = true; style.code_bg = true; style.color = ColorRole::InlineCode; }
         if self.mark > 0 {
             style.bg = 1;
@@ -565,6 +567,7 @@ impl InlineState {
 
     /// 识别常见行内 HTML 标签并调整样式计数；返回 true 表示已消费该标签，不再原样显示。
     fn apply_html(&mut self, html: &str) -> Option<bool> {
+        self.language.observe(html);
         let tag = html.trim().trim_start_matches('<').trim_end_matches('>').trim_end_matches('/').trim().to_ascii_lowercase();
         let (closing, name) = match tag.strip_prefix('/') {
             Some(name) => (true, name.trim().to_string()),
@@ -608,6 +611,54 @@ impl InlineState {
         };
         *counter = if closing { counter.saturating_sub(1) } else { counter.saturating_add(1) };
         Some(true)
+    }
+}
+
+/// 原版按最近的 p/li/td/th/span/a[lang] 决定英文断词；只保留最多 64 层的小型语言状态。
+#[derive(Clone, Default)]
+struct HyphenationLanguage {
+    scopes: Vec<(String, bool)>,
+    overflow: usize,
+}
+impl HyphenationLanguage {
+    fn excluded(&self) -> bool {
+        self.overflow > 0 || self.scopes.last().is_some_and(|(_, excluded)| *excluded)
+    }
+    fn observe(&mut self, html: &str) {
+        if self.scopes.is_empty() && self.overflow == 0
+            && !html.as_bytes().windows(4).any(|word| word.eq_ignore_ascii_case(b"lang")) { return; }
+        let start = html.len() - html.trim_start().len();
+        let Some(tag) = crate::nomo_mark::nomo_syntax::html_tag(html, start) else { return; };
+        self.tag(&tag);
+    }
+    fn tag(&mut self, tag: &crate::nomo_mark::nomo_syntax::HtmlTag) {
+        if !matches!(tag.name.as_str(), "p" | "li" | "td" | "th" | "span" | "a") || tag.self_closing { return; }
+        if tag.closing {
+            if self.overflow > 0 { self.overflow -= 1; }
+            else if let Some(index) = self.scopes.iter().rposition(|(name, _)| name == &tag.name) { self.scopes.truncate(index); }
+            return;
+        }
+        let language = tag.attrs.get("lang");
+        if self.scopes.is_empty() && self.overflow == 0 && language.is_none() { return; }
+        if self.scopes.len() >= 64 || self.overflow > 0 { self.overflow = self.overflow.saturating_add(1); return; }
+        let excluded = language.map_or_else(|| self.excluded(), |language| {
+            !(language.is_empty() || language.eq_ignore_ascii_case("en")
+                || language.get(..3).is_some_and(|prefix| prefix.eq_ignore_ascii_case("en-")))
+        });
+        self.scopes.push((tag.name.clone(), excluded));
+    }
+    /// HTML 容器的文本 run 已有源码范围；顺序扫描标签，不新增第二份正文或 HTML 树。
+    fn advance(&mut self, source: &str, cursor: &mut usize, to: usize) {
+        while *cursor < to {
+            let Some(relative) = source[*cursor..to].find('<') else { *cursor = to; break; };
+            let at = *cursor + relative;
+            if source[at..].starts_with("<!--") {
+                *cursor = source[at..to].find("-->").map_or(to, |end| at + end + 3);
+            } else if let Some(tag) = crate::nomo_mark::nomo_syntax::html_tag(source, at).filter(|tag| tag.end <= to) {
+                self.tag(&tag);
+                *cursor = tag.end;
+            } else { *cursor = at + 1; }
+        }
     }
 }
 
@@ -1909,6 +1960,10 @@ impl Builder<'_> {
 
     fn html_fragment(&mut self, fragment: &crate::nomo_mark::html_table::HtmlFragment) {
         use crate::nomo_mark::parse::InlineFormat;
+        let has_language = self.env.wrap == Wrap::KnuthPlass && self.source[fragment.source.clone()]
+            .as_bytes().windows(4).any(|word| word.eq_ignore_ascii_case(b"lang"));
+        let mut language = HyphenationLanguage::default();
+        let mut language_cursor = fragment.source.start;
         self.flush_paragraph(); self.apply_gap();
         let top = self.y;
         let index = self.items.len();
@@ -1933,14 +1988,19 @@ impl Builder<'_> {
             for run in &cell.runs {
                 if run.text == "\n" && run.atom.is_none() { self.line_break(run.source.clone()); continue; }
                 let mut style = self.base;
+                style.no_hyphenation |= run.link.is_some();
+                if has_language {
+                    language.advance(self.source, &mut language_cursor, run.source.start);
+                    style.no_hyphenation |= language.excluded();
+                }
                 for format in &run.formats {
                     match format {
                         InlineFormat::Strong => style.bold = true, InlineFormat::Emphasis => style.italic = true,
                         InlineFormat::Strike => style.strike = true, InlineFormat::Underline => style.underline = true,
                         InlineFormat::Highlight => style.bg = 1, InlineFormat::Superscript => style.shift = 1,
                         InlineFormat::Subscript => style.shift = -1,
-                        InlineFormat::Code => { style.mono = true; style.code_bg = true; style.color = ColorRole::InlineCode; }
-                        InlineFormat::Link => { style.underline = true; style.color = ColorRole::Link; }
+                        InlineFormat::Code => { style.mono = true; style.code_bg = true; style.no_hyphenation = true; style.color = ColorRole::InlineCode; }
+                        InlineFormat::Link => { style.underline = true; style.no_hyphenation = true; style.color = ColorRole::Link; }
                     }
                 }
                 if let Some(atom) = &run.atom { push_table_atom(&mut self.para, atom, run.source.clone(), style, self.env, self.window); }
@@ -2141,7 +2201,7 @@ impl Builder<'_> {
                     continue;
                 }
                 let mut style=base;
-                for format in formats{match format{InlineFormat::Strong=>style.bold=true,InlineFormat::Emphasis=>style.italic=true,InlineFormat::Code=>{style.mono=true;style.code_bg=true;style.color=ColorRole::InlineCode;},InlineFormat::Strike=>style.strike=true,InlineFormat::Underline=>style.underline=true,InlineFormat::Highlight=>style.bg=1,InlineFormat::Superscript=>style.shift=1,InlineFormat::Subscript=>style.shift=-1,InlineFormat::Link=>{style.underline=true;style.color=ColorRole::Link;}}}
+                for format in formats{match format{InlineFormat::Strong=>style.bold=true,InlineFormat::Emphasis=>style.italic=true,InlineFormat::Code=>{style.mono=true;style.code_bg=true;style.no_hyphenation=true;style.color=ColorRole::InlineCode;},InlineFormat::Strike=>style.strike=true,InlineFormat::Underline=>style.underline=true,InlineFormat::Highlight=>style.bg=1,InlineFormat::Superscript=>style.shift=1,InlineFormat::Subscript=>style.shift=-1,InlineFormat::Link=>{style.underline=true;style.no_hyphenation=true;style.color=ColorRole::Link;}}}
                 if is_revealed(revealed, range.clone()) { style.color = ColorRole::Muted; }
                 if let Some(atom) = atom {
                     push_table_atom(&mut para, atom, range, style, self.env, self.window);
