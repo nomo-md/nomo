@@ -1,5 +1,6 @@
 //! 同一份原子布局清单可同时发布移交的两个窗口。正文和撤销历史始终由原会话管理。
 use super::*;
+use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
 use crate::nomo_mark::protocol::DocumentSelection;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -20,12 +21,12 @@ pub(in crate::ui::workspace) struct SavedDocument {
     pub(in crate::ui::workspace) selection: DocumentSelection,
 }
 impl SavedDocument {
-    pub(super) fn title(&self) -> String {
+    pub(super) fn display_title(&self, cx: &App) -> String {
         self.path
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "未命名".into())
+            .unwrap_or_else(|| ToolbarLocale::current(cx).app_text("document.untitled").into())
     }
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -44,7 +45,7 @@ struct Store {
     book: LayoutBook,
     path: PathBuf,
     claims: HashMap<u64, gpui::WeakEntity<Workspace>>,
-    error: Option<String>,
+    error: Option<UiMessage>,
 }
 impl gpui::Global for Store {}
 
@@ -86,14 +87,14 @@ impl Store {
                     .is_some_and(|owner| owner.upgrade().is_some())
         })
     }
-    fn update(&mut self, updates: Vec<SavedLayout>) -> Result<(), String> {
+    fn update(&mut self, updates: Vec<SavedLayout>) -> Result<(), UiMessage> {
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
         let mut next = self.book.clone();
         for layout in updates {
             if layout.documents.len() > MAX_DOCUMENTS {
-                return Err("工作区超过 512 篇文档，无法记录布局。".into());
+                return Err(UiMessage::new("layout.documentLimit").arg("count", MAX_DOCUMENTS));
             }
             next.windows.retain(|s| s.id != layout.id);
             if !layout.items.is_empty() {
@@ -118,9 +119,12 @@ impl Store {
         if next.windows == self.book.windows {
             return Ok(());
         }
+        self.persist(next)
+    }
+    fn persist(&mut self, next: LayoutBook) -> Result<(), UiMessage> {
         let bytes = serde_json::to_vec(&next).map_err(|e| e.to_string())?;
         if bytes.len() > MAX_BYTES {
-            return Err("工作区布局超过 2 MiB，原记录已保留。".into());
+            return Err(UiMessage::new("layout.budget").arg("size", "2 MiB"));
         }
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -141,28 +145,28 @@ impl Workspace {
         else {
             return;
         };
-        let data = (|| -> Result<LayoutBook, String> {
+        let data = (|| -> Result<LayoutBook, UiMessage> {
             use std::io::Read;
             let file = match std::fs::File::open(&path) {
                 Ok(f) => f,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
-                Err(e) => return Err(e.to_string()),
+                Err(e) => return Err(UiMessage::raw(e)),
             };
             let mut bytes = Vec::new();
             file.take((MAX_BYTES + 1) as u64)
                 .read_to_end(&mut bytes)
                 .map_err(|e| e.to_string())?;
             if bytes.len() > MAX_BYTES {
-                return Err("布局文件过大".into());
+                return Err(UiMessage::new("layout.tooLarge"));
             }
-            serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+            serde_json::from_slice(&bytes).map_err(UiMessage::raw)
         })();
         let error = data
             .as_ref()
             .err()
-            .map(|e| format!("读取标签布局失败：{e}"));
+            .map(|e| e.clone().context("layout.readFailed"));
         if let Some(error) = &error {
-            self.failure_notice = Some(error.clone().into());
+            self.failure_notice = Some(error.render(ToolbarLocale::current(cx)).into());
         }
         cx.set_global(Store {
             book: data.unwrap_or_default(),
@@ -206,8 +210,9 @@ impl Workspace {
         }
     }
     pub(super) fn publish_layouts(updates: Vec<SavedLayout>, cx: &mut App) -> Result<(), String> {
-        cx.try_global::<Store>().ok_or("无法确定工作区配置目录")?;
-        cx.global_mut::<Store>().update(updates)
+        let locale = ToolbarLocale::current(cx);
+        cx.try_global::<Store>().ok_or_else(|| locale.app_text("layout.directory").to_owned())?;
+        cx.global_mut::<Store>().update(updates).map_err(|message| message.render(locale))
     }
     pub(super) fn claim_layout(&self, cx: &mut Context<Self>) {
         if cx.try_global::<Store>().is_some() {
@@ -277,7 +282,7 @@ impl Workspace {
             }
         }
         if let Err(error) = Self::publish_layouts(vec![saved], cx) {
-            self.failure_notice = Some(format!("保存关闭布局失败：{error}").into());
+            self.failure_notice = Some(ToolbarLocale::current(cx).app_format("layout.saveFailed", &[("error", &error)]).into());
             cx.notify();
         }
     }
@@ -493,7 +498,7 @@ impl Workspace {
                     || saved.dirty && saved.path.is_none())
             {
                 self.failure_notice =
-                    Some(format!("无法恢复 {}，保留其他标签。", saved.title()).into());
+                    Some(ToolbarLocale::current(cx).app_format("layout.restoreFailed", &[("name", &saved.display_title(cx))]).into());
                 self.finish_saved_open(next, false, window, cx);
                 return;
             }

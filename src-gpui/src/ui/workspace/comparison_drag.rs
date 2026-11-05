@@ -36,17 +36,18 @@ fn insert_item(
     items: &mut Vec<TabItem>,
     item: TabItem,
     placement: Placement,
+    locale: ToolbarLocale,
 ) -> Result<TabItem, String> {
     let pos = match placement {
         Placement::End => items.len(),
         Placement::Before(k) | Placement::After(k) | Placement::Combine(k) => items
             .iter()
             .position(|i| i.contains(k))
-            .ok_or("目标标签已改变")?,
+            .ok_or(locale.app_text("drag.targetChanged"))?,
     };
     if let Placement::Combine(target) = placement {
         if items[pos] != TabItem::Single(target) || item.pair().is_some() || item.contains(target) {
-            return Err("该标签不能组合".into());
+            return Err(locale.app_text("drag.cannotCombine").into());
         }
         let group = TabItem::Pair(Pair {
             left: target,
@@ -270,7 +271,7 @@ impl Workspace {
             }
             _ => placement,
         };
-        if insert_item(&mut items, moved, placement).is_err() {
+        if insert_item(&mut items, moved, placement, ToolbarLocale::current(cx)).is_err() {
             return;
         }
         self.comparison.items = items;
@@ -315,7 +316,7 @@ impl Workspace {
             .map(|k| vec![k])
             .unwrap_or_else(|| item.keys())
             .iter()
-            .filter_map(|key| self.host_for(*key).map(|doc| doc.read(cx).title()))
+            .filter_map(|key| self.host_for(*key).map(|doc| doc.read(cx).display_title(cx)))
             .collect::<Vec<_>>()
             .join("｜");
         let release = Rc::new(Cell::new(None));
@@ -529,7 +530,7 @@ impl Workspace {
             keys.iter()
                 .any(|key| self.host_for(*key).as_ref() == Some(&save.document))
         }) {
-            self.failure_notice = Some("请等待文档保存完成后再移交。".into());
+            self.failure_notice = Some(ToolbarLocale::current(cx).app_text("drag.waitSave").into());
             cx.notify();
             return;
         }
@@ -585,7 +586,7 @@ impl Workspace {
                     || !dest.opening.is_empty()
                     || dest.comparison.layout.loading.is_some()
                 {
-                    return Err("目标工作区正忙。".into());
+                    return Err(ToolbarLocale::current(cx).app_text("drag.busy").into());
                 }
                 let mut dest_layout = dest.layout_snapshot(cx);
                 if prepared.iter().any(|(_, _, _, _, saved)| {
@@ -596,7 +597,7 @@ impl Workspace {
                             .any(|other| other.path.as_ref() == Some(p))
                     })
                 }) {
-                    return Err("目标窗口已打开同一文档。".into());
+                    return Err(ToolbarLocale::current(cx).app_text("drag.duplicate").into());
                 }
                 let mut targets: Vec<_> = dest
                     .tabs
@@ -626,7 +627,7 @@ impl Workspace {
                     if dest.comparison.item(key) != Some(TabItem::Single(key))
                         || !dest.markdown_tab(key, cx)
                     {
-                        return Err("目标标签不能组合。".into());
+                        return Err(ToolbarLocale::current(cx).app_text("drag.targetCombine").into());
                     }
                     if dest.load_before(TabItem::Single(key), win, cx, move |_, win, _| {
                         win.on_next_frame(move |_, cx| {
@@ -650,7 +651,7 @@ impl Workspace {
                 }) {
                     return Ok(false);
                 }
-                let dest_item = insert_item(&mut dest_layout.items, moving, placement)?;
+                let dest_item = insert_item(&mut dest_layout.items, moving, placement, ToolbarLocale::current(cx))?;
                 let mode = if let Placement::Combine(key) = placement {
                     Some(
                         if dest.tabs[dest.tab_index(key).unwrap()].mode == EditorMode::Source {
@@ -691,7 +692,7 @@ impl Workspace {
                 let previous_mode = if let Placement::Combine(key) = placement {
                     let before = dest.tabs[dest.tab_index(key).unwrap()].mode;
                     if !dest.set_member_modes(&[key], mode.unwrap(), cx) {
-                        return Err("目标文档无法切换模式。".into());
+                        return Err(ToolbarLocale::current(cx).app_text("drag.mode").into());
                     }
                     Some((key, before))
                 } else {
@@ -829,7 +830,7 @@ impl Workspace {
                         }
                     });
                 }
-                self.failure_notice = Some(format!("移交失败：{error}").into());
+                self.failure_notice = Some(ToolbarLocale::current(cx).app_format("drag.failed", &[("error", &error)]).into());
                 cx.notify();
             }
         }

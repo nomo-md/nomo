@@ -7,6 +7,7 @@ use crate::ui::components::{IconName, button, ButtonKind, icon, select, select_o
 use crate::ui::motion::ScalarMotion;
 use crate::ui::settings_schema::{CATEGORIES, Control, Item, Page, Support};
 use crate::ui::text_field::{FieldEvent, TextField};
+use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
 #[cfg(target_os = "windows")]
 use crate::ui::window_chrome::{self, CaptionAction};
 use gpui::{
@@ -71,12 +72,12 @@ pub fn open(cx: &mut App) {
     let options = WindowOptions {
         app_id: Some("com.nomo.desktop".into()),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitlebarOptions { title: Some("偏好设置 - Nomo".into()), appears_transparent: true, traffic_light_position: Some(point(px(14.0), px(14.0))) }),
+        titlebar: Some(TitlebarOptions { title: Some(ToolbarLocale::current(cx).app_text("settings.windowTitle").into()), appears_transparent: true, traffic_light_position: Some(point(px(14.0), px(14.0))) }),
         window_min_size: Some(size(px(760.0), px(520.0))),
         ..Default::default()
     };
     if let Ok(handle) = cx.open_window(options, |window, cx| {
-        let view = cx.new(SettingsWindow::new);
+        let view = cx.new(|cx| SettingsWindow::new(window,cx));
         window.focus(&view.read(cx).focus.clone(), cx);
         view
     }) {
@@ -89,19 +90,23 @@ pub struct SettingsWindow {
     #[cfg(target_os = "windows")]
     caption_focus: window_chrome::CaptionFocus,
     category: usize,
+    title_locale: ToolbarLocale,
+    // 原生窗口后端在窗口生命周期内不变；仅保存静态翻译键，不保留平台句柄。
+    tray_unavailable: Option<&'static str>,
     open_select: Option<&'static str>,
     font_picker: Option<(Entity<fonts::FontPicker>, Subscription)>,
     dragging: Option<&'static str>,
     /// 上限为当前分区开关数，切换分区即清空；窗口关闭时一并释放。
     toggles: HashMap<&'static str, ScalarMotion>,
     fields: HashMap<&'static str, Entity<TextField>>,
-    /// 文本设置（快捷插入符号、图片宽度等）的校验结果。
-    shortcut_errors: HashMap<&'static str, String>,
+    /// 每个快捷键最多一个稳定错误键；切换语言时不替换草稿、焦点或校验结果。
+    shortcut_errors: HashMap<&'static str, UiMessage>,
+    /// 文本设置校验错误的稳定翻译键。
     field_errors: HashMap<&'static str, &'static str>,
     scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
     image_test: Option<crate::image_import::ImportCancellation>,
-    image_test_message: Option<String>,
+    image_test_message: Option<UiMessage>,
     #[cfg(windows)]
     shell: ShellControls,
 }
@@ -143,12 +148,14 @@ impl SettingsWindow {
         cx.stop_propagation();
     }
 
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(window: &Window, cx: &mut Context<Self>) -> Self {
         Self {
             focus: cx.focus_handle(),
             #[cfg(target_os = "windows")]
             caption_focus: window_chrome::CaptionFocus::new(cx),
+            title_locale: ToolbarLocale::current(cx),
             category: 0, open_select: None, font_picker: None, dragging: None,
+            tray_unavailable: crate::ui::tray::unavailable_reason_key(window),
             toggles: HashMap::new(), fields: HashMap::new(), field_errors: HashMap::new(), shortcut_errors: HashMap::new(),
             scroll: ScrollHandle::new(), _subscriptions: Vec::new(),
             image_test: None, image_test_message: None,
@@ -158,7 +165,10 @@ impl SettingsWindow {
     }
 
     fn field(&mut self, item: &'static Item, placeholder: &'static str, cx: &mut Context<Self>) -> Entity<TextField> {
-        if let Some(field) = self.fields.get(item.key) { return field.clone(); }
+        if let Some(field) = self.fields.get(item.key) {
+            field.update(cx, |field, cx| field.set_placeholder(placeholder, cx));
+            return field.clone();
+        }
         let current = cx.global::<Settings>().string(item.key);
         let field = cx.new(|cx| {
             let mut field = TextField::new(placeholder, cx);
@@ -175,7 +185,7 @@ impl SettingsWindow {
                 if key=="quickInsertTrigger" || key=="imageHandlingSettings.defaultImageWidth" {
                     let invalid=if key=="quickInsertTrigger" {!crate::nomo_mark::quick_insert::valid_trigger(&value)}else{crate::image_import::normalize_width(&value).is_none()};
                     field.update(cx,|field,cx|field.set_invalid(invalid,cx));
-                    if invalid {this.field_errors.insert(key,if key=="quickInsertTrigger" {"请输入一个标点或符号。"}else{"请输入像素宽度或百分比，例如 480px、50%。"});}
+                    if invalid {this.field_errors.insert(key,if key=="quickInsertTrigger" {"settings.invalidTrigger"}else{"settings.invalidWidth"});}
                     else {this.field_errors.remove(key);let value=if key=="imageHandlingSettings.defaultImageWidth" {crate::image_import::normalize_width(&value).unwrap()}else{value};Settings::set(cx,key,json!(value));}
                     cx.notify();return;
                 }
@@ -188,6 +198,7 @@ impl SettingsWindow {
     }
 
     fn render_control(&mut self, item: &'static Item, theme: &Theme, viewport: gpui::Size<gpui::Pixels>, cx: &mut Context<Self>) -> AnyElement {
+        let locale = ToolbarLocale::current(cx);
         let settings = cx.global::<Settings>().clone();
         let key = item.key;
         let width = control_width(viewport);
@@ -214,23 +225,25 @@ impl SettingsWindow {
                     options.iter().map(|(value, label)| {
                         let value = *value;
                         let active = current == value;
-                        let option_enabled = enabled && !(key == "imageHandlingSettings.imageInsertStrategy" && value == "upload") && !(key=="closeWindowBehavior" && value=="close-to-tray" && !cfg!(windows));
-                        text_segment(eid(key, value), *label, active, option_enabled, theme)
+                        let option_enabled = enabled && !(key == "closeWindowBehavior" && value == "close-to-tray" && self.tray_unavailable.is_some());
+                        text_segment(eid(key, value), locale.app_text(label), active, option_enabled, theme)
                             .when(option_enabled, |el| el.on_click(cx.listener(move |_, _: &ClickEvent, _, cx| Settings::set(cx, key, json!(value)))))
-                            .when(enabled && !option_enabled, |el| el.opacity(0.55).tooltip(tooltip("图片上传尚未接入。")))
+                            .when(enabled && !option_enabled, |el| el.opacity(0.55).tooltip(tooltip(locale.app_text(self.tray_unavailable.unwrap_or("settings.trayUnavailable")))))
                             .into_any_element()
                     }).collect()
                 };
                 let group = div().w(px(width)).flex().p(px(4.0)).gap(px(4.0)).rounded(px(8.0))
                     .bg(crate::ui::motion::color(theme.app_bg, theme.surface, 0.82))
                     .border_1().border_color(theme.border).when(!enabled, |el| el.opacity(0.55));
-                if options.len() == 4 {
-                    group.flex_col().children(options.chunks(2).map(|pair| div().flex().gap(px(4.0)).children(buttons(pair)))).into_any_element()
-                } else { group.children(buttons(options)).into_any_element() }
+                let widest = options.iter().map(|(_, label)| locale.app_text(label).chars()
+                    .map(|ch| if ch.is_ascii() { 7.0 } else { 13.0 }).sum::<f32>() + 24.0).fold(1.0_f32, f32::max);
+                let preferred = if options.len() == 4 { 2 } else { options.len() };
+                let columns = ((width / widest).floor() as usize).clamp(1, preferred);
+                group.flex_col().children(options.chunks(columns).map(|row| div().flex().gap(px(4.0)).children(buttons(row)))).into_any_element()
             }
             Control::Choice(options) => {
                 let current = value.as_str().unwrap_or_default();
-                let label = options.iter().find(|(value, _)| *value == current).map_or(current, |(_, label)| label).to_string();
+                let label = options.iter().find(|(value, _)| *value == current).map_or(current, |(_, label)| locale.app_text(label)).to_string();
                 if !enabled {
                     return readonly_input(label, width, theme).justify_between()
                         .child(icon(IconName::ChevronDown, 14.0, theme.muted)).into_any_element();
@@ -238,7 +251,7 @@ impl SettingsWindow {
                 let open = self.open_select == Some(key);
                 let rows = options.iter().map(|(value, label)| {
                     let value = *value;
-                    select_option(eid(key, value), *label, current == value, theme)
+                    select_option(eid(key, value), locale.app_text(label), current == value, theme)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             cx.stop_propagation();
                             this.open_select = None;
@@ -276,6 +289,7 @@ impl SettingsWindow {
                         .text_color(theme.muted).child(display)).into_any_element()
             }
             Control::Text { placeholder, compact } => {
+                let placeholder = locale.app_text(placeholder);
                 let width = if key == "quickInsertTrigger" { width.min(64.0) } else if *compact { width.min(180.0) } else { width };
                 if enabled { div().w(px(width)).flex().child(self.field(item, placeholder, cx)).into_any_element() }
                 else {
@@ -287,13 +301,13 @@ impl SettingsWindow {
             Control::Number { unit } => div().flex().items_center().gap(px(10.0))
                 .child(readonly_input(value.as_i64().unwrap_or_default().to_string(), width.min(180.0), theme))
                 .child(div().text_size(px(13.0)).font_family(crate::theme::font_for(crate::theme::Family::Mono, false, false).family)
-                    .text_color(theme.muted).child(*unit)).into_any_element(),
+                    .text_color(theme.muted).child(locale.app_text(unit))).into_any_element(),
             Control::Action(label) if key=="updateCheck" => {
                 let busy=super::updates::busy(cx);
                 let label = match super::updates::chrome_state(cx) {
-                    Some(super::chrome::ChromeUpdateState::Downloading(p)) => format!("正在下载 {p}%"),
-                    Some(super::chrome::ChromeUpdateState::Downloaded) => "重启并安装".into(),
-                    _ if busy => "正在检查…".into(), _ => (*label).into(),
+                    Some(super::chrome::ChromeUpdateState::Downloading(p)) => locale.app_format("settings.downloading", &[("progress", &p.to_string())]),
+                    Some(super::chrome::ChromeUpdateState::Downloaded) => locale.app_text("settings.restartInstall").into(),
+                    _ if busy => locale.app_text("settings.checking").into(), _ => locale.app_text(label).into(),
                 };
                 button("update-check",label,None,ButtonKind::Secondary,theme)
                     .when(!busy,|el|el.on_click(cx.listener(|_,_,window,cx|super::updates::action(window,cx))))
@@ -302,7 +316,7 @@ impl SettingsWindow {
             Control::Action(label) if key == "imageConnectionTest" => {
                 let busy = self.image_test.is_some();
                 div().flex().flex_col().gap(px(6.0)).child(
-                    button("image-connection-test", if busy { "正在检查…" } else { label }, None,
+                    button("image-connection-test", if busy { locale.app_text("settings.checking") } else { locale.app_text(label) }, None,
                         if busy { ButtonKind::Disabled } else { ButtonKind::Secondary }, theme)
                         .when(!busy, |el| el.on_click(cx.listener(|view, _, _, cx| {
                             let value = cx.global::<Settings>().value("imageHandlingSettings");
@@ -315,22 +329,22 @@ impl SettingsWindow {
                                 let _ = this.update(cx, |view, cx| {
                                     view.image_test = None;
                                     if cx.global::<Settings>().value("imageHandlingSettings") == value {
-                                        view.image_test_message = Some(result.map_or_else(|error| error, |_| "连接成功".into()));
+                                        view.image_test_message = Some(result.map_or_else(|error| UiMessage::raw(error).context("settings.connectionFailed"), |_| UiMessage::new("settings.connectionSuccess")));
                                     }
                                     cx.notify();
                                 });
                             }).detach(); cx.notify();
                         }))))
-                    .children(self.image_test_message.clone().map(|message| div().text_size(px(12.0)).text_color(theme.muted).child(message)))
+                    .children(self.image_test_message.as_ref().map(|message| div().text_size(px(12.0)).text_color(theme.muted).child(message.render(locale))))
                     .into_any_element()
             },
             #[cfg(windows)]
             Control::Action(label) if matches!(key, "markdownAssociation" | "contextMenuRegistration") => {
-                self.render_shell_action(key, label, theme, cx)
+                self.render_shell_action(key, locale.app_text(label), theme, cx)
             }
-            Control::Action(label) => unavailable_action(key, label, theme).into_any_element(),
+            Control::Action(label) => unavailable_action(key, locale.app_text(label), theme, locale).into_any_element(),
             Control::Info => div().px(px(9.0)).py(px(5.0)).rounded_full().border_1().border_color(theme.border)
-                .text_size(px(13.0)).text_color(theme.muted).child("后续版本支持").into_any_element(),
+                .text_size(px(13.0)).text_color(theme.muted).child(locale.app_text("settings.future")).into_any_element(),
             Control::ThemePicker | Control::Shortcuts => div().into_any_element(),
         }
     }
@@ -338,16 +352,17 @@ impl SettingsWindow {
     fn render_item(&mut self, item: &'static Item, theme: &Theme, viewport: gpui::Size<gpui::Pixels>, cx: &mut Context<Self>) -> AnyElement {
         if matches!(item.control, Control::ThemePicker) { return self.render_theme_picker(theme, viewport, cx); }
         if matches!(item.control, Control::Shortcuts) { return self.render_shortcuts(theme, viewport, cx); }
+        let locale = ToolbarLocale::current(cx);
         let compact = f32::from(viewport.width) <= COMPACT_WIDTH;
         let note = match &item.support {
             Support::Full => None,
-            Support::Partial(reason) | Support::None(reason) => Some(*reason),
+            Support::Partial(reason) | Support::None(reason) => Some(locale.app_text(reason)),
         };
         let control = self.render_control(item, theme, viewport, cx);
-        let error = self.field_errors.get(item.key).copied();
+        let error = self.field_errors.get(item.key).map(|key| locale.app_text(key));
         let (label, description) = if item.key == "ctrlWheelZoomEnabled" && cfg!(target_os = "macos") {
-            ("⌘ 滚轮缩放", "按住 ⌘ 并滚动鼠标滚轮调整缩放。")
-        } else { (item.label, item.description) };
+            (locale.app_text("settings.commandZoom"), locale.app_text("settings.commandZoomDescription"))
+        } else { (locale.app_text(item.label), locale.app_text(item.description)) };
         div().flex_none().min_h(px(64.0)).py(px(12.0)).border_t_1().border_color(theme.border.opacity(0.72))
             .flex().justify_between()
             .when(compact, |el| el.flex_col().items_start().gap(px(10.0)))
@@ -356,7 +371,7 @@ impl SettingsWindow {
                 .min_w(px(0.0)).flex().flex_col().gap(px(4.0))
                 .child(div().id(eid("setting-label", item.key)).text_size(px(14.0))
                     .line_height(gpui::relative(1.35)).font_weight(FontWeight(650.0)).text_color(theme.fg).child(label)
-                    .when_some(note, |el, reason| el.tooltip(tooltip(format!("当前支持范围：{reason}。")))))
+                    .when_some(note, |el, reason| el.tooltip(tooltip(locale.app_format("settings.supportScope", &[("reason", reason)])))))
                 .when(!description.is_empty(), |el| el.child(div().text_size(px(13.0))
                     .line_height(gpui::relative(1.45)).text_color(theme.muted).child(description)))
                 .children(error.map(|error| div().text_size(px(13.0)).line_height(gpui::relative(1.45))
@@ -370,7 +385,7 @@ impl SettingsWindow {
             let rows: Vec<AnyElement> = group.items.iter().filter(|item| item_is_visible(item, &settings))
                 .map(|item| self.render_item(item, theme, viewport, cx)).collect();
             div().flex_none().flex().flex_col().w_full().max_w(px(740.0))
-                .child(section_heading(group.title, group.badge, theme)).children(rows).into_any_element()
+                .child(section_heading(ToolbarLocale::current(cx).app_text(group.title), group.badge, theme)).children(rows).into_any_element()
         }).collect()
     }
 }
@@ -378,6 +393,11 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = ToolbarLocale::current(cx);
+        if self.title_locale != locale {
+            self.title_locale = locale;
+            window.set_window_title(locale.app_text("settings.windowTitle"));
+        }
         super::updates::defer_pending(window,cx);
         let animate_theme = Theme::ui_transition_active(cx);
         let theme = Theme::ui(cx);
@@ -386,7 +406,7 @@ impl Render for SettingsWindow {
         let ui_font = cx.global::<Settings>().string("uiFontFamily");
         let ui_font = if ui_font.trim().is_empty() { crate::theme::ui_font_family().to_string() } else { ui_font };
         let category = &CATEGORIES[self.category];
-        let category_title = if matches!(category.page, Page::About) { "关于 Nomo" } else { category.title };
+        let category_title = if matches!(category.page, Page::About) { locale.app_text("settings.aboutTitle") } else { locale.app_text(category.title) };
         let nav: Vec<AnyElement> = CATEGORIES
             .iter()
             .enumerate()
@@ -406,9 +426,9 @@ impl Render for SettingsWindow {
                     .text_color(if active { theme.accent_strong } else { theme.muted })
                     .when(active, |el| el.bg(theme.sidebar_active))
                     .when(!active, |el| el.hover(|style| style.bg(theme.hover)))
-                    .when(compact, |el| el.justify_center().tooltip(tooltip(entry.title)))
+                    .when(compact, |el| el.justify_center().tooltip(tooltip(locale.app_text(entry.title))))
                     .child(icon(entry.icon, 16.0, if active { theme.accent_strong } else { theme.muted }))
-                    .when(!compact, |el| el.child(entry.title))
+                    .when(!compact, |el| el.child(locale.app_text(entry.title)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.category = index;
                         this.open_select = None;
@@ -429,7 +449,7 @@ impl Render for SettingsWindow {
             .when(compact, |el| el.justify_center())
             .border_b_1().border_color(theme.border)
             .child(gpui::img("app/128x128.png").size(px(22.0)).flex_none())
-            .when(!compact, |el| el.child(div().text_size(px(14.0)).font_weight(FontWeight::BOLD).child("偏好设置")));
+            .when(!compact, |el| el.child(div().text_size(px(14.0)).font_weight(FontWeight::BOLD).child(locale.app_text("settings.title"))));
         #[cfg(target_os = "windows")]
         { nav_drag = nav_drag.child(window_chrome::drag_surface("settings-nav-drag")); }
         #[cfg(not(target_os = "windows"))]

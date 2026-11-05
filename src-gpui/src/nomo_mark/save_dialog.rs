@@ -1,5 +1,6 @@
 //! 保存选择器共用当前目录与首个 H1；按需查询会话索引，不持有正文或大纲副本。
 use super::*;
+use crate::ui::toolbar_i18n::ToolbarLocale;
 use crate::nomo_mark::session_window::WindowRequest;
 use crate::text_document::StructureQuery;
 use std::{path::{Path, PathBuf}, time::{Duration, Instant}};
@@ -20,8 +21,8 @@ impl Drop for SaveDialog {
     fn drop(&mut self) { self.cancel(); }
 }
 
-fn dialog_error(error: impl std::fmt::Display) -> ControlError {
-    ControlError::HostFailure(format!("无法准备文档保存窗口：{error}"))
+fn dialog_error(error: impl std::fmt::Display, locale: ToolbarLocale) -> ControlError {
+    ControlError::HostFailure(locale.app_format("save.prepareFailed", &[("error", &error.to_string())]))
 }
 
 fn heading_filename(title: &str) -> Option<String> {
@@ -46,7 +47,7 @@ fn heading_filename(title: &str) -> Option<String> {
     Some(name)
 }
 
-fn suggested_filename(port: &NativeWindowPort, revision: u64, request: &WindowRequest) -> Result<String, ControlError> {
+fn suggested_filename(port: &NativeWindowPort, revision: u64, request: &WindowRequest, locale: ToolbarLocale) -> Result<String, ControlError> {
     request.check()?;
     let status = port.status()?;
     if status.revision != revision { return Err(ControlError::Stale); }
@@ -59,18 +60,18 @@ fn suggested_filename(port: &NativeWindowPort, revision: u64, request: &WindowRe
     loop {
         request.check()?;
         if started.elapsed() > Duration::from_secs(30) {
-            return Err(ControlError::NeedsContext("保存标题查询尚未完成，请重试保存".into()));
+            return Err(ControlError::NeedsContext(locale.app_text("save.titlePending").into()));
         }
         let page = port.manager.query_structure(&port.owner, identity.clone(), StructureQuery::Headings {
             from_byte: 0, to_byte: status.byte_length, cursor,
-        }).map_err(dialog_error)?;
+        }).map_err(|error| dialog_error(error, locale))?;
         if page.state != "ready" { return Err(ControlError::Stale); }
         if let Some(heading) = page.items.iter().find(|heading| heading["level"].as_u64() == Some(1)) {
-            let title = heading["title"].as_str().ok_or_else(|| dialog_error("一级标题缺少文本"))?;
+            let title = heading["title"].as_str().ok_or_else(|| dialog_error(locale.app_text("save.titleMissing"), locale))?;
             return Ok(heading_filename(title).unwrap_or(fallback));
         }
         if page.items.is_empty() && page.next.is_some() {
-            return Err(ControlError::NeedsContext("保存标题超过索引单页预算".into()));
+            return Err(ControlError::NeedsContext(locale.app_text("save.titleBudget").into()));
         }
         cursor = page.next;
         if cursor.is_none() { return Ok(fallback); }
@@ -91,6 +92,7 @@ impl DocumentHost {
             return Err(ControlError::Busy);
         }
         let path = self.path();
+        let locale = ToolbarLocale::current(cx);
         let request = WindowRequest::default();
         self.metadata.save_dialog.request = Some(request.clone());
         Ok(cx.spawn_in(window, async move |this, cx| {
@@ -106,13 +108,13 @@ impl DocumentHost {
                         if host.navigating || host.control.read(cx).host.pending_count() > 0 { return Ok(None); }
                         host.ready(cx)?;
                         Ok(Some((host.status().revision, host.port.clone())))
-                    }).map_err(dialog_error)??;
+                    }).map_err(|error| dialog_error(error, locale))??;
                     let Some((revision, port)) = prepared else {
                         cx.background_executor().timer(Duration::from_millis(16)).await;
                         continue;
                     };
                     let worker = request.clone();
-                    let filename = cx.background_executor().spawn(async move { suggested_filename(&port, revision, &worker) }).await;
+                    let filename = cx.background_executor().spawn(async move { suggested_filename(&port, revision, &worker, locale) }).await;
                     request.check()?;
                     let response = this.update_in(cx, |host, _, cx| {
                         if host.path() != path { return Err(ControlError::Stale); }
@@ -129,11 +131,11 @@ impl DocumentHost {
                         };
                         let directory = host.path().as_deref().and_then(Path::parent).map(Path::to_path_buf)
                             .or_else(|| host.metadata.save_dialog.directory.clone())
-                            .map(Ok).unwrap_or_else(std::env::current_dir).map_err(dialog_error)?;
+                            .map(Ok).unwrap_or_else(std::env::current_dir).map_err(|error| dialog_error(error, locale))?;
                         Ok(Some(cx.prompt_for_new_path(&directory, Some(&filename))))
-                    }).map_err(dialog_error)??;
+                    }).map_err(|error| dialog_error(error, locale))??;
                     let Some(response) = response else { continue; };
-                    let path = response.await.map_err(dialog_error)?.map_err(dialog_error)?;
+                    let path = response.await.map_err(|error| dialog_error(error, locale))?.map_err(|error| dialog_error(error, locale))?;
                     request.check()?;
                     return Ok(path);
                 }

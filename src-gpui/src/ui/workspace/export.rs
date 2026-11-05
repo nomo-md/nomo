@@ -1,5 +1,6 @@
 //! 导出意图只持有弱文档引用和可取消快照；文档关闭、重载或窗口释放时取消。
 use super::*;
+use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
 use crate::document_export::{self, Appearance, ExportPermit, Snapshot, Format};
 use std::sync::Arc;
 
@@ -25,7 +26,7 @@ impl Workspace {
     }
     fn export_document_format(&mut self, document: Entity<DocumentHost>, format: Format, window: &mut Window, cx: &mut Context<Self>) {
         if window.has_active_prompt() || self.closing_window || self.application_dialogs.busy { return; }
-        if self.export_job.is_some() { self.notice = Some("正在导出，请稍候…".into()); cx.notify(); return; }
+        if self.export_job.is_some() { self.notice = Some(ToolbarLocale::current(cx).app_text("export.busy").into()); cx.notify(); return; }
         let weak = document.downgrade();
         if !self.prepare_document_transition(&document, false, window, cx, move |workspace, window, cx| {
             if let Some(document) = weak.upgrade().filter(|doc| workspace.tabs.iter().any(|tab| tab.document == *doc)) {
@@ -62,13 +63,13 @@ impl Workspace {
                     let valid = workspace.export_job.as_ref().is_some_and(|job| job.snapshot.id() == id
                         && job.document.upgrade().is_some_and(|doc| workspace.tabs.iter().any(|tab| tab.document == doc)
                             && doc.read(cx).path() == worker_snapshot.path));
-                    if valid { workspace.notice = Some(format!("正在导出 {}…", format.label()).into()); cx.notify(); }
+                    if valid { workspace.notice = Some(ToolbarLocale::current(cx).app_format("export.running", &[("format", format.label())]).into()); cx.notify(); }
                     valid
                 }).map_err(|e| e.to_string())?;
-                if !valid { return Err("文档已关闭、移动或导出已取消。".into()); }
+                if !valid { return Err(UiMessage::new("export.cancelled")); }
                 cx.background_executor().spawn(async move {
                     let _permit = permit;
-                    document_export::export(format, worker_snapshot, &path, &title, appearance, worker_request).map(|report| Some((path, report)))
+                    document_export::export(format, worker_snapshot, &path, &title, appearance, worker_request).map(|report| Some((path, report))).map_err(UiMessage::raw)
                 }).await
             }.await;
             let _ = this.update_in(cx, |workspace, _, cx| {
@@ -76,11 +77,11 @@ impl Workspace {
                 workspace.export_job = None;
                 match result {
                     Ok(Some((path, report))) => {
-                        let message = format!("{} 已导出：{}", format.label(), path.display());
+                        let message = ToolbarLocale::current(cx).app_format("export.complete", &[("format", format.label()), ("path", &path.display().to_string())]);
                         if report.warnings.is_empty() { workspace.notice = Some(message.into()); }
-                        else { workspace.failure_notice = Some(format!("{message}；{}", report.warnings.join("；")).into()); }
+                        else { workspace.failure_notice = Some(format!("{message}\n{}", report.warnings.join("\n")).into()); }
                     }
-                    Ok(None) => {}, Err(error) => workspace.failure_notice = Some(format!("{} 导出失败：{error}", format.label()).into()),
+                    Ok(None) => {}, Err(error) => workspace.failure_notice = Some(ToolbarLocale::current(cx).app_format("export.failed", &[("format", format.label()), ("error", &error.render(ToolbarLocale::current(cx)))]).into()),
                 }
                 cx.notify();
             });

@@ -63,11 +63,10 @@ pub(super) fn handle_action(window: &mut Window, cx: &mut App) -> bool {
     let Some(stage) = stage(cx) else { return false; };
     if window.has_active_prompt() { return true; }
     if let ChromeUpdateState::Downloading(percent) = stage {
-        let locale = ToolbarLocale::current(cx);
         let Some(cancel) = cx.global::<Updates>().install.transfer.as_ref().map(|t| t.cancel.clone()) else { return true; };
-        let dialog = SecondaryDialog { kind: SecondaryKind::Update, title: locale.text("nativeUpdateDownload").into(),
-            message: format!("{} · {percent}%", locale.text("nativeUpdateDownloading")), detail: None, notes: None, cancel: 0, remember: None, leading: vec![],
-            actions: vec![A::new(locale.text("close"),IconName::Close,Tone::Normal), A::new(locale.text("nativeUpdateCancel"),IconName::Close,Tone::Warning)] };
+        let dialog = SecondaryDialog { kind: SecondaryKind::Update, title: UiMessage::toolbar("nativeUpdateDownload"),
+            message: UiMessage::new("updates.downloadProgress").arg("percent",percent), detail: None, notes: None, cancel: 0, remember: None, leading: vec![],
+            actions: vec![A::new(UiMessage::toolbar("close"),IconName::Close,Tone::Normal), A::new(UiMessage::toolbar("nativeUpdateCancel"),IconName::Close,Tone::Warning)] };
         let reply = dialogs::choose(dialog,window,cx);
         window.to_async(cx).spawn(async move |_| { if reply.await.index == 1 { cancel.cancel(); } }).detach();
     } else { confirm(window, cx); }
@@ -76,10 +75,9 @@ pub(super) fn handle_action(window: &mut Window, cx: &mut App) -> bool {
 
 pub(super) fn confirm(window: &mut Window, cx: &mut App) {
     let Some(ready) = &cx.global::<Updates>().install.ready else { return; };
-    let locale = ToolbarLocale::current(cx);
-    let dialog = SecondaryDialog { kind: SecondaryKind::Update, title: locale.text("nativeUpdateReady").replace("{version}", &ready.version),
-        message: locale.text("nativeUpdateRestartHint").into(), detail: None, notes: None, cancel: 0, remember: None, leading: vec![],
-        actions: vec![A::new(locale.text("softwareUpdateLater"),IconName::Close,Tone::Normal), A::new(locale.text("nativeUpdateInstall"),IconName::RefreshCw,Tone::Primary)] };
+    let dialog = SecondaryDialog { kind: SecondaryKind::Update, title: UiMessage::toolbar("nativeUpdateReady").arg("version",&ready.version),
+        message: UiMessage::toolbar("nativeUpdateRestartHint"), detail: None, notes: None, cancel: 0, remember: None, leading: vec![],
+        actions: vec![A::new(UiMessage::toolbar("softwareUpdateLater"),IconName::Close,Tone::Normal), A::new(UiMessage::toolbar("nativeUpdateInstall"),IconName::RefreshCw,Tone::Primary)] };
     let reply = dialogs::choose(dialog,window,cx);
     window.to_async(cx).spawn(async move |context| {
         if reply.await.index == 1 { let _ = context.update(|_,cx| cx.defer(crate::quit_to_install)); }
@@ -87,8 +85,8 @@ pub(super) fn confirm(window: &mut Window, cx: &mut App) {
 }
 
 pub(crate) fn launch_after_close(cx: &mut App) -> Result<(),String> {
-    let ready = cx.try_global::<Updates>().and_then(|s| s.install.ready.as_ref()).ok_or("没有已校验的安装包。")?;
-    ready.launch()?;
+    let ready = cx.try_global::<Updates>().and_then(|s| s.install.ready.as_ref()).ok_or_else(|| ToolbarLocale::current(cx).app_text("installer.noVerified").to_owned())?;
+    ready.launch().map_err(|message| message.render(ToolbarLocale::current(cx)))?;
     Settings::set(cx,"nativeReleaseNotesVersion",serde_json::json!(env!("CARGO_PKG_VERSION")));
     Ok(())
 }

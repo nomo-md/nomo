@@ -1,4 +1,5 @@
 //! 主页只持久化目录入口、最近路径和可再生缩略图；不保存正文或编辑会话。
+use crate::ui::toolbar_i18n::UiMessage;
 use gpui::{App, AppContext, Context, Entity, Global, Task};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{collections::VecDeque, path::{Path, PathBuf}, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
@@ -35,7 +36,7 @@ pub(crate) enum Change {
 
 pub(crate) struct Library {
     pub snapshot: Arc<Snapshot>,
-    pub error: Option<String>,
+    pub error: Option<UiMessage>,
     pub loaded: bool,
     pub generation: u64,
     pending: VecDeque<Change>,
@@ -64,7 +65,7 @@ impl Library {
         // 刷新是可合并的读请求；文件事件按发生顺序提交，避免晚到的读取覆盖新记录。
         if matches!(change, Change::Refresh) && self.pending.iter().any(|item| matches!(item, Change::Refresh)) { return; }
         if self.pending.len() >= 256 {
-            self.error = Some("主页记录队列已满，请稍后重新打开文件或添加目录".into());
+            self.error = Some(UiMessage::new("home.queueFull"));
             cx.notify();
             return;
         }
@@ -88,7 +89,7 @@ impl Library {
                         }
                         Err(error) => {
                             crate::app_logger::warn("Home", &format!("主页记录保存或读取失败：{error}"));
-                            library.error = Some(format!("主页记录保存或读取失败：{error}"));
+                            library.error = Some(error.context("home.failed"));
                         },
                     }
                     library.generation = library.generation.wrapping_add(1);
@@ -102,14 +103,16 @@ impl Library {
 
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(i64::MAX as u128) as u64 }
 
-pub(super) fn path_key(path: &Path) -> Result<String, String> {
-    let path = path.to_str().ok_or("文件路径不能转换为 UTF-8")?;
-    if path.len() > PATH_LIMIT { return Err("文件路径过长，未加入主页记录".into()); }
+pub(super) fn path_key(path: &Path) -> Result<String, String> { path_key_message(path).map_err(String::from) }
+
+fn path_key_message(path: &Path) -> Result<String, UiMessage> {
+    let path = path.to_str().ok_or(UiMessage::new("home.pathEncoding"))?;
+    if path.len() > PATH_LIMIT { return Err(UiMessage::new("home.pathTooLong")); }
     Ok(path.to_owned())
 }
 
-fn connect() -> Result<Connection, String> {
-    let root = crate::settings::config_path().and_then(|p| p.parent().map(PathBuf::from)).ok_or("无法确定主页数据目录")?;
+fn connect() -> Result<Connection, UiMessage> {
+    let root = crate::settings::config_path().and_then(|p| p.parent().map(PathBuf::from)).ok_or(UiMessage::new("home.dataDirectory"))?;
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     let path = root.join("document-library.sqlite3");
     let new = !path.exists();
@@ -134,27 +137,27 @@ fn read_entries(connection: &Connection, folder: bool) -> Result<Vec<Entry>, Str
     entries.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
-fn apply(change: Change) -> Result<Snapshot, String> {
+fn apply(change: Change) -> Result<Snapshot, UiMessage> {
     let mut connection = connect()?;
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
-    let result = (|| -> Result<(), String> {
+    let result = (|| -> Result<(), UiMessage> {
         match change {
             Change::Refresh => {},
             Change::Opened(path) => {
-                let key = path_key(&path)?;
+                let key = path_key_message(&path)?;
                 transaction.execute("INSERT INTO entries(path,folder,opened) VALUES (?1,0,?2) ON CONFLICT(path,folder) DO UPDATE SET opened=excluded.opened", params![key, now() as i64]).map_err(|e| e.to_string())?;
                 transaction.execute("DELETE FROM entries WHERE folder=0 AND path NOT IN (SELECT path FROM entries WHERE folder=0 ORDER BY opened DESC,path LIMIT ?1)", params![RECENT_LIMIT as i64]).map_err(|e| e.to_string())?;
             },
             Change::Saved(path) => {
-                let key = path_key(&path)?;
+                let key = path_key_message(&path)?;
                 transaction.execute("INSERT OR IGNORE INTO entries(path,folder,opened) VALUES (?1,0,?2)", params![key, now() as i64]).map_err(|e| e.to_string())?;
                 transaction.execute("DELETE FROM thumbnails WHERE path=?1", params![key]).map_err(|e| e.to_string())?;
                 transaction.execute("DELETE FROM entries WHERE folder=0 AND path NOT IN (SELECT path FROM entries WHERE folder=0 ORDER BY opened DESC,path LIMIT ?1)", params![RECENT_LIMIT as i64]).map_err(|e| e.to_string())?;
             },
             Change::AddFolder(path) => {
-                let key = path_key(&path)?;
+                let key = path_key_message(&path)?;
                 let count: i64 = transaction.query_row("SELECT count(*) FROM entries WHERE folder=1 AND path<>?1", params![key], |row| row.get(0)).map_err(|e| e.to_string())?;
-                if count >= FOLDER_LIMIT as i64 { return Err(format!("最多保留 {FOLDER_LIMIT} 个文件夹入口，请先移除不用的入口")); }
+                if count >= FOLDER_LIMIT as i64 { return Err(UiMessage::new("home.folderLimit").arg("count", FOLDER_LIMIT)); }
                 transaction.execute("INSERT INTO entries(path,folder,opened) VALUES (?1,1,?2) ON CONFLICT(path,folder) DO UPDATE SET opened=excluded.opened", params![key, now() as i64]).map_err(|e| e.to_string())?;
             },
             Change::Remove { path, folder } => {
@@ -194,7 +197,7 @@ pub(super) fn cached_thumbnail(path: &Path, fingerprint: &str) -> Result<Option<
 }
 
 pub(super) fn store_thumbnail(path: &Path, fingerprint: &str, png: &[u8]) -> Result<(), String> {
-    if png.len() > MAX_PNG_BYTES { return Err("缩略图超过单项缓存预算".into()); }
+    if png.len() > MAX_PNG_BYTES { return Err(UiMessage::new("home.thumbnailBudget").to_string()); }
     let mut connection = connect()?;
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     let key = path_key(path)?;

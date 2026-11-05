@@ -1,6 +1,7 @@
 //! 原版 schemaVersion=1 主题目录。只解析声明式令牌，不执行 CSS 或加载外部资源。
 //! 目录最多 32 个用户主题，单文件 128 KiB，规范化后的主题总量最多 2 MiB。
 use super::Theme;
+use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
 use crate::{file_system::write_file_atomically, settings::Settings};
 use gpui::{App, Global, Hsla, PathPromptOptions, WindowAppearance};
 use serde::{Deserialize, Serialize};
@@ -54,7 +55,7 @@ impl Variant {
 pub(crate) struct ThemeCatalog {
     pub themes: Vec<Arc<ColorTheme>>,
     pub busy: bool,
-    pub message: Option<String>,
+    pub message: Vec<UiMessage>,
 }
 impl Global for ThemeCatalog {}
 impl ThemeCatalog {
@@ -67,7 +68,7 @@ impl ThemeCatalog {
 pub(crate) fn init(cx: &mut App) {
     let builtin: Vec<ColorTheme> = serde_json::from_str(include_str!("../resources/color-themes.json")).expect("内置主题定义");
     let themes: Vec<_> = builtin.into_iter().map(Arc::new).collect();
-    cx.set_global(ThemeCatalog { themes: themes.clone(), busy: true, message: None });
+    cx.set_global(ThemeCatalog { themes: themes.clone(), busy: true, message: Vec::new() });
     let task = cx.background_executor().spawn(async move { load_users(&themes) });
     cx.spawn(async move |cx| {
         let (themes, errors) = task.await;
@@ -77,9 +78,9 @@ pub(crate) fn init(cx: &mut App) {
             catalog.themes.extend(themes);
             catalog.busy = false;
             let mut errors = errors;
-            if !catalog.themes.iter().any(|theme| theme.id == requested) { errors.push("已选主题不可用，暂用 Nomo 默认配色；原偏好保留。".into()); }
-            catalog.message = (!errors.is_empty()).then(|| errors.join("；"));
-            if let Some(message) = &catalog.message { eprintln!("加载主题：{message}"); }
+            if !catalog.themes.iter().any(|theme| theme.id == requested) { errors.push(UiMessage::new("theme.selectedMissing").into()); }
+            catalog.message = errors;
+            for message in &catalog.message { eprintln!("加载主题：{message}"); }
             reapply(cx);
         });
     }).detach();
@@ -99,8 +100,8 @@ pub(crate) fn import(cx: &mut App) {
     if cx.global::<ThemeCatalog>().busy { return; }
     let themes = cx.global::<ThemeCatalog>().themes.clone();
     cx.global_mut::<ThemeCatalog>().busy = true;
-    cx.global_mut::<ThemeCatalog>().message = None;
-    let response = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("导入 Nomo 主题 JSON".into()) });
+    cx.global_mut::<ThemeCatalog>().message.clear();
+    let response = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some(ToolbarLocale::current(cx).app_text("theme.importTitle").into()) });
     cx.spawn(async move |cx| {
         let result = match response.await {
             Ok(Ok(Some(paths))) => if let Some(path) = paths.into_iter().next() {
@@ -108,15 +109,15 @@ pub(crate) fn import(cx: &mut App) {
                     let theme = parse_user(&read_source(&path)?, &themes)?;
                     check_capacity(&themes, &theme)?;
                     let directory = theme_directory()?;
-                    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-                    let source = serde_json::to_vec_pretty(&theme).map_err(|error| error.to_string())?;
+                    std::fs::create_dir_all(&directory).map_err(UiMessage::raw)?;
+                    let source = serde_json::to_vec_pretty(&theme).map_err(UiMessage::raw)?;
                     write_file_atomically(&directory.join(format!("{}.json", theme.id)), &source)?;
-                    Ok(Some(theme))
+                    Ok::<_, UiMessage>(Some(theme))
                 }).await
             } else { Ok(None) },
             Ok(Ok(None)) => Ok(None),
-            Ok(Err(error)) => Err(error.to_string()),
-            Err(error) => Err(error.to_string()),
+            Ok(Err(error)) => Err(UiMessage::raw(error)),
+            Err(error) => Err(UiMessage::raw(error)),
         };
         let _ = cx.update(|cx| {
             cx.global_mut::<ThemeCatalog>().busy = false;
@@ -126,13 +127,13 @@ pub(crate) fn import(cx: &mut App) {
                     let catalog = cx.global_mut::<ThemeCatalog>();
                     catalog.themes.retain(|existing| existing.id != id);
                     catalog.themes.push(Arc::new(theme));
-                    catalog.message = Some("主题已导入并应用。".into());
+                    catalog.message = vec![UiMessage::new("theme.imported")];
                     Settings::set(cx, "colorThemeId", json!(id));
                     // 同 ID 重新导入也需要刷新目标令牌。
                     reapply(cx);
                 }
                 Ok(None) => {}
-                Err(error) => cx.global_mut::<ThemeCatalog>().message = Some(format!("导入失败：{error}")),
+                Err(error) => cx.global_mut::<ThemeCatalog>().message = vec![error.context("theme.importFailed")],
             }
             cx.refresh_windows();
         });
@@ -151,127 +152,127 @@ pub(crate) fn export(cx: &mut App) {
         }
     }
     let source = match serde_json::to_vec_pretty(&theme) { Ok(source) => source, Err(error) => {
-        cx.global_mut::<ThemeCatalog>().message = Some(format!("导出失败：{error}")); return;
+        cx.global_mut::<ThemeCatalog>().message = vec![UiMessage::raw(error).context("theme.exportFailed")]; return;
     }};
     let directory = crate::settings::config_path().and_then(|path| path.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("."));
     let response = cx.prompt_for_new_path(&directory, Some(&format!("{}.json", theme.id)));
     cx.global_mut::<ThemeCatalog>().busy = true;
-    cx.global_mut::<ThemeCatalog>().message = None;
+    cx.global_mut::<ThemeCatalog>().message.clear();
     cx.spawn(async move |cx| {
         let result = match response.await {
-            Ok(Ok(Some(path))) => cx.background_executor().spawn(async move { write_file_atomically(&path, &source).map(|()| true) }).await,
+            Ok(Ok(Some(path))) => cx.background_executor().spawn(async move { write_file_atomically(&path, &source).map(|()| true).map_err(UiMessage::raw) }).await,
             Ok(Ok(None)) => Ok(false),
-            Ok(Err(error)) => Err(error.to_string()), Err(error) => Err(error.to_string()),
+            Ok(Err(error)) => Err(UiMessage::raw(error)), Err(error) => Err(UiMessage::raw(error)),
         };
         let _ = cx.update(|cx| {
             let catalog = cx.global_mut::<ThemeCatalog>();
             catalog.busy = false;
-            catalog.message = match result { Ok(true) => Some("主题模板已导出。".into()), Ok(false) => None, Err(error) => Some(format!("导出失败：{error}")) };
+            catalog.message = match result { Ok(true) => vec![UiMessage::new("theme.exported")], Ok(false) => Vec::new(), Err(error) => vec![error.context("theme.exportFailed")] };
             cx.refresh_windows();
         });
     }).detach();
     cx.refresh_windows();
 }
 
-fn theme_directory() -> Result<PathBuf, String> {
-    crate::settings::config_path().and_then(|path| path.parent().map(|parent| parent.join("themes"))).ok_or_else(|| "无法确定主题目录".into())
+fn theme_directory() -> Result<PathBuf, UiMessage> {
+    crate::settings::config_path().and_then(|path| path.parent().map(|parent| parent.join("themes"))).ok_or_else(|| UiMessage::new("theme.directory").into())
 }
-fn read_source(path: &Path) -> Result<String, String> {
-    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    if !file.metadata().map_err(|error| error.to_string())?.is_file() { return Err("主题必须是普通文件".into()); }
+fn read_source(path: &Path) -> Result<String, UiMessage> {
+    let file = std::fs::File::open(path).map_err(UiMessage::raw)?;
+    if !file.metadata().map_err(UiMessage::raw)?.is_file() { return Err(UiMessage::new("theme.regularFile").into()); }
     let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
-    if bytes.len() > MAX_FILE_BYTES { return Err("主题文件不能超过 128 KiB".into()); }
-    String::from_utf8(bytes).map(|text| text.trim_start_matches('\u{feff}').to_owned()).map_err(|_| "主题文件必须使用 UTF-8".into())
+    file.take(MAX_FILE_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(UiMessage::raw)?;
+    if bytes.len() > MAX_FILE_BYTES { return Err(UiMessage::new("theme.fileBudget").into()); }
+    String::from_utf8(bytes).map(|text| text.trim_start_matches('\u{feff}').to_owned()).map_err(|_| UiMessage::new("theme.encoding").into())
 }
-fn load_users(builtin: &[Arc<ColorTheme>]) -> (Vec<Arc<ColorTheme>>, Vec<String>) {
+fn load_users(builtin: &[Arc<ColorTheme>]) -> (Vec<Arc<ColorTheme>>, Vec<UiMessage>) {
     let mut loaded = Vec::new();
     let mut errors = Vec::new();
     let entries = match theme_directory().and_then(|path| match std::fs::read_dir(path) {
-        Ok(entries) => Ok(Some(entries)), Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None), Err(error) => Err(error.to_string()),
+        Ok(entries) => Ok(Some(entries)), Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None), Err(error) => Err(UiMessage::raw(error)),
     }) { Ok(Some(entries)) => entries, Ok(None) => return (loaded, errors), Err(error) => return (loaded, vec![error]) };
     let mut paths = Vec::new();
     for (index, entry) in entries.enumerate() {
-        if index >= 256 { errors.push("主题目录条目超过 256，已停止扫描".into()); break; }
+        if index >= 256 { errors.push(UiMessage::new("theme.scanBudget").into()); break; }
         match entry { Ok(entry) if entry.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) => paths.push(entry.path()),
-            Ok(_) => {}, Err(error) => errors.push(error.to_string()) }
+            Ok(_) => {}, Err(error) => errors.push(UiMessage::raw(error)) }
     }
     paths.sort();
     let mut all = builtin.to_vec();
     for path in paths {
         let result = read_source(&path).and_then(|source| parse_user(&source, builtin)).and_then(|theme| {
-            if path.file_stem().and_then(|name| name.to_str()) != Some(&theme.id) { return Err("主题 ID 与文件名不一致".into()); }
+            if path.file_stem().and_then(|name| name.to_str()) != Some(&theme.id) { return Err(UiMessage::new("theme.idFile").into()); }
             check_capacity(&all, &theme)?; Ok(theme)
         });
         match result { Ok(theme) => { let theme = Arc::new(theme); all.push(theme.clone()); loaded.push(theme); },
-            Err(error) => errors.push(format!("{}：{error}", path.file_name().unwrap_or_default().to_string_lossy())) }
+            Err(error) => errors.push(error.context("theme.pathError").arg("path", path.file_name().unwrap_or_default().to_string_lossy())) }
     }
     (loaded, errors)
 }
-fn check_capacity(themes: &[Arc<ColorTheme>], theme: &ColorTheme) -> Result<(), String> {
+fn check_capacity(themes: &[Arc<ColorTheme>], theme: &ColorTheme) -> Result<(), UiMessage> {
     let remaining = themes.iter().filter(|entry| !entry.builtin() && entry.id != theme.id);
-    if remaining.clone().count() >= MAX_USER_THEMES { return Err("最多安装 32 个用户主题".into()); }
-    if remaining.map(|entry| entry.bytes()).sum::<usize>() + theme.bytes() > MAX_TOTAL_BYTES { return Err("用户主题总量不能超过 2 MiB".into()); }
+    if remaining.clone().count() >= MAX_USER_THEMES { return Err(UiMessage::new("theme.countBudget").into()); }
+    if remaining.map(|entry| entry.bytes()).sum::<usize>() + theme.bytes() > MAX_TOTAL_BYTES { return Err(UiMessage::new("theme.totalBudget").into()); }
     Ok(())
 }
 
-fn parse_user(source: &str, builtin: &[Arc<ColorTheme>]) -> Result<ColorTheme, String> {
-    let raw: Value = serde_json::from_str(source).map_err(|error| format!("JSON 格式错误：{error}"))?;
-    let object = raw.as_object().ok_or("主题必须是对象")?;
-    if raw["schemaVersion"] != 1 { return Err("schemaVersion 必须为 1".into()); }
-    let id = raw["id"].as_str().ok_or("缺少主题 ID")?;
+fn parse_user(source: &str, builtin: &[Arc<ColorTheme>]) -> Result<ColorTheme, UiMessage> {
+    let raw: Value = serde_json::from_str(source).map_err(|error| UiMessage::new("theme.json").arg("error", error))?;
+    let object = raw.as_object().ok_or(UiMessage::new("theme.object"))?;
+    if raw["schemaVersion"] != 1 { return Err(UiMessage::new("theme.schema").into()); }
+    let id = raw["id"].as_str().ok_or(UiMessage::new("theme.idMissing"))?;
     if id.len() > 64 || !id.starts_with("user-") || !id[5..].split('-').all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())) {
-        return Err("ID 必须以 user- 开头，仅含小写字母、数字和单个连字符，最多 64 字符".into());
+        return Err(UiMessage::new("theme.id").into());
     }
-    let base_id = raw.get("baseThemeId").map(|value| value.as_str().ok_or("baseThemeId 必须为字符串")).transpose()?.unwrap_or("nomo-default");
-    let mut theme = builtin.iter().find(|theme| theme.builtin() && theme.id == base_id).ok_or("baseThemeId 必须是内置主题")?.as_ref().clone();
+    let base_id = raw.get("baseThemeId").map(|value| value.as_str().ok_or(UiMessage::new("theme.baseString"))).transpose()?.unwrap_or("nomo-default");
+    let mut theme = builtin.iter().find(|theme| theme.builtin() && theme.id == base_id).ok_or(UiMessage::new("theme.baseBuiltin"))?.as_ref().clone();
     theme.id = id.into();
     theme.author = metadata(raw.get("author"), "User")?;
     theme.version = metadata(raw.get("version"), "1.0.0")?;
     theme.style_profile = metadata(raw.get("styleProfile"), &theme.style_profile)?;
-    if !matches!(theme.style_profile.as_str(), "modern" | "paper" | "classic") { return Err("未知 styleProfile".into()); }
-    let names = raw["localizedNames"].as_object().ok_or("localizedNames 必须是对象")?;
-    if names.is_empty() || names.len() > 16 { return Err("localizedNames 需要 1–16 个名称".into()); }
+    if !matches!(theme.style_profile.as_str(), "modern" | "paper" | "classic") { return Err(UiMessage::new("theme.profile").into()); }
+    let names = raw["localizedNames"].as_object().ok_or(UiMessage::new("theme.namesObject"))?;
+    if names.is_empty() || names.len() > 16 { return Err(UiMessage::new("theme.namesCount").into()); }
     theme.localized_names.clear();
     for (locale, value) in names {
         let mut parts = locale.split('-');
         if !parts.next().is_some_and(|part| (2..=3).contains(&part.len()) && part.bytes().all(|byte| byte.is_ascii_alphabetic()))
-            || !parts.all(|part| (2..=8).contains(&part.len()) && part.bytes().all(|byte| byte.is_ascii_alphanumeric())) { return Err("无效的语言代码".into()); }
+            || !parts.all(|part| (2..=8).contains(&part.len()) && part.bytes().all(|byte| byte.is_ascii_alphanumeric())) { return Err(UiMessage::new("theme.locale").into()); }
         theme.localized_names.insert(locale.clone(), metadata(Some(value), "")?);
     }
     if let Some(variants) = object.get("variants") {
-        for (scheme, value) in variants.as_object().ok_or("variants 必须是对象")? {
-            let variant = theme.variants.get_mut(scheme).ok_or("只支持 light 和 dark 变体")?;
-            let value = value.as_object().ok_or("主题变体必须是对象")?;
+        for (scheme, value) in variants.as_object().ok_or(UiMessage::new("theme.variantsObject"))? {
+            let variant = theme.variants.get_mut(scheme).ok_or(UiMessage::new("theme.schemes"))?;
+            let value = value.as_object().ok_or(UiMessage::new("theme.variantObject"))?;
             merge_tokens(&mut variant.tokens, value.get("tokens"), false)?;
             merge_tokens(&mut variant.style_tokens, value.get("styleTokens"), true)?;
             variant.shiki_theme = metadata(value.get("shikiTheme"), &variant.shiki_theme)?;
-            if !matches!(variant.shiki_theme.as_str(), "github-light" | "github-dark" | "gruvbox-light-medium" | "gruvbox-dark-medium") { return Err("不支持的代码高亮主题".into()); }
+            if !matches!(variant.shiki_theme.as_str(), "github-light" | "github-dark" | "gruvbox-light-medium" | "gruvbox-dark-medium") { return Err(UiMessage::new("theme.highlight").into()); }
             if let Some(mermaid) = value.get("mermaid") {
-                let mermaid = mermaid.as_object().ok_or("mermaid 必须是对象")?;
+                let mermaid = mermaid.as_object().ok_or(UiMessage::new("theme.mermaidObject"))?;
                 variant.mermaid.theme = metadata(mermaid.get("theme"), &variant.mermaid.theme)?;
-                if !matches!(variant.mermaid.theme.as_str(), "default" | "dark" | "base") { return Err("不支持的 Mermaid 主题".into()); }
+                if !matches!(variant.mermaid.theme.as_str(), "default" | "dark" | "base") { return Err(UiMessage::new("theme.mermaid").into()); }
             }
         }
     }
     Ok(theme)
 }
-fn metadata(value: Option<&Value>, default: &str) -> Result<String, String> {
-    let text = value.map(|value| value.as_str().ok_or("主题元数据必须是字符串")).transpose()?.unwrap_or(default).trim();
-    if text.is_empty() || text.chars().count() > 80 || text.chars().any(char::is_control) { return Err("主题元数据为空、过长或含控制字符".into()); }
+fn metadata(value: Option<&Value>, default: &str) -> Result<String, UiMessage> {
+    let text = value.map(|value| value.as_str().ok_or(UiMessage::new("theme.metadataString"))).transpose()?.unwrap_or(default).trim();
+    if text.is_empty() || text.chars().count() > 80 || text.chars().any(char::is_control) { return Err(UiMessage::new("theme.metadata").into()); }
     Ok(text.into())
 }
-fn merge_tokens(base: &mut BTreeMap<String, String>, raw: Option<&Value>, style: bool) -> Result<(), String> {
+fn merge_tokens(base: &mut BTreeMap<String, String>, raw: Option<&Value>, style: bool) -> Result<(), UiMessage> {
     let Some(raw) = raw else { return Ok(()); };
-    for (name, value) in raw.as_object().ok_or("令牌必须是对象")? {
-        if !base.contains_key(name) { return Err(format!("未知令牌：{name}")); }
-        let value = value.as_str().ok_or_else(|| format!("令牌 {name} 必须为字符串"))?.trim();
+    for (name, value) in raw.as_object().ok_or(UiMessage::new("theme.tokensObject"))? {
+        if !base.contains_key(name) { return Err(UiMessage::new("theme.tokenUnknown").arg("name", name)); }
+        let value = value.as_str().ok_or_else(|| UiMessage::new("theme.tokenString").arg("name", name))?.trim();
         let safe = value.len() <= 256 && !value.is_empty() && !value.chars().any(|ch| ch.is_control() || matches!(ch, ';' | '{' | '}' | '@' | '!'));
         let valid = if !style { parse_color(value).is_some() }
             else if name.starts_with("font") { font_stack(value).is_some() }
             else if name.starts_with("shadow") { parse_shadow(value).is_some() }
             else { parse_length(value).is_some_and(|length| length <= if name == "radiusPill" { 1000.0 } else { 128.0 }) };
-        if !safe || !valid { return Err(format!("不支持或无效的原生主题令牌：{name}")); }
+        if !safe || !valid { return Err(UiMessage::new("theme.tokenInvalid").arg("name", name)); }
         base.insert(name.clone(), value.into());
     }
     Ok(())

@@ -132,7 +132,7 @@ mod windows {
                 .child(window_glyph(glyph))
                 // 保留 Windows 对最大化按钮的命中信息；动作仍只由下方点击处理一次。
                 .child(div().absolute().top_0().right_0().bottom_0().left_0().window_control_area(area))
-                .tooltip(tooltip(label))
+                .tooltip(move |window, cx| tooltip(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text(label))(window, cx))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .on_click(move |event: &ClickEvent, window, cx| {
@@ -143,11 +143,11 @@ mod windows {
                 })
         };
         div().flex().h_full().flex_none().tab_group()
-            .child(button("window-minimize", CaptionAction::Minimize, WindowGlyph::Minimize, WindowControlArea::Min, "最小化", &focus.minimize))
+            .child(button("window-minimize", CaptionAction::Minimize, WindowGlyph::Minimize, WindowControlArea::Min, "window.minimize", &focus.minimize))
             .child(button("window-maximize", CaptionAction::Maximize,
                 if maximized { WindowGlyph::Restore } else { WindowGlyph::Maximize },
-                WindowControlArea::Max, if maximized { "还原" } else { "最大化" }, &focus.maximize))
-            .child(button("window-close", CaptionAction::Close, WindowGlyph::Close, WindowControlArea::Close, "关闭", &focus.close))
+                WindowControlArea::Max, if maximized { "window.restore" } else { "window.maximize" }, &focus.maximize))
+            .child(button("window-close", CaptionAction::Close, WindowGlyph::Close, WindowControlArea::Close, "window.close", &focus.close))
     }
 }
 

@@ -1,5 +1,6 @@
 //! 虚拟目录列表及其滚动条；根目录与普通行共享同一滚动范围。
 use super::*;
+use crate::ui::toolbar_i18n::ToolbarLocale;
 #[path = "explorer_label.rs"]
 mod label;
 use label::TreeLabel;
@@ -59,8 +60,12 @@ impl Workspace {
 
     /// 文件栏 = 与主页相同的“主页”导航头 + 文件树视口；导航头不进入虚拟列表，滚动条和拖宽仍以列表边界计算。
     fn render_explorer_sidebar(&mut self, width: f32, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(edit) = &self.explorer.edit {
+            let label = ToolbarLocale::current(cx).app_text("tree.name");
+            edit.field.update(cx, |field, cx| field.set_placeholder(label, cx));
+        }
         let tree = self.render_explorer_tree(width, theme, cx);
-        let home = crate::ui::home::nav_home_row(false, theme)
+        let home = crate::ui::home::nav_home_row(false, theme, cx)
             .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| workspace.show_home(window, cx)));
         div().w(px(width)).h_full().min_h(px(0.0)).flex_none().flex().flex_col().bg(theme.rail_bg)
             .child(div().w_full().flex_none().px(px(8.0)).pt(px(10.0)).pb(px(6.0)).child(home))
@@ -124,14 +129,14 @@ impl Workspace {
                                 workspace.focus_tree_search(focused, window, cx);
                                 if let Some(tree) = &mut workspace.tree {
                                     let path = tree.root.clone();
-                                    match tree.toggle_root() {
+                                    match tree.toggle_root_message() {
                                         Ok(expanded) => {
                                             workspace.animate_tree_chevron(path.clone(), expanded);
                                             workspace.sync_tree_selection(false, cx);
                                             if expanded { workspace.queue_tree_scan(path, false, cx); }
                                             else { workspace.cancel_hidden_tree_scan(); }
                                         }
-                                        Err(error) => workspace.notice = Some(error.into()),
+                                        Err(error) => workspace.notice = Some(error.render(ToolbarLocale::current(cx)).into()),
                                     }
                                     cx.notify();
                                 } else { workspace.prompt_open(true, window, cx); }
@@ -370,14 +375,14 @@ impl Workspace {
 
     pub(super) fn toggle_tree_folder(&mut self, path: &Path, cx: &mut Context<Self>) {
         if let Some(tree) = &mut self.tree {
-            match tree.toggle(path) {
+            match tree.toggle_message(path) {
                 Ok(expanded) => {
                     self.animate_tree_chevron(path.to_path_buf(), expanded);
                     self.sync_tree_selection(false, cx);
                     if expanded { self.queue_tree_scan(path.to_path_buf(), false, cx); }
                     else { self.cancel_hidden_tree_scan(); }
                 }
-                Err(error) => self.notice = Some(error.into()),
+                Err(error) => self.notice = Some(error.render(ToolbarLocale::current(cx)).into()),
             }
             self.recompute_tree_search(cx);
             cx.notify();
@@ -396,13 +401,13 @@ fn tree_spinner(id: impl Into<gpui::ElementId>, color: gpui::Hsla, reduce_motion
 
 fn tree_controls(path: &Path, root: bool, theme: &Theme, cx: &mut Context<Workspace>) -> AnyElement {
     let actions: &[(IconName, &'static str, super::explorer_actions::TreeAction)] = if root {
-        &[(IconName::FilePlus, "新建文件", super::explorer_actions::TreeAction::NewFile),
-          (IconName::FolderPlus, "新建文件夹", super::explorer_actions::TreeAction::NewFolder),
-          (IconName::RefreshCw, "刷新", super::explorer_actions::TreeAction::Refresh),
-          (IconName::ChevronsUp, "全部折叠", super::explorer_actions::TreeAction::Collapse)]
+        &[(IconName::FilePlus, "tree.newFile", super::explorer_actions::TreeAction::NewFile),
+          (IconName::FolderPlus, "tree.newFolder", super::explorer_actions::TreeAction::NewFolder),
+          (IconName::RefreshCw, "tree.refresh", super::explorer_actions::TreeAction::Refresh),
+          (IconName::ChevronsUp, "tree.collapseAll", super::explorer_actions::TreeAction::Collapse)]
     } else {
-        &[(IconName::FilePlus, "新建文件", super::explorer_actions::TreeAction::NewFile),
-          (IconName::FolderPlus, "新建文件夹", super::explorer_actions::TreeAction::NewFolder)]
+        &[(IconName::FilePlus, "tree.newFile", super::explorer_actions::TreeAction::NewFile),
+          (IconName::FolderPlus, "tree.newFolder", super::explorer_actions::TreeAction::NewFolder)]
     };
     let mut controls = div().flex().items_center().gap(px(1.0)).flex_none();
     for (index, (name, tip, action)) in actions.iter().enumerate() {
@@ -410,7 +415,7 @@ fn tree_controls(path: &Path, root: bool, theme: &Theme, cx: &mut Context<Worksp
         let action = *action;
         controls = controls.child(div().id(("tree-control", index)).size(px(20.0)).flex_none().flex().items_center().justify_center()
             .rounded(px(5.0)).cursor_pointer().hover(|style| style.bg(theme.hover))
-            .child(icon(*name, 12.0, theme.muted)).tooltip(tooltip(*tip))
+            .child(icon(*name, 12.0, theme.muted)).tooltip(tooltip(ToolbarLocale::current(cx).app_text(tip)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |workspace, _, window, cx| {
                 cx.stop_propagation();

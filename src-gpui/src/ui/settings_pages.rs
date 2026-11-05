@@ -49,12 +49,12 @@ pub(super) fn readonly_input(value: impl Into<SharedString>, width: f32, theme: 
         .child(div().min_w(px(0.0)).flex_1().overflow_hidden().whitespace_nowrap().child(value.into()))
 }
 
-pub(super) fn unavailable_action(key: &str, label: &'static str, theme: &Theme) -> Div {
+pub(super) fn unavailable_action(key: &str, label: &'static str, theme: &Theme, locale: ToolbarLocale) -> Div {
     div().flex().items_center().gap(px(10.0))
         .when(key != "imageConnectionTest", |el| el.child(div().min_w(px(62.0)).px(px(9.0)).h(px(26.0))
             .flex().items_center().justify_center().rounded_full().border_1().border_color(theme.border)
             .bg(theme.surface.opacity(0.78)).text_size(px(13.0)).font_weight(FontWeight(750.0))
-            .text_color(theme.muted).child("不支持")))
+            .text_color(theme.muted).child(locale.app_text("settings.unsupported"))))
         .child(button(eid("unavailable", key), label, None, ButtonKind::Disabled, theme)
             .min_w(px(116.0)).h(px(34.0)).justify_center().rounded(px(4.0))
             .bg(theme.accent).text_color(theme.on_accent).font_weight(FontWeight::BOLD))
@@ -78,6 +78,7 @@ impl SettingsWindow {
     #[cfg(windows)]
     pub(super) fn render_shell_action(&self, key: &'static str, label: &'static str, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         use crate::windows_integration::{self, ShellAction};
+        let locale = ToolbarLocale::current(cx);
         let busy = self.shell.running.is_some();
         let action_button = |action: ShellAction, label| {
             button(eid(key, label), label, None, if busy { ButtonKind::Disabled } else { ButtonKind::Secondary }, theme)
@@ -104,14 +105,17 @@ impl SettingsWindow {
         let buttons = if key == "markdownAssociation" {
             buttons.child(action_button(ShellAction::BindMarkdown, label))
         } else {
-            buttons.child(action_button(ShellAction::RegisterMenu, label)).child(action_button(ShellAction::RemoveMenu, "移除"))
+            buttons.child(action_button(ShellAction::RegisterMenu, label)).child(action_button(ShellAction::RemoveMenu, locale.app_text("settings.remove")))
         };
         let mut row = div().min_w(px(0.0)).flex().flex_col().items_end().gap(px(5.0)).child(buttons);
         if self.shell.running.as_ref().is_some_and(|(owner, _)| *owner == key) {
-            row = row.child(div().text_size(px(12.0)).text_color(theme.muted).child("正在处理…"));
+            row = row.child(div().text_size(px(12.0)).text_color(theme.muted).child(locale.app_text("settings.working")));
         } else if let Some((_, result)) = self.shell.message.as_ref().filter(|(owner, _)| *owner == key) {
-            let (message, color) = match result { Ok(ok) => (*ok, theme.muted), Err(err) => (err.as_str(), theme.danger) };
-            row = row.child(div().text_size(px(12.0)).text_color(color).child(message.to_owned()));
+            let (message, color) = match result {
+                Ok(key) => (locale.app_text(key).to_owned(), theme.muted),
+                Err(error) => (locale.app_format("shell.failed", &[("error", error)]), theme.danger),
+            };
+            row = row.child(div().text_size(px(12.0)).text_color(color).child(message));
         }
         row.into_any_element()
     }
@@ -121,11 +125,12 @@ impl SettingsWindow {
         let catalog = cx.global::<ThemeCatalog>();
         let settings = cx.global::<Settings>();
         let selected = catalog.selected(settings).id.clone();
-        let language = crate::ui::toolbar_i18n::ToolbarLocale::current(cx).code();
+        let locale = ToolbarLocale::current(cx);
+        let language = locale.code();
         let columns = if content_width(viewport) <= 380.0 { 1 } else { 2 };
         let kind = if catalog.busy { ButtonKind::Disabled } else { ButtonKind::Secondary };
         div().flex_none().py(px(12.0)).border_t_1().border_color(theme.border.opacity(0.72)).flex().flex_col().gap(px(12.0))
-            .child(div().text_size(px(14.0)).font_weight(FontWeight(650.0)).text_color(theme.heading).child("配色主题"))
+            .child(div().text_size(px(14.0)).font_weight(FontWeight(650.0)).text_color(theme.heading).child(locale.app_text("settings.colorThemeId.label")))
             .child(div().flex().flex_col().gap(px(12.0)).children(catalog.themes.chunks(columns).map(|row| {
                 div().flex().gap(px(12.0)).children(row.iter().map(|preview| {
                     let active = preview.id == selected;
@@ -143,16 +148,17 @@ impl SettingsWindow {
                 }))
             })))
             .child(div().flex().flex_wrap().gap(px(8.0))
-                .child(button("import-theme", "导入主题…", None, kind, theme)
+                .child(button("import-theme", locale.app_text("settings.themeImport"), None, kind, theme)
                     .when(!catalog.busy, |el| el.on_click(cx.listener(|_, _, _, cx| catalog::import(cx)))))
-                .child(button("export-theme", "导出当前主题为模板…", None, kind, theme)
+                .child(button("export-theme", locale.app_text("settings.themeExport"), None, kind, theme)
                     .when(!catalog.busy, |el| el.on_click(cx.listener(|_, _, _, cx| catalog::export(cx))))))
-            .children(catalog.busy.then(|| div().text_size(px(12.0)).text_color(theme.muted).child("正在处理主题…")))
-            .children(catalog.message.clone().map(|message| div().text_size(px(12.0)).text_color(theme.muted).child(message)))
+            .children(catalog.busy.then(|| div().text_size(px(12.0)).text_color(theme.muted).child(locale.app_text("settings.themeWorking"))))
+            .children((!catalog.message.is_empty()).then(|| div().text_size(px(12.0)).text_color(theme.muted).child(catalog.message.iter().map(|message| message.render(locale)).collect::<Vec<_>>().join("\n"))))
             .into_any_element()
     }
 
     pub(super) fn render_about(&mut self, theme: &Theme, viewport: gpui::Size<gpui::Pixels>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let locale = ToolbarLocale::current(cx);
         let mut items = vec![div().w_full().max_w(px(640.0)).flex().flex_col()
             .child(div().mb(px(14.0)).flex().items_center().gap(px(14.0))
                 .child(gpui::img("app/128x128.png").size(px(54.0)).flex_none())
@@ -161,12 +167,12 @@ impl SettingsWindow {
                     .child(div().min_h(px(20.0)).px(px(7.0)).py(px(1.0)).flex().items_center().rounded_full().border_1().border_color(theme.accent.opacity(0.34))
                         .bg(crate::ui::motion::color(theme.surface, theme.accent, 0.07)).text_color(theme.accent)
                         .text_size(px(11.0)).font_weight(FontWeight::BOLD).child(format!("v{}", env!("CARGO_PKG_VERSION"))))))
-            .child(about_detail("定位", "本地优先、Markdown-first 的轻量桌面 Markdown 编辑器。", theme))
-            .child(about_detail("平台支持", "支持 macOS 与 Windows，并持续完善各平台的原生文件、窗口和快捷键体验。", theme))
+            .child(about_detail(locale.app_text("settings.aboutPurpose"), locale.app_text("settings.aboutPurposeDescription"), theme))
+            .child(about_detail(locale.app_text("settings.aboutPlatforms"), locale.app_text("settings.aboutPlatformsDescription"), theme))
             .child(div().mt(px(16.0)).mb(px(8.0)).flex().gap(px(10.0))
                 .when(f32::from(viewport.width) <= 520.0, |el| el.flex_col())
-                .child(project_link("repository", "GitHub 仓库", "查看源代码、版本发布和项目动态。", IconName::Github, "https://github.com/nomo-md/nomo", theme))
-                .child(project_link("issue", "提交 Issue", "报告问题或提出功能建议。", IconName::CircleDot, "https://github.com/nomo-md/nomo/issues/new/choose", theme)))
+                .child(project_link("repository", locale.app_text("settings.repository"), locale.app_text("settings.repositoryDescription"), IconName::Github, "https://github.com/nomo-md/nomo", theme))
+                .child(project_link("issue", locale.app_text("settings.issue"), locale.app_text("settings.issueDescription"), IconName::CircleDot, "https://github.com/nomo-md/nomo/issues/new/choose", theme)))
             .into_any_element()];
         items.extend(ABOUT_ITEMS.iter().map(|item| self.render_item(item, theme, viewport, cx)));
         vec![div().w_full().max_w(px(640.0)).flex().flex_col().children(items).into_any_element()]
@@ -175,7 +181,7 @@ impl SettingsWindow {
 
 fn about_detail(label: &'static str, description: &'static str, theme: &Theme) -> Div {
     div().py(px(13.0)).border_t_1().border_color(theme.border.opacity(0.72)).flex().gap(px(12.0))
-        .child(div().w(px(68.0)).flex_none().text_size(px(13.0)).font_weight(FontWeight(650.0)).text_color(theme.muted).child(label))
+        .child(div().w(px(88.0)).flex_none().text_size(px(13.0)).font_weight(FontWeight(650.0)).text_color(theme.muted).child(label))
         .child(div().min_w(px(0.0)).flex_1().text_size(px(14.0)).line_height(gpui::relative(1.55)).text_color(theme.fg).child(description))
 }
 

@@ -29,11 +29,11 @@ impl ShellAction {
         let exe = path.to_str().ok_or("Nomo 的启动路径不是有效的 Unicode 路径。")?;
         let message = match self {
             Self::BindMarkdown => register_markdown(CURRENT_USER, exe)
-                .map(|()| "请在 Windows 默认应用中为 .md 选择 Nomo。"),
+                .map(|()| "shell.chooseDefault"),
             Self::RegisterMenu => change_menu(CURRENT_USER, exe, true)
-                .map(|_| "右键菜单已注册。"),
+                .map(|_| "shell.menuRegistered"),
             Self::RemoveMenu => change_menu(CURRENT_USER, exe, false)
-                .map(|removed| if removed > 0 { "已移除当前 Nomo 的右键菜单。" } else { "当前 Nomo 没有已注册的右键菜单。" }),
+                .map(|removed| if removed > 0 { "shell.menuRemoved" } else { "shell.noMenu" }),
         }.map_err(|e| format!("Windows 注册表操作未完成：{e}"))?;
         unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED as i32, SHCNF_FLUSHNOWAIT, null(), null()); }
         Ok(message)

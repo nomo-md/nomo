@@ -21,7 +21,7 @@ pub enum Support {
     None(&'static str),
 }
 
-const WINDOWS_SHELL: Support = if cfg!(windows) { Support::Full } else { Support::None("仅支持 Windows 资源管理器") };
+const WINDOWS_SHELL: Support = if cfg!(windows) { Support::Full } else { Support::None("settings.support.windowsShell") };
 
 pub struct Item {
     pub key: &'static str,
@@ -58,118 +58,118 @@ const fn group(title: &'static str, items: &'static [Item]) -> Group {
 
 pub const CATEGORIES: &[Category] = &[
     Category {
-        title: "通用", icon: IconName::Settings2,
-        page: Page::Groups(&[group("基础行为", &[
-            item("editorMode", "启动默认编辑模式", "用于下次打开文档时的默认编辑形态。", Control::Choice(&[("semantic", "语义编辑"), ("source", "源码模式"), ("split", "双栏模式")]), Support::Full),
-            item("splitViewLayout", "双栏排列", "选择双栏模式中语义编辑区与 Markdown 源码的位置。", Control::Choice(&[("semantic-source", "语义在左"), ("source-semantic", "源码在左")]), Support::Full),
-            item("autoSaveEnabled", "自动保存", "编辑后自动写入当前本地文件。", Control::Toggle, Support::Full),
-            item("autoSaveDelayMs", "自动保存延迟", "输入停止后等待多久再保存。", Control::Range { min: 500.0, max: 5000.0, step: 100.0, unit: "ms" }, Support::Full),
-            item("createSnapshotBeforeSave", "保存前创建快照", "保存本地文件前记录一份 Markdown 快照，便于恢复误覆盖。", Control::Toggle, Support::Full),
-            item("interfaceLanguage", "界面语言", "控制应用界面、菜单和提示文案，不会改写当前 Markdown 文档。", Control::Choice(&[("system", "跟随系统"), ("zh-CN", "简体中文"), ("zh-TW", "繁體中文"), ("en-US", "English"), ("ja-JP", "日本語")]), Support::Partial("工具栏支持四种语言，其余界面目前为简体中文")),
+        title: "settings.category.general", icon: IconName::Settings2,
+        page: Page::Groups(&[group("settings.group.basics", &[
+            item("editorMode", "settings.editorMode.label", "settings.editorMode.description", Control::Choice(&[("semantic", "settings.editorMode.choice.semantic"), ("source", "settings.editorMode.choice.source"), ("split", "settings.editorMode.choice.split")]), Support::Full),
+            item("splitViewLayout", "settings.splitViewLayout.label", "settings.splitViewLayout.description", Control::Choice(&[("semantic-source", "settings.splitViewLayout.choice.semantic-source"), ("source-semantic", "settings.splitViewLayout.choice.source-semantic")]), Support::Full),
+            item("autoSaveEnabled", "settings.autoSaveEnabled.label", "settings.autoSaveEnabled.description", Control::Toggle, Support::Full),
+            item("autoSaveDelayMs", "settings.autoSaveDelayMs.label", "settings.autoSaveDelayMs.description", Control::Range { min: 500.0, max: 5000.0, step: 100.0, unit: "ms" }, Support::Full),
+            item("createSnapshotBeforeSave", "settings.createSnapshotBeforeSave.label", "settings.createSnapshotBeforeSave.description", Control::Toggle, Support::Full),
+            item("interfaceLanguage", "settings.interfaceLanguage.label", "settings.interfaceLanguage.description", Control::Choice(&[("system", "settings.interfaceLanguage.choice.system"), ("zh-CN", "settings.interfaceLanguage.choice.zh-CN"), ("zh-TW", "settings.interfaceLanguage.choice.zh-TW"), ("en-US", "settings.interfaceLanguage.choice.en-US"), ("ja-JP", "settings.interfaceLanguage.choice.ja-JP")]), Support::Full),
         ])]),
     },
     Category {
-        title: "编辑器", icon: IconName::BookOpenText,
+        title: "settings.category.editor", icon: IconName::BookOpenText,
         page: Page::Groups(&[
-            group("段落排版", &[
-                item("typographyEnabled", "精细排版", "采用 Knuth–Plass（KP）算法优化段落断行。", Control::Toggle, Support::Full),
+            group("settings.group.typography", &[
+                item("typographyEnabled", "settings.typographyEnabled.label", "settings.typographyEnabled.description", Control::Toggle, Support::Full),
             ]),
-            group("编辑器选项", &[
-                item("fontSize", "字号", "影响语义编辑区和源码模式的正文大小。", Control::Range { min: 14.0, max: 22.0, step: 1.0, unit: "px" }, Support::Full),
-                item("lineHeight", "行高", "提升长文档阅读和编辑的舒适度。", Control::Range { min: 1.4, max: 2.1, step: 0.05, unit: "" }, Support::Full),
-                item("contentWidthPercent", "内容宽度", "控制编辑正文在窗口中的最大占比。", Control::Range { min: 45.0, max: 90.0, step: 1.0, unit: "%" }, Support::Full),
-                item("largeDocumentLimit", "大文件阈值", "超过阈值后使用只读源码模式，避免语义解析阻塞窗口。", Control::Number { unit: "字符 / 字节" }, Support::None("当前编辑器按窗口加载文档，不使用旧版阈值切换策略")),
-                item("codeBlockIndent", "默认缩进", "代码块编辑态按 Tab 时使用。", Control::Choice(&[("spaces-2", "2 空格"), ("spaces-4", "4 空格"), ("tab", "Tab")]), Support::Full),
-                item("codeBlockLineNumbersVisible", "代码块行号", "控制语义编辑区代码块是否显示行号。", Control::Toggle, Support::Full),
-                item("inlineCodeRenderingEnabled", "渲染行内代码", "开启后显示行内代码样式；关闭后显示原始 Markdown 反引号文本。", Control::Toggle, Support::Full),
-                item("copyMarkdownSyntaxEnabled", "复制时保留 Markdown 语法", "开启后，在语义编辑模式中复制或剪切选区时，纯文本剪贴板使用语义等价的 Markdown；富文本格式保持不变。", Control::Toggle, Support::Full),
+            group("settings.group.editor", &[
+                item("fontSize", "settings.fontSize.label", "settings.fontSize.description", Control::Range { min: 14.0, max: 22.0, step: 1.0, unit: "px" }, Support::Full),
+                item("lineHeight", "settings.lineHeight.label", "settings.lineHeight.description", Control::Range { min: 1.4, max: 2.1, step: 0.05, unit: "" }, Support::Full),
+                item("contentWidthPercent", "settings.contentWidthPercent.label", "settings.contentWidthPercent.description", Control::Range { min: 45.0, max: 90.0, step: 1.0, unit: "%" }, Support::Full),
+                item("largeDocumentLimit", "settings.largeDocumentLimit.label", "settings.largeDocumentLimit.description", Control::Number { unit: "settings.unit.size" }, Support::None("settings.largeDocumentLimit.support")),
+                item("codeBlockIndent", "settings.codeBlockIndent.label", "settings.codeBlockIndent.description", Control::Choice(&[("spaces-2", "settings.codeBlockIndent.choice.spaces-2"), ("spaces-4", "settings.codeBlockIndent.choice.spaces-4"), ("tab", "settings.codeBlockIndent.choice.tab")]), Support::Full),
+                item("codeBlockLineNumbersVisible", "settings.codeBlockLineNumbersVisible.label", "settings.codeBlockLineNumbersVisible.description", Control::Toggle, Support::Full),
+                item("inlineCodeRenderingEnabled", "settings.inlineCodeRenderingEnabled.label", "settings.inlineCodeRenderingEnabled.description", Control::Toggle, Support::Full),
+                item("copyMarkdownSyntaxEnabled", "settings.copyMarkdownSyntaxEnabled.label", "settings.copyMarkdownSyntaxEnabled.description", Control::Toggle, Support::Full),
             ]),
-            group("快捷插入", &[
-                item("quickInsertEnabled", "启用快捷插入", "在行首或空格后输入触发符号，选择要插入的内容。↑↓ 选类别，←→ 切换样式。", Control::Toggle, Support::Full),
-                item("quickInsertTrigger", "触发符号", "默认 /，可以改为一个标点或符号。", Control::Text { placeholder: "/", compact: true }, Support::Full),
+            group("settings.group.quickInsert", &[
+                item("quickInsertEnabled", "settings.quickInsertEnabled.label", "settings.quickInsertEnabled.description", Control::Toggle, Support::Full),
+                item("quickInsertTrigger", "settings.quickInsertTrigger.label", "settings.quickInsertTrigger.description", Control::Text { placeholder: "/", compact: true }, Support::Full),
             ]),
-            Group { title: "Markdown 格式检查", badge: "Beta", items: &[
-                item("markdownLintEnabled", "检查 Markdown 格式", "仅报告格式问题，不会修改文档内容。", Control::Toggle, Support::None("Markdown 格式检查器尚未接入")),
-                item("markdownLintRuleSet", "检查规则", "宽松规则减少写作干扰；默认规则启用全部内置检查。", Control::Choice(&[("relaxed", "宽松规则"), ("default", "默认规则")]), Support::None("Markdown 格式检查器尚未接入")),
+            Group { title: "settings.group.lint", badge: "Beta", items: &[
+                item("markdownLintEnabled", "settings.markdownLintEnabled.label", "settings.markdownLintEnabled.description", Control::Toggle, Support::None("settings.unsupported")),
+                item("markdownLintRuleSet", "settings.markdownLintRuleSet.label", "settings.markdownLintRuleSet.description", Control::Choice(&[("relaxed", "settings.markdownLintRuleSet.choice.relaxed"), ("default", "settings.markdownLintRuleSet.choice.default")]), Support::None("settings.unsupported")),
             ] },
         ]),
     },
     Category {
-        title: "外观", icon: IconName::Palette,
+        title: "settings.category.appearance", icon: IconName::Palette,
         page: Page::Groups(&[
-            group("主题", &[
-                item("themeMode", "明暗模式", "", Control::Choice(&[("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")]), Support::Full),
-                item("colorThemeId", "配色主题", "", Control::ThemePicker, Support::Full),
+            group("settings.group.theme", &[
+                item("themeMode", "settings.themeMode.label", "", Control::Choice(&[("system", "settings.themeMode.choice.system"), ("light", "settings.themeMode.choice.light"), ("dark", "settings.themeMode.choice.dark")]), Support::Full),
+                item("colorThemeId", "settings.colorThemeId.label", "", Control::ThemePicker, Support::Full),
             ]),
-            group("字体", &[
-                item("uiFontFamily", "界面字体", "搜索本机已安装的字体，用于菜单、侧栏、工具栏和设置窗口。", Control::FontFamily, Support::Full),
-                item("documentFontFamily", "正文字体", "从本机字体中选择，用于编辑区正文及导出的 HTML 和 PDF。", Control::FontFamily, Support::Full),
-                item("monoFontFamily", "代码字体", "从本机字体中选择，用于代码块、行内代码和源码模式。", Control::FontFamily, Support::Full),
+            group("settings.group.fonts", &[
+                item("uiFontFamily", "settings.uiFontFamily.label", "settings.uiFontFamily.description", Control::FontFamily, Support::Full),
+                item("documentFontFamily", "settings.documentFontFamily.label", "settings.documentFontFamily.description", Control::FontFamily, Support::Full),
+                item("monoFontFamily", "settings.monoFontFamily.label", "settings.monoFontFamily.description", Control::FontFamily, Support::Full),
             ]),
-            group("视觉缩放", &[
-                item("zoomPercent", "缩放级别", "调整正文编辑区和源码模式的整体显示比例。", Control::Range { min: 80.0, max: 160.0, step: 5.0, unit: "%" }, Support::Full),
-                item("ctrlWheelZoomEnabled", "Ctrl 滚轮缩放", "按住 Ctrl 并滚动鼠标滚轮调整缩放。", Control::Toggle, Support::Full),
+            group("settings.group.zoom", &[
+                item("zoomPercent", "settings.zoomPercent.label", "settings.zoomPercent.description", Control::Range { min: 80.0, max: 160.0, step: 5.0, unit: "%" }, Support::Full),
+                item("ctrlWheelZoomEnabled", "settings.ctrlWheelZoomEnabled.label", "settings.ctrlWheelZoomEnabled.description", Control::Toggle, Support::Full),
             ]),
         ]),
     },
     Category {
-        title: "文件与窗口", icon: IconName::FolderOpen,
-        page: Page::Groups(&[group("文件与窗口", &[
-            item("openDefaultBehavior", "打开默认行为", "用于菜单、最近记录和系统文件管理器；目标已打开或当前为空窗口时会直接复用。", Control::Choice(&[("ask-every-time", "每次询问"), ("current-window", "当前窗口"), ("new-window", "新窗口")]), Support::Full),
-            item("filePreviewEnabled", "文件预览标签", "单击新文件显示为预览标签；打开另一文件、编辑或双击后自动固定。", Control::Toggle, Support::Full),
-            item("sidebarHidden", "启动时隐藏资源管理器侧边栏", "下次打开后保持侧边栏收起。", Control::Toggle, Support::Full),
-            item("closeWindowBehavior", "关闭窗口行为", "设置点击关闭按钮时的主窗口行为。", Control::Choice(&[("ask-every-time", "每次选择"), ("close-window", "关闭窗口"), ("close-to-tray", "关闭到托盘")]), Support::Partial("关闭到托盘仅在 Windows 可用")),
-            item("externalFileChangeBehavior", "文件变更默认行为", "仅在没有本地修改时自动处理；有未保存修改、文件被删除或移动时仍会提示。忽略后保存仍需确认。", Control::Choice(&[("reload-external", "重新载入"), ("overwrite-external", "覆盖外部"), ("ignore", "忽略")]), Support::Full),
-            item("markdownAssociation", "绑定 .md 默认打开方式", "将 Nomo 加入候选列表，再到 Windows 默认应用设置中选择 .md 的打开程序。", Control::Action("绑定 .md"), WINDOWS_SHELL),
-            item("contextMenuRegistration", "注册 .md 与文件夹右键菜单", "在 Markdown 文件和文件夹的右键菜单中加入 Nomo。Windows 11 可在“显示更多选项”中找到。", Control::Action("注册右键菜单"), WINDOWS_SHELL),
+        title: "settings.category.files", icon: IconName::FolderOpen,
+        page: Page::Groups(&[group("settings.group.files", &[
+            item("openDefaultBehavior", "settings.openDefaultBehavior.label", "settings.openDefaultBehavior.description", Control::Choice(&[("ask-every-time", "settings.openDefaultBehavior.choice.ask-every-time"), ("current-window", "settings.openDefaultBehavior.choice.current-window"), ("new-window", "settings.openDefaultBehavior.choice.new-window")]), Support::Full),
+            item("filePreviewEnabled", "settings.filePreviewEnabled.label", "settings.filePreviewEnabled.description", Control::Toggle, Support::Full),
+            item("sidebarHidden", "settings.sidebarHidden.label", "settings.sidebarHidden.description", Control::Toggle, Support::Full),
+            item("closeWindowBehavior", "settings.closeWindowBehavior.label", "settings.closeWindowBehavior.description", Control::Choice(&[("ask-every-time", "settings.closeWindowBehavior.choice.ask-every-time"), ("close-window", "settings.closeWindowBehavior.choice.close-window"), ("close-to-tray", "settings.closeWindowBehavior.choice.close-to-tray")]), Support::Partial("settings.closeWindowBehavior.support")),
+            item("externalFileChangeBehavior", "settings.externalFileChangeBehavior.label", "settings.externalFileChangeBehavior.description", Control::Choice(&[("reload-external", "settings.externalFileChangeBehavior.choice.reload-external"), ("overwrite-external", "settings.externalFileChangeBehavior.choice.overwrite-external"), ("ignore", "settings.externalFileChangeBehavior.choice.ignore")]), Support::Full),
+            item("markdownAssociation", "settings.markdownAssociation.label", "settings.markdownAssociation.description", Control::Action("settings.markdownAssociation.action"), WINDOWS_SHELL),
+            item("contextMenuRegistration", "settings.contextMenuRegistration.label", "settings.contextMenuRegistration.description", Control::Action("settings.contextMenuRegistration.action"), WINDOWS_SHELL),
         ])]),
     },
     Category {
-        title: "图片", icon: IconName::FileImage,
-        page: Page::Groups(&[group("图片导入", &[
-            item("imageHandlingSettings.imageInsertStrategy", "图片处理方式", "粘贴、拖放和上传图片时使用的默认策略。", Control::Choice(&[("copy-current-folder", "当前文件夹"), ("copy-assets", "assets 文件夹"), ("copy-document-assets", "文档.assets"), ("upload", "上传")]), Support::Full),
-            item("imageHandlingSettings.uploadProvider", "上传方式", "PicGo 适合常驻服务，PicGo-Core 适合命令行工作流。", Control::Choice(&[("picgo", "PicGo"), ("picgo-core", "PicGo-Core")]), Support::Full),
-            item("imageHandlingSettings.picgoServerUrl", "PicGo Server 地址", "用于调用本机 PicGo 服务上传图片。", Control::Text { placeholder: "", compact: false }, Support::Full),
-            item("imageHandlingSettings.picgoCoreCommand", "PicGo-Core 命令", "例如 picgo、npx picgo 或完整可执行文件路径。", Control::Text { placeholder: "", compact: false }, Support::Full),
-            item("imageHandlingSettings.picgoCoreConfigPath", "PicGo-Core 配置文件路径", "可留空，使用 PicGo-Core 默认配置。", Control::Text { placeholder: "留空", compact: false }, Support::Full),
-            item("imageConnectionTest", "连接测试", "检查当前 PicGo 配置能否被 Nomo 调用。", Control::Action("测试连接"), Support::Full),
-            item("imageHandlingSettings.defaultImageWidth", "图片默认宽度", "插入图片时自动写入宽度属性，可填 640px、80% 或留空。", Control::Text { placeholder: "留空", compact: true }, Support::Full),
-            item("imageHandlingSettings.defaultImageAlign", "图片默认对齐", "插入图片时自动写入对齐属性。", Control::Choice(&[("none", "跟随正文"), ("left", "左对齐"), ("center", "居中"), ("right", "右对齐")]), Support::Full),
+        title: "settings.category.images", icon: IconName::FileImage,
+        page: Page::Groups(&[group("settings.group.images", &[
+            item("imageHandlingSettings.imageInsertStrategy", "settings.imageHandlingSettings.imageInsertStrategy.label", "settings.imageHandlingSettings.imageInsertStrategy.description", Control::Choice(&[("copy-current-folder", "settings.imageHandlingSettings.imageInsertStrategy.choice.copy-current-folder"), ("copy-assets", "settings.imageHandlingSettings.imageInsertStrategy.choice.copy-assets"), ("copy-document-assets", "settings.imageHandlingSettings.imageInsertStrategy.choice.copy-document-assets"), ("upload", "settings.imageHandlingSettings.imageInsertStrategy.choice.upload")]), Support::Full),
+            item("imageHandlingSettings.uploadProvider", "settings.imageHandlingSettings.uploadProvider.label", "settings.imageHandlingSettings.uploadProvider.description", Control::Choice(&[("picgo", "settings.imageHandlingSettings.uploadProvider.choice.picgo"), ("picgo-core", "settings.imageHandlingSettings.uploadProvider.choice.picgo-core")]), Support::Full),
+            item("imageHandlingSettings.picgoServerUrl", "settings.imageHandlingSettings.picgoServerUrl.label", "settings.imageHandlingSettings.picgoServerUrl.description", Control::Text { placeholder: "", compact: false }, Support::Full),
+            item("imageHandlingSettings.picgoCoreCommand", "settings.imageHandlingSettings.picgoCoreCommand.label", "settings.imageHandlingSettings.picgoCoreCommand.description", Control::Text { placeholder: "", compact: false }, Support::Full),
+            item("imageHandlingSettings.picgoCoreConfigPath", "settings.imageHandlingSettings.picgoCoreConfigPath.label", "settings.imageHandlingSettings.picgoCoreConfigPath.description", Control::Text { placeholder: "settings.placeholder.empty", compact: false }, Support::Full),
+            item("imageConnectionTest", "settings.imageConnectionTest.label", "settings.imageConnectionTest.description", Control::Action("settings.imageConnectionTest.action"), Support::Full),
+            item("imageHandlingSettings.defaultImageWidth", "settings.imageHandlingSettings.defaultImageWidth.label", "settings.imageHandlingSettings.defaultImageWidth.description", Control::Text { placeholder: "settings.placeholder.empty", compact: true }, Support::Full),
+            item("imageHandlingSettings.defaultImageAlign", "settings.imageHandlingSettings.defaultImageAlign.label", "settings.imageHandlingSettings.defaultImageAlign.description", Control::Choice(&[("none", "settings.imageHandlingSettings.defaultImageAlign.choice.none"), ("left", "settings.imageHandlingSettings.defaultImageAlign.choice.left"), ("center", "settings.imageHandlingSettings.defaultImageAlign.choice.center"), ("right", "settings.imageHandlingSettings.defaultImageAlign.choice.right")]), Support::Full),
         ])]),
     },
     Category {
-        title: "统计与大纲", icon: IconName::ChartColumn,
-        page: Page::Groups(&[group("统计与导航", &[
-            item("outlineVisible", "显示文档大纲", "在编辑区右侧显示标题导航。空间不足时自动隐藏，仍可用工具栏的大纲按钮手动打开。", Control::Toggle, Support::Full),
-            item("writingStatsVisible", "显示文档统计", "在正文右下角显示当前文档的轻量统计。", Control::Toggle, Support::Full),
-            item("writingStatsMetric", "默认统计类型", "决定状态栏默认展示行数、词数、字数或字符数。", Control::Choice(&[("lines", "行数"), ("words", "词数"), ("visibleChars", "字数"), ("chars", "字符")]), Support::Full),
-            item("readingTimeVisible", "阅读时间", "在统计弹层中显示由当前 Markdown 派生的阅读时长。", Control::Toggle, Support::Full),
-            item("outlineDefaultExpandLevel", "大纲默认展开层级", "打开或切换文档时默认展示到指定标题层级。", Control::Range { min: 1.0, max: 6.0, step: 1.0, unit: "" }, Support::Full),
+        title: "settings.category.statistics", icon: IconName::ChartColumn,
+        page: Page::Groups(&[group("settings.group.statistics", &[
+            item("outlineVisible", "settings.outlineVisible.label", "settings.outlineVisible.description", Control::Toggle, Support::Full),
+            item("writingStatsVisible", "settings.writingStatsVisible.label", "settings.writingStatsVisible.description", Control::Toggle, Support::Full),
+            item("writingStatsMetric", "settings.writingStatsMetric.label", "settings.writingStatsMetric.description", Control::Choice(&[("lines", "settings.writingStatsMetric.choice.lines"), ("words", "settings.writingStatsMetric.choice.words"), ("visibleChars", "settings.writingStatsMetric.choice.visibleChars"), ("chars", "settings.writingStatsMetric.choice.chars")]), Support::Full),
+            item("readingTimeVisible", "settings.readingTimeVisible.label", "settings.readingTimeVisible.description", Control::Toggle, Support::Full),
+            item("outlineDefaultExpandLevel", "settings.outlineDefaultExpandLevel.label", "settings.outlineDefaultExpandLevel.description", Control::Range { min: 1.0, max: 6.0, step: 1.0, unit: "" }, Support::Full),
         ])]),
     },
     Category {
-        title: "高级", icon: IconName::SlidersHorizontal,
+        title: "settings.category.advanced", icon: IconName::SlidersHorizontal,
         page: Page::Groups(&[
-            group("渲染", &[
-                item("renderMode", "渲染模式", "选择使用硬件 GPU 加速或软件渲染。", Control::Choice(&[("hardware", "硬件"), ("software", "软件")]), Support::None("当前原生渲染后端尚未提供此切换")),
+            group("settings.group.rendering", &[
+                item("renderMode", "settings.renderMode.label", "settings.renderMode.description", Control::Choice(&[("hardware", "settings.renderMode.choice.hardware"), ("software", "settings.renderMode.choice.software")]), Support::None("settings.renderMode.support")),
             ]),
-            group("默认插入行为", &[
-                item("defaultCodeBlockLanguage", "代码块默认语言", "菜单或快捷键插入代码块时使用。", Control::Text { placeholder: "ts", compact: true }, Support::Full),
-                item("defaultDiagramType", "Mermaid 默认图表类型", "默认插入、快捷插入及图表菜单的初始选择使用此模板；手动选定的类型保持优先。", Control::Choice(&[("flowchart", "流程图"), ("sequenceDiagram", "时序图"), ("classDiagram", "类图"), ("stateDiagram", "状态图"), ("erDiagram", "ER 图"), ("gantt", "甘特图"), ("pie", "饼图")]), Support::Full),
+            group("settings.group.insertion", &[
+                item("defaultCodeBlockLanguage", "settings.defaultCodeBlockLanguage.label", "settings.defaultCodeBlockLanguage.description", Control::Text { placeholder: "ts", compact: true }, Support::Full),
+                item("defaultDiagramType", "settings.defaultDiagramType.label", "settings.defaultDiagramType.description", Control::Choice(&[("flowchart", "settings.defaultDiagramType.choice.flowchart"), ("sequenceDiagram", "settings.defaultDiagramType.choice.sequenceDiagram"), ("classDiagram", "settings.defaultDiagramType.choice.classDiagram"), ("stateDiagram", "settings.defaultDiagramType.choice.stateDiagram"), ("erDiagram", "settings.defaultDiagramType.choice.erDiagram"), ("gantt", "settings.defaultDiagramType.choice.gantt"), ("pie", "settings.defaultDiagramType.choice.pie")]), Support::Full),
             ]),
-            group("自定义快捷键", &[
+            group("settings.group.shortcuts", &[
                 item("shortcutPreferences", "", "", Control::Shortcuts, Support::Full),
             ]),
-            group("开发者选项", &[
-                item("developerMode", "开发者模式", "开启后输出运行日志，便于排查问题。", Control::Toggle, Support::None("开发者模式偏好尚未接入")),
-                item("exportSettings", "文档导出", "文件菜单可导出 HTML、PDF 和可编辑的 Word 文档；公式、图表和本地图片可嵌入，无法嵌入的内容会提示。", Control::Info, Support::Full),
+            group("settings.group.developer", &[
+                item("developerMode", "settings.developerMode.label", "settings.developerMode.description", Control::Toggle, Support::None("settings.developerMode.support")),
+                item("exportSettings", "settings.exportSettings.label", "settings.exportSettings.description", Control::Info, Support::Full),
             ]),
         ]),
     },
-    Category { title: "关于", icon: IconName::Info, page: Page::About },
+    Category { title: "settings.category.about", icon: IconName::Info, page: Page::About },
 ];
 
 pub const ABOUT_ITEMS: &[Item] = &[
-    item("softwareUpdateAutoCheckEnabled", "启动时自动检查更新", "每次冷启动后在后台检查一次，检查失败时不会打扰编辑。", Control::Toggle, Support::Full),
-    item("updateCheck", "更新检查", "检查官方稳定版。Windows 安装版可直接下载更新并重启安装。", Control::Action("检查更新"), Support::Full),
+    item("softwareUpdateAutoCheckEnabled", "settings.softwareUpdateAutoCheckEnabled.label", "settings.softwareUpdateAutoCheckEnabled.description", Control::Toggle, Support::Full),
+    item("updateCheck", "settings.updateCheck.label", "settings.updateCheck.description", Control::Action("settings.updateCheck.action"), Support::Full),
 ];

@@ -1,5 +1,5 @@
 //! 检查官方 Release。Windows 安装版在应用内下载并确认重启；便携版保留单独的下载入口。
-use super::{dialogs::{self, SecondaryDialog, SecondaryKind, SecondaryAction as A, Tone}, components::IconName, toolbar_i18n::ToolbarLocale};
+use super::{dialogs::{self, SecondaryDialog, SecondaryKind, SecondaryAction as A, Tone}, components::IconName, toolbar_i18n::{ToolbarLocale, UiMessage}};
 use crate::settings::Settings;
 use gpui::{App, AppContext, AnyWindowHandle, Entity, Global, Task, Window, IntoElement};
 use serde::Deserialize;
@@ -15,7 +15,7 @@ pub(crate) use install_ui::launch_after_close;
 #[derive(Default)]
 struct Updates { started:bool, busy:bool, task:Option<Task<()>>, notice:Option<(AnyWindowHandle,Entity<notice::UpdateNotice>)>, pending:Option<(AnyWindowHandle,Pending)>,
     #[cfg(windows)] install:install_ui::InstallState }
-enum Pending { Release(Release,bool), Failure(String), #[cfg(windows)] Install }
+enum Pending { Release(Release,bool), Failure(UiMessage), #[cfg(windows)] Install }
 impl Global for Updates {}
 #[derive(Clone,Deserialize)]
 struct Release {tag_name:String, html_url:String, body:Option<String>, published_at:Option<String>,#[serde(default)]assets:Vec<ReleaseAsset>}
@@ -95,20 +95,19 @@ pub(crate) fn defer_pending(window:&Window,cx:&mut App) {
     }
 }
 fn show_release(release:Release,success:bool,window:&mut Window,cx:&mut App) {
-    let locale=ToolbarLocale::current(cx);
     let newer=version(&release.tag_name)>version(env!("CARGO_PKG_VERSION"));
     let installed=installed_windows();
     let in_app=installed && newer && !success;
     let download=if newer && !installed {portable_download(&release)}else{None};
     let primary=download.clone().unwrap_or_else(||release.html_url.clone());
-    let title=locale.text(if success {"softwareUpdateInstalledTitle"}else{"softwareUpdateReleaseTitle"}).replace("{version}",release.tag_name.trim_start_matches('v'));
+    let title=UiMessage::toolbar(if success {"softwareUpdateInstalledTitle"}else{"softwareUpdateReleaseTitle"}).arg("version",release.tag_name.trim_start_matches('v'));
     let message=format!("{}  ·  {}",release.tag_name,release.published_at.as_deref().unwrap_or("").split('T').next().unwrap_or(""));
     let dismiss = if success {"softwareUpdateStartUsing"} else if newer {"softwareUpdateLater"} else {"close"};
-    let mut actions=vec![A::new(locale.text(dismiss),if success{IconName::Check}else{IconName::Close},if success || !newer{Tone::Primary}else{Tone::Normal})];
-    if newer && !success {actions.push(A::new(if in_app {locale.text("nativeUpdateDownload")}else if download.is_some(){locale.text("softwareUpdateDownloadPortable")}else{locale.text("nativeViewRelease")},if in_app {IconName::Download} else {IconName::ExternalLink},Tone::Primary));}
-    let notes=release.body.as_deref().map(strip_packages).filter(|text|!text.trim().is_empty()).unwrap_or_else(||locale.text("softwareUpdateReleaseFallback")).to_owned();
-    let detail=if success{Some(locale.text("softwareUpdateInstalledHint").into())}else if in_app {Some(locale.text("nativeUpdateDownloadHint").into())}else if !newer {Some(locale.text("nativeUpdateCurrent").into())}else if download.is_some(){Some(format!("{} · {}",locale.text("softwareUpdatePortableTitle"),locale.text("softwareUpdatePortableHint")))}else{None};
-    let dialog=SecondaryDialog {kind:if success {SecondaryKind::UpdateSuccess}else{SecondaryKind::Update},title,message,detail,notes:Some(notes),actions,cancel:0,remember:None,leading:Vec::new()};
+    let mut actions=vec![A::new(UiMessage::toolbar(dismiss),if success{IconName::Check}else{IconName::Close},if success || !newer{Tone::Primary}else{Tone::Normal})];
+    if newer && !success {actions.push(A::new(UiMessage::toolbar(if in_app {"nativeUpdateDownload"}else if download.is_some(){"softwareUpdateDownloadPortable"}else{"nativeViewRelease"}),if in_app {IconName::Download} else {IconName::ExternalLink},Tone::Primary));}
+    let notes=release.body.as_deref().map(strip_packages).filter(|text|!text.trim().is_empty()).unwrap_or("").to_owned();
+    let detail=if success{Some(UiMessage::toolbar("softwareUpdateInstalledHint"))}else if in_app {Some(UiMessage::toolbar("nativeUpdateDownloadHint"))}else if !newer {Some(UiMessage::toolbar("nativeUpdateCurrent"))}else if download.is_some(){Some(UiMessage::new("updates.portableHint"))}else{None};
+    let dialog=SecondaryDialog {kind:if success {SecondaryKind::UpdateSuccess}else{SecondaryKind::Update},title,message:UiMessage::raw(message),detail,notes:Some(notes),actions,cancel:0,remember:None,leading:Vec::new()};
     let response=dialogs::choose(dialog,window,cx);
     window.to_async(cx).spawn(async move |context| {let choice=response.await;let _=context.update(|window,cx| {
         if success {Settings::set(cx,"nativeReleaseNotesVersion",serde_json::json!(env!("CARGO_PKG_VERSION")));}
@@ -118,9 +117,8 @@ fn show_release(release:Release,success:bool,window:&mut Window,cx:&mut App) {
         }
     });}).detach();
 }
-pub(crate) fn show_error(error:String,window:&mut Window,cx:&mut App) {
-    let locale=ToolbarLocale::current(cx);
-    let dialog=SecondaryDialog {kind:SecondaryKind::Update,title:locale.text("nativeUpdateFailed").into(),message:error,detail:None,notes:None,actions:vec![A::new(locale.text("close"),IconName::Close,Tone::Normal),A::new(locale.text("softwareUpdateCheckAgain"),IconName::RefreshCw,Tone::Primary)],cancel:0,remember:None,leading:Vec::new()};
+pub(crate) fn show_error(error:impl Into<UiMessage>,window:&mut Window,cx:&mut App) {
+    let dialog=SecondaryDialog {kind:SecondaryKind::Update,title:UiMessage::toolbar("nativeUpdateFailed"),message:error.into(),detail:None,notes:None,actions:vec![A::new(UiMessage::toolbar("close"),IconName::Close,Tone::Normal),A::new(UiMessage::toolbar("softwareUpdateCheckAgain"),IconName::RefreshCw,Tone::Primary)],cancel:0,remember:None,leading:Vec::new()};
     let response=dialogs::choose(dialog,window,cx);
     window.to_async(cx).spawn(async move |context| {let choice=response.await;if choice.index==1 {let _=context.update(|window,cx|action(window,cx));}}).detach();
 }
@@ -148,17 +146,17 @@ fn strip_packages(source:&str)->&str {
     }
     source
 }
-fn fetch(endpoint:&str)->Result<Release,String> {
+fn fetch(endpoint:&str)->Result<Release,UiMessage> {
     let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error|error.to_string())?;
     runtime.block_on(async {
         let client=reqwest::Client::builder().timeout(Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none()).build().map_err(|error|error.to_string())?;
         let mut response=client.get(endpoint).header("User-Agent",concat!("Nomo/",env!("CARGO_PKG_VERSION"))).header("Accept","application/vnd.github+json").send().await.map_err(|error|error.to_string())?.error_for_status().map_err(|error|error.to_string())?;
         let mut bytes=Vec::new();
-        while let Some(chunk)=response.chunk().await.map_err(|error|error.to_string())? {if bytes.len()+chunk.len()>1024*1024{return Err("发布信息超过 1 MiB，已停止读取".into());}bytes.extend_from_slice(&chunk);}
+        while let Some(chunk)=response.chunk().await.map_err(|error|error.to_string())? {if bytes.len()+chunk.len()>1024*1024{return Err(UiMessage::new("update.metadataBudget"));}bytes.extend_from_slice(&chunk);}
         let mut release:Release=serde_json::from_slice(&bytes).map_err(|error|error.to_string())?;
-        if version(&release.tag_name).is_none(){return Err("发布版本格式无效".into());}
+        if version(&release.tag_name).is_none(){return Err(UiMessage::new("update.invalidVersion"));}
         let url=url::Url::parse(&release.html_url).map_err(|error|error.to_string())?;
-        if url.scheme()!="https"||url.host_str()!=Some("github.com")||!url.path().starts_with("/nomo-md/nomo/releases/tag/"){return Err("发布链接不属于 Nomo 官方仓库".into());}
+        if url.scheme()!="https"||url.host_str()!=Some("github.com")||!url.path().starts_with("/nomo-md/nomo/releases/tag/"){return Err(UiMessage::new("update.invalidSource"));}
         if let Some(body)=&mut release.body {let mut end=body.len().min(64*1024);while !body.is_char_boundary(end){end-=1;}body.truncate(end);}
         Ok(release)
     })

@@ -1,5 +1,6 @@
 //! 目录树菜单及文件操作。磁盘操作由用户触发，运行于后台，并保护打开的文档。
 use super::*;
+use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
 use std::io::Write;
 
 #[derive(Clone, Copy)]
@@ -40,28 +41,29 @@ impl Workspace {
 
     pub(super) fn render_tree_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.explorer.menu.as_ref()?;
+        let locale = ToolbarLocale::current(cx);
         let mut items = Vec::new();
         if menu.directory {
-            items.extend([(TreeAction::NewFile, "新建文件"), (TreeAction::NewFolder, "新建文件夹")]);
+            items.extend([(TreeAction::NewFile, "tree.newFile"), (TreeAction::NewFolder, "tree.newFolder")]);
         } else {
-            items.extend([(TreeAction::Open, "预览打开"), (TreeAction::Pin, "固定打开")]);
+            items.extend([(TreeAction::Open, "tree.preview"), (TreeAction::Pin, "tree.pin")]);
         }
-        if !menu.root { items.push((TreeAction::Rename, "重命名")); }
-        if !menu.directory { items.push((TreeAction::CopyFile, "复制文件")); }
-        items.extend([(TreeAction::CopyPath, "复制路径"), (TreeAction::Reveal, "在文件管理器中显示")]);
-        if menu.directory { items.push((TreeAction::Refresh, "刷新")); }
-        if menu.root { items.push((TreeAction::Collapse, "全部折叠")); }
-        else { items.push((TreeAction::Delete, "删除")); }
-        let mut panel = div().id("tree-context-menu").w(px(198.0)).py(px(5.0)).flex().flex_col()
+        if !menu.root { items.push((TreeAction::Rename, "tree.rename")); }
+        if !menu.directory { items.push((TreeAction::CopyFile, "tree.copyFile")); }
+        items.extend([(TreeAction::CopyPath, "tree.copyPath"), (TreeAction::Reveal, "tree.reveal")]);
+        if menu.directory { items.push((TreeAction::Refresh, "tree.refresh")); }
+        if menu.root { items.push((TreeAction::Collapse, "tree.collapseAll")); }
+        else { items.push((TreeAction::Delete, "tree.delete")); }
+        let mut panel = div().id("tree-context-menu").w(px(if locale.is_chinese() { 198.0 } else { 252.0 })).py(px(5.0)).flex().flex_col()
             .rounded(px(8.0)).bg(theme.surface).border_1().border_color(theme.border).shadow_lg().occlude()
             .on_mouse_down_out(cx.listener(|workspace, _, _, cx| { workspace.explorer.menu = None; cx.notify(); }));
         for (index, (action, label)) in items.into_iter().enumerate() {
             let path = menu.path.clone();
             let disabled = matches!(action, TreeAction::CopyFile) && !cfg!(any(target_os = "windows", target_os = "macos", target_os = "linux"));
             panel = panel.child(div().id(("tree-menu-item", index)).h(px(29.0)).px(px(14.0)).flex().flex_none().items_center()
-                .text_size(px(13.0)).text_color(theme.fg).when(disabled, |el| el.opacity(0.45).tooltip(tooltip("当前平台暂不支持复制文件")))
+                .text_size(px(13.0)).text_color(theme.fg).when(disabled, |el| el.opacity(0.45).tooltip(tooltip(locale.app_text("tree.copyUnsupported"))))
                 .when(!disabled, |el| el.cursor_pointer().hover(|style| style.bg(theme.hover)))
-                .child(label).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(locale.app_text(label)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |workspace, _, window, cx| {
                     cx.stop_propagation();
                     workspace.explorer.menu = None;
@@ -76,7 +78,7 @@ impl Workspace {
 
     pub(super) fn run_tree_action(&mut self, action: TreeAction, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.explorer.mutating.iter().any(|busy| path.starts_with(busy) || busy.starts_with(&path)) {
-            self.notice = Some("文件操作正在进行，请稍后重试。".into());
+            self.notice = Some(ToolbarLocale::current(cx).app_text("tree.busy").into());
             cx.notify();
             return;
         }
@@ -97,7 +99,7 @@ impl Workspace {
             TreeAction::Reveal => cx.reveal_path(&path),
             TreeAction::Delete => self.confirm_tree_delete(path, window, cx),
             TreeAction::CopyFile => {
-                if let Err(error) = copy_file_to_clipboard(&path, cx) { self.notice = Some(error.into()); cx.notify(); }
+                if let Err(error) = copy_file_to_clipboard(&path, cx) { self.notice = Some(error.render(ToolbarLocale::current(cx)).into()); cx.notify(); }
             },
         }
     }
@@ -105,11 +107,11 @@ impl Workspace {
     fn start_tree_edit(&mut self, kind: EditKind, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(kind, EditKind::Rename) {
             if let Some(tree) = &mut self.tree {
-                if let Err(error) = tree.expand(&path) { self.notice = Some(error.into()); cx.notify(); return; }
+                if let Err(error) = tree.expand_message(&path) { self.notice = Some(error.render(ToolbarLocale::current(cx)).into()); cx.notify(); return; }
             }
             self.queue_tree_scan(path.clone(), false, cx);
         }
-        let field = cx.new(|cx| TextField::new("名称", cx));
+        let field = cx.new(|cx| TextField::new(ToolbarLocale::current(cx).app_text("tree.name"), cx));
         if matches!(kind, EditKind::Rename) {
             let name = path.file_name().map(|v| v.to_string_lossy().into_owned()).unwrap_or_default();
             let is_dir = self.tree.as_ref().is_some_and(|tree| tree.rows().iter().any(|row| row.entry.path == path && row.entry.is_dir));
@@ -147,13 +149,13 @@ impl Workspace {
         let Some(edit) = self.explorer.edit.take() else { return; };
         let name = edit.field.read(cx).content.trim().to_string();
         if name.is_empty() { cx.notify(); return; }
-        if let Err(error) = validate_name(&name) { self.notice = Some(error.into()); self.explorer.edit = Some(edit); cx.notify(); return; }
+        if let Err(error) = validate_name(&name) { self.notice = Some(error.render(ToolbarLocale::current(cx)).into()); self.explorer.edit = Some(edit); cx.notify(); return; }
         let Some(root) = self.tree.as_ref().map(|tree| tree.root.clone()) else { return; };
         let generation = self.explorer.generation();
         let path = edit.path;
         let kind = edit.kind;
         if matches!(kind, EditKind::Rename) {
-            let Some(manager) = self.services.clone() else { self.notice = Some("文档会话不可用，无法安全重命名。".into()); cx.notify(); return; };
+            let Some(manager) = self.services.clone() else { self.notice = Some(ToolbarLocale::current(cx).app_text("tree.sessionUnavailable").into()); cx.notify(); return; };
             let busy_paths = self.tree_busy_paths(&path);
             self.explorer.mutating.extend(busy_paths.iter().cloned());
             let task = cx.background_executor().spawn(async move { rename_tree_path(&root, &path, &name, &manager) });
@@ -161,7 +163,7 @@ impl Workspace {
                 let result = task.await;
                 let _ = this.update(cx, |workspace, cx| {
                     for path in &busy_paths { workspace.explorer.mutating.remove(path); }
-                    if let Err(error) = &result { workspace.notice = Some(error.clone().into()); }
+                    if let Err(error) = &result { workspace.notice = Some(error.render(ToolbarLocale::current(cx)).into()); }
                     cx.notify();
                 });
                 if let Ok(report) = result {
@@ -180,7 +182,7 @@ impl Workspace {
                         workspace.refresh_tree(cx);
                         if matches!(kind, EditKind::NewFile) { workspace.open_path(&path, window, cx); }
                     }
-                    Err(error) => workspace.notice = Some(error.into()),
+                    Err(error) => workspace.notice = Some(error.render(ToolbarLocale::current(cx)).into()),
                 }
                 cx.notify();
             });
@@ -207,7 +209,7 @@ impl Workspace {
 
     fn confirm_tree_delete(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.tree_path_open(&path, cx) {
-            self.notice = Some("请先关闭该文件或目录内已打开的文档，再删除。".into()); cx.notify(); return;
+            self.notice = Some(ToolbarLocale::current(cx).app_text("tree.closeBeforeDelete").into()); cx.notify(); return;
         }
         let Some(root) = self.tree.as_ref().map(|tree| tree.root.clone()) else { return; };
         let generation = self.explorer.generation();
@@ -218,21 +220,21 @@ impl Workspace {
             let _ = this.update_in(cx, |workspace, window, cx| {
                 if workspace.explorer.generation() != generation { return; }
                 if workspace.tree_path_open(&path, cx) {
-                    workspace.notice = Some("请先关闭该文件或目录内已打开的文档，再删除。".into()); cx.notify(); return;
+                    workspace.notice = Some(ToolbarLocale::current(cx).app_text("tree.closeBeforeDelete").into()); cx.notify(); return;
                 }
                 let busy_paths = workspace.tree_busy_paths(&path);
                 workspace.explorer.mutating.extend(busy_paths.iter().cloned());
                 let manager = workspace.services.clone();
                 let task = cx.background_executor().spawn(async move {
-                    let manager = manager.ok_or("无法检查其他窗口的文档，删除已取消。")?;
-                    manager.with_unopened_path(&path, || delete_tree_path(&root, &path))
+                    let manager = manager.ok_or_else(|| UiMessage::new("tree.checkUnavailable"))?;
+                    manager.with_unopened_path(&path, || Ok(delete_tree_path(&root, &path))).map_err(UiMessage::raw)?
                 });
                 cx.spawn_in(window, async move |this, cx| {
                     let result = task.await;
                     let _ = this.update_in(cx, |workspace, _, cx| {
                         for path in &busy_paths { workspace.explorer.mutating.remove(path); }
                         if workspace.explorer.generation() != generation { return; }
-                        if let Err(error) = result { workspace.notice = Some(error.into()); }
+                        if let Err(error) = result { workspace.notice = Some(error.render(ToolbarLocale::current(cx)).into()); }
                         workspace.refresh_tree(cx);
                         cx.notify();
                     });
@@ -247,14 +249,14 @@ struct TreeRenameReport {
     warning: Option<String>,
 }
 
-fn rename_tree_path(root: &Path, path: &Path, name: &str, manager: &MarkdownDocumentSessionManager) -> Result<TreeRenameReport, String> {
+fn rename_tree_path(root: &Path, path: &Path, name: &str, manager: &MarkdownDocumentSessionManager) -> Result<TreeRenameReport, UiMessage> {
     validate_name(name)?;
     let source = checked_existing(root, path)?;
-    let destination = source.parent().ok_or("目标没有父目录。")?.join(name);
+    let destination = source.parent().ok_or(UiMessage::new("tree.noParent"))?.join(name);
     if source == destination { return Ok(TreeRenameReport { paths: Vec::new(), warning: None }); }
     let outcome = manager.rename_path(&source, &destination, || {
-        rename_no_replace(&source, &destination).map_err(|error| format!("重命名失败：{error}"))
-    })?;
+        rename_no_replace(&source, &destination).map_err(|error| error.to_string())
+    }).map_err(|error| UiMessage::raw(error).context("tree.renameFailed"))?;
     let mut paths = vec![(source, destination)];
     let logical = (path.to_path_buf(), path.with_file_name(name));
     if paths[0] != logical { paths.push(logical); }
@@ -283,10 +285,10 @@ fn broadcast_tree_rename(app: &mut App, paths: &[(PathBuf, PathBuf)], warning: O
             if changed {
                 workspace.sync_tree_selection(false, cx);
                 if let Some(tab) = workspace.tab() {
-                    window.set_window_title(&format!("{} — Nomo", tab.document.read(cx).title()));
+                    window.set_window_title(&format!("{} — Nomo", tab.document.read(cx).display_title(cx)));
                 }
             }
-            if let Some(warning) = warning { workspace.notice = Some(warning.to_string().into()); }
+            if let Some(warning) = warning { workspace.notice = Some(ToolbarLocale::current(cx).app_format("tree.renameWarning", &[("error", warning)]).into()); }
             cx.notify();
         }) {
             crate::app_logger::warn("FileTree", &format!("同步重命名后的窗口失败：{error}"));
@@ -314,7 +316,7 @@ pub(super) fn display_tree_path(path: &Path) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn copy_file_to_clipboard(path: &Path, _: &mut App) -> Result<(), String> {
+fn copy_file_to_clipboard(path: &Path, _: &mut App) -> Result<(), UiMessage> {
     use std::os::windows::ffi::OsStrExt;
     use std::ffi::c_void;
     #[repr(C)]
@@ -334,7 +336,7 @@ fn copy_file_to_clipboard(path: &Path, _: &mut App) -> Result<(), String> {
         fn SetClipboardData(format: u32, memory: *mut c_void) -> *mut c_void;
         fn CloseClipboard() -> i32;
     }
-    if !path.is_file() { return Err("无法复制：文件不存在或不可访问。".into()); }
+    if !path.is_file() { return Err(UiMessage::new("tree.fileUnavailable")); }
     let original = path.as_os_str().encode_wide().collect::<Vec<_>>();
     let mut wide = if original.starts_with(&[92, 92, 63, 92, 85, 78, 67, 92]) {
         let mut value = vec![92, 92]; value.extend_from_slice(&original[8..]); value
@@ -343,17 +345,17 @@ fn copy_file_to_clipboard(path: &Path, _: &mut App) -> Result<(), String> {
     let bytes = std::mem::size_of::<DropFiles>() + wide.len() * 2;
     unsafe {
         let memory = GlobalAlloc(2, bytes);
-        if memory.is_null() { return Err("分配剪贴板内存失败。".into()); }
+        if memory.is_null() { return Err(UiMessage::new("tree.clipboardMemory")); }
         let data = GlobalLock(memory);
-        if data.is_null() { GlobalFree(memory); return Err("无法访问剪贴板内存。".into()); }
+        if data.is_null() { GlobalFree(memory); return Err(UiMessage::new("tree.clipboardAccess")); }
         data.cast::<DropFiles>().write(DropFiles { offset: std::mem::size_of::<DropFiles>() as u32, x: 0, y: 0, non_client: 0, wide: 1 });
         std::ptr::copy_nonoverlapping(wide.as_ptr(), (data as *mut u8).add(std::mem::size_of::<DropFiles>()).cast::<u16>(), wide.len());
         GlobalUnlock(memory);
         let owner = GetActiveWindow();
-        if owner.is_null() || OpenClipboard(owner) == 0 { GlobalFree(memory); return Err("无法打开系统剪贴板。".into()); }
+        if owner.is_null() || OpenClipboard(owner) == 0 { GlobalFree(memory); return Err(UiMessage::new("tree.clipboardOpen")); }
         let ok = EmptyClipboard() != 0 && !SetClipboardData(15, memory).is_null();
         CloseClipboard();
-        if !ok { GlobalFree(memory); return Err("复制文件到剪贴板失败。".into()); }
+        if !ok { GlobalFree(memory); return Err(UiMessage::new("tree.clipboardCopy")); }
     }
     Ok(())
 }
@@ -364,46 +366,46 @@ struct FileClipboard(arboard::Clipboard);
 impl gpui::Global for FileClipboard {}
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn copy_file_to_clipboard(path: &Path, cx: &mut App) -> Result<(), String> {
-    if !path.is_absolute() || !path.is_file() { return Err("无法复制：文件不存在或不可访问。".into()); }
+fn copy_file_to_clipboard(path: &Path, cx: &mut App) -> Result<(), UiMessage> {
+    if !path.is_absolute() || !path.is_file() { return Err(UiMessage::new("tree.fileUnavailable")); }
     if cx.try_global::<FileClipboard>().is_none() {
-        let clipboard = arboard::Clipboard::new().map_err(|error| format!("无法打开系统剪贴板：{error}"))?;
+        let clipboard = arboard::Clipboard::new().map_err(|error| UiMessage::new("tree.clipboardOpenFailed").arg("error", error))?;
         cx.set_global(FileClipboard(clipboard));
     }
     cx.global_mut::<FileClipboard>().0.set().file_list(&[path])
-        .map_err(|error| format!("复制文件到剪贴板失败：{error}"))
+        .map_err(|error| UiMessage::new("tree.clipboardCopyFailed").arg("error", error))
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-fn copy_file_to_clipboard(_: &Path, _: &mut App) -> Result<(), String> { Err("当前平台暂不支持复制文件。".into()) }
+fn copy_file_to_clipboard(_: &Path, _: &mut App) -> Result<(), UiMessage> { Err(UiMessage::new("tree.copyUnsupported")) }
 
-fn validate_name(name: &str) -> Result<(), String> {
+fn validate_name(name: &str) -> Result<(), UiMessage> {
     if name == "." || name == ".." || name.chars().any(|ch| ch.is_control() || "<>:\"/\\|?*".contains(ch)) || name.ends_with([' ', '.']) {
-        return Err("名称包含不允许的字符。".into());
+        return Err(UiMessage::new("tree.invalidName"));
     }
     Ok(())
 }
 
-fn checked_parent(root: &Path, parent: &Path) -> Result<PathBuf, String> {
-    let root = root.canonicalize().map_err(|error| format!("无法访问根目录：{error}"))?;
-    let parent = parent.canonicalize().map_err(|error| format!("无法访问目录：{error}"))?;
-    if !parent.starts_with(&root) { return Err("目标不在当前根目录中。".into()); }
+fn checked_parent(root: &Path, parent: &Path) -> Result<PathBuf, UiMessage> {
+    let root = root.canonicalize().map_err(|error| UiMessage::new("tree.rootAccess").arg("error", error))?;
+    let parent = parent.canonicalize().map_err(|error| UiMessage::new("tree.directoryAccess").arg("error", error))?;
+    if !parent.starts_with(&root) { return Err(UiMessage::new("tree.outsideRoot")); }
     Ok(parent)
 }
 
-fn checked_existing(root: &Path, path: &Path) -> Result<PathBuf, String> {
-    if path == root { return Err("不能修改根目录。".into()); }
-    let parent = checked_parent(root, path.parent().ok_or("目标没有父目录。")?)?;
-    let name = path.file_name().ok_or("目标名称无效。")?;
+fn checked_existing(root: &Path, path: &Path) -> Result<PathBuf, UiMessage> {
+    if path == root { return Err(UiMessage::new("tree.rootMutation")); }
+    let parent = checked_parent(root, path.parent().ok_or(UiMessage::new("tree.noParent"))?)?;
+    let name = path.file_name().ok_or(UiMessage::new("tree.invalidTarget"))?;
     let target = parent.join(name);
-    let metadata = std::fs::symlink_metadata(&target).map_err(|error| format!("无法访问目标：{error}"))?;
-    if metadata.file_type().is_symlink() { return Err("不能通过符号链接执行此操作。".into()); }
+    let metadata = std::fs::symlink_metadata(&target).map_err(|error| UiMessage::new("tree.targetAccess").arg("error", error))?;
+    if metadata.file_type().is_symlink() { return Err(UiMessage::new("tree.symlink")); }
     Ok(target)
 }
 
-fn apply_tree_edit(root: &Path, path: &Path, kind: EditKind, name: &str) -> Result<PathBuf, String> {
+fn apply_tree_edit(root: &Path, path: &Path, kind: EditKind, name: &str) -> Result<PathBuf, UiMessage> {
     validate_name(name)?;
-    if matches!(kind, EditKind::Rename) { return Err("重命名必须通过文档会话执行。".into()); }
+    if matches!(kind, EditKind::Rename) { return Err(UiMessage::new("tree.renameSession")); }
     let parent = checked_parent(root, path)?;
     let name = if matches!(kind, EditKind::NewFile) && !name.to_ascii_lowercase().ends_with(".md") { format!("{name}.md") } else { name.to_string() };
     let base = if matches!(kind, EditKind::NewFile) { &name[..name.len() - 3] } else { &name };
@@ -420,17 +422,17 @@ fn apply_tree_edit(root: &Path, path: &Path, kind: EditKind, name: &str) -> Resu
         match result {
             Ok(()) => return Ok(target),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(format!("创建失败：{error}")),
+            Err(error) => return Err(UiMessage::new("tree.createFailed").arg("error", error)),
         }
     }
-    Err("同名文件过多，无法创建。".into())
+    Err(UiMessage::new("tree.tooManyNames"))
 }
 
-fn delete_tree_path(root: &Path, path: &Path) -> Result<(), String> {
+fn delete_tree_path(root: &Path, path: &Path) -> Result<(), UiMessage> {
     let target = checked_existing(root, path)?;
-    let metadata = std::fs::symlink_metadata(&target).map_err(|error| format!("无法访问目标：{error}"))?;
+    let metadata = std::fs::symlink_metadata(&target).map_err(|error| UiMessage::new("tree.targetAccess").arg("error", error))?;
     if metadata.is_dir() { std::fs::remove_dir_all(&target) } else { std::fs::remove_file(&target) }
-        .map_err(|error| format!("删除失败：{error}"))
+        .map_err(|error| UiMessage::new("tree.deleteFailed").arg("error", error))
 }
 
 #[cfg(target_os = "windows")]

@@ -5,6 +5,7 @@ mod thumbnail;
 use crate::{theme::Theme, ui::components::{ButtonKind, IconName, button, icon, small_icon_button, tooltip}};
 use crate::ui::{motion, popup::reduced_motion};
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, ParentElement, Render, RenderImage, SharedString, Styled, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list};
+use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
 use library::{Change, Entry, Library, Snapshot};
 use std::{collections::{HashMap, VecDeque}, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
 
@@ -30,7 +31,7 @@ fn card_height(width: f32) -> f32 {
 #[derive(Clone)]
 pub(crate) enum HomeEvent { Open(PathBuf), NewFile, OpenFile, OpenFolder, AddFolder, Resume, Restore }
 
-enum Preview { Ready { image: Arc<RenderImage>, title: SharedString, fingerprint: String }, Failed(SharedString) }
+enum Preview { Ready { image: Arc<RenderImage>, title: SharedString, fingerprint: String }, Failed(UiMessage) }
 struct CachedPreview { preview: Preview, used: u64, stale: bool }
 
 #[derive(Default)]
@@ -109,7 +110,7 @@ impl Home {
         cx.on_release(|home, cx| home.clear_previews(cx)).detach();
         Self { focus: cx.focus_handle(), library, snapshot, _subscription: subscription, active, open_tabs: 0, restore_layout:false, sidebar_width: 250.0,
             sidebar_scroll: UniformListScrollHandle::new(), grid_scroll: UniformListScrollHandle::new(),
-            preview_theme: thumbnail::Palette::new(cx.global::<Theme>()),
+            preview_theme: thumbnail::Palette::new(cx.global::<Theme>(), ToolbarLocale::current(cx)),
             previews: HashMap::new(), card_motion: HashMap::new(), bytes: 0, clock: 0, visible: Vec::new(), pending: VecDeque::new(), scheduled: false, worker: None, running: None }
     }
 
@@ -198,7 +199,7 @@ impl Home {
                             home.bytes += BITMAP_BYTES + title.len() + fingerprint.len();
                             Some(Preview::Ready { image: Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])), title: title.into(), fingerprint })
                         },
-                        Err(error) => Some(Preview::Failed(error.into())),
+                        Err(error) => Some(Preview::Failed(error.context("preview.failed"))),
                     };
                     if let Some(preview) = replacement {
                         changed = true;
@@ -237,7 +238,7 @@ impl Home {
             .child(small_icon_button((if folder { "home-remove-folder" } else { "home-remove-recent" },index),IconName::Close,false,theme)
                 .absolute().right(px(4.0)).top(px(3.0)).bg(theme.hover)
                 .invisible().group_hover("home-sidebar-row", |style| style.visible())
-                .tooltip(tooltip(if folder { "移除文件夹入口（保留磁盘文件）" } else { "从最近记录移除" }))
+                .tooltip(tooltip(if folder { ToolbarLocale::current(cx).app_text("home.removeFolder") } else { ToolbarLocale::current(cx).app_text("home.removeRecent") }))
                 .on_click(cx.listener(move |home, _, _, cx| { cx.stop_propagation(); home.library.update(cx, |library,cx| library.change(Change::Remove { path: remove_path.clone(), folder },cx)); })))
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Open(path.clone())))).into_any_element()
     }
@@ -290,7 +291,7 @@ impl Home {
             Some(Preview::Ready { image, .. }) => gpui::img(image.clone()).w(px(inner_width)).h(px(inner_height)).rounded(px(3.0)).into_any_element(),
             Some(Preview::Failed(error)) => div().w(px(inner_width)).h(px(inner_height)).flex().flex_col().items_center().justify_center().gap(px(8.0))
                 .child(icon(IconName::FileText,24.0,theme.muted))
-                .child(div().text_size(px(12.0)).text_color(theme.muted).text_center().line_clamp(3).child(error.clone())).into_any_element(),
+                .child(div().text_size(px(12.0)).text_color(theme.muted).text_center().line_clamp(3).child(error.render(ToolbarLocale::current(cx)))).into_any_element(),
             None => div().w(px(inner_width)).h(px(inner_height)).flex().flex_col().gap(px(10.0))
                 .children([0.92, 1.0, 0.76, 0.88, 0.62].map(|fraction| div().w(px(inner_width * fraction)).h(px(5.0)).rounded(px(3.0))
                     .bg(motion::color(theme.surface, theme.border, 0.45)))).into_any_element(),
@@ -316,7 +317,7 @@ impl Home {
             .child(div().relative().top(px(if reduced { 0.0 } else { 3.0 * (1.0 - hint) })).opacity(hint)
                 .w_full().h(px(CARD_FOOTER_HEIGHT)).flex_none().flex().items_center().justify_between()
                 .text_size(px(11.0)).line_height(px(CARD_FOOTER_HEIGHT)).text_color(theme.muted)
-                .child("打开文档")
+                .child(ToolbarLocale::current(cx).app_text("home.openDocument"))
                 .child(icon(IconName::ArrowUp, 13.0, theme.muted)
                     .with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::FRAC_PI_4)))));
         // 感应区域覆盖浮起前后的卡片，避免边缘因视觉位移而反复触发 hover。
@@ -336,7 +337,7 @@ impl Render for Home {
         self.card_motion.retain(|_, state| state.hovered || state.pressed || state.running());
         // 快速掠过多张卡片时也只合并请求一帧，静止后不再重绘。
         if self.active && self.card_motion.values().any(CardMotion::running) { window.request_animation_frame(); }
-        let preview_theme = thumbnail::Palette::new(cx.global::<Theme>());
+        let preview_theme = thumbnail::Palette::new(cx.global::<Theme>(), ToolbarLocale::current(cx));
         if self.preview_theme != preview_theme {
             self.preview_theme = preview_theme;
             self.clear_previews(cx);
@@ -360,9 +361,9 @@ impl Render for Home {
                 if index == 0 || index == sidebar_snapshot.folders.len()+1 {
                     let folder = index == 0;
                     div().w_full().h(px(32.0)).px(px(12.0)).flex().items_center().justify_between().text_size(px(11.0)).font_weight(FontWeight::MEDIUM).text_color(sidebar_theme.muted)
-                        .child(if folder { "文件夹" } else { "最近文档" })
+                        .child(if folder { ToolbarLocale::current(cx).app_text("home.folders") } else { ToolbarLocale::current(cx).app_text("home.recentDocuments") })
                         .child(small_icon_button(if folder { "home-add-folder" } else { "home-open-recent" },IconName::Plus,false,&sidebar_theme)
-                            .tooltip(tooltip(if folder { "添加文件夹" } else { "打开文件" }))
+                            .tooltip(tooltip(if folder { ToolbarLocale::current(cx).app_text("home.addFolder") } else { ToolbarLocale::current(cx).app_text("home.openFile") }))
                             .on_click(cx.listener(move |_,_,_,cx|cx.emit(if folder { HomeEvent::AddFolder } else { HomeEvent::OpenFile }))))
                         .into_any_element()
                 } else if index <= sidebar_snapshot.folders.len() {
@@ -372,14 +373,14 @@ impl Render for Home {
                 }
             }).collect::<Vec<_>>())).w_full().h_full().track_scroll(&self.sidebar_scroll);
         let library = self.library.read(cx);
-        let error = library.error.clone();
+        let error = library.error.as_ref().map(|message| message.render(ToolbarLocale::current(cx)));
         let loaded = library.loaded;
         let content = if rows == 0 {
             div().size_full().flex().flex_col().items_center().justify_center().gap(px(14.0))
                 .child(div().size(px(58.0)).rounded(px(16.0)).bg(theme.sidebar_active).flex().items_center().justify_center().child(icon(IconName::BookOpenText,28.0,theme.accent)))
-                .child(div().text_size(px(20.0)).font_weight(FontWeight::BOLD).child(if loaded { "从这里开始写作" } else { "正在读取最近记录…" }))
-                .child(div().text_size(px(13.0)).text_color(theme.muted).child("打开过的文件会显示在这里。"))
-                .child(button("home-first-open","打开文件",Some(IconName::FileText),ButtonKind::Secondary,&theme).on_click(cx.listener(|_,_,_,cx|cx.emit(HomeEvent::OpenFile))))
+                .child(div().text_size(px(20.0)).font_weight(FontWeight::BOLD).child(if loaded { ToolbarLocale::current(cx).app_text("home.start") } else { ToolbarLocale::current(cx).app_text("home.loading") }))
+                .child(div().text_size(px(13.0)).text_color(theme.muted).child(ToolbarLocale::current(cx).app_text("home.empty")))
+                .child(button("home-first-open",ToolbarLocale::current(cx).app_text("home.openFile"),Some(IconName::FileText),ButtonKind::Secondary,&theme).on_click(cx.listener(|_,_,_,cx|cx.emit(HomeEvent::OpenFile))))
                 .into_any_element()
         } else {
             let grid_theme = theme.clone();
@@ -404,7 +405,7 @@ impl Render for Home {
         // 外壳与编辑页一致：侧栏直接落在 rail_bg 上，内容区是左上圆角、带描边的白色面板。
         div().id("document-home").track_focus(&self.focus).w_full().flex_1().min_h(px(0.0)).flex().bg(theme.rail_bg)
             .child(div().w(px(sidebar_width)).h_full().flex_none().px(px(8.0)).py(px(10.0)).flex().flex_col().gap(px(6.0))
-                .child(nav_home_row(true, &theme))
+                .child(nav_home_row(true, &theme, cx))
                 .child(div().id("home-sidebar-list-region")
                     .w_full().flex_1().min_h(px(0.0)).overflow_hidden().child(sidebar)))
             .child(div().relative().flex_1().min_w(px(0.0)).min_h(px(0.0)).h_full().flex().flex_col()
@@ -412,27 +413,27 @@ impl Render for Home {
                     .rounded_tl(px(12.0)).border_t_1().border_l_1().border_color(theme.workspace_edge)
                     .px(px(content_padding)).pt(px(14.0)).flex().flex_col().gap(px(12.0))
                     .child(div().w_full().flex_none().flex().items_center().gap(px(12.0))
-                        .child(div().flex_none().text_size(px(18.0)).font_weight(FontWeight::BOLD).child("主页"))
+                        .child(div().flex_none().text_size(px(18.0)).font_weight(FontWeight::BOLD).child(ToolbarLocale::current(cx).app_text("home.title")))
                         .child(div().flex_1().min_w(px(0.0)).flex().flex_wrap().items_center().justify_end().gap(px(6.0))
                             .when(self.restore_layout,|row|row.child(button("home-restore-layout",crate::ui::toolbar_i18n::ToolbarLocale::current(cx).text("tab_restore_layout"),Some(IconName::Columns),ButtonKind::Ghost,&theme).flex_none()
                                 .on_click(cx.listener(|_,_,_,cx|cx.emit(HomeEvent::Restore)))))
-                            .when(self.open_tabs>0,|row|row.child(button("home-resume","继续编辑",Some(IconName::SquarePen),ButtonKind::Ghost,&theme).flex_none()
+                            .when(self.open_tabs>0,|row|row.child(button("home-resume",ToolbarLocale::current(cx).app_text("home.resume"),Some(IconName::SquarePen),ButtonKind::Ghost,&theme).flex_none()
                                 .on_click(cx.listener(|_,_,_,cx|cx.emit(HomeEvent::Resume)))))
-                            .child(button("home-open-folder","打开文件夹",Some(IconName::FolderOpen),ButtonKind::Ghost,&theme).flex_none()
+                            .child(button("home-open-folder",ToolbarLocale::current(cx).app_text("home.openFolder"),Some(IconName::FolderOpen),ButtonKind::Ghost,&theme).flex_none()
                                 .on_click(cx.listener(|_,_,_,cx|cx.emit(HomeEvent::OpenFolder))))
-                            .child(button("home-open","打开文件",Some(IconName::FileText),ButtonKind::Ghost,&theme).flex_none()
+                            .child(button("home-open",ToolbarLocale::current(cx).app_text("home.openFile"),Some(IconName::FileText),ButtonKind::Ghost,&theme).flex_none()
                                 .on_click(cx.listener(|_,_,_,cx|cx.emit(HomeEvent::OpenFile))))
-                            .child(button("home-new","新建",Some(IconName::Plus),ButtonKind::Primary,&theme).flex_none()
+                            .child(button("home-new",ToolbarLocale::current(cx).app_text("home.new"),Some(IconName::Plus),ButtonKind::Primary,&theme).flex_none()
                                 .on_click(cx.listener(|_,_,_,cx|cx.emit(HomeEvent::NewFile))))))
                     .child(div().w_full().h(px(28.0)).flex_none().flex().items_center().justify_between().gap(px(8.0))
                         .child(div().flex().items_center().gap(px(8.0))
-                            .child(div().px(px(9.0)).py(px(4.0)).rounded(px(6.0)).bg(theme.hover).text_size(px(12.0)).font_weight(FontWeight::MEDIUM).child("最近打开"))
+                            .child(div().px(px(9.0)).py(px(4.0)).rounded(px(6.0)).bg(theme.hover).text_size(px(12.0)).font_weight(FontWeight::MEDIUM).child(ToolbarLocale::current(cx).app_text("home.recent")))
                             .child(div().text_size(px(11.0)).text_color(theme.muted).child(self.snapshot.recent.len().to_string())))
                         .child(div().flex().flex_none().items_center().gap(px(8.0))
-                            .child(small_icon_button("home-refresh",IconName::RefreshCw,false,&theme).tooltip(tooltip("刷新记录和预览"))
+                            .child(small_icon_button("home-refresh",IconName::RefreshCw,false,&theme).tooltip(tooltip(ToolbarLocale::current(cx).app_text("home.refresh")))
                                 .on_click(cx.listener(|home,_,_,cx|home.refresh(cx))))
                             .when(rows>0,|row|row.child(small_icon_button("home-clear",IconName::Trash2,false,&theme)
-                                .tooltip(tooltip("清空最近记录（保留磁盘文件）"))
+                                .tooltip(tooltip(ToolbarLocale::current(cx).app_text("home.clearRecent")))
                                 .on_click(cx.listener(|home,_,_,cx|home.library.update(cx,|library,cx|library.change(Change::ClearRecent,cx))))))))
                     .children(error.map(|error|div().text_size(px(12.0)).text_color(theme.danger).child(error)))
                     .child(div().flex_1().min_h(px(0.0)).overflow_hidden().child(content))))
@@ -450,10 +451,10 @@ pub(crate) fn entry_name(path: &Path) -> SharedString {
 }
 
 /// 主页与编辑页侧栏共用的“主页”导航行：主页内为选中态，编辑页内作为返回主页入口。
-pub(crate) fn nav_home_row(active: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn nav_home_row(active: bool, theme: &Theme, cx: &App) -> gpui::Stateful<gpui::Div> {
     let color = if active { theme.accent } else { theme.fg };
     div().id("sidebar-home").w_full().h(px(28.0)).flex_none().px(px(12.0)).flex().items_center().gap(px(6.0)).rounded(px(4.0))
         .text_size(px(14.0)).text_color(color).when(active, |el| el.bg(theme.sidebar_active).font_weight(FontWeight::SEMIBOLD))
         .when(!active, |el| el.cursor_pointer().hover(|style| style.bg(gpui::rgba(0x80808014))))
-        .child(icon(IconName::Home, 14.0, if active { theme.accent } else { theme.muted })).child("主页")
+        .child(icon(IconName::Home, 14.0, if active { theme.accent } else { theme.muted })).child(ToolbarLocale::current(cx).app_text("home.title"))
 }

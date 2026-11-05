@@ -60,7 +60,7 @@ impl Workspace {
                 for key in item.keys() {
                     if let Some(&index) = indices.get(&key) {
                         let doc = self.tabs[index].document.read(cx);
-                        let title = doc.title();
+                        let title = doc.display_title(cx);
                         paths.push(
                             doc.path()
                                 .map(|path| path.display().to_string())
@@ -69,7 +69,7 @@ impl Workspace {
                         titles.push(title);
                         dirty |= doc.is_dirty(cx);
                     } else if let Some(saved) = self.comparison.layout.pending.get(&key) {
-                        let title = saved.title();
+                        let title = saved.display_title(cx);
                         paths.push(
                             saved
                                 .path
@@ -182,7 +182,7 @@ impl Workspace {
                 host.set_save_directory(self.tree.as_ref().map(|tree| tree.root.as_path()))
             });
             let focused = key == pair.focused;
-            let title = document.read(cx).title();
+            let title = document.read(cx).display_title(cx);
             document.update(cx, |host, cx| host.set_workspace_focus(focused, cx));
             let mut body = div().relative().flex_1().min_h_0().child(document);
             if focused {
@@ -435,13 +435,13 @@ impl Workspace {
                     self.can_combine(key, other, cx).then(|| {
                         (
                             self.host_for(other)
-                                .map(|doc| doc.read(cx).title())
+                                .map(|doc| doc.read(cx).display_title(cx))
                                 .or_else(|| {
                                     self.comparison
                                         .layout
                                         .pending
                                         .get(&other)
-                                        .map(|doc| doc.title())
+                                        .map(|doc| doc.display_title(cx))
                                 })
                                 .unwrap_or_default(),
                             Combine(other),
@@ -457,7 +457,7 @@ impl Workspace {
                     let doc = self.host_for(k)?;
                     doc.read(cx).path().map(|_| {
                         (
-                            doc.read(cx).title(),
+                            doc.read(cx).display_title(cx),
                             Path(k, page == MenuPage::Reveal),
                             true,
                         )

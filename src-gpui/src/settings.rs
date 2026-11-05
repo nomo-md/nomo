@@ -249,6 +249,7 @@ impl Settings {
             return;
         }
         if key == "shortcutPreferences" { crate::ui::reload_key_bindings(cx); crate::set_menus(cx); }
+        if key == "interfaceLanguage" { crate::set_menus(cx); cx.defer(crate::ui::workspace::refresh_interface_locales); }
         // 影响排版结果的设置需要让文本与块布局缓存失效。
         if matches!(key, "documentFontFamily" | "monoFontFamily" | "codeBlockLineNumbersVisible" | "inlineCodeRenderingEnabled") {
             layout::bump_generation();

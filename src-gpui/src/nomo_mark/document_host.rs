@@ -127,7 +127,7 @@ impl DocumentHost {
             closed: false,
             port,
             control: control.clone(),
-            message: "原版会话已连接 · 固定片段开发入口".into(),
+            message: crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text("host.connected").into(),
             hidden: false,
             close_prompt: false,
             saving: false,
@@ -227,7 +227,7 @@ impl DocumentHost {
                                                 v.host.verify_authoritative(&window)
                                             }) {
                                                 Ok(()) => {
-                                                    format!("原版会话已确认 · revision {revision}")
+                                                    crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_format("host.acknowledged", &[("revision", &revision.to_string())])
                                                 }
                                                 Err(error) => error.to_string(),
                                             };
@@ -302,7 +302,7 @@ impl DocumentHost {
                     return;
                 }
                 let identity = identity.clone();
-                self.message = "正在获取 Emoji 词库".into();
+                self.message = crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text("host.emojiLoading").into();
                 let task = cx.background_executor().spawn(async move {
                     // 复用原版经过哈希校验、有大小与超时限制的加载器。
                     // 运行时仅属于本次宿主资源任务，不成为每个控件的常驻线程。
@@ -324,13 +324,13 @@ impl DocumentHost {
                         match result {
                             Ok(catalog) => {
                                 host.message =
-                                    format!("Emoji 词库已就绪 · {} 项", catalog.entries.len());
+                                    crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_format("host.emojiReady", &[("count", &catalog.entries.len().to_string())]);
                                 let _ = host
                                     .control
                                     .update(cx, |view, cx| view.set_emoji_catalog(catalog, cx));
                             }
                             Err(error) => {
-                                host.message = format!("Emoji 暂不可用：{error}");
+                                host.message = crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_format("host.emojiFailed", &[("error", &error.to_string())]);
                                 host.control
                                     .update(cx, |view, cx| view.emoji_catalog_failed(cx));
                             }
@@ -341,7 +341,7 @@ impl DocumentHost {
                 .detach();
             }
             ControlEvent::DraftChanged { active: false, .. } => {
-                self.message = "对象编辑已结束".into()
+                self.message = crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text("host.objectFinished").into()
             }
             ControlEvent::ResourceDemand {
                 identity,
@@ -373,7 +373,7 @@ impl DocumentHost {
                     Ok(LinkTarget::Markdown { path, anchor }) if self.embedded => {
                         cx.emit(DocumentEvent::OpenMarkdownLink { path, anchor });
                     }
-                    Ok(_) => self.message = "请在 Workspace 中打开文档以使用本地链接导航".into(),
+                    Ok(_) => self.message = crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text("host.localLinkWorkspace").into(),
                     Err(error) => {
                         self.message = error.to_string();
                         cx.emit(DocumentEvent::Failure(self.message.clone()));
@@ -388,7 +388,7 @@ impl DocumentHost {
                 if self.production && self.control.read(cx).host.parsed.identity == *identity {
                     self.adjacent(*forward, *extend_selection, cx);
                 } else {
-                    self.message = "当前演示片段已经到达文档边界".into();
+                    self.message = crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text("host.demoBoundary").into();
                 }
             }
             ControlEvent::DocumentBoundary { identity, end, extend_selection } if self.production => {
@@ -441,9 +441,9 @@ impl DocumentHost {
         })();
         self.message = match result {
             Ok(()) => if redo {
-                "原版会话已重做"
+                crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text("host.redone")
             } else {
-                "原版会话已撤销"
+                crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text("host.undone")
             }
             .into(),
             Err(error) => error.to_string(),
@@ -504,7 +504,7 @@ impl DocumentHost {
         self.close_prompt = true;
         self.control
             .update(cx, |view, _| view.host.set_readonly(true));
-        let response = crate::ui::dialogs::confirm_save(&self.title(), window, cx);
+        let response = crate::ui::dialogs::confirm_save(self.title_message(), window, cx);
         cx.spawn_in(window, async move |this, cx| {
             let choice = response.await;
             let _ = this.update_in(cx, |host, window, cx| {
@@ -596,7 +596,7 @@ impl DocumentHost {
                 match result {
                     Ok(revision) => {
                         host.refresh_status(cx);
-                        host.message = format!("完整会话快照已保存 · revision {revision}");
+                        host.message = crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_format("host.saved", &[("revision", &revision.to_string())]);
                         if close_after {
                             match host.port.close(false) {
                                 Ok(()) => {

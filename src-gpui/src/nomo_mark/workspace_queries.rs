@@ -541,7 +541,7 @@ impl DocumentHost {
                         {
                             host.action_failed(e, cx);
                         } else {
-                            host.message = format!("已替换 {count} 处");
+                            host.message = crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_format("host.replaced", &[("count", &count.to_string())]);
                         }
                     }
                     Ok(None) => {

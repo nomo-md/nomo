@@ -13,6 +13,7 @@ use crate::ui::home::{self, Home, HomeEvent, library::{Library, Change as Librar
 use crate::nomo_mark::{link_edit::LinkDraft, protocol::ControlError};
 use crate::ui::editor_popovers::{EditorPopover, EditorPopoverEvent, EditorPopoverKind};
 use crate::ui::text_field::{FieldEvent, TextField};
+use crate::ui::toolbar_i18n::ToolbarLocale;
 use crate::ui::chrome::{Chrome, ChromeState, ChromeEvent, ChromeCapability, ChromeCommand};
 use crate::ui::workspace_surface::{TAB_RAIL_HEIGHT, WorkspaceSurface};
 use crate::ui::motion::{self, MotionPreference, ScalarMotion};
@@ -38,6 +39,7 @@ mod outline;
 mod toolbar;
 mod status;
 mod application_dialogs;
+pub(crate) use application_dialogs::refresh_interface_locales;
 mod mini;
 mod document_transition;
 mod open_requests;
@@ -310,7 +312,7 @@ impl Workspace {
             });
             // 任务结束也会 notify；持续的同一个后台错误只提示一次，恢复后允许再次提示。
             if !workspace.home_visible && error_key != last_library_error {
-                if let Some(error) = error { workspace.failure_notice = Some(error.clone().into()); }
+                if let Some(error) = error { workspace.failure_notice = Some(error.render(super::toolbar_i18n::ToolbarLocale::current(cx)).into()); }
             }
             last_library_error = error_key;
             if workspace.waiting_library_close && !library.read(cx).is_busy() {
@@ -326,7 +328,7 @@ impl Workspace {
                 .join(format!("{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()));
             crate::text_document::markdown_session::SessionLease::acquire(&root).and_then(|lease| MarkdownDocumentSessionManager::new(root).map(|manager| {cx.set_global(DocumentServices{manager:manager.clone(),_lease:std::sync::Arc::new(lease)});manager}))
         };
-        let service_error=service.as_ref().err().map(|e|format!("无法初始化文档会话：{e}").into());
+        let service_error=service.as_ref().err().map(|e|ToolbarLocale::current(cx).app_format("workspace.sessionFailed", &[("error", &e.to_string())]).into());
         let this=cx.entity().downgrade();
         window.on_window_should_close(cx,move |window,cx| this.update(cx,|workspace,cx| workspace.request_close_window(window,cx)).unwrap_or(true));
         let chrome=cx.new(Chrome::new);
@@ -493,7 +495,7 @@ impl Workspace {
     }
 
     fn prompt_home_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let response = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("添加文件夹".into()) });
+        let response = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(ToolbarLocale::current(cx).app_text("home.addFolder").into()) });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = response.await {
                 let _ = this.update(cx, |workspace, cx| {
@@ -541,7 +543,7 @@ impl Workspace {
 
     fn open_path_now(&mut self,path:&Path,preview:bool,anchor:Option<String>,generation:u64,window:&mut Window,cx:&mut Context<Self>) {
         if !self.leave_mini(window,cx) {return;}
-        if self.explorer.mutating.iter().any(|busy| path.starts_with(busy)) {self.notice=Some("文件操作正在进行，请稍后打开。".into());cx.notify();return;}
+        if self.explorer.mutating.iter().any(|busy| path.starts_with(busy)) {self.notice=Some(ToolbarLocale::current(cx).app_text("workspace.fileBusy").into());cx.notify();return;}
         if path.is_dir() {
             self.cancel_preview_opens(None);
             let root=path.canonicalize().unwrap_or_else(|_|path.to_path_buf());
@@ -563,7 +565,7 @@ impl Workspace {
             return;
         }
         let path=path.canonicalize().unwrap_or_else(|_|path.to_path_buf());
-        if self.explorer.mutating.iter().any(|busy| path.starts_with(busy)) {self.notice=Some("文件操作正在进行，请稍后打开。".into());cx.notify();return;}
+        if self.explorer.mutating.iter().any(|busy| path.starts_with(busy)) {self.notice=Some(ToolbarLocale::current(cx).app_text("workspace.fileBusy").into());cx.notify();return;}
         if let Some(key)=self.saved_path_key(&path) {
             self.open_saved_member(key,anchor,window,cx); return;
         }
@@ -683,7 +685,7 @@ impl Workspace {
         let requested=path.clone();
         let recovery=match &source {application_dialogs::OpenSource::Recovery(candidate,copy,_,_)=>Some((candidate.clone(),*copy)),application_dialogs::OpenSource::Layout(_,Some(candidate))=>Some((candidate.clone(),false)),_=>None};
         let fresh=matches!(&source,application_dialogs::OpenSource::Reload(_,_)|application_dialogs::OpenSource::DiskRecovery(_,_,_));
-        self.last_notice=Some("正在打开文档…".into());
+        self.last_notice=Some(ToolbarLocale::current(cx).app_text("workspace.opening").into());
         let reading_byte=layout_doc.as_ref().map(|doc|doc.byte);
         let task=cx.background_executor().spawn(async move {
             request.check()?;
@@ -729,7 +731,7 @@ impl Workspace {
                         if let application_dialogs::OpenSource::Recovery(_,false,Some(previous),revision)=&source {
                             let Some(index)=workspace.tabs.iter().position(|tab|tab.document==*previous) else {return false;};
                             if previous.read(cx).status().revision!=*revision || previous.read(cx).is_dirty(cx) {
-                                workspace.failure_notice=Some("当前文档已有新修改，草稿仍保留，请使用另存草稿。".into());return false;
+                                workspace.failure_notice=Some(ToolbarLocale::current(cx).app_text("workspace.draftChanged").into());return false;
                             }
                             workspace.cancel_export_for(previous);
                             if let Err(error)=previous.update(cx,|host,cx|host.close_document(false,cx)){workspace.failure_notice=Some(error.to_string().into());return false;}
@@ -741,7 +743,7 @@ impl Workspace {
                         let replacement=match &source {application_dialogs::OpenSource::Reload(previous,revision)=>Some((previous,*revision,true)),application_dialogs::OpenSource::DiskRecovery(_,Some(previous),revision)=>Some((previous,*revision,false)),_=>None};
                         if let Some((previous,revision,discard))=replacement {
                             let Some(index)=workspace.tabs.iter().position(|tab|tab.document==*previous) else {return false;};
-                            if previous.read(cx).status().revision!=revision {workspace.failure_notice=Some("文档已有新修改，重载已取消。".into());return false;}
+                            if previous.read(cx).status().revision!=revision {workspace.failure_notice=Some(ToolbarLocale::current(cx).app_text("workspace.reloadChanged").into());return false;}
                             reload_selection=Some(previous.read(cx).selection(cx));
                             workspace.cancel_export_for(previous);
                             if let Err(error)=previous.update(cx,|host,cx|host.close_document(discard,cx)) {workspace.failure_notice=Some(error.to_string().into());return false;}
@@ -781,7 +783,7 @@ impl Workspace {
                         }
                         true
                     }
-                    Err(e)=>{workspace.failure_notice=Some(format!("打开失败：{e}").into());cx.notify();false}
+                    Err(e)=>{workspace.failure_notice=Some(ToolbarLocale::current(cx).app_format("workspace.openFailed", &[("error", &e.to_string())]).into());cx.notify();false}
                 }
             }).unwrap_or(false);
             let mut recovery_finished=accepted;
@@ -791,7 +793,7 @@ impl Workspace {
                 if let Some(manager)=manager {
                     if let Err(error)=cx.background_executor().spawn(async move{manager.dismiss_recovery(&candidate)}).await {
                         recovery_finished=false;
-                        let _=this.update_in(cx,|workspace,_,cx|{workspace.failure_notice=Some(format!("磁盘版本已打开，旧草稿清理失败：{error}").into());cx.notify();});
+                        let _=this.update_in(cx,|workspace,_,cx|{workspace.failure_notice=Some(ToolbarLocale::current(cx).app_format("workspace.draftCleanupFailed", &[("error", &error.to_string())]).into());cx.notify();});
                     }
                 }
             }}
@@ -810,7 +812,7 @@ impl Workspace {
                 let retry=completed_path.as_ref().is_some_and(|completed|workspace.deferred_open.as_ref().is_some_and(|(path,_,_,_)|path==completed));
                 if let Some(error)=cleanup_error {
                     if retry {workspace.deferred_open=None;}
-                    workspace.notice=Some(format!("清理未完成的文档会话失败：{error}").into());
+                    workspace.notice=Some(ToolbarLocale::current(cx).app_format("workspace.sessionCleanupFailed", &[("error", &error.to_string())]).into());
                     cx.notify();
                 } else if retry {
                     if let Some((path,preview,anchor,generation))=workspace.deferred_open.take() {
@@ -918,7 +920,7 @@ impl Workspace {
         if let Some(position)=self.comparison.position(key) {self.tab_scroll.scroll_to_item(position);}
         self.record_layout(cx);
         self.sync_tree_selection(true,cx);
-        window.set_window_title(&format!("{} — Nomo",document.read(cx).title()));
+        window.set_window_title(&format!("{} — Nomo",document.read(cx).display_title(cx)));
         if !window.has_active_prompt() { window.focus(&document.focus_handle(cx), cx); }
         self.last_notice=None;
         self.run_search(cx);
@@ -965,7 +967,7 @@ impl Workspace {
         if !self.leave_mini(window,cx) {return;}
         if !document.read(cx).is_dirty(cx) {self.remove_tab(&document,false,window,cx);return;}
         self.close_prompt=true;
-        let response=dialogs::confirm_save(&document.read(cx).title(),window,cx);
+        let response=dialogs::confirm_save(document.read(cx).title_message(),window,cx);
         cx.spawn_in(window,async move |this,cx| {
             let choice=response.await;
             let _=this.update_in(cx,|workspace,window,cx| {
@@ -1028,12 +1030,12 @@ impl Workspace {
         }
         if self.mini.active() { self.return_from_mini(window,cx); return false; }
         if !self.application_dialogs.close_approved {self.choose_close_behavior(window,cx);return false;}
-        if !self.opening.is_empty() || !self.open_requests.pending.is_empty() {self.notice=Some("文档仍在打开，请稍后关闭".into());cx.notify();return false;}
+        if !self.opening.is_empty() || !self.open_requests.pending.is_empty() {self.notice=Some(ToolbarLocale::current(cx).app_text("workspace.openingClose").into());cx.notify();return false;}
         if self.tabs.is_empty() {
             if !self.closing_window {self.flush_layout(cx);}
             if self.library.read(cx).is_busy() {
                 self.waiting_library_close=true;
-                self.notice=Some("正在保存主页记录…".into());cx.notify();return false;
+                self.notice=Some(ToolbarLocale::current(cx).app_text("workspace.savingHome").into());cx.notify();return false;
             }
             return true;
         }
@@ -1046,7 +1048,7 @@ impl Workspace {
         if window.has_active_prompt() || self.closing_window || self.application_dialogs.busy || !self.opening.is_empty()
             || !self.open_requests.pending.is_empty() || self.pending_document_transition.is_some() || !self.pending_saves.is_empty() {
             self.reveal_window(window,cx);
-            self.notice=Some("请先完成当前操作，再点击“重启并安装”。".into()); cx.notify(); return false;
+            self.notice=Some(ToolbarLocale::current(cx).app_text("workspace.restartBusy").into()); cx.notify(); return false;
         }
         true
     }
@@ -1065,7 +1067,7 @@ impl Workspace {
     }
     fn prompt_open(&mut self,directories:bool,window:&mut Window,cx:&mut Context<Self>) {
         if !self.leave_mini(window,cx) {return;}
-        let response=cx.prompt_for_paths(PathPromptOptions {files:!directories,directories,multiple:!directories,prompt:Some("打开".into())});
+        let response=cx.prompt_for_paths(PathPromptOptions {files:!directories,directories,multiple:!directories,prompt:Some(ToolbarLocale::current(cx).app_text("menu.openFile").into())});
         cx.spawn_in(window,async move |this,cx| {
             if let Ok(Ok(Some(paths)))=response.await {let _=this.update_in(cx,|workspace,window,cx| {workspace.open_paths(paths,window,cx);});}
         }).detach();
@@ -1130,8 +1132,8 @@ impl Workspace {
                     }
                     workspace.refresh_tree(cx);
                     workspace.sync_tree_selection(false,cx);
-                    if workspace.document().as_ref()==Some(&document) {window.set_window_title(&format!("{} — Nomo",document.read(cx).title()));}
-                    if close_after && workspace.comparison.closing.is_some() {workspace.continue_pair_save(&document,window,cx);} else if close_after {if document.read(cx).is_dirty(cx) {workspace.cancel_close(cx);workspace.notice=Some("保存期间有新修改，文档保持打开".into());}else{workspace.remove_tab(&document,false,window,cx);}}
+                    if workspace.document().as_ref()==Some(&document) {window.set_window_title(&format!("{} — Nomo",document.read(cx).display_title(cx)));}
+                    if close_after && workspace.comparison.closing.is_some() {workspace.continue_pair_save(&document,window,cx);} else if close_after {if document.read(cx).is_dirty(cx) {workspace.cancel_close(cx);workspace.notice=Some(ToolbarLocale::current(cx).app_text("workspace.saveChanged").into());}else{workspace.remove_tab(&document,false,window,cx);}}
                 }else{workspace.cancel_close(cx);}
                 cx.notify();
             });
@@ -1377,8 +1379,8 @@ impl Workspace {
             ChromeEvent::ResetOutlinePosition=>self.reset_outline_position(cx),
             ChromeEvent::ToggleMini=>self.toggle_mini(window,cx),
             ChromeEvent::SoftwareUpdate=>crate::ui::updates::action(window,cx),
-            ChromeEvent::Unavailable(_)=>{self.notice=Some("此功能尚未提供".into());cx.notify();},
-            _=>{self.notice=Some("此功能尚未接入原生页面".into());cx.notify();},
+            ChromeEvent::Unavailable(_)=>{self.notice=Some(ToolbarLocale::current(cx).app_text("workspace.unavailable").into());cx.notify();},
+            _=>{self.notice=Some(ToolbarLocale::current(cx).app_text("workspace.notConnected").into());cx.notify();},
         }
     }
     fn render_hidden_tabs(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1576,14 +1578,14 @@ impl Workspace {
         let action = if overflow {
             action_button("tab-overflow", IconName::ChevronDown)
                 .relative().child(overflow_marker).children(hidden_tabs)
-                .tooltip(tooltip("显示隐藏的标签"))
+                .tooltip(tooltip(ToolbarLocale::current(cx).app_text("workspace.hiddenTabs")))
                 .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
                     workspace.tab_menu_open = !workspace.tab_menu_open;
                     cx.notify();
                 })).into_any_element()
         } else {
             action_button("new-tab", IconName::Plus)
-                .tooltip(tooltip("新建 ⌘N"))
+                .tooltip(tooltip(format!("{} {}", ToolbarLocale::current(cx).app_text("home.newFile"), super::shortcuts::current("new-file", cx))))
                 .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| workspace.new_file(window, cx)))
                 .into_any_element()
         };
@@ -1730,17 +1732,17 @@ impl Workspace {
             .justify_center()
             .gap(px(10.0))
             .child(div().size(px(44.0)).rounded(px(10.0)).bg(theme.hover).flex().items_center().justify_center().child(icon(IconName::FileText, 20.0, theme.accent_strong)))
-            .child(div().text_size(px(17.0)).font_weight(FontWeight::BOLD).text_color(theme.heading).child("未打开文档"))
-            .child(div().text_size(px(13.0)).text_color(theme.muted).child("从左侧选择 Markdown 文件，或新建一个文档开始编辑。"))
+            .child(div().text_size(px(17.0)).font_weight(FontWeight::BOLD).text_color(theme.heading).child(ToolbarLocale::current(cx).app_text("workspace.emptyTitle")))
+            .child(div().text_size(px(13.0)).text_color(theme.muted).child(ToolbarLocale::current(cx).app_text("workspace.emptyDescription")))
             .children(self.last_notice.clone().map(|notice|div().max_w(px(560.0)).text_size(px(13.0)).text_color(theme.fg).child(notice)))
             .child(
                 div()
                     .flex()
                     .gap(px(8.0))
                     .mt(px(8.0))
-                    .child(button("empty-new", "新建文件", Some(IconName::SquarePen), ButtonKind::Primary, theme).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.new_file(window, cx))))
-                    .child(button("empty-open", "打开文件", Some(IconName::FileText), ButtonKind::Secondary, theme).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.prompt_open(false, window, cx))))
-                    .child(button("empty-folder", "打开文件夹", Some(IconName::FolderOpen), ButtonKind::Secondary, theme).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.prompt_open(true, window, cx)))),
+                    .child(button("empty-new", ToolbarLocale::current(cx).app_text("home.newFile"), Some(IconName::SquarePen), ButtonKind::Primary, theme).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.new_file(window, cx))))
+                    .child(button("empty-open", ToolbarLocale::current(cx).app_text("home.openFile"), Some(IconName::FileText), ButtonKind::Secondary, theme).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.prompt_open(false, window, cx))))
+                    .child(button("empty-folder", ToolbarLocale::current(cx).app_text("home.openFolder"), Some(IconName::FolderOpen), ButtonKind::Secondary, theme).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.prompt_open(true, window, cx)))),
             )
     }
 }

@@ -1,5 +1,6 @@
 //! 字体名称来自当前渲染后端；搜索是草稿，只有选中候选才会写入设置。
 use super::*;
+use crate::ui::toolbar_i18n::ToolbarLocale;
 use gpui::{EventEmitter, ScrollStrategy, UniformListScrollHandle, uniform_list};
 
 const MAX_NAMES: usize = 4096;
@@ -45,7 +46,7 @@ impl Focusable for FontPicker {
 impl FontPicker {
     fn new(key: &'static str, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| {
-            let mut input = TextField::new("搜索已安装字体", cx);
+            let mut input = TextField::new(ToolbarLocale::current(cx).app_text("font.search"), cx);
             input.set_settings_style();
             input
         });
@@ -103,6 +104,8 @@ impl FontPicker {
 impl Render for FontPicker {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::ui(cx);
+        let locale = ToolbarLocale::current(cx);
+        self.search.update(cx, |field, cx| field.set_placeholder(locale.app_text("font.search"), cx));
         let count = self.matches.len() + usize::from(self.reset);
         let current = cx.global::<Settings>().string(self.key);
         let missing = !current.is_empty() && self.list.as_ref().is_some_and(|list| list.filtered_for.is_none() && !list.names.iter().any(|name| name.eq_ignore_ascii_case(&current)));
@@ -115,13 +118,13 @@ impl Render for FontPicker {
                 picker.scroll.scroll_to_item(picker.selected, ScrollStrategy::Nearest);
                 window.prevent_default(); cx.stop_propagation(); cx.notify();
             })).child(self.search.clone());
-        if missing { panel = panel.child(div().px(px(5.0)).text_size(px(12.0)).text_color(theme.muted).child("原字体未安装，可重新选择。")); }
+        if missing { panel = panel.child(div().px(px(5.0)).text_size(px(12.0)).text_color(theme.muted).child(locale.app_text("font.missing"))); }
         if count > 0 {
             let list = uniform_list("installed-fonts", count, cx.processor(move |picker, range: std::ops::Range<usize>, _, cx| {
                 let theme = Theme::ui(cx);
                 range.map(|i| {
                     let name = picker.value(i).unwrap_or_default();
-                    select_option(("font-option", i), if name.is_empty() { "跟随主题".into() } else { name.to_owned() }, name.eq_ignore_ascii_case(&current), &theme)
+                    select_option(("font-option", i), if name.is_empty() { ToolbarLocale::current(cx).app_text("font.theme").into() } else { name.to_owned() }, name.eq_ignore_ascii_case(&current), &theme)
                         .whitespace_nowrap().overflow_hidden()
                         .when(i == picker.selected, |row| row.bg(theme.hover))
                         .on_click(cx.listener(move |picker, _, _, cx| { cx.stop_propagation(); picker.choose(i, cx); }))
@@ -129,9 +132,9 @@ impl Render for FontPicker {
             })).track_scroll(&self.scroll).h(px(count.min(7) as f32 * 28.0));
             panel = panel.child(list);
         }
-        let hint = if self.load.is_some() { Some("正在读取系统字体…") }
-            else if count == 0 { Some("没有匹配的已安装字体") }
-            else if self.list.as_ref().is_some_and(|list| list.more) { Some("结果较多，可输入名称缩小范围。") } else { None };
+        let hint = if self.load.is_some() { Some(locale.app_text("font.loading")) }
+            else if count == 0 { Some(locale.app_text("font.empty")) }
+            else if self.list.as_ref().is_some_and(|list| list.more) { Some(locale.app_text("font.more")) } else { None };
         panel.children(hint.map(|text| div().p(px(5.0)).text_size(px(12.0)).text_color(theme.muted).child(text)))
     }
 }
@@ -142,7 +145,7 @@ impl SettingsWindow {
         let current = cx.global::<Settings>().string(key);
         let picker = self.font_picker.as_ref().filter(|(picker, _)| picker.read(cx).key == key);
         let owner = cx.entity().downgrade();
-        let select = select(eid("font-select", key), if current.is_empty() { "跟随主题".into() } else { current }, picker.is_some(), width, viewport,
+        let select = select(eid("font-select", key), if current.is_empty() { ToolbarLocale::current(cx).app_text("font.theme").into() } else { current }, picker.is_some(), width, viewport,
             crate::ui::popup::reduced_motion(cx), theme, picker.map(|(picker, _)| picker.clone().into_any_element()).into_iter().collect(),
             move |window, cx| { let _ = owner.update(cx, |view, cx| { view.font_picker = None; window.focus(&view.focus, cx); cx.notify(); }); });
         div().id(eid("font-trigger", key)).tab_index(0).child(select)

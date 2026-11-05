@@ -3,6 +3,7 @@
 //! 只保存菜单、焦点及宿主提供的轻量状态；不持有文档、正文或撤销历史。
 //! 宿主必须先连接事件，再声明相应 capability。未连接的主分支功能保留可见的禁用项。
 
+use super::toolbar_i18n::ToolbarLocale;
 use super::components::{IconName, icon, tooltip};
 use super::{window_chrome, workspace as action};
 use super::popup::{popup, reduced_motion, PopupAnchor, PopupPlacement};
@@ -108,12 +109,12 @@ impl Default for ChromeState {
 enum Menu { File, Edit, Paragraph, Format, View, Recent, Export, Heading, Diagram, Window }
 
 impl Menu {
-    fn label(self) -> &'static str {
+    fn label(self, locale: ToolbarLocale) -> &'static str {
         match self {
-            Self::File => "文件", Self::Edit => "编辑", Self::Paragraph => "段落",
-            Self::Format => "格式", Self::View => "查看", Self::Recent => "打开最近",
-            Self::Export => "导出", Self::Heading => "标题", Self::Diagram => "图表",
-            Self::Window => "窗口",
+            Self::File => locale.app_text("menu.file"), Self::Edit => locale.app_text("menu.edit"), Self::Paragraph => locale.app_text("chrome.paragraph"),
+            Self::Format => locale.app_text("menu.format"), Self::View => locale.app_text("chrome.view"), Self::Recent => locale.app_text("chrome.openRecent"),
+            Self::Export => locale.app_text("chrome.export"), Self::Heading => locale.app_text("chrome.quickInsertHeading"), Self::Diagram => locale.app_text("chrome.diagram"),
+            Self::Window => locale.app_text("chrome.window"),
         }
     }
     fn index(self) -> usize {
@@ -146,7 +147,7 @@ impl MenuItem {
     fn separator() -> Self {
         Self { separator: true, ..Self::new("", "", MenuAction::None, false) }
     }
-    fn submenu(menu: Menu) -> Self { Self::new(menu.label(), "", MenuAction::Submenu(menu), true) }
+    fn submenu(menu: Menu, locale: ToolbarLocale) -> Self { Self::new(menu.label(locale), "", MenuAction::Submenu(menu), true) }
     fn checked(mut self, checked: bool) -> Self { self.checked = checked; self }
 }
 
@@ -198,114 +199,115 @@ impl Chrome {
         use ChromeCommand as Cmd;
         use ChromeEvent as E;
         use MenuAction as A;
+        let locale = ToolbarLocale::current(cx);
         let doc = self.state.has_document;
         let separator = MenuItem::separator;
         let action = |label: &'static str, shortcut: &'static str, action: fn() -> Box<dyn Action>, enabled: bool| MenuItem::new(label, shortcut, A::Dispatch(action), enabled);
         let event = |label, shortcut, value, capability, document| self.event_item(label, shortcut, value, capability, document);
         let mut entries = match menu {
             Menu::File => vec![
-                action("新建 Markdown", "Ctrl + N", || Box::new(action::NewFile), true),
-                event("新窗口", "Ctrl + Shift + N", E::NewWindow, C::NewWindow, false), separator(),
-                action("打开文件...", "Ctrl + O", || Box::new(action::OpenFile), true),
-                action("打开文件夹...", "Ctrl + Shift + O", || Box::new(action::OpenFolder), true),
-                MenuItem::submenu(Menu::Recent),
-                action("恢复未保存文档...", "", || Box::new(action::RecoverDocuments), true), separator(),
-                action("保存", "Ctrl + S", || Box::new(action::Save), doc),
-                action("另存为...", "Ctrl + Shift + S", || Box::new(action::SaveAs), doc), separator(),
-                MenuItem::submenu(Menu::Export), separator(),
-                action("关闭当前文件", "Ctrl + W", || Box::new(action::CloseTab), doc),
-                MenuItem::new("关闭窗口", "Alt + F4", A::Emit(E::CloseWindow), true), separator(),
-                MenuItem::new("退出", "", A::Emit(E::Quit), true),
+                action(locale.app_text("shortcuts.newFile"), "Ctrl + N", || Box::new(action::NewFile), true),
+                event(locale.app_text("settings.openDefaultBehavior.choice.new-window"), "Ctrl + Shift + N", E::NewWindow, C::NewWindow, false), separator(),
+                action(locale.app_text("chrome.openFile"), "Ctrl + O", || Box::new(action::OpenFile), true),
+                action(locale.app_text("chrome.openFolder"), "Ctrl + Shift + O", || Box::new(action::OpenFolder), true),
+                MenuItem::submenu(Menu::Recent, locale),
+                action(locale.app_text("chrome.recover"), "", || Box::new(action::RecoverDocuments), true), separator(),
+                action(locale.app_text("shortcuts.save"), "Ctrl + S", || Box::new(action::Save), doc),
+                action(locale.app_text("menu.saveAs"), "Ctrl + Shift + S", || Box::new(action::SaveAs), doc), separator(),
+                MenuItem::submenu(Menu::Export, locale), separator(),
+                action(locale.app_text("chrome.closeFile"), "Ctrl + W", || Box::new(action::CloseTab), doc),
+                MenuItem::new(locale.app_text("settings.closeWindowBehavior.choice.close-window"), "Alt + F4", A::Emit(E::CloseWindow), true), separator(),
+                MenuItem::new(locale.app_text("chrome.quit"), "", A::Emit(E::Quit), true),
             ],
             Menu::Edit => vec![
-                action("撤销", "Ctrl + Z", || Box::new(editor::Undo), doc && self.state.can_undo),
-                action("重做", "Ctrl + Y", || Box::new(editor::Redo), doc && self.state.can_redo),
+                action(locale.app_text("menu.undo"), "Ctrl + Z", || Box::new(editor::Undo), doc && self.state.can_undo),
+                action(locale.app_text("menu.redo"), "Ctrl + Y", || Box::new(editor::Redo), doc && self.state.can_redo),
             ],
             Menu::Paragraph => vec![
-                MenuItem::submenu(Menu::Heading),
-                action("段落", "Ctrl + 0", || Box::new(action::Paragraph), doc),
-                event("提升标题", "Ctrl + =", E::Command(Cmd::AdjustHeading { increase: true }), C::HeadingAdjustment, true),
-                event("降低标题", "Ctrl + -", E::Command(Cmd::AdjustHeading { increase: false }), C::HeadingAdjustment, true), separator(),
-                event("表格", "Ctrl + Shift + T", E::TablePicker, C::TablePicker, true),
-                action("代码块", "Ctrl + Shift + K", || Box::new(action::CodeBlock), doc),
-                action("行间公式", "Ctrl + Shift + M", || Box::new(action::MathBlock), doc),
-                MenuItem::new("行内公式", "", A::Emit(E::Command(Cmd::MathInline)), doc && self.capable(C::MathInline) && self.state.mode != EditorMode::Source), separator(),
-                action("引用", "Ctrl + Shift + Q", || Box::new(action::Quote), doc),
-                event("提示块", "Ctrl + Shift + A", E::Command(Cmd::Callout), C::Callout, true),
-                event("折叠块", "", E::Command(Cmd::Details), C::Details, true),
-                event("块注释", "", E::Command(Cmd::BlockComment), C::BlockComment, true),
-                action("有序列表", "Ctrl + Shift + [", || Box::new(action::OrderedList), doc),
-                action("无序列表", "Ctrl + Shift + ]", || Box::new(action::BulletList), doc),
-                action("任务列表", "Ctrl + Shift + X", || Box::new(action::TaskList), doc), separator(),
-                action("上插段落", "Ctrl + Shift + Enter", || Box::new(crate::nomo_mark::view::ParagraphBefore), doc),
-                action("下插段落", "Ctrl + Enter", || Box::new(crate::nomo_mark::view::ParagraphAfter), doc), separator(),
-                MenuItem::submenu(Menu::Diagram),
-                event("脚注", "", E::Command(Cmd::Footnote), C::Footnote, true),
-                action("水平分割线", "Ctrl + Shift + H", || Box::new(action::Rule), doc),
-                event("目录", "", E::Command(Cmd::Toc), C::Toc, true),
-                event("文档元数据", "", E::FrontMatter, C::FrontMatter, true),
+                MenuItem::submenu(Menu::Heading, locale),
+                action(locale.app_text("chrome.paragraph"), "Ctrl + 0", || Box::new(action::Paragraph), doc),
+                event(locale.app_text("chrome.liftHeading"), "Ctrl + =", E::Command(Cmd::AdjustHeading { increase: true }), C::HeadingAdjustment, true),
+                event(locale.app_text("chrome.sinkHeading"), "Ctrl + -", E::Command(Cmd::AdjustHeading { increase: false }), C::HeadingAdjustment, true), separator(),
+                event(locale.app_text("menu.table"), "Ctrl + Shift + T", E::TablePicker, C::TablePicker, true),
+                action(locale.app_text("menu.codeBlock"), "Ctrl + Shift + K", || Box::new(action::CodeBlock), doc),
+                action(locale.app_text("chrome.mathBlock"), "Ctrl + Shift + M", || Box::new(action::MathBlock), doc),
+                MenuItem::new(locale.app_text("chrome.mathInline"), "", A::Emit(E::Command(Cmd::MathInline)), doc && self.capable(C::MathInline) && self.state.mode != EditorMode::Source), separator(),
+                action(locale.app_text("menu.quote"), "Ctrl + Shift + Q", || Box::new(action::Quote), doc),
+                event(locale.app_text("chrome.quickInsertCallout"), "Ctrl + Shift + A", E::Command(Cmd::Callout), C::Callout, true),
+                event(locale.app_text("chrome.details"), "", E::Command(Cmd::Details), C::Details, true),
+                event(locale.app_text("menu.blockComment"), "", E::Command(Cmd::BlockComment), C::BlockComment, true),
+                action(locale.app_text("menu.orderedList"), "Ctrl + Shift + [", || Box::new(action::OrderedList), doc),
+                action(locale.app_text("menu.bulletList"), "Ctrl + Shift + ]", || Box::new(action::BulletList), doc),
+                action(locale.app_text("menu.taskList"), "Ctrl + Shift + X", || Box::new(action::TaskList), doc), separator(),
+                action(locale.app_text("chrome.paragraphBefore"), "Ctrl + Shift + Enter", || Box::new(crate::nomo_mark::view::ParagraphBefore), doc),
+                action(locale.app_text("chrome.paragraphAfter"), "Ctrl + Enter", || Box::new(crate::nomo_mark::view::ParagraphAfter), doc), separator(),
+                MenuItem::submenu(Menu::Diagram, locale),
+                event(locale.app_text("chrome.footnote"), "", E::Command(Cmd::Footnote), C::Footnote, true),
+                action(locale.app_text("chrome.horizontalRule"), "Ctrl + Shift + H", || Box::new(action::Rule), doc),
+                event(locale.app_text("chrome.toc"), "", E::Command(Cmd::Toc), C::Toc, true),
+                event(locale.app_text("menu.editFrontMatter"), "", E::FrontMatter, C::FrontMatter, true),
             ],
             Menu::Format => vec![
-                action("加粗", "Ctrl + B", || Box::new(action::Bold), doc),
-                action("斜体", "Ctrl + I", || Box::new(action::Italic), doc),
-                action("下划线", "Ctrl + U", || Box::new(action::Underline), doc),
-                action("行代码", "Ctrl + `", || Box::new(action::InlineCode), doc),
-                event("行公式", "", E::Unavailable(UnavailableFeature::InlineMath), C::UnavailableNotice, true), separator(),
-                action("删除线", "Alt + Shift + 5", || Box::new(action::Strike), doc),
-                action("高亮", "", || Box::new(action::Highlight), doc),
-                event("行内注释", "", E::Command(Cmd::InlineComment), C::InlineComment, true), separator(),
-                event("链接", "Ctrl + K", E::LinkPicker, C::LinkPicker, true),
-                event("图像", "", E::Unavailable(UnavailableFeature::Image), C::UnavailableNotice, true), separator(),
-                event("清除样式", r"Ctrl + \", E::Command(Cmd::ClearFormatting), C::ClearFormatting, true),
+                action(locale.app_text("menu.bold"), "Ctrl + B", || Box::new(action::Bold), doc),
+                action(locale.app_text("menu.italic"), "Ctrl + I", || Box::new(action::Italic), doc),
+                action(locale.app_text("chrome.underline"), "Ctrl + U", || Box::new(action::Underline), doc),
+                action(locale.app_text("chrome.inlineCode"), "Ctrl + `", || Box::new(action::InlineCode), doc),
+                event(locale.app_text("chrome.inlineMath"), "", E::Unavailable(UnavailableFeature::InlineMath), C::UnavailableNotice, true), separator(),
+                action(locale.app_text("menu.strike"), "Alt + Shift + 5", || Box::new(action::Strike), doc),
+                action(locale.app_text("chrome.highlight"), "", || Box::new(action::Highlight), doc),
+                event(locale.app_text("chrome.inlineComment"), "", E::Command(Cmd::InlineComment), C::InlineComment, true), separator(),
+                event(locale.app_text("menu.link"), "Ctrl + K", E::LinkPicker, C::LinkPicker, true),
+                event(locale.app_text("chrome.imageMenu"), "", E::Unavailable(UnavailableFeature::Image), C::UnavailableNotice, true), separator(),
+                event(locale.app_text("shortcuts.clear"), r"Ctrl + \", E::Command(Cmd::ClearFormatting), C::ClearFormatting, true),
             ],
             Menu::View => vec![
-                action("语义编辑", "", || Box::new(action::ModeSemantic), doc && !self.state.large_document).checked(self.state.mode == EditorMode::Semantic),
-                action("源码模式", "Ctrl + E", || Box::new(action::ModeSource), doc).checked(self.state.mode == EditorMode::Source),
-                action("双栏模式", "", || Box::new(action::ModeSplit), doc && !self.state.large_document && self.state.split_available).checked(self.state.mode == EditorMode::Split),
-                action(if self.state.outline_visible { "隐藏文档大纲" } else { "显示文档大纲" }, "", || Box::new(action::ToggleOutline), doc),
-                event("恢复大纲默认位置", "", E::ResetOutlinePosition, C::ResetOutlinePosition, false),
-                MenuItem::new(if self.state.toolbar_visible { "隐藏工具栏" } else { "显示工具栏" }, self.state.toolbar_shortcut.clone(), A::Dispatch(|| Box::new(action::ToggleToolbar)), true),
-                action("切换主题", "Ctrl + Shift + L", || Box::new(action::ToggleTheme), true),
-                action("显示 / 隐藏资源管理器", "Ctrl + Shift + F", || Box::new(action::ToggleSidebar), true),
+                action(locale.app_text("settings.editorMode.choice.semantic"), "", || Box::new(action::ModeSemantic), doc && !self.state.large_document).checked(self.state.mode == EditorMode::Semantic),
+                action(locale.app_text("menu.modeSource"), "Ctrl + E", || Box::new(action::ModeSource), doc).checked(self.state.mode == EditorMode::Source),
+                action(locale.app_text("settings.editorMode.choice.split"), "", || Box::new(action::ModeSplit), doc && !self.state.large_document && self.state.split_available).checked(self.state.mode == EditorMode::Split),
+                action(if self.state.outline_visible { locale.app_text("chrome.hideOutline") } else { locale.app_text("settings.outlineVisible.label") }, "", || Box::new(action::ToggleOutline), doc),
+                event(locale.app_text("outline.resetPosition"), "", E::ResetOutlinePosition, C::ResetOutlinePosition, false),
+                MenuItem::new(if self.state.toolbar_visible { locale.app_text("chrome.hideToolbar") } else { locale.app_text("chrome.showToolbar") }, self.state.toolbar_shortcut.clone(), A::Dispatch(|| Box::new(action::ToggleToolbar)), true),
+                action(locale.app_text("chrome.switchTheme"), "Ctrl + Shift + L", || Box::new(action::ToggleTheme), true),
+                action(locale.app_text("shortcuts.toggleSidebar"), "Ctrl + Shift + F", || Box::new(action::ToggleSidebar), true),
             ],
             Menu::Heading => vec![
-                action("一级标题", "Ctrl + 1", || Box::new(action::Heading1), doc),
-                action("二级标题", "Ctrl + 2", || Box::new(action::Heading2), doc),
-                action("三级标题", "Ctrl + 3", || Box::new(action::Heading3), doc),
-                event("四级标题", "Ctrl + 4", E::Command(Cmd::Heading(4)), C::HeadingLevels, true),
-                event("五级标题", "Ctrl + 5", E::Command(Cmd::Heading(5)), C::HeadingLevels, true),
-                event("六级标题", "Ctrl + 6", E::Command(Cmd::Heading(6)), C::HeadingLevels, true),
+                action(locale.app_text("menu.heading1"), "Ctrl + 1", || Box::new(action::Heading1), doc),
+                action(locale.app_text("menu.heading2"), "Ctrl + 2", || Box::new(action::Heading2), doc),
+                action(locale.app_text("menu.heading3"), "Ctrl + 3", || Box::new(action::Heading3), doc),
+                event(locale.app_text("chrome.heading4"), "Ctrl + 4", E::Command(Cmd::Heading(4)), C::HeadingLevels, true),
+                event(locale.app_text("chrome.heading5"), "Ctrl + 5", E::Command(Cmd::Heading(5)), C::HeadingLevels, true),
+                event(locale.app_text("chrome.heading6"), "Ctrl + 6", E::Command(Cmd::Heading(6)), C::HeadingLevels, true),
             ],
             Menu::Export => vec![
-                event("导出 HTML", "", E::Export(ExportFormat::Html), C::ExportHtml, true),
-                event("导出 PDF", "", E::Export(ExportFormat::Pdf), C::ExportPdf, true),
-                MenuItem::new("导出 Word", "", A::Emit(E::Export(ExportFormat::Word)), doc && self.capable(C::ExportWord) && !self.state.word_export_busy),
+                event(locale.app_text("shortcuts.exportHtml"), "", E::Export(ExportFormat::Html), C::ExportHtml, true),
+                event(locale.app_text("shortcuts.exportPdf"), "", E::Export(ExportFormat::Pdf), C::ExportPdf, true),
+                MenuItem::new(locale.app_text("chrome.exportWord"), "", A::Emit(E::Export(ExportFormat::Word)), doc && self.capable(C::ExportWord) && !self.state.word_export_busy),
             ],
             Menu::Diagram => {
-                let mut entries = vec![event("默认图表", "", E::Command(Cmd::Diagram(DiagramKind::Default)), C::Diagrams, true), event("空白图表", "mermaid", E::Command(Cmd::Diagram(DiagramKind::Blank)), C::Diagrams, true), separator()];
+                let mut entries = vec![event(locale.app_text("chrome.defaultDiagram"), "", E::Command(Cmd::Diagram(DiagramKind::Default)), C::Diagrams, true), event(locale.app_text("chrome.blankDiagram"), "mermaid", E::Command(Cmd::Diagram(DiagramKind::Blank)), C::Diagrams, true), separator()];
                 for (label, shortcut, kind) in [
-                    ("流程图", "flowchart", DiagramKind::Flowchart), ("时序图", "sequenceDiagram", DiagramKind::Sequence),
-                    ("类图", "classDiagram", DiagramKind::Class), ("状态图", "stateDiagram", DiagramKind::State),
-                    ("饼图", "pie", DiagramKind::Pie), ("甘特图", "gantt", DiagramKind::Gantt),
-                    ("实体关系图", "erDiagram", DiagramKind::EntityRelationship),
+                    (locale.app_text("settings.defaultDiagramType.choice.flowchart"), "flowchart", DiagramKind::Flowchart), (locale.app_text("settings.defaultDiagramType.choice.sequenceDiagram"), "sequenceDiagram", DiagramKind::Sequence),
+                    (locale.app_text("settings.defaultDiagramType.choice.classDiagram"), "classDiagram", DiagramKind::Class), (locale.app_text("settings.defaultDiagramType.choice.stateDiagram"), "stateDiagram", DiagramKind::State),
+                    (locale.app_text("settings.defaultDiagramType.choice.pie"), "pie", DiagramKind::Pie), (locale.app_text("settings.defaultDiagramType.choice.gantt"), "gantt", DiagramKind::Gantt),
+                    (locale.app_text("chrome.erDiagram"), "erDiagram", DiagramKind::EntityRelationship),
                 ] { entries.push(event(label, shortcut, E::Command(Cmd::Diagram(kind)), C::Diagrams, true)); }
                 entries
             }
             Menu::Recent => {
                 let mut entries: Vec<_> = self.state.recent.iter().take(10).map(|recent| {
-                    let mut entry = MenuItem::new(recent.label.clone(), if recent.missing { "不可用" } else { "" }, A::Emit(E::OpenRecent { path: recent.path.clone(), folder: recent.folder }), self.capable(C::Recent) && !recent.missing);
+                    let mut entry = MenuItem::new(recent.label.clone(), if recent.missing { locale.app_text("chrome.unavailable") } else { "" }, A::Emit(E::OpenRecent { path: recent.path.clone(), folder: recent.folder }), self.capable(C::Recent) && !recent.missing);
                     entry.icon = Some(if recent.folder { IconName::Folder } else { IconName::FileText });
                     entry.remove_recent = Some(recent.path.clone());
                     entry
                 }).collect();
-                if entries.is_empty() { entries.push(MenuItem::new("无最近打开的记录", "", A::None, false)); }
-                else { entries.push(separator()); entries.push(event("清除最近打开", "", E::ClearRecent, C::Recent, false)); }
+                if entries.is_empty() { entries.push(MenuItem::new(locale.app_text("chrome.noRecentFiles"), "", A::None, false)); }
+                else { entries.push(separator()); entries.push(event(locale.app_text("chrome.clearRecentFiles"), "", E::ClearRecent, C::Recent, false)); }
                 entries
             }
             Menu::Window => vec![
-                MenuItem::new("最小化", "", A::Minimize, true),
-                MenuItem::new(if maximized { "还原" } else { "最大化" }, "", A::Maximize, true), separator(),
-                MenuItem::new("关闭窗口", "Alt + F4", A::Emit(E::CloseWindow), true),
+                MenuItem::new(locale.app_text("window.minimize"), "", A::Minimize, true),
+                MenuItem::new(if maximized { locale.app_text("window.restore") } else { locale.app_text("window.maximize") }, "", A::Maximize, true), separator(),
+                MenuItem::new(locale.app_text("settings.closeWindowBehavior.choice.close-window"), "Alt + F4", A::Emit(E::CloseWindow), true),
             ],
         };
         for entry in &mut entries {
@@ -399,6 +401,7 @@ impl Chrome {
     }
 
     fn menu_panel(&self, menu: Menu, nested: bool, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
+        let locale = ToolbarLocale::current(cx);
         let theme = Theme::ui(cx);
         let compact = window.viewport_size().height <= px(700.0);
         let selected = if nested { self.subselected } else { self.selected };
@@ -418,7 +421,7 @@ impl Chrome {
                 .flex_none().text_size(px(13.0)).line_height(px(19.0)).text_color(color)
                 .when(highlighted && enabled, |el| el.bg(theme.accent_fill))
                 .when(enabled, |el| el.cursor_pointer())
-                .when(!enabled, |el| el.opacity(0.55).tooltip(tooltip("当前不可用")))
+                .when(!enabled, |el| el.opacity(0.55).tooltip(tooltip(locale.app_text("chrome.currentlyUnavailable"))))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.run(&clicked, window, cx); }))
                 .on_hover(cx.listener(move |this, hover, _, cx| {
@@ -433,14 +436,14 @@ impl Chrome {
                 }));
             if let Some(name) = entry.icon { row = row.child(icon(name, 14.0, color)); }
             if entry.checked { row = row.child(icon(IconName::Check, 12.0, color)); }
-            row = row.child(div().flex_1().min_w(px(0.0)).overflow_hidden().whitespace_nowrap().child(entry.label))
+            row = row.child(div().flex_1().min_w(px(0.0)).child(entry.label))
                 .when(!entry.shortcut.is_empty(), |el| el.child(div().flex_none().ml(px(16.0)).text_size(px(12.0)).text_color(if highlighted && enabled { theme.on_accent } else { theme.muted }).child(entry.shortcut)));
             if submenu.is_some() { row = row.child(icon(IconName::ChevronRight, 10.0, color)); }
             if let Some(path) = entry.remove_recent {
                 let removable = self.capable(ChromeCapability::Recent);
                 row = row.child(div().id(("chrome-remove-recent", index)).size(px(18.0)).flex().items_center().justify_center()
                     .when(removable, |el| el.cursor_pointer()).child(icon(IconName::Close, 12.0, color))
-                    .tooltip(tooltip("从最近记录移除"))
+                    .tooltip(tooltip(locale.app_text("chrome.removeRecent")))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |_, _, _, cx| { cx.stop_propagation(); if removable { cx.emit(ChromeEvent::RemoveRecent(path.clone())); } })));
             }
@@ -451,7 +454,7 @@ impl Chrome {
             }
             rows.push(row.into_any_element());
         }
-        div().id(if nested { "chrome-submenu" } else { "chrome-menu" }).w(px(MENU_WIDTH))
+        div().id(if nested { "chrome-submenu" } else { "chrome-menu" }).w(px(if locale.is_chinese() { MENU_WIDTH } else { 360.0 }))
             .max_h((window.viewport_size().height - px(16.0)).max(px(0.0))).py(px(4.0))
             .flex().flex_col().rounded(px(theme.radius_md)).bg(theme.dropdown_bg).border_1().border_color(theme.dropdown_border)
             .shadow(vec![theme.floating_shadow.clone()]).occlude().overflow_y_scroll()
@@ -477,6 +480,7 @@ impl Chrome {
 
 impl Render for Chrome {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = ToolbarLocale::current(cx);
         let animate_theme = Theme::ui_transition_active(cx);
         let theme = Theme::ui(cx);
         let viewport = window.viewport_size();
@@ -502,7 +506,7 @@ impl Render for Chrome {
                 })));
         }
         root = root.child(self.icon_button("chrome-sidebar", IconName::PanelLeft, &theme)
-                .tooltip(tooltip(if self.state.sidebar_visible { "隐藏文件栏" } else { "显示文件栏" }))
+                .tooltip(tooltip(if self.state.sidebar_visible { locale.app_text("chrome.hideExplorer") } else { locale.app_text("chrome.showExplorer") }))
                 .on_click(cx.listener(|this, _, window, cx| { this.dismiss(window, cx); window.dispatch_action(Box::new(action::ToggleSidebar), cx); })));
         if !cfg!(target_os = "macos") {
             root = root.child(div().text_size(px(14.0)).font_weight(FontWeight(650.0)).opacity(0.9).mr(px(6.0)).child("Nomo"));
@@ -512,7 +516,7 @@ impl Render for Chrome {
                 let trigger = div().id(("chrome-menu-trigger", menu.index())).h(px(32.0)).px(px(8.0))
                     .flex().items_center().rounded(px(4.0)).cursor_pointer()
                     .when(cfg!(target_os = "windows"), |el| el.occlude())
-                    .when(open, |el| el.bg(gpui::rgba(0x80808026))).hover(|style| style.bg(gpui::rgba(0x80808026))).child(menu.label())
+                    .when(open, |el| el.bg(gpui::rgba(0x80808026))).hover(|style| style.bg(gpui::rgba(0x80808026))).child(menu.label(locale))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -530,7 +534,7 @@ impl Render for Chrome {
                 nav = nav.child(item);
             }
             root = root.child(nav.child(div().id("chrome-settings").h(px(32.0)).px(px(8.0)).flex().items_center()
-                .rounded(px(4.0)).cursor_pointer().hover(|style| style.bg(theme.hover)).child("设置")
+                .rounded(px(4.0)).cursor_pointer().hover(|style| style.bg(theme.hover)).child(locale.app_text("chrome.settings"))
                 .when(cfg!(target_os = "windows"), |el| el.occlude())
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
@@ -545,7 +549,7 @@ impl Render for Chrome {
         if let Some(update) = self.state.update {
             let enabled = self.capable(ChromeCapability::SoftwareUpdate);
             right = right.child(self.icon_button("chrome-update", IconName::ArrowDown, &theme).relative()
-                .when(!enabled, |el| el.opacity(0.5)).tooltip(tooltip("软件更新"))
+                .when(!enabled, |el| el.opacity(0.5)).tooltip(tooltip(locale.app_text("chrome.softwareUpdate")))
                 .child(div().absolute().right_0().top_0().text_size(px(8.0)).text_color(theme.accent)
                     .child(match update { ChromeUpdateState::Available => "●".to_owned(), ChromeUpdateState::Downloading(percent) => percent.min(100).to_string(), ChromeUpdateState::Downloaded => "✓".to_owned() }))
                 .on_click(cx.listener(move |this, _, window, cx| { if enabled { this.dismiss(window, cx); cx.emit(ChromeEvent::SoftwareUpdate); } })));
@@ -557,7 +561,7 @@ impl Render for Chrome {
                 .on_click(cx.listener(move |this, _, window, cx| { if mini_enabled { this.dismiss(window, cx); cx.emit(ChromeEvent::ToggleMini); } })));
         }
         right = right.child(self.icon_button("chrome-theme", if theme.dark { IconName::Sun } else { IconName::Moon }, &theme)
-                .tooltip(tooltip("切换主题"))
+                .tooltip(tooltip(locale.app_text("chrome.switchTheme")))
                 .on_click(cx.listener(|this, _, window, cx| { this.dismiss(window, cx); window.dispatch_action(Box::new(action::ToggleTheme), cx); })));
         root = root.child(right);
         #[cfg(target_os = "windows")]

@@ -1,5 +1,5 @@
 //! 旧版保存与删除确认框；只持有提示文字，通过 GPUI PromptHandle 返回选择并恢复焦点。
-use super::{components::{IconName, icon}, motion, popup::reduced_motion, toolbar_i18n::ToolbarLocale};
+use super::{components::{IconName, icon}, motion, popup::reduced_motion, toolbar_i18n::{ToolbarLocale, UiMessage}};
 use crate::{settings::Settings, theme::Theme};
 use gpui::{
     App, AppContext, BoxShadow, Context, EventEmitter, FocusHandle, Focusable, Global,
@@ -13,7 +13,7 @@ pub(crate) use secondary::{SecondaryDialog, SecondaryKind, SecondaryAction, Tone
 #[derive(Clone, Copy)]
 pub(crate) enum SaveChoice { Save, Discard, Cancel }
 
-enum DialogKind { Unsaved, Delete(SharedString), Message, Secondary(SecondaryDialog) }
+enum DialogKind { Unsaved(UiMessage), Delete(SharedString), Message, Secondary(SecondaryDialog) }
 
 #[derive(Default)]
 struct NextPrompt(Option<DialogKind>);
@@ -29,13 +29,14 @@ pub(crate) fn init(cx: &mut App) {
     });
 }
 
-pub(crate) fn confirm_save(title: &str, window: &mut Window, cx: &mut App)
+pub(crate) fn confirm_save(title: UiMessage, window: &mut Window, cx: &mut App)
     -> impl Future<Output = SaveChoice> + use<>
 {
     let response = if window.has_active_prompt() { None } else {
         let locale = ToolbarLocale::current(cx);
-        cx.global_mut::<NextPrompt>().0 = Some(DialogKind::Unsaved);
-        Some(window.prompt(PromptLevel::Warning, title, Some(locale.text("dialog_unsaved_message")), &[
+        let rendered_title = title.render(locale);
+        cx.global_mut::<NextPrompt>().0 = Some(DialogKind::Unsaved(title));
+        Some(window.prompt(PromptLevel::Warning, &rendered_title, Some(locale.text("dialog_unsaved_message")), &[
             PromptButton::ok(locale.text("dialog_save")),
             PromptButton::new(locale.text("dialog_discard")),
             PromptButton::cancel(locale.text("cancel")),
@@ -146,8 +147,17 @@ impl Confirmation {
 
     fn action(&self, index: usize, vertical: bool, theme: &Theme, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
         if let DialogKind::Secondary(dialog) = &self.kind { return self.secondary_action(dialog, index, theme, cx); }
+        let locale = ToolbarLocale::current(cx);
+        let label: SharedString = match (&self.kind, index) {
+            (DialogKind::Unsaved(_), 0) => locale.text("dialog_save").into(),
+            (DialogKind::Unsaved(_), 1) => locale.text("dialog_discard").into(),
+            (DialogKind::Unsaved(_), _) => locale.text("cancel").into(),
+            (DialogKind::Delete(_), 0) => locale.text("dialog_delete").into(),
+            (DialogKind::Delete(_), _) => locale.text("cancel").into(),
+            _ => self.actions[index].label().clone(),
+        };
         let cancel = self.actions[index].is_cancel();
-        let unsaved = matches!(self.kind, DialogKind::Unsaved);
+        let unsaved = matches!(self.kind, DialogKind::Unsaved(_));
         let delete = matches!(self.kind, DialogKind::Delete(_));
         let destructive = !cancel && ((unsaved && index == 1) || delete || matches!(self.level, PromptLevel::Critical));
         let save = unsaved && index == 0;
@@ -176,7 +186,7 @@ impl Confirmation {
                 window.refresh();
             }))
             .child(icon(leading, if unsaved { 15.0 } else { 14.0 }, foreground))
-            .child(div().overflow_hidden().whitespace_nowrap().child(self.actions[index].label().clone()))
+            .child(div().overflow_hidden().whitespace_nowrap().child(label))
             .on_click(cx.listener(move |dialog, _, _, cx| { dialog.respond(index, cx); cx.stop_propagation(); }));
         if self.keyboard_choice == Some(index) {
             // 焦点外框不能用实心阴影，透明的取消按钮会透出阴影色。
@@ -195,14 +205,15 @@ impl Focusable for Confirmation {
 impl Render for Confirmation {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.focus.is_focused(window) { window.focus(&self.focus, cx); }
+        let locale = ToolbarLocale::current(cx);
         let theme = Theme::ui(cx);
         let reduced = reduced_motion(cx);
-        let unsaved = matches!(self.kind, DialogKind::Unsaved);
+        let unsaved = matches!(self.kind, DialogKind::Unsaved(_));
         let delete = matches!(self.kind, DialogKind::Delete(_));
         let viewport = window.viewport_size();
         let inset = window.client_inset().unwrap_or(px(0.0));
         let available_width = (viewport.width - inset * 2.0 - px(32.0)).max(px(0.0));
-        let vertical = unsaved && viewport.width <= px(460.0);
+        let vertical = unsaved && (viewport.width <= px(460.0) || !locale.is_chinese());
         let duration = if reduced { 90.0 } else { 160.0 };
         let (panel_alpha, backdrop_alpha, animating) = if let Some(closing) = self.closing {
             let progress = (closing.elapsed().as_secs_f32() * 1000.0 / if reduced { 90.0 } else { 120.0 }).min(1.0);
@@ -222,10 +233,24 @@ impl Render for Confirmation {
             .bg(accent.opacity(if unsaved { 0.12 } else { 0.1 }))
             .child(icon(if matches!(self.level, PromptLevel::Info) { IconName::Info } else { IconName::AlertTriangle },
                 if unsaved { 18.0 } else { 20.0 }, accent));
+        let title_text: SharedString = match &self.kind {
+            DialogKind::Unsaved(title) => title.render(locale).into(),
+            DialogKind::Delete(_) => locale.text("dialog_delete_title").into(),
+            _ => self.title.clone(),
+        };
+        let message: Option<SharedString> = match &self.kind {
+            DialogKind::Unsaved(_) => Some(locale.text("dialog_unsaved_message").into()),
+            DialogKind::Delete(path) => {
+                let path = Path::new(path.as_ref());
+                let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+                Some(locale.text("dialog_delete_message").replace("{name}", &name).into())
+            }
+            _ => self.message.clone(),
+        };
         let title = div().text_color(theme.heading).text_size(px(if unsaved { 15.0 } else { 14.5 }))
             .font_weight(if unsaved { gpui::FontWeight::BOLD } else { gpui::FontWeight::SEMIBOLD })
-            .line_height(relative(1.35)).when(unsaved, |el| el.mt(px(1.0))).child(self.title.clone());
-        let description = self.message.clone().map(|message| div().text_size(px(if unsaved { 12.5 } else { 13.0 }))
+            .line_height(relative(1.35)).when(unsaved, |el| el.mt(px(1.0))).child(title_text);
+        let description = message.map(|message| div().text_size(px(if unsaved { 12.5 } else { 13.0 }))
             .text_color(if unsaved { theme.muted } else { theme.fg }).line_height(relative(if unsaved { 1.5 } else { 1.6 })).child(message));
         let mut order: Vec<_> = (0..self.actions.len()).collect();
         if delete { order.reverse(); }

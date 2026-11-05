@@ -1,5 +1,6 @@
 //! 侧栏目录快照：后台按需读取，保留展开状态并限制目录缓存的总字节数。
 
+use crate::ui::toolbar_i18n::UiMessage;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -52,9 +53,9 @@ impl DirectorySnapshot {
 }
 
 #[derive(Debug)]
-pub enum ScanError {
+pub enum ScanError<E = String> {
     Cancelled,
-    Failed(String),
+    Failed(E),
 }
 
 pub struct FileTree {
@@ -103,12 +104,16 @@ impl FileTree {
         self.expanded.contains(&self.root)
     }
 
-    pub fn toggle_root(&mut self) -> Result<bool, String> {
+    pub fn toggle_root(&mut self) -> Result<bool, String> { self.toggle_root_message().map_err(String::from) }
+
+    pub(crate) fn toggle_root_message(&mut self) -> Result<bool, UiMessage> {
         let root = self.root.clone();
-        self.toggle(&root)
+        self.toggle_message(&root)
     }
 
-    pub fn toggle(&mut self, path: &Path) -> Result<bool, String> {
+    pub fn toggle(&mut self, path: &Path) -> Result<bool, String> { self.toggle_message(path).map_err(String::from) }
+
+    pub(crate) fn toggle_message(&mut self, path: &Path) -> Result<bool, UiMessage> {
         if self.expanded.remove(path) {
             self.expanded_bytes = self.expanded_bytes.saturating_sub(path_cost(path));
             self.rebuild();
@@ -116,7 +121,7 @@ impl FileTree {
         }
         let cost = path_cost(path);
         if self.expanded_bytes.saturating_add(cost) > EXPANDED_PATH_BYTES {
-            return Err("展开的目录过多，请先折叠部分目录。".into());
+            return Err(UiMessage::new("tree.tooManyExpanded"));
         }
         self.expanded.insert(path.to_path_buf());
         self.expanded_bytes += cost;
@@ -126,9 +131,11 @@ impl FileTree {
         Ok(true)
     }
 
-    pub fn expand(&mut self, path: &Path) -> Result<(), String> {
+    pub fn expand(&mut self, path: &Path) -> Result<(), String> { self.expand_message(path).map_err(String::from) }
+
+    pub(crate) fn expand_message(&mut self, path: &Path) -> Result<(), UiMessage> {
         if !self.expanded.contains(path) {
-            self.toggle(path)?;
+            self.toggle_message(path)?;
         }
         Ok(())
     }
@@ -223,6 +230,10 @@ impl FileTree {
     }
 
     pub fn complete_load(&mut self, path: &Path, snapshot: DirectorySnapshot) -> Result<(), String> {
+        self.complete_load_message(path, snapshot).map_err(String::from)
+    }
+
+    pub(crate) fn complete_load_message(&mut self, path: &Path, snapshot: DirectorySnapshot) -> Result<(), UiMessage> {
         self.loading.remove(path);
         if !self.is_visible_directory(path) {
             self.rebuild();
@@ -243,7 +254,7 @@ impl FileTree {
                 .map(|(candidate, _)| candidate.clone());
             let Some(victim) = victim else {
                 self.rebuild();
-                return Err("文件树缓存已达到 32 MiB，请折叠部分目录后重试。".into());
+                return Err(UiMessage::new("tree.cacheBudget").arg("size", "32 MiB"));
             };
             if let Some(entry) = self.children.remove(&victim) {
                 self.cache_bytes = self.cache_bytes.saturating_sub(entry.bytes);
@@ -292,25 +303,31 @@ fn path_cost(path: &Path) -> usize {
     path.as_os_str().len().saturating_mul(2).saturating_add(96)
 }
 
-fn check_cancel(cancel: &AtomicBool) -> Result<(), ScanError> {
+fn check_cancel(cancel: &AtomicBool) -> Result<(), ScanError<UiMessage>> {
     if cancel.load(Ordering::Acquire) { Err(ScanError::Cancelled) } else { Ok(()) }
 }
 
 /// 单次扫描只持有一个有界快照；目录变更通过取消标记和调用方的代次失效。
 pub fn scan_directory(root: &Path, dir: &Path, cancel: &AtomicBool) -> Result<DirectorySnapshot, ScanError> {
+    scan_directory_message(root, dir, cancel).map_err(|error| match error {
+        ScanError::Cancelled => ScanError::Cancelled, ScanError::Failed(message) => ScanError::Failed(message.to_string()),
+    })
+}
+
+pub(crate) fn scan_directory_message(root: &Path, dir: &Path, cancel: &AtomicBool) -> Result<DirectorySnapshot, ScanError<UiMessage>> {
     check_cancel(cancel)?;
     let rules = IgnoreRules::load(root, dir)?;
-    let iter = std::fs::read_dir(dir).map_err(|error| ScanError::Failed(format!("读取目录失败：{error}")))?;
+    let iter = std::fs::read_dir(dir).map_err(|error| ScanError::Failed(UiMessage::new("tree.readDirectory").arg("error", error)))?;
     let mut entries = Vec::new();
     let mut bytes = path_cost(dir);
     let resolved_dir = dir.canonicalize().ok();
     let through_link = resolved_dir.as_ref().is_some_and(|resolved| resolved != dir);
     for item in iter {
         check_cancel(cancel)?;
-        let item = item.map_err(|error| ScanError::Failed(format!("读取目录项失败：{error}")))?;
+        let item = item.map_err(|error| ScanError::Failed(UiMessage::new("tree.readEntry").arg("error", error)))?;
         let raw_name = item.file_name().to_string_lossy().into_owned();
         let path = item.path();
-        let kind = item.file_type().map_err(|error| ScanError::Failed(format!("读取目录项类型失败：{error}")))?;
+        let kind = item.file_type().map_err(|error| ScanError::Failed(UiMessage::new("tree.readType").arg("error", error)))?;
         let linked = kind.is_symlink();
         let metadata = if linked { std::fs::metadata(&path).ok() } else { None };
         let is_dir = if linked { metadata.as_ref().is_some_and(|metadata| metadata.is_dir()) } else { kind.is_dir() };
@@ -334,7 +351,7 @@ pub fn scan_directory(root: &Path, dir: &Path, cancel: &AtomicBool) -> Result<Di
             .saturating_add(search_name.len())
             .saturating_add(std::mem::size_of::<Entry>() + 2 * std::mem::size_of::<Row>() + 64);
         if bytes > DIRECTORY_SNAPSHOT_BYTES {
-            return Err(ScanError::Failed("单个目录的文件树快照超过 16 MiB，无法完整显示。".into()));
+            return Err(ScanError::Failed(UiMessage::new("tree.snapshotBudget").arg("size", "16 MiB")));
         }
         entries.push((Entry { path, resolved_path, name, search_name, is_dir, has_children: false }, cyclic));
     }
@@ -347,7 +364,7 @@ pub fn scan_directory(root: &Path, dir: &Path, cancel: &AtomicBool) -> Result<Di
     Ok(DirectorySnapshot { entries: entries.into_iter().map(|(entry, _)| Arc::new(entry)).collect::<Vec<_>>().into(), bytes, unchanged_from: None })
 }
 
-fn has_visible_children(root: &Path, dir: &Path, rules: &IgnoreRules, cancel: &AtomicBool) -> Result<bool, ScanError> {
+fn has_visible_children(root: &Path, dir: &Path, rules: &IgnoreRules, cancel: &AtomicBool) -> Result<bool, ScanError<UiMessage>> {
     let iter = match std::fs::read_dir(dir) {
         Ok(iter) => iter,
         // 保留展开入口，让用户在展开时看到明确的读取错误。
@@ -386,7 +403,7 @@ struct IgnoreRules {
 }
 
 impl IgnoreRules {
-    fn load(root: &Path, dir: &Path) -> Result<Self, ScanError> {
+    fn load(root: &Path, dir: &Path) -> Result<Self, ScanError<UiMessage>> {
         let mut patterns: Vec<_> = [
             ".git/", ".hg/", ".svn/", "node_modules/", "target/", "dist/",
             "build/", "out/", "coverage/", ".next/", ".svelte-kit/", ".turbo/", ".cache/",
@@ -414,19 +431,19 @@ impl IgnoreRules {
     }
 }
 
-fn append_ignore_file(dir: &Path, patterns: &mut Vec<IgnorePattern>) -> Result<(), ScanError> {
+fn append_ignore_file(dir: &Path, patterns: &mut Vec<IgnorePattern>) -> Result<(), ScanError<UiMessage>> {
     let mut file = match std::fs::File::open(dir.join(".gitignore")) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(ScanError::Failed(format!("读取忽略规则失败：{error}"))),
+        Err(error) => return Err(ScanError::Failed(UiMessage::new("tree.readIgnore").arg("error", error))),
     };
     let mut bytes = Vec::new();
     file.by_ref().take(IGNORE_FILE_BYTES + 1).read_to_end(&mut bytes)
-        .map_err(|error| ScanError::Failed(format!("读取忽略规则失败：{error}")))?;
+        .map_err(|error| ScanError::Failed(UiMessage::new("tree.readIgnore").arg("error", error)))?;
     if bytes.len() as u64 > IGNORE_FILE_BYTES {
-        return Err(ScanError::Failed("忽略规则文件超过 256 KiB。".into()));
+        return Err(ScanError::Failed(UiMessage::new("tree.ignoreBudget").arg("size", "256 KiB")));
     }
-    let text = String::from_utf8(bytes).map_err(|error| ScanError::Failed(format!("忽略规则编码无效：{error}")))?;
+    let text = String::from_utf8(bytes).map_err(|error| ScanError::Failed(UiMessage::new("tree.ignoreEncoding").arg("error", error)))?;
     patterns.extend(text.lines().filter_map(parse_ignore));
     Ok(())
 }

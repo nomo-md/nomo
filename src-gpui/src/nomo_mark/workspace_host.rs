@@ -1,6 +1,7 @@
 //! 正式页面的文档宿主接口。正文和历史只在会话中，UI 只持有状态与有界窗口。
 use super::*;
 use crate::text_document::markdown_session::MarkdownStatus;
+use crate::ui::toolbar_i18n::ToolbarLocale;
 use gpui::{App, EventEmitter, FocusHandle};
 use std::path::PathBuf;
 
@@ -121,6 +122,14 @@ impl DocumentHost {
         self.path()
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "未命名".into())
+    }
+    pub(crate) fn display_title(&self, cx: &App) -> String {
+        if self.status().path.is_none() { ToolbarLocale::current(cx).app_text("document.untitled").into() }
+        else { self.title() }
+    }
+    pub(crate) fn title_message(&self) -> crate::ui::toolbar_i18n::UiMessage {
+        if self.status().path.is_none() { crate::ui::toolbar_i18n::UiMessage::new("document.untitled") }
+        else { crate::ui::toolbar_i18n::UiMessage::raw(self.title()) }
     }
     pub(crate) fn is_dirty(&self, cx: &App) -> bool {
         self.status().dirty || self.control.read(cx).host.pending_count() > 0
@@ -363,7 +372,7 @@ impl DocumentHost {
         cx.emit(DocumentEvent::Changed);
     }
     pub(crate) fn report(&mut self, error: ControlError, cx: &mut Context<Self>) {
-        self.message = error.to_string();
+        self.message = crate::ui::toolbar_i18n::ToolbarLocale::current(cx).error(&error);
         cx.emit(DocumentEvent::Failure(self.message.clone()));
         cx.notify();
     }
@@ -409,7 +418,7 @@ impl DocumentHost {
     }
     pub(crate) fn link_draft(&self,cx:&App)->Result<(EditTarget,crate::nomo_mark::link_edit::LinkDraft),ControlError> {
         let target=self.edit_target(cx)?;
-        if target.mode!=ViewMode::Semantic {return Err(ControlError::Unsupported("请先切换到语义编辑区再编辑链接".into()));}
+        if target.mode!=ViewMode::Semantic {return Err(ControlError::Unsupported(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text("host.linkSemantic").into()));}
         let draft=crate::nomo_mark::link_edit::LinkDraft::begin(&self.control.read(cx).host.parsed,target.selection)?;
         Ok((target,draft))
     }
@@ -529,12 +538,12 @@ impl Render for DocumentHost {
                     div()
                         .flex_1()
                         .text_color(theme.fg)
-                        .child(format!("修改尚未写入文档会话：{failure}")),
+                        .child(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_format("host.editPending", &[("error", &failure)])),
                 )
                 .child(
                     crate::ui::components::button(
                         "retry-document-edit",
-                        "重试保存修改",
+                        crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text("host.retryEdit"),
                         None,
                         crate::ui::components::ButtonKind::Secondary,
                         &theme,

@@ -1,5 +1,6 @@
 //! 第二阶段应用弹窗：共享模态、焦点和离场生命周期，布局按旧版组件分别绘制。
 use super::*;
+use crate::ui::toolbar_i18n::UiMessage;
 use std::sync::Arc;
 
 pub(super) const REMEMBER: usize = 1 << 16;
@@ -7,20 +8,20 @@ pub(super) const REMEMBER: usize = 1 << 16;
 pub(crate) enum SecondaryKind { External, Folder, Close, Recovery, Update, UpdateSuccess }
 #[derive(Clone, Copy)]
 pub(crate) enum Tone { Normal, Primary, Accent, TextAccent, Quiet, Warning, Danger, DangerSoft }
-pub(crate) struct SecondaryAction { pub label: String, pub icon: IconName, pub tone: Tone }
+pub(crate) struct SecondaryAction { pub label: UiMessage, pub icon: IconName, pub tone: Tone }
 impl SecondaryAction {
-    pub(crate) fn new(label: impl Into<String>, icon: IconName, tone: Tone) -> Self { Self { label: label.into(), icon, tone } }
+    pub(crate) fn new(label: impl Into<UiMessage>, icon: IconName, tone: Tone) -> Self { Self { label: label.into(), icon, tone } }
 }
 pub(crate) struct SecondaryDialog {
     pub kind: SecondaryKind,
-    pub title: String,
-    pub message: String,
-    pub detail: Option<String>,
+    pub title: UiMessage,
+    pub message: UiMessage,
+    pub detail: Option<UiMessage>,
     pub notes: Option<String>,
     pub actions: Vec<SecondaryAction>,
     pub cancel: usize,
-    pub remember: Option<String>,
-    pub leading: Vec<String>,
+    pub remember: Option<UiMessage>,
+    pub leading: Vec<UiMessage>,
 }
 impl SecondaryDialog {
     fn width(&self) -> f32 { match self.kind { SecondaryKind::External => 560.0, SecondaryKind::Folder => 420.0, SecondaryKind::Close | SecondaryKind::Recovery => 392.0, _ => 640.0 } }
@@ -32,8 +33,9 @@ pub(crate) struct Selection { pub index: usize, pub remember: bool }
 pub(crate) fn choose(dialog: SecondaryDialog, window: &mut Window, cx: &mut App) -> impl Future<Output=Selection> + use<> {
     let cancel = dialog.cancel;
     let response = if window.has_active_prompt() { None } else {
-        let actions: Vec<_> = dialog.actions.iter().enumerate().map(|(index, action)| if index == cancel { PromptButton::cancel(action.label.clone()) } else { PromptButton::new(action.label.clone()) }).collect();
-        let title = dialog.title.clone();
+        let locale = ToolbarLocale::current(cx);
+        let actions: Vec<_> = dialog.actions.iter().enumerate().map(|(index, action)| if index == cancel { PromptButton::cancel(action.label.render(locale)) } else { PromptButton::new(action.label.render(locale)) }).collect();
+        let title = dialog.title.render(locale);
         cx.global_mut::<NextPrompt>().0 = Some(DialogKind::Secondary(dialog));
         Some(window.prompt(PromptLevel::Info, &title, None, &actions, cx))
     };
@@ -76,20 +78,21 @@ impl Confirmation {
         let border=if solid{color}else if accent{motion::color(theme.border,color,0.42)}else{theme.border};
         let hover = self.hover[index].value();
         let update = matches!(dialog.kind, SecondaryKind::Update | SecondaryKind::UpdateSuccess);
-        let mut button = div().id(("confirmation-action", index)).relative().min_w_0().h(px(if update { 32.0 } else { 36.0 }))
+        let mut button = div().id(("confirmation-action", index)).relative().min_w_0().min_h(px(if update { 32.0 } else { 36.0 })).py(px(6.0))
             .px(px(if update { 13.0 } else { 10.0 })).flex().items_center().justify_center().gap(px(6.0))
             .rounded(px(if update { 7.0 } else { 4.0 })).border_1().border_color(if solid{border}else{motion::color(border,if accent{color}else{motion::color(theme.border,theme.fg,0.18)},hover)})
             .bg(if solid { background } else { motion::color(background, if accent{motion::color(theme.surface,color,0.16)}else{theme.hover}, hover) })
             .text_color(foreground).text_size(px(if update {12.0}else if dialog.kind==SecondaryKind::Folder{13.0}else{12.5})).cursor_pointer()
             .opacity(if solid { 1.0 - 0.1 * hover } else { 1.0 })
             .on_hover(cx.listener(move |dialog, hovered, window, cx| { dialog.hover[index].set(*hovered, reduced_motion(cx), Duration::from_millis(140)); cx.notify(); window.refresh(); }))
-            .when(dialog.kind!=SecondaryKind::Folder,|el|el.child(icon(action.icon,15.0,foreground))).child(div().overflow_hidden().whitespace_nowrap().child(action.label.clone()))
+            .when(dialog.kind!=SecondaryKind::Folder,|el|el.child(icon(action.icon,15.0,foreground))).child(div().min_w_0().line_height(relative(1.35)).child(action.label.render(ToolbarLocale::current(cx))))
             .on_click(cx.listener(move |dialog, _, _, cx| { dialog.respond(index, cx); cx.stop_propagation(); }));
         if self.keyboard_choice == Some(index) { button = button.child(div().absolute().top(px(-4.0)).bottom(px(-4.0)).left(px(-4.0)).right(px(-4.0)).rounded(px(6.0)).border_2().border_color(theme.accent)); }
         button
     }
 
     pub(super) fn secondary_panel(&self, dialog: &SecondaryDialog, theme: &Theme, viewport: gpui::Size<gpui::Pixels>, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let locale = ToolbarLocale::current(cx);
         let update = matches!(dialog.kind, SecondaryKind::Update | SecondaryKind::UpdateSuccess);
         let folder = dialog.kind == SecondaryKind::Folder;
         let recovery = dialog.kind == SecondaryKind::Recovery;
@@ -98,38 +101,43 @@ impl Confirmation {
             .rounded(px(if update { 14.0 } else { 8.0 })).border_1().border_color(theme.border).bg(if update { theme.surface } else { theme.app_bg })
             .shadow(vec![BoxShadow { color: gpui::black().opacity(if theme.dark { 0.42 } else { 0.22 }), offset: point(px(0.0), px(20.0)), blur_radius: px(60.0), spread_radius: px(0.0), inset: false }])
             .on_click(|_, _, cx| cx.stop_propagation());
-        let title = div().text_size(px(if update { 19.0 } else { 15.0 })).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme.heading).child(dialog.title.clone());
+        let title = div().text_size(px(if update { 19.0 } else { 15.0 })).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme.heading).child(dialog.title.render(locale));
         if folder {
             panel = panel.p(px(24.0)).child(title)
                 .child(div().mt(px(8.0)).mb(px(20.0)).text_size(px(12.0)).text_color(theme.muted)
-                    .font_family(crate::theme::font_for(crate::theme::Family::Mono, false, false).family).child(dialog.message.clone()));
+                    .font_family(crate::theme::font_for(crate::theme::Family::Mono, false, false).family).child(dialog.message.render(locale)));
         } else {
             let padding = if update { 22.0 } else { 18.0 };
             let badge=div().size(px(if update {48.0}else{34.0})).flex_none().flex().items_center().justify_center()
                 .rounded(px(if update {11.0}else{4.0})).bg(accent.opacity(0.12))
                 .when(update,|el|el.child(gpui::img(crate::ui::updates::app_mark(theme.dark)).size(px(48.0))))
                 .when(!update,|el|el.child(icon(if dialog.kind==SecondaryKind::External||recovery {IconName::AlertTriangle}else{IconName::Info},18.0,accent)));
-            let copy=div().flex_1().min_w_0().child(title).child(div().mt(px(4.0)).text_size(px(if update {11.0}else{12.5})).line_height(relative(1.5)).text_color(theme.muted).child(dialog.message.clone()));
+            let copy=div().flex_1().min_w_0().child(title).child(div().mt(px(4.0)).text_size(px(if update {11.0}else{12.5})).line_height(relative(1.5)).text_color(theme.muted).child(dialog.message.render(locale)));
             let header=div().flex().flex_none().items_start().gap(px(if update {14.0}else{12.0})).p(px(padding)).when(update,|el|el.pt(px(20.0)).pb(px(18.0)))
                 .when(update,|el|el.border_b_1().border_color(theme.border)).child(badge).child(copy)
                 .when(update,|el|el.child(div().id("application-dialog-close").size(px(30.0)).cursor_pointer().flex_none().flex().items_center().justify_center().rounded(px(7.0)).hover(|style|style.bg(theme.hover)).when(self.keyboard_choice==Some(self.actions.len()),|el|el.border_2().border_color(theme.accent)).child(icon(IconName::Close,16.0,theme.muted))
                     .on_click(cx.listener(|dialog,_,_,cx|{if let Some(cancel)=dialog.cancel_index(){dialog.respond(cancel,cx);}cx.stop_propagation();}))));
             panel=panel.child(header);
         }
-        if !update {if let Some(detail) = &dialog.detail { panel = panel.child(div().mx(px(18.0)).mb(px(12.0)).p(px(10.0)).rounded(px(4.0)).bg(theme.surface).text_size(px(12.0)).text_color(theme.muted).child(detail.clone())); }}
+        if !update {if let Some(detail) = &dialog.detail { panel = panel.child(div().mx(px(18.0)).mb(px(12.0)).p(px(10.0)).rounded(px(4.0)).bg(theme.surface).text_size(px(12.0)).text_color(theme.muted).child(detail.render(locale))); }}
         if dialog.notes.is_some() {
             // 发布说明有 64 KiB 输入上限；这里不创建文档会话或正文渲染镜像。
             let mut links=0usize;
             let focused=self.keyboard_choice.and_then(|index|index.checked_sub(self.actions.len()+1));
             let paragraphs=self.release_notes.iter().enumerate().map(|(index,block)|{let within=focused.and_then(|index|index.checked_sub(links)).filter(|index|*index<block.link_count());links+=block.link_count();block.render(index,theme,within)}).collect::<Vec<_>>();
-            panel = panel.child(div().id("release-notes-scroll").min_h_0().max_h((viewport.height - px(300.0)).max(px(80.0))).overflow_y_scroll().track_scroll(&self.release_scroll).p(px(22.0)).children(paragraphs));
+            panel = panel.child(div().id("release-notes-scroll").min_h_0().max_h((viewport.height - px(300.0)).max(px(80.0))).overflow_y_scroll().track_scroll(&self.release_scroll).p(px(22.0)).children(paragraphs)
+                .when(self.release_notes.is_empty(), |el| el.child(div().text_size(px(13.0)).text_color(theme.muted).child(locale.text("softwareUpdateReleaseFallback")))));
         }
         let columns = if dialog.kind == SecondaryKind::External { if viewport.width <= px(400.0) {1} else if viewport.width <= px(650.0) {2} else {4} }
             else if dialog.kind == SecondaryKind::Close && viewport.width <= px(460.0) {1} else {dialog.actions.len().max(1)};
+        let available = f32::from(viewport.width).min(dialog.width()) - 72.0;
+        let widest = dialog.actions.iter().skip(dialog.leading.len()).map(|action| action.label.render(locale).chars()
+            .map(|ch| if ch.is_ascii() { 6.5 } else { 12.5 }).sum::<f32>() + 46.0).fold(1.0_f32, f32::max);
+        let columns = columns.min(((available / widest).floor() as usize).max(1));
         let mut actions = div().flex().flex_col().flex_none().gap(px(10.0));
         for (index,path) in dialog.leading.iter().enumerate() {
             panel=panel.child(self.secondary_action(dialog,index,theme,cx).h_auto().min_h(px(36.0)).mb(px(10.0)).py(px(8.0)).flex_col().items_start()
-                .child(div().text_size(px(12.0)).text_color(theme.muted).child(path.clone())));
+                .child(div().text_size(px(12.0)).text_color(theme.muted).child(path.render(locale))));
         }
         for indexes in (dialog.leading.len()..dialog.actions.len()).collect::<Vec<_>>().chunks(columns) {
             actions = actions.child(div().flex().gap(px(10.0)).children(indexes.iter().map(|&index| self.secondary_action(dialog,index,theme,cx).flex_1())));
@@ -138,14 +146,14 @@ impl Confirmation {
             .when(update, |el| el.border_t_1().border_color(theme.border).pt(px(14.0))).child(actions);
         if update {footer=div().flex_none().px(px(22.0)).py(px(14.0)).border_t_1().border_color(theme.border).flex().items_center().gap(px(16.0))
             .when(viewport.width<=px(520.0),|el|el.flex_col().items_start())
-            .child(div().flex_1().text_size(px(11.0)).line_height(relative(1.5)).text_color(theme.muted).children(dialog.detail.clone()))
-            .child(div().flex().gap(px(8.0)).flex_none().children((0..dialog.actions.len()).map(|index|self.secondary_action(dialog,index,theme,cx))));}
+            .child(div().flex_1().text_size(px(11.0)).line_height(relative(1.5)).text_color(theme.muted).children(dialog.detail.as_ref().map(|detail| detail.render(locale))))
+            .child(div().flex().flex_wrap().min_w_0().justify_end().gap(px(8.0)).children((0..dialog.actions.len()).map(|index|self.secondary_action(dialog,index,theme,cx))));}
         if let Some(label) = &dialog.remember {
             footer = footer.child(div().id("dialog-remember").relative().mt(px(16.0)).flex().items_center().gap(px(8.0)).text_size(px(12.0)).text_color(theme.muted).cursor_pointer()
                 .child(div().relative().size(px(16.0)).flex_none().flex().items_center().justify_center().rounded(px(4.0)).border_1().border_color(if self.remember {theme.accent} else {theme.border}).bg(if self.remember {theme.accent} else {theme.app_bg})
                     .when(self.remember, |el| el.child(icon(IconName::Check,12.0,rgb(0xffffff).into())))
                     .when(self.keyboard_choice==Some(self.actions.len()),|el|el.child(div().absolute().top(px(-4.0)).bottom(px(-4.0)).left(px(-4.0)).right(px(-4.0)).rounded(px(6.0)).border_2().border_color(theme.accent))))
-                .child(label.clone())
+                .child(label.render(locale))
                 .on_click(cx.listener(|dialog,_,window,cx| { dialog.remember=!dialog.remember; cx.notify(); window.refresh(); cx.stop_propagation(); })));
         }
         panel.child(footer)

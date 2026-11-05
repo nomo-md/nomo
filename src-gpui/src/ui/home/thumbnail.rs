@@ -1,5 +1,6 @@
 //! 固定尺寸的文档页首缩略图。后台串行读取 32 KiB，复用原生 SVG/图片栅格化，不创建编辑器。
 use super::library;
+use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
 use image::{ImageEncoder, RgbaImage};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use sha2::{Digest, Sha256};
@@ -21,6 +22,7 @@ pub(super) struct Thumbnail {
 /// 使用稳定的目标主题，避免外壳颜色过渡的每一帧都重新生成位图。
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Palette {
+    locale: ToolbarLocale,
     dark: bool,
     surface: u32,
     fg: u32,
@@ -42,7 +44,7 @@ pub(super) struct Palette {
 }
 
 impl Palette {
-    pub(super) fn new(theme: &crate::theme::Theme) -> Self {
+    pub(super) fn new(theme: &crate::theme::Theme, locale: ToolbarLocale) -> Self {
         let color = |value: gpui::Hsla| {
             let rgba = value.to_rgb();
             ((rgba.r * 255.0).round() as u32) << 16
@@ -50,7 +52,7 @@ impl Palette {
                 | (rgba.b * 255.0).round() as u32
         };
         Self {
-            dark: theme.dark, surface: color(theme.surface), fg: color(theme.fg),
+            locale, dark: theme.dark, surface: color(theme.surface), fg: color(theme.fg),
             heading: color(theme.heading), muted: color(theme.muted), border: color(theme.border),
             quote_bg: color(theme.code_bg), quote_fg: color(theme.quote_fg), quote_border: color(theme.quote_border),
             code_bg: color(theme.code_bg), code_fg: color(theme.code_fg),
@@ -62,6 +64,7 @@ impl Palette {
     }
 
     fn fingerprint(&self, hash: &mut Sha256) {
+        hash.update(self.locale.code().as_bytes());
         hash.update([u8::from(self.dark)]);
         for color in [self.surface, self.fg, self.heading, self.muted, self.border, self.quote_bg,
             self.quote_fg, self.quote_border, self.code_bg, self.code_fg, self.table_bg, self.table_border,
@@ -116,16 +119,16 @@ fn check(cancel: &AtomicBool) -> Result<(), String> {
     if cancel.load(Ordering::Acquire) { Err("预览请求已取消".into()) } else { Ok(()) }
 }
 
-pub(super) fn load(path: &Path, palette: &Palette, known: Option<&str>, cancel: &AtomicBool) -> Result<Option<Thumbnail>, String> {
+pub(super) fn load(path: &Path, palette: &Palette, known: Option<&str>, cancel: &AtomicBool) -> Result<Option<Thumbnail>, UiMessage> {
     check(cancel)?;
-    if !std::fs::metadata(path).map_err(|_| "文件已移动或无法访问")?.is_file() { return Err("此记录已不再是文件".into()); }
+    if !std::fs::metadata(path).map_err(|_| UiMessage::new("preview.inaccessible"))?.is_file() { return Err(UiMessage::new("preview.notFile")); }
     let file = File::open(path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => "文件已移动或删除".to_string(),
-        std::io::ErrorKind::PermissionDenied => "没有读取此文件的权限".to_string(),
-        _ => format!("无法读取文件：{e}"),
+        std::io::ErrorKind::NotFound => UiMessage::new("preview.missing"),
+        std::io::ErrorKind::PermissionDenied => UiMessage::new("preview.permission"),
+        _ => UiMessage::new("preview.readFailed").arg("error", e),
     })?;
     let metadata = file.metadata().map_err(|e| e.to_string())?;
-    if !metadata.is_file() { return Err("此记录已不再是文件".into()); }
+    if !metadata.is_file() { return Err(UiMessage::new("preview.notFile")); }
     let mut bytes = Vec::new();
     file.take(HEAD_BYTES).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     check(cancel)?;
@@ -355,7 +358,7 @@ fn render(blocks: &[Block], palette: &Palette, cancel: &AtomicBool) -> Result<Rg
     let mut y = 0.0f32;
     let mut assets = Vec::new();
     let mut rich_assets = 0;
-    if blocks.is_empty() { svg.push_str(&format!("<text x=\"0\" y=\"24\" font-size=\"18\" fill=\"#{:06x}\">暂无正文</text>", palette.muted)); }
+    if blocks.is_empty() { svg.push_str(&format!("<text x=\"0\" y=\"24\" font-size=\"18\" fill=\"#{:06x}\">{}</text>", palette.muted, xml(palette.locale.app_text("preview.empty")))); }
     for block in blocks {
         check(cancel)?;
         if y > PAGE_HEIGHT - 24.0 { break; }
@@ -392,17 +395,17 @@ fn render(blocks: &[Block], palette: &Palette, cancel: &AtomicBool) -> Result<Rg
             Block::Rule => { y += 8.0; svg.push_str(&format!("<path d=\"M0 {y}H{PAGE_WIDTH}\" stroke=\"#{:06x}\"/>",palette.border)); y += 16.0; },
             Block::Image { .. } | Block::Diagram(_) | Block::Math(_) => {
                 let (asset, label) = match block {
-                    Block::Image { path, alt } => (path.as_ref().ok_or_else(|| "非本地图片".into()).and_then(|path| image_asset(path)), if alt.is_empty() { "图片".to_string() } else { alt.clone() }),
+                    Block::Image { path, alt } => (path.as_ref().ok_or_else(|| "非本地图片".into()).and_then(|path| image_asset(path)), if alt.is_empty() { palette.locale.app_text("preview.image").to_string() } else { alt.clone() }),
                     Block::Diagram(source) if rich_assets < 2 && source.len() <= 4096 => {
                         rich_assets += 1;
-                        (crate::embeds::thumbnail_mermaid(source,palette.dark).and_then(|svg| raster_svg(&svg,WIDTH,144,palette)), "Mermaid 图表".into())
+                        (crate::embeds::thumbnail_mermaid(source,palette.dark).and_then(|svg| raster_svg(&svg,WIDTH,144,palette)), palette.locale.app_text("preview.diagram").into())
                     },
                     Block::Math(source) if rich_assets < 2 && source.len() <= 512 => {
                         rich_assets += 1;
                         let color = [(palette.fg >> 16) as u8, (palette.fg >> 8) as u8, palette.fg as u8];
-                        (crate::embeds::math_svg(source,true,color).and_then(|(svg,_)| raster_svg(&svg,WIDTH,96,palette)), "公式".into())
+                        (crate::embeds::math_svg(source,true,color).and_then(|(svg,_)| raster_svg(&svg,WIDTH,96,palette)), palette.locale.app_text("preview.formula").into())
                     },
-                    _ => (Err("资源超过预览预算".into()), "图表 / 公式".into()),
+                    _ => (Err("资源超过预览预算".into()), palette.locale.app_text("preview.rich").into()),
                 };
                 check(cancel)?;
                 match asset {
@@ -413,7 +416,7 @@ fn render(blocks: &[Block], palette: &Palette, cancel: &AtomicBool) -> Result<Rg
                         y += height + 16.0;
                     },
                     Err(_) => {
-                        svg.push_str(&format!("<rect x=\"0\" y=\"{y}\" width=\"{PAGE_WIDTH}\" height=\"64\" rx=\"8\" fill=\"#{:06x}\"/><text x=\"12\" y=\"{}\" font-size=\"16\" fill=\"#{:06x}\">{}</text>",palette.code_bg,y+37.0,palette.muted,xml(&format!("{} · 打开文档查看",label.chars().take(20).collect::<String>()))));
+                        svg.push_str(&format!("<rect x=\"0\" y=\"{y}\" width=\"{PAGE_WIDTH}\" height=\"64\" rx=\"8\" fill=\"#{:06x}\"/><text x=\"12\" y=\"{}\" font-size=\"16\" fill=\"#{:06x}\">{}</text>",palette.code_bg,y+37.0,palette.muted,xml(&palette.locale.app_format("preview.openDocument", &[("label", &label.chars().take(20).collect::<String>())]))));
                         y += 80.0;
                     },
                 }

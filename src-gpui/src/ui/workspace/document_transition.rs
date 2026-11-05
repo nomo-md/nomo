@@ -43,7 +43,7 @@ impl Workspace {
                             },
                             Err(error) => {
                                 workspace.pending_document_transition = None;
-                                workspace.failure_notice = Some(error.to_string().into());
+                                workspace.failure_notice = Some(ToolbarLocale::current(cx).app_format("workspace.imeFailed", &[("error", &error)]).into());
                                 workspace.cancel_close(cx);
                                 cx.notify();
                             }
@@ -124,7 +124,7 @@ fn native_composition(window: &Window) -> Option<isize> {
 }
 
 #[cfg(target_os = "windows")]
-fn complete_native_composition(handle: isize) -> Result<(), ControlError> {
+fn complete_native_composition(handle: isize) -> Result<(), String> {
     use windows::Win32::{Foundation::HWND, UI::Input::{Ime::*, KeyboardAndMouse::GetFocus}};
     let hwnd = HWND(handle as *mut _);
     unsafe {
@@ -135,6 +135,6 @@ fn complete_native_composition(handle: isize) -> Result<(), ControlError> {
             ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_COMPLETE, 0).ok()
         } else { Ok(()) };
         let _ = ImmReleaseContext(hwnd, context);
-        result.map_err(|error| ControlError::HostFailure(format!("输入法确认失败：{error}")))
+        result.map_err(|error| error.to_string())
     }
 }

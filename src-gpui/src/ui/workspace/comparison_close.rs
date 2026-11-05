@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::toolbar_i18n::ToolbarLocale;
 
 pub(in crate::ui::workspace) struct PairClose {
     pair: Pair,
@@ -96,7 +97,7 @@ impl Workspace {
                 return;
             }
             self.close_prompt = true;
-            let response = dialogs::confirm_save(&doc.read(cx).title(), window, cx);
+            let response = dialogs::confirm_save(doc.read(cx).title_message(), window, cx);
             cx.spawn_in(window, async move |this, cx| {
                 let choice = response.await;
                 let _ = this.update_in(cx, |w, win, cx| {
@@ -142,7 +143,7 @@ impl Workspace {
                 || (!discard && host.is_dirty(cx))
             {
                 self.failure_notice =
-                    Some("组合文档有新修改或操作尚未完成，已保留两篇文档。".into());
+                    Some(ToolbarLocale::current(cx).app_text("comparison.changed").into());
                 self.cancel_close(cx);
                 cx.notify();
                 return;
@@ -229,7 +230,7 @@ impl Workspace {
         }
         if doc.read(cx).is_dirty(cx) {
             self.cancel_close(cx);
-            self.failure_notice = Some("保存期间有新修改，两篇文档保持打开。".into());
+            self.failure_notice = Some(ToolbarLocale::current(cx).app_text("comparison.saveChanged").into());
             cx.notify();
             return;
         }

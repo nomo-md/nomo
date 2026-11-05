@@ -1,5 +1,6 @@
 //! 文档大纲浮层：界面只消费结构索引的有限页，不持有正文。
 use super::*;
+use crate::ui::toolbar_i18n::ToolbarLocale;
 use crate::nomo_mark::document_host::{OutlineLayout, OutlineSnapshot};
 
 const OUTLINE_ROW_HEIGHT: f32 = 32.0;
@@ -425,7 +426,7 @@ impl Workspace {
         let page = snapshot.clone();
         let theme = theme.clone();
         let rows: AnyElement = if count == 0 {
-            let text: String = if snapshot.error.is_some() { "大纲暂不可用".into() } else if snapshot.pending && !snapshot.complete { "正在加载大纲…".into() } else if snapshot.incomplete { "结构索引不完整，无法确认标题".into() } else { "当前文档还没有标题".into() };
+            let text: String = if snapshot.error.is_some() { ToolbarLocale::current(cx).app_text("outline.unavailable").into() } else if snapshot.pending && !snapshot.complete { ToolbarLocale::current(cx).app_text("outline.loading").into() } else if snapshot.incomplete { ToolbarLocale::current(cx).app_text("outline.incomplete").into() } else { ToolbarLocale::current(cx).app_text("outline.empty").into() };
             div().w_full().h(px(list_height)).px(px(OUTLINE_PADDING)).text_size(px(13.0)).text_color(theme.muted).child(text).into_any_element()
         } else {
             let ghosts: Vec<AnyElement> = animation.as_ref().map(|animation| {
@@ -446,7 +447,7 @@ impl Workspace {
                 cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
                     range.map(|index| {
                         let Some(heading) = page.row(index).cloned() else {
-                            return div().w_full().h(px(OUTLINE_ROW_HEIGHT)).text_color(theme.muted).child("加载中…").into_any_element();
+                            return div().w_full().h(px(OUTLINE_ROW_HEIGHT)).text_color(theme.muted).child(ToolbarLocale::current(cx).app_text("outline.loadingRow")).into_any_element();
                         };
                         let active = active == Some(heading.byte);
                         let active_weight = active_motion.as_ref().map_or(if active { 1.0 } else { 0.0 }, |animation| animation.weight(heading.byte));
@@ -460,8 +461,8 @@ impl Workspace {
                         } else { (0.0, 1.0) };
                         let hover = row_hovers.iter().find(|(hovered,_)| hovered == &key).map_or(0.0, |(_, value)| *value);
                         let color = motion::color(motion::color(theme.muted, theme.accent_strong, hover), theme.accent_strong, active_weight);
-                        let title = if heading.text.is_empty() { "（空标题）".to_string() } else { heading.text.clone() };
-                        let title_hint = format!("{} · 第 {} 行", title, heading.line);
+                        let title = if heading.text.is_empty() { ToolbarLocale::current(cx).app_text("outline.emptyHeading").to_string() } else { heading.text.clone() };
+                        let title_hint = ToolbarLocale::current(cx).app_format("outline.headingLine", &[("title", &title), ("line", &heading.line.to_string())]);
                         let (number, rest) = split_number(&title);
                         let number = number.to_string(); let rest = rest.to_string();
                         let fold_heading = heading.clone(); let goto_heading = heading.clone(); let menu_heading = heading.clone();
@@ -479,7 +480,7 @@ impl Workspace {
                                 from + (target - from) * arrow_progress
                             });
                             div().id((if heading.collapsed { "outline-fold-collapsed" } else { "outline-fold-expanded" }, index)).w(px(16.0)).h(px(24.0)).flex_none().flex().items_center().justify_center()
-                                .cursor_pointer().tooltip(tooltip(if heading.collapsed { "展开标题" } else { "收起标题" }))
+                                .cursor_pointer().tooltip(tooltip(if heading.collapsed { ToolbarLocale::current(cx).app_text("outline.expandHeading") } else { ToolbarLocale::current(cx).app_text("outline.collapseHeading") }))
                                 .child(icon(IconName::ChevronDown, 13.0, color).with_transformation(Transformation::rotate(radians(angle))))
                                 .on_mouse_down(MouseButton::Left, cx.listener(|workspace, _, _, cx| { workspace.outline_ui.keyboard_focus_visible = false; cx.stop_propagation(); cx.notify(); }))
                                 .on_click(cx.listener(move |workspace, _, _, cx| { cx.stop_propagation(); workspace.toggle_outline_heading(&fold_heading, cx); }))
@@ -537,7 +538,7 @@ impl Workspace {
         let bulk_border = motion::color(theme.border, motion::color(theme.border, theme.accent, 0.38), bulk_hover);
         let bulk = div().id(if bulk_expand { "outline-bulk-expand" } else { "outline-bulk-default" }).size(px(28.0)).flex_none().flex().items_center().justify_center().rounded(px(4.0))
             .border_1().border_color(bulk_border).bg(theme.accent.opacity(0.08 * bulk_hover)).cursor_pointer()
-            .tooltip(tooltip(if bulk_expand { "全部展开" } else { "恢复默认展开层级" }))
+            .tooltip(tooltip(if bulk_expand { ToolbarLocale::current(cx).app_text("outline.expandAll") } else { ToolbarLocale::current(cx).app_text("outline.defaultLevel") }))
             .child(icon(if bulk_expand { IconName::ChevronsUpDown } else { IconName::ChevronsDownUp }, 15.0,
                 motion::color(theme.muted, theme.accent_strong, bulk_hover)))
             .on_hover(cx.listener(|workspace, hovered: &bool, _, cx| {
@@ -547,7 +548,7 @@ impl Workspace {
             .on_click(cx.listener(move |workspace, _, _, cx| { cx.stop_propagation(); let level = if bulk_expand { 6 } else { cx.global::<Settings>().outline_level }; workspace.set_outline_level_animated(level,cx); }));
         let header = div().h(px(54.0)).px(px(14.0)).flex().items_center().justify_between()
             .cursor(outline_drag_cursor(false))
-            .child(div().min_w_0().truncate().text_size(px(14.0)).font_weight(FontWeight::EXTRA_BOLD).text_color(theme.heading).child("文档大纲"))
+            .child(div().min_w_0().truncate().text_size(px(14.0)).font_weight(FontWeight::EXTRA_BOLD).text_color(theme.heading).child(ToolbarLocale::current(cx).app_text("outline.title")))
             .when(snapshot.has_expandable, |el|el.child(bulk))
             .on_mouse_down(MouseButton::Left, cx.listener(move |workspace, event: &gpui::MouseDownEvent, window, cx| {
                 if !workspace.outline_ui.showing { return; }
@@ -561,9 +562,9 @@ impl Workspace {
             }));
         let notice = if let Some(error) = snapshot.error.clone() {
             Some(div().px(px(14.0)).pb(px(6.0)).text_size(px(11.0)).text_color(theme.callout_caution)
-                .child(error).child(div().id("outline-retry").cursor_pointer().text_color(theme.accent_strong).child("重试")
+                .child(error).child(div().id("outline-retry").cursor_pointer().text_color(theme.accent_strong).child(ToolbarLocale::current(cx).app_text("outline.retry"))
                     .on_click(cx.listener(|workspace, _, _, cx| { if let Some(doc) = workspace.document() { doc.update(cx, |host, cx| host.retry_outline(cx)); } }))))
-        } else { snapshot.incomplete.then(|| div().px(px(14.0)).pb(px(6.0)).text_size(px(11.0)).text_color(theme.muted).child("部分结构尚未识别")) };
+        } else { snapshot.incomplete.then(|| div().px(px(14.0)).pb(px(6.0)).text_size(px(11.0)).text_color(theme.muted).child(ToolbarLocale::current(cx).app_text("outline.partial"))) };
         let shadows = vec![
             gpui::BoxShadow { inset: false, color: gpui::rgba(if theme.dark { 0x00000033 } else { 0x16202c0f }).into(),
                 offset: gpui::point(px(0.0), px(0.0)), blur_radius: px(24.0), spread_radius: px(0.0) },
@@ -684,7 +685,7 @@ impl Workspace {
                 window.on_next_frame(move |_,cx| {let _=weak.update(cx,|workspace,_|workspace.outline_ui.suppress_click=false);});
                 if let Some(target)=drag.target {
                     if drag.valid {if let Some(doc)=self.document() {doc.update(cx,|host,cx|host.move_outline_section(&drag.source,&target,drag.placement,drag.revision,cx));}}
-                    else if target.byte != drag.source.byte {self.notice=Some("不能把章节移动到子章节或 H6 内部。".into());}
+                    else if target.byte != drag.source.byte {self.notice=Some(ToolbarLocale::current(cx).app_text("outline.moveBlocked").into());}
                 }
                 cx.notify();
             }
@@ -730,10 +731,10 @@ impl Workspace {
     pub(super) fn render_outline_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.outline_ui.menu.as_ref()?; let heading = menu.heading.clone(); let revision = menu.revision;
         let mut items = Vec::new();
-        if heading.is_some() { items.extend([("jump", "跳转到标题"), ("copy", "复制标题")]); }
-        if heading.as_ref().is_some_and(|h| h.has_children) { items.push(("fold", "展开／收起")); }
-        items.extend([("expand", "全部展开"), ("collapse", "全部收起"), ("default", "恢复默认展开层级"), ("reset", "恢复大纲默认位置"), ("hide", "隐藏大纲")]);
-        let mut panel = div().id("outline-context-menu").w(px(190.0)).py(px(5.0)).flex().flex_col().rounded(px(8.0))
+        if heading.is_some() { items.extend([("jump", ToolbarLocale::current(cx).app_text("outline.jump")), ("copy", ToolbarLocale::current(cx).app_text("outline.copy"))]); }
+        if heading.as_ref().is_some_and(|h| h.has_children) { items.push(("fold", ToolbarLocale::current(cx).app_text("outline.toggle"))); }
+        items.extend([("expand", ToolbarLocale::current(cx).app_text("outline.expandAll")), ("collapse", ToolbarLocale::current(cx).app_text("outline.collapseAll")), ("default", ToolbarLocale::current(cx).app_text("outline.defaultLevel")), ("reset", ToolbarLocale::current(cx).app_text("outline.resetPosition")), ("hide", ToolbarLocale::current(cx).app_text("outline.hide"))]);
+        let mut panel = div().id("outline-context-menu").w(px(if ToolbarLocale::current(cx).is_chinese() { 190.0 } else { 280.0 })).py(px(5.0)).flex().flex_col().rounded(px(8.0))
             .bg(theme.surface).border_1().border_color(theme.border).shadow_lg().occlude()
             .on_mouse_down_out(cx.listener(|workspace, _, _, cx| { workspace.outline_ui.menu=None; cx.notify(); }));
         for (index, (action, label)) in items.into_iter().enumerate() {

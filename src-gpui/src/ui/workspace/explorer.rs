@@ -212,7 +212,7 @@ impl Workspace {
         self.explorer.scan = Some(TreeScan { path: path.clone(), cancel: cancel.clone() });
         let scan_path = path.clone();
         let task = cx.background_executor().spawn(async move {
-            let mut snapshot = file_tree::scan_directory(&root, &scan_path, &cancel)?;
+            let mut snapshot = file_tree::scan_directory_message(&root, &scan_path, &cancel)?;
             snapshot.compare_previous(previous);
             Ok(snapshot)
         });
@@ -233,16 +233,16 @@ impl Workspace {
                 if let Some(tree) = &mut workspace.tree {
                     match result {
                         Ok(snapshot) => {
-                            if let Err(error) = tree.complete_load(&path, snapshot) {
+                            if let Err(error) = tree.complete_load_message(&path, snapshot) {
                                 failed = true;
-                                workspace.notice = Some(format!("{}：{error}", path.display()).into());
+                                workspace.notice = Some(ToolbarLocale::current(cx).app_format("tree.pathFailure", &[("path", &path.display().to_string()), ("error", &error.render(ToolbarLocale::current(cx)))]).into());
                             }
                         }
                         Err(ScanError::Cancelled) => tree.cancel_load(&path),
                         Err(ScanError::Failed(error)) => {
                             failed = true;
                             tree.cancel_load(&path);
-                            workspace.notice = Some(format!("{}：{error}", path.display()).into());
+                            workspace.notice = Some(ToolbarLocale::current(cx).app_format("tree.pathFailure", &[("path", &path.display().to_string()), ("error", &error.render(ToolbarLocale::current(cx)))]).into());
                         }
                     }
                 }

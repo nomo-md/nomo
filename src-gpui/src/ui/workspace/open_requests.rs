@@ -46,7 +46,7 @@ impl Workspace {
             || path.as_ref().is_some_and(|path| path.as_os_str().len() > 32 * 1024)
             || anchor.as_ref().is_some_and(|anchor| anchor.len() > 8192)
         {
-            self.failure_notice = Some("打开请求过多或路径过长，请分批打开。".into());
+            self.failure_notice = Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text("open.queueFull").into());
             cx.notify();
             return;
         }

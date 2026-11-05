@@ -1,5 +1,6 @@
 //! 恢复目录属于应用；主页不自动提示，取消不会删除资料或丢失再次进入的入口。
 use super::*;
+use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
 use super::application_dialogs::OpenSource;
 use crate::text_document::markdown_session::RecoveryCandidate;
 use crate::ui::dialogs::{SecondaryAction as A, SecondaryDialog, SecondaryKind, Tone};
@@ -19,8 +20,8 @@ impl Drop for RecoveryCatalog {
     fn drop(&mut self) {self.cancel.store(true,std::sync::atomic::Ordering::Release);}
 }
 
-fn dialog(title: &str, message: String, actions: Vec<A>, cancel: usize) -> SecondaryDialog {
-    SecondaryDialog {kind:SecondaryKind::Recovery,title:title.into(),message,actions,cancel,detail:None,notes:None,remember:None,leading:Vec::new()}
+fn dialog(title: UiMessage, message: UiMessage, actions: Vec<A>, cancel: usize) -> SecondaryDialog {
+    SecondaryDialog {kind:SecondaryKind::Recovery,title,message,actions,cancel,detail:None,notes:None,remember:None,leading:Vec::new()}
 }
 
 impl Workspace {
@@ -59,15 +60,20 @@ impl Workspace {
         if !self.leave_mini(window,cx) {return;}
         self.refresh_recovery_catalog(cx);
         let Some(catalog)=cx.try_global::<RecoveryCatalog>() else {return;};
-        if catalog.loading {self.notice=Some("正在检查恢复资料，请稍后重试。".into());cx.notify();return;}
-        if let Some(error)=&catalog.error {self.failure_notice=Some(format!("恢复资料检查失败：{error}").into());cx.notify();return;}
-        let candidates=catalog.candidates.iter().filter(|candidate|!catalog.busy.contains_key(&candidate.document_id)).cloned().collect::<Vec<_>>();
-        if candidates.is_empty() {self.notice=Some("没有待恢复的未保存文档。".into());cx.notify();return;}
+        if catalog.loading {self.notice=Some(ToolbarLocale::current(cx).app_text("recovery.loading").into());cx.notify();return;}
+        if let Some(error)=&catalog.error {self.failure_notice=Some(ToolbarLocale::current(cx).app_format("recovery.failed", &[("error", &error.to_string())]).into());cx.notify();return;}
+        let available=catalog.candidates.iter().filter(|candidate|!catalog.busy.contains_key(&candidate.document_id)).count();
+        let candidates=catalog.candidates.iter().filter(|candidate|!catalog.busy.contains_key(&candidate.document_id)).take(32).cloned().collect::<Vec<_>>();
+        if candidates.is_empty() {
+            self.notice=Some(ToolbarLocale::current(cx).app_text("recovery.empty").into());
+            cx.notify();return;
+        }
         let mut actions=candidates.iter().map(|candidate|A::new(candidate.label(),IconName::FileText,Tone::Normal)).collect::<Vec<_>>();
-        actions.push(A::new("稍后处理",IconName::Close,Tone::Normal));
-        let mut spec=dialog("恢复未保存文档","选择要处理的草稿；稍后处理会保留恢复资料。".into(),actions,candidates.len());
+        actions.push(A::new(UiMessage::new("recovery.later"),IconName::Close,Tone::Normal));
+        let mut spec=dialog(UiMessage::new("recovery.title"),UiMessage::new("recovery.choose").into(),actions,candidates.len());
+        if available>candidates.len() {spec.message=UiMessage::new("recovery.chooseMore").arg("shown",candidates.len()).arg("total",available);}
         spec.kind=SecondaryKind::Folder;
-        spec.leading=candidates.iter().map(|candidate|candidate.path.as_ref().map(|path|super::explorer_actions::display_tree_path(path)).unwrap_or_else(||"尚未保存到文件".into())).collect();
+        spec.leading=candidates.iter().map(|candidate|candidate.path.as_ref().map(|path|UiMessage::raw(super::explorer_actions::display_tree_path(path))).unwrap_or_else(||UiMessage::new("recovery.unsavedPath"))).collect();
         self.application_dialogs.busy=true;
         let response=dialogs::choose(spec,window,cx);
         cx.spawn_in(window,async move |this,cx| {
@@ -99,7 +105,7 @@ impl Workspace {
 
     fn choose_recovery_here(&mut self,candidate:RecoveryCandidate,window:&mut Window,cx:&mut Context<Self>) {
         if window.has_active_prompt() || self.application_dialogs.busy {return;}
-        if !self.opening.is_empty() {self.notice=Some("文档仍在打开，请稍后从恢复列表重试。".into());cx.notify();return;}
+        if !self.opening.is_empty() {self.notice=Some(ToolbarLocale::current(cx).app_text("recovery.opening").into());cx.notify();return;}
         if !self.leave_mini(window,cx) {return;}
         let owner=cx.entity().downgrade();
         let catalog=cx.global_mut::<RecoveryCatalog>();
@@ -107,12 +113,11 @@ impl Workspace {
         catalog.busy.insert(candidate.document_id.clone(),owner);
         catalog.offered.insert(candidate.document_id.clone());
         let named=candidate.path.is_some();
-        let message=if !candidate.verified {format!("{}\n保存状态尚未核实，可恢复后检查内容，原资料会保留到处理完成。",candidate.label())} else if candidate.conflict {format!("{}\n磁盘文件也发生了变化，请选择要保留的内容。",candidate.label())}
-            else {format!("{}\n发现尚未保存的内容。稍后处理会保留草稿，可从文件菜单再次进入。",candidate.label())};
-        let spec=dialog("恢复未保存文档",message,vec![
-            A::new("另存草稿",IconName::Save,Tone::Accent),A::new("恢复草稿",IconName::FileText,Tone::Primary),
-            A::new(if named {"使用磁盘"}else{"放弃草稿"},IconName::Trash2,if named {Tone::Normal}else{Tone::DangerSoft}),
-            A::new("稍后处理",IconName::Close,Tone::Normal),
+        let message=UiMessage::new(if !candidate.verified {"recovery.unverified"} else if candidate.conflict {"recovery.conflict"} else {"recovery.found"}).arg("name",candidate.label());
+        let spec=dialog(UiMessage::new("recovery.title"),message,vec![
+            A::new(UiMessage::new("recovery.saveAs"),IconName::Save,Tone::Accent),A::new(UiMessage::new("recovery.restore"),IconName::FileText,Tone::Primary),
+            A::new(if named {UiMessage::new("recovery.useDisk")}else{UiMessage::new("recovery.discard")},IconName::Trash2,if named {Tone::Normal}else{Tone::DangerSoft}),
+            A::new(UiMessage::new("recovery.later"),IconName::Close,Tone::Normal),
         ],3);
         self.application_dialogs.busy=true;
         let response=dialogs::choose(spec,window,cx);
@@ -126,7 +131,7 @@ impl Workspace {
                         let copy=choice.index==0;
                         let previous=(!copy).then(||workspace.tabs.iter().find(|tab|candidate.path.is_some()&&tab.document.read(cx).path()==candidate.path).map(|tab|tab.document.clone())).flatten();
                         if previous.as_ref().is_some_and(|document|document.read(cx).is_dirty(cx)) {
-                            workspace.failure_notice=Some("当前文档已有未保存修改，请先保存当前文档，或选择另存草稿。".into());cx.notify();return;
+                            workspace.failure_notice=Some(ToolbarLocale::current(cx).app_text("recovery.currentDirty").into());cx.notify();return;
                         }
                         let revision=previous.as_ref().map_or(0,|document|document.read(cx).status().revision);
                         let path=if copy {None}else{candidate.path.clone()};
@@ -138,7 +143,7 @@ impl Workspace {
                         let path=candidate.path.clone().expect("named recovery");
                         let previous=workspace.tabs.iter().find(|tab|tab.document.read(cx).path().as_ref()==Some(&path)).map(|tab|tab.document.clone());
                         if !path.is_file() || previous.as_ref().is_some_and(|document|document.read(cx).is_dirty(cx)) {
-                            workspace.failure_notice=Some("磁盘文件不可用或当前文档已有修改，恢复资料仍保留。".into());cx.notify();return;
+                            workspace.failure_notice=Some(ToolbarLocale::current(cx).app_text("recovery.diskUnavailable").into());cx.notify();return;
                         }
                         let revision=previous.as_ref().map_or(0,|document|document.read(cx).status().revision);
 
@@ -157,14 +162,15 @@ impl Workspace {
         let owner=cx.entity().downgrade();
         cx.global_mut::<RecoveryCatalog>().busy.insert(candidate.document_id.clone(),owner);
         self.application_dialogs.busy=true;
-        let response=dialogs::choose(dialog("放弃未保存草稿",format!("将删除“{}”的恢复资料，此操作无法撤销。",candidate.label()),vec![A::new("保留草稿",IconName::Close,Tone::Normal),A::new("放弃草稿",IconName::Trash2,Tone::Danger)],0),window,cx);
+        let message=UiMessage::new("recovery.discardPrompt").arg("name",candidate.label());
+        let response=dialogs::choose(dialog(UiMessage::new("recovery.discardTitle"),message,vec![A::new(UiMessage::new("recovery.keep"),IconName::Close,Tone::Normal),A::new(UiMessage::new("recovery.discard"),IconName::Trash2,Tone::Danger)],0),window,cx);
         cx.spawn_in(window,async move |this,cx| {
             let choice=response.await;
             let result=if choice.index==1 {let candidate=candidate.clone();Some(cx.background_executor().spawn(async move{manager.dismiss_recovery(&candidate)}).await)}else{None};
             let _=this.update_in(cx,|workspace,window,cx| {
                 workspace.application_dialogs.busy=false;
                 cx.global_mut::<RecoveryCatalog>().busy.remove(&candidate.document_id);
-                match result {Some(Ok(()))=>cx.global_mut::<RecoveryCatalog>().candidates.retain(|entry|entry.document_id!=candidate.document_id),Some(Err(error))=>workspace.failure_notice=Some(format!("清理草稿失败：{error}").into()),None=>{}}
+                match result {Some(Ok(()))=>cx.global_mut::<RecoveryCatalog>().candidates.retain(|entry|entry.document_id!=candidate.document_id),Some(Err(error))=>workspace.failure_notice=Some(ToolbarLocale::current(cx).app_format("recovery.cleanupFailed", &[("error", &error.to_string())]).into()),None=>{}}
                 workspace.drain_open_requests(window,cx);cx.notify();
             });
         }).detach();
@@ -178,10 +184,10 @@ impl Workspace {
     }
 
     pub(super) fn layout_recovery_candidate(&self,id:&str,cx:&App)->Result<Option<RecoveryCandidate>,String> {
-        let catalog=cx.try_global::<RecoveryCatalog>().ok_or("草稿目录尚未就绪")?;
-        if catalog.loading { return Err("正在检查草稿，请稍后恢复工作区。".into()); }
+        let catalog=cx.try_global::<RecoveryCatalog>().ok_or(ToolbarLocale::current(cx).app_text("recovery.notReady"))?;
+        if catalog.loading { return Err(ToolbarLocale::current(cx).app_text("recovery.waitLayout").into()); }
         if let Some(error)=&catalog.error {return Err(error.clone());}
-        if catalog.busy.contains_key(id) {return Err("草稿正在另一个窗口中恢复。".into());}
+        if catalog.busy.contains_key(id) {return Err(ToolbarLocale::current(cx).app_text("recovery.busy").into());}
         Ok(catalog.candidates.iter().find(|candidate|candidate.document_id==id).cloned())
     }
     pub(super) fn begin_recovery_attempt(&mut self,source:&OpenSource,cx:&mut Context<Self>) -> bool {
@@ -191,7 +197,7 @@ impl Workspace {
         catalog.busy.retain(|_,owner|owner.upgrade().is_some());
         // 输入收尾可能跨越其他窗口的恢复操作，真正开始前再次核对归属。
         if catalog.busy.contains_key(&candidate.document_id) || !catalog.candidates.iter().any(|entry|entry.document_id==candidate.document_id) {
-            self.notice=Some("此草稿正在其他窗口处理或已恢复，请重新查看恢复列表。".into());
+            self.notice=Some(ToolbarLocale::current(cx).app_text("recovery.handled").into());
             cx.notify();
             return false;
         }
