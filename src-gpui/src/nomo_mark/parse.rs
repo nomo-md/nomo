@@ -289,9 +289,13 @@ impl ParsedWindow {
             }
             if matches!(event, Event::Start(Tag::HtmlBlock) | Event::Html(_)) {
                 if let Some(fragments) = super::html_table::HtmlFragment::parse_all(&source, range.clone()) {
-                    for fragment in fragments {
+                    for mut fragment in fragments {
                         if !html_fragments.iter().any(|other: &super::html_table::HtmlFragment| other.source.start <= fragment.source.start && fragment.source.end <= other.source.end) {
                             inline.extend(fragment.cells.iter().flat_map(|cell| cell.spans.clone()));
+                            for table in std::mem::take(&mut fragment.tables) {
+                                inline.extend(table.cells.iter().flat_map(|cell| cell.spans.clone()));
+                                html_tables.push(table);
+                            }
                             html_fragments.push(fragment);
                         }
                     }

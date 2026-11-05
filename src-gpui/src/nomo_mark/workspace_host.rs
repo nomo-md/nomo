@@ -447,28 +447,8 @@ impl DocumentHost {
     }
     pub(crate) fn insert_table(&mut self,target:&EditTarget,rows:usize,columns:usize,cx:&mut Context<Self>)->Result<(),ControlError> {
         self.validate_target(target,cx)?;
-        if !(1..=5).contains(&rows) || !(1..=6).contains(&columns) {return Err(ControlError::InvalidRange);}
-        let columns=columns.max(2);
-        let line=format!("|{}", "  |".repeat(columns));
-        let separator=format!("|{}", " --- |".repeat(columns));
-        let mut table=format!("{line}\n{separator}");
-        for _ in 0..rows {table.push('\n');table.push_str(&line);}
         let view=self.control.read(cx);
-        if view.effective_mode()==ViewMode::Semantic {
-            let parsed=&view.host.parsed;
-            let range=crate::nomo_mark::mapping::local_range(&parsed.source,parsed.identity.from_byte,target.selection.range())?;
-            let crosses_inline=parsed.inline.iter().any(|span|span.intersects(&range)
-                && !(range.start<=span.open.start && span.close.end<=range.end));
-            let nested=parsed.nodes.iter().any(|node|matches!(node.kind,"code"|"table"|"list"|"quote"|"html")
-                && node.source.start<=range.start && range.start<node.source.end)
-                || parsed.html_tables.iter().any(|table|table.source.start<=range.start && range.start<table.source.end);
-            if crosses_inline || nested || !parsed.context.ancestors.is_empty() {
-                return Err(ControlError::Unsupported("当前格式或容器内的表格插入尚待接入；原文已保留".into()));
-            }
-        }
-        let mut result=if view.effective_mode()==ViewMode::Semantic {crate::nomo_mark::commands::apply_semantic(&view.host.parsed,target.selection,EditIntent::InsertBlock(table))?}
-            else {crate::nomo_mark::commands::apply(&view.host.parsed,target.selection,EditIntent::InsertBlock(table))?};
-        if let Some(edit)=result.edits.first() {if let Some(at)=edit.inserted_text.find('|') {result.selection=DocumentSelection::caret(edit.from_byte+at as u64+2);}}
+        let result=crate::nomo_mark::table_insert::insert(&view.host.parsed,target.selection,rows,columns,view.effective_mode()==ViewMode::Semantic)?;
         self.control.update(cx,|view,cx|view.apply_host_edit(result,cx))
     }
     pub(crate) fn selection_anchor(&self,cx:&App)->Option<gpui::Bounds<gpui::Pixels>> {

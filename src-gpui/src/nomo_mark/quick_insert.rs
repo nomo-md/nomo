@@ -137,12 +137,7 @@ pub(crate) fn apply(parsed: &ParsedWindow, range: Range<usize>, action: QuickIns
                 || projected.source[commands::line_start(&projected.source,at)..at].trim_start().starts_with('>')=>return Ok(no_change(selection)),
             A::Quote=>EditIntent::LinePrefix("> ".into()),
             A::Callout(kind)=>return callout(projected,selection,kind),
-            A::Table(columns,rows)=>{
-                let header=format!("|{}", "  |".repeat(columns));
-                let separator=format!("|{}", " --- |".repeat(columns));
-                let block=format!("{header}\n{separator}{}",format!("\n{header}").repeat(rows));
-                EditIntent::InsertBlockAt{block,caret:2}
-            },
+            A::Table(columns,rows)=>return super::table_insert::insert(projected,selection,rows,columns,true),
             A::Code(language)=>EditIntent::InsertCodeBlock(language.into()),
             A::Details=>EditIntent::InsertDetails,
             A::Diagram(index)=>EditIntent::InsertDiagram(DIAGRAMS[index].2.into()),

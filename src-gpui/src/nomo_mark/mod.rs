@@ -44,6 +44,7 @@ pub mod paint;
 pub mod resources;
 pub mod source_view;
 pub mod table;
+mod table_insert;
 pub(crate) mod table_inline;
 pub mod table_widths;
 pub mod view;

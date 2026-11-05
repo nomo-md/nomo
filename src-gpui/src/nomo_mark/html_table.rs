@@ -94,6 +94,8 @@ pub struct HtmlFragment {
     pub label: String,
     pub card: bool,
     pub cells: Vec<Cell>,
+    /// 解析后移交 ParsedWindow 的共享表格集合，不保留第二份单元格模型。
+    pub tables: Vec<HtmlTable>,
 }
 impl HtmlFragment {
     pub fn parse_all(source: &str, range: Range<usize>) -> Option<Vec<Self>> {
@@ -115,14 +117,15 @@ impl HtmlFragment {
         if at > range.end || !source[at..range.end].trim().is_empty()
             || !matches!(root.name.as_str(), "p" | "div" | "section" | "summary") { return None; }
         let mut cells = Vec::new();
-        fragment_cells(source, &root, &mut cells)?;
+        let mut tables = Vec::new();
+        fragment_cells(source, &root, &mut cells, &mut tables)?;
         let mut label = format!("<{}>", root.name);
         for (key, prefix) in [("class", "."), ("id", "#")] {
             if let Some(value) = root.attrs.get(key).filter(|value| !value.is_empty()) {
                 label.push_str(&format!(" {prefix}{value}"));
             }
         }
-        Some(Self { source: root.source, label, card: matches!(root.name.as_str(), "div" | "section"), cells })
+        Some(Self { source: root.source, label, card: matches!(root.name.as_str(), "div" | "section"), cells, tables })
     }
 
     pub fn estimated_bytes(&self) -> usize {
@@ -137,10 +140,11 @@ impl HtmlFragment {
     }
 }
 
-fn fragment_cells(source: &str, node: &Element, cells: &mut Vec<Cell>) -> Option<()> {
+fn fragment_cells(source: &str, node: &Element, cells: &mut Vec<Cell>, tables: &mut Vec<HtmlTable>) -> Option<()> {
     if !matches!(node.name.as_str(), "p" | "div" | "section" | "summary")
         || !only_attrs(node, &["class", "id", "align", "title"]) { return None; }
-    if node.children.iter().any(|child| matches!(child.name.as_str(), "p" | "div" | "section")) {
+    if node.children.iter().any(|child| matches!(child.name.as_str(), "p" | "div" | "section" | "table")) {
+        if matches!(node.name.as_str(), "p" | "summary") && node.children.iter().any(|child| child.name == "table") { return None; }
         let mut pending: Vec<&Element> = Vec::new();
         let flush = |pending: &mut Vec<&Element>, cells: &mut Vec<Cell>| -> Option<()> {
             let (first, last) = (pending.first()?, pending.last()?);
@@ -155,9 +159,13 @@ fn fragment_cells(source: &str, node: &Element, cells: &mut Vec<Cell>) -> Option
             pending.clear(); Some(())
         };
         for child in &node.children {
-            if matches!(child.name.as_str(), "p" | "div" | "section") {
+            if matches!(child.name.as_str(), "p" | "div" | "section" | "table") {
                 if !pending.is_empty() { flush(&mut pending, cells)?; }
-                let from = cells.len(); fragment_cells(source, child, cells)?;
+                if child.name == "table" {
+                    tables.push(HtmlTable::parse(source, child.source.clone())?);
+                    continue;
+                }
+                let from = cells.len(); fragment_cells(source, child, cells, tables)?;
                 for cell in &mut cells[from..] { if cell.align.is_none() { cell.align = node.attrs.get("align").cloned(); } }
             } else { pending.push(child); }
         }
@@ -171,6 +179,74 @@ fn fragment_cells(source: &str, node: &Element, cells: &mut Vec<Cell>) -> Option
     cells.push(Cell { source: node.source.clone(), content: node.content.clone(), row: cells.len(), column: 0,
         rowspan: 1, colspan: 1, header: false, widths: Vec::new(), align: node.attrs.get("align").cloned(), runs, spans });
     Some(())
+}
+
+/// HTML 段落拆成表格两侧的兄弟节点；div/section 保持包裹，summary 仍只接收行内内容。
+pub(crate) fn insert_table(
+    parsed: &super::parse::ParsedWindow,
+    range: Range<usize>,
+    rows: usize,
+    columns: usize,
+) -> Option<Result<EditResult, ControlError>> {
+    let fragment = parsed.html_fragments.iter().find(|fragment|
+        fragment.source.start <= range.start && range.start < fragment.source.end)?;
+    Some((|| {
+        let invalid = || ControlError::Unsupported("请在同一个 HTML 正文段落内插表；原文已保留".into());
+        let cell = fragment.cells.iter().find(|cell| cell.content.start <= range.start && range.end <= cell.content.end)
+            .ok_or_else(invalid)?;
+        if !super::commands::html_text_boundary(parsed, cell, range.start)
+            || !super::commands::html_text_boundary(parsed, cell, range.end) { return Err(invalid()); }
+        let source = &parsed.source;
+        let mut start = fragment.source.start;
+        let root = element(source, &mut start, 0).ok_or_else(invalid)?;
+        let mut node = &root;
+        while let Some(child) = node.children.iter().find(|child|
+            matches!(child.name.as_str(), "p" | "div" | "section" | "summary")
+                && child.content.start <= range.start && range.end <= child.content.end) { node = child; }
+        if root.name == "summary" || node.name == "summary" { return Err(invalid()); }
+        let mut table = String::from("<table data-nomo-table=\"semantic\"><tbody>");
+        for row in 0..=rows {
+            let tag = if row == 0 { "th" } else { "td" };
+            table.push_str("<tr>");
+            for _ in 0..columns { table.push_str(&format!("<{tag}><p></p></{tag}>")); }
+            table.push_str("</tr>");
+        }
+        table.push_str("</tbody></table>");
+        let caret_in_table = table.find("<th><p>").ok_or_else(invalid)? + "<th><p>".len();
+        let mut before = String::new();
+        let mut after = String::new();
+        if node.name == "p" {
+            before.push_str(&source[node.content.end..node.source.end]);
+            if root.name == "p" {
+                let eol = super::commands::line_ending(source, range.start);
+                let prefix = super::table_insert::continuation_prefix(parsed, range.start)?;
+                let boundary = format!("{eol}{prefix}{eol}{prefix}");
+                before.push_str(&boundary);
+                after.push_str(&boundary);
+            }
+            // 新的右侧段落继承样式，id 只留在原段落，避免复制锚点。
+            after.push_str("<p");
+            for (name, value) in &node.attrs {
+                if name != "id" {
+                    after.push_str(&format!(" {name}=\"{}\"", html_escape::encode_double_quoted_attribute(value)));
+                }
+            }
+            after.push('>');
+        }
+        let mut text = source[fragment.source.start..range.start].to_owned();
+        text.push_str(&before);
+        let caret = text.len() + caret_in_table;
+        text.push_str(&table);
+        text.push_str(&after);
+        text.push_str(&source[range.end..fragment.source.end]);
+        if root.name != "p" && HtmlFragment::parse(&text, 0..text.len()).is_none() { return Err(invalid()); }
+        let base = parsed.identity.from_byte + fragment.source.start as u64;
+        Ok(EditResult {
+            edits: vec![SourceEdit { from_byte: base, to_byte: parsed.identity.from_byte + fragment.source.end as u64, inserted_text: text }],
+            selection: DocumentSelection::caret(base + caret as u64),
+            template_update: None,
+        })
+    })())
 }
 // 居中等图片属性写入会在 <p> 内加入换行和缩进。这些源码空白不占视觉行，
 // 否则行内图片抬高段落行高时，前后的空行也会各占一张图片的高度。

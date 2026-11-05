@@ -1022,7 +1022,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                         previous = fragment.source.end; adjacent
                     }) && source[previous..range.end].trim().is_empty();
                     if complete {
-                        for fragment in fragments { builder.html_fragment(fragment); }
+                        for fragment in fragments { builder.html_fragment(fragment, html_tables, revealed); }
                         while let Some((event, _)) = events.next() { if matches!(event, Event::End(TagEnd::HtmlBlock)) { break; } }
                         continue;
                     }
@@ -1860,7 +1860,7 @@ impl Builder<'_> {
                 if let Some(fragment) = fragment {
                     let base = self.base;
                     self.base = style;
-                    self.html_fragment(fragment);
+                    self.html_fragment(fragment, &[], &[]);
                     self.base = base;
                 } else {
                     self.html_inline(html,source,style);
@@ -1958,7 +1958,8 @@ impl Builder<'_> {
         }
     }
 
-    fn html_fragment(&mut self, fragment: &crate::nomo_mark::html_table::HtmlFragment) {
+    fn html_fragment(&mut self, fragment: &crate::nomo_mark::html_table::HtmlFragment,
+        tables: &[crate::nomo_mark::html_table::HtmlTable], revealed: &[Range<usize>]) {
         use crate::nomo_mark::parse::InlineFormat;
         let has_language = self.env.wrap == Wrap::KnuthPlass && self.source[fragment.source.clone()]
             .as_bytes().windows(4).any(|word| word.eq_ignore_ascii_case(b"lang"));
@@ -1977,7 +1978,12 @@ impl Builder<'_> {
             self.items.push(DisplayItem::Text { x: self.indent, y: self.y, layout: Rc::new(label), map: Vec::new() });
             self.y += h + pad;
         }
+        let mut tables = tables.iter().filter(|table| fragment.source.start <= table.source.start
+            && table.source.end <= fragment.source.end).peekable();
         for cell in &fragment.cells {
+            while tables.peek().is_some_and(|table| table.source.start < cell.source.start) {
+                self.html_table(tables.next().unwrap(), revealed);
+            }
             self.html_align = cell.align.clone();
             if cell.runs.iter().filter(|run| !run.text.trim().is_empty()).count() == 1 {
                 if let Some(crate::nomo_mark::html_table::InlineAtom::Image { align: Some(align), .. }) = cell.runs.iter().find_map(|run| run.atom.as_ref()) {
@@ -2013,6 +2019,7 @@ impl Builder<'_> {
             self.html_align = None;
             self.gap(self.env.metrics.paragraph_gap());
         }
+        for table in tables { self.html_table(table, revealed); }
         if fragment.card {
             self.indent -= pad; self.width += pad; self.y += pad;
             if let DisplayItem::Rect { h, .. } = &mut self.items[index] { *h = self.y - top; }

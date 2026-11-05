@@ -75,11 +75,19 @@ fn plain(parsed: &ParsedWindow, range: &Range<usize>) -> Result<String, ControlE
             Event::Html(_) => {
                 for fragment in parsed.html_fragments.iter().filter(|fragment| fragment.source.start < span.end && span.start < fragment.source.end) {
                     if !fragments.insert(fragment.source.start) { continue; }
-                    let mut first = true;
-                    for cell in &fragment.cells {
+                    let mut cells = fragment.cells.iter().map(|cell| (None, cell)).collect::<Vec<_>>();
+                    for table in parsed.html_tables.iter().filter(|table| fragment.source.start <= table.source.start && table.source.end <= fragment.source.end) {
+                        cells.extend(table.cells.iter().map(|cell| (Some((table.source.start, cell.row)), cell)));
+                    }
+                    cells.sort_by_key(|(_, cell)| cell.source.start);
+                    let mut previous = None;
+                    for (row, cell) in cells {
                         if cell.content.end <= range.start || range.end <= cell.content.start { continue; }
-                        if !first && !output.ends_with('\n') { output.push('\n'); }
-                        first = false;
+                        if let Some(last) = previous {
+                            if row.is_some() && row == last { output.push('\t'); }
+                            else if !output.ends_with('\n') { output.push('\n'); }
+                        }
+                        previous = Some(row);
                         for run in &cell.runs {
                             let start = run.source.start.max(range.start); let end = run.source.end.min(range.end);
                             if start >= end { continue; }
@@ -89,7 +97,8 @@ fn plain(parsed: &ParsedWindow, range: &Range<usize>) -> Result<String, ControlE
                         }
                     }
                 }
-                if let Some(table) = parsed.html_tables.iter().find(|t| t.source.start == span.start) {
+                if let Some(table) = parsed.html_tables.iter().find(|t| t.source.start == span.start
+                    && !parsed.html_fragments.iter().any(|fragment| fragment.source.start <= t.source.start && t.source.end <= fragment.source.end)) {
                     let mut last_row = None;
                     for cell in &table.cells {
                         if cell.content.end <= range.start || range.end <= cell.content.start { continue; }

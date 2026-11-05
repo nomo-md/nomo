@@ -266,6 +266,12 @@ impl Builder<'_> {
                         if let Some(table) = HtmlTable::parse(source, range.clone()) {
                             self.flush()?; self.html_table(table)?; skip = range.clone();
                         }
+                    } else if range.len() <= 512 * 1024 {
+                        if let Some(fragments) = HtmlFragment::parse_all(source, range.clone()) {
+                            self.flush()?;
+                            for fragment in fragments { self.html_fragment(fragment)?; }
+                            skip = range.clone();
+                        }
                     }
                 },
                 Event::Html(value) | Event::InlineHtml(value) => {
@@ -280,13 +286,25 @@ impl Builder<'_> {
                         self.flush()?; self.html_table(t)?;
                     } else if let Some(fragments) = HtmlFragment::parse_all(source, range.clone()) {
                         self.flush()?;
-                        for fragment in fragments { for cell in fragment.cells { for run in cell.runs { self.html_run(run)?; } self.flush()?; } }
+                        for fragment in fragments { self.html_fragment(fragment)?; }
                     } else { self.raw_html(&value)?; }
                 },
                 Event::End(TagEnd::HtmlBlock) => {},
                 _ => self.report.warn("部分扩展结构按文本保留"),
             }
         }
+        Ok(())
+    }
+    fn html_fragment(&mut self, fragment: HtmlFragment) -> Result<(), String> {
+        let mut tables = fragment.tables.into_iter().peekable();
+        for cell in fragment.cells {
+            while tables.peek().is_some_and(|table| table.source.start < cell.source.start) {
+                self.html_table(tables.next().unwrap())?;
+            }
+            for run in cell.runs { self.html_run(run)?; }
+            self.flush()?;
+        }
+        for table in tables { self.html_table(table)?; }
         Ok(())
     }
     fn html_run(&mut self, run: html_table::InlineRun) -> Result<(), String> {

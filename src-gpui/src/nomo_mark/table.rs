@@ -48,13 +48,14 @@ impl Table {
             n.kind == "table" && n.source.start <= position && position <= n.source.end
         })?;
         let mut offset = node.source.start;
+        let prefix = super::table_insert::continuation_prefix(parsed, offset).ok()?;
         let mut rows = Vec::new();
         for line in parsed.source[node.source.clone()].split_inclusive('\n') {
             let raw = line.trim_end_matches(['\r', '\n']);
             let end = offset + raw.len();
             rows.push(TableRow {
                 source: offset..offset + line.len(),
-                cells: cells(&parsed.source, offset..end),
+                cells: cells(&parsed.source, row_content_start(&parsed.source, offset..end, &prefix)..end),
             });
             offset += line.len();
         }
@@ -105,6 +106,7 @@ impl Table {
         let source = &*parsed.source;
         let base = parsed.identity.from_byte;
         let count = self.separator.cells.len();
+        let prefix = super::table_insert::continuation_prefix(parsed, self.source.start)?;
         let edit = |range: Range<usize>, text: String| SourceEdit {
             from_byte: base + range.start as u64,
             to_byte: base + range.end as u64,
@@ -117,8 +119,8 @@ impl Table {
                 let empty = format!("|{}{eol}", "  |".repeat(count));
                 if row == 0 {
                     vec![edit(target.source.start..self.separator.source.end,
-                        format!("{empty}{}{}", &source[self.separator.source.clone()], &source[target.source.clone()]))]
-                } else { vec![edit(target.source.start..target.source.start, empty)] }
+                        format!("{empty}{}{prefix}{}", &source[self.separator.source.clone()], &source[target.source.clone()]))]
+                } else { vec![edit(target.source.start..target.source.start, format!("{prefix}{empty}"))] }
             }
             TableIntent::InsertRow { after } => {
                 let row = self.rows.get(after).ok_or(ControlError::InvalidRange)?;
@@ -128,7 +130,7 @@ impl Table {
                     row.source.end
                 };
                 let eol = line_ending(source, at.min(source.len()));
-                let mut text = format!("|{}{}", "  |".repeat(count), eol);
+                let mut text = format!("{prefix}|{}{}", "  |".repeat(count), eol);
                 if at > 0 && !source[..at].ends_with('\n') {
                     text.insert_str(0, eol);
                 }
@@ -139,7 +141,7 @@ impl Table {
                     let next = self.rows.get(1).ok_or(ControlError::InvalidRange)?;
                     let text = format!(
                         "{}{}",
-                        &source[next.source.clone()],
+                        &source[row_content_start(source, next.source.clone(), &prefix)..next.source.end],
                         &source[self.separator.source.clone()]
                     );
                     return Ok(EditResult {
@@ -270,15 +272,15 @@ impl Table {
                 } else if rows > self.rows.len() {
                     let at = self.source.end;
                     let eol = line_ending(source, at);
-                    let prefix = if at > 0 && !source[..at].ends_with('\n') {
+                    let before = if at > 0 && !source[..at].ends_with('\n') {
                         eol
                     } else {
                         ""
                     };
-                    let row = format!("|{}{eol}", "  |".repeat(columns));
+                    let row = format!("{prefix}|{}{eol}", "  |".repeat(columns));
                     edits.push(edit(
                         at..at,
-                        format!("{prefix}{}", row.repeat(rows - self.rows.len())),
+                        format!("{before}{}", row.repeat(rows - self.rows.len())),
                     ));
                 }
                 edits
@@ -428,6 +430,17 @@ fn raw_cell_end(source: &str, row: &TableRow, column: usize) -> usize {
         end += 1;
     }
     end
+}
+fn row_content_start(source: &str, line: Range<usize>, prefix: &str) -> usize {
+    let mut at = line.start;
+    // 第一行从表头正文开始；其余行含外层列表缩进和引用标记，不能算作额外列。
+    if at != super::commands::line_start(source, at) { return at; }
+    for _ in 0..prefix.bytes().filter(|byte| *byte == b'>').count() {
+        while at < line.end && matches!(source.as_bytes()[at], b' ' | b'\t') { at += 1; }
+        if source.as_bytes().get(at) == Some(&b'>') { at += 1; }
+    }
+    while at < line.end && matches!(source.as_bytes()[at], b' ' | b'\t') { at += 1; }
+    at
 }
 fn cells(source: &str, line: Range<usize>) -> Vec<Range<usize>> {
     let bytes = source.as_bytes();
