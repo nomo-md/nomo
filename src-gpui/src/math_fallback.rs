@@ -40,6 +40,9 @@ impl MathFallback {
         candidates.sort_by_key(|id| database.face(*id).map_or((true, true), |face| (face.weight != weight, face.style != font_style)));
         let mut result = None;
         for id in candidates {
+            // macOS LastResort 为缺字返回问号轮廓；它不是正文可用字形，须保留缺字失败语义。
+            if database.face(id).is_some_and(|face| face.post_script_name.to_ascii_lowercase().contains("lastresort")
+                || face.families.iter().any(|(name, _)| name.to_ascii_lowercase().contains("lastresort"))) { continue; }
             if let Some(glyph) = database.with_face_data(id, |data, index| outline(data, index, ch)).flatten() {
                 let bytes = glyph.outline.len() + std::mem::size_of::<FallbackGlyph>() + 64;
                 if self.bytes.get().saturating_add(bytes) > MAX_OUTLINE_BYTES { return Err(limit()); }

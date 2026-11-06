@@ -10,7 +10,13 @@ description = "Nomo native Markdown editor"
 name = "nomo"
 path = "src/main.rs"
 
+[lib]
+name = "nomo_quick_look"
+path = "src/quick_look.rs"
+
 [features]
+# macOS 扩展单独构建为静态库；默认编辑器不编译预览桥接代码。
+quick-look = []
 # 文档会话是正式编辑器的基础；feature 仅保留 NomoMark 开发外壳。
 nomo-mark-demo = []
 # 兼容更名前的构建命令。

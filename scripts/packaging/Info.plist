@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleIdentifier</key><string>com.nomo.desktop</string>
-  <key>CFBundleName</key><string>Nomo</string>
-  <key>CFBundleDisplayName</key><string>Nomo</string>
+  <key>CFBundleIdentifier</key><string>@BUNDLE_ID@</string>
+  <key>CFBundleName</key><string>@APP_NAME@</string>
+  <key>CFBundleDisplayName</key><string>@APP_NAME@</string>
   <key>CFBundleExecutable</key><string>nomo</string>
   <key>CFBundleIconFile</key><string>Nomo.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>

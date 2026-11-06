@@ -8,7 +8,7 @@ Launching without a file opens the document home page, with local folder shortcu
 
 The default Workspace now uses the windowed NomoMark with one document session and history per tab. Normal startup, new files and opened files require no development flags. Semantic, source and shared-session split modes are connected; split editing, the menu chrome and reading-position synchronization still require desktop acceptance. Page parity and complete interaction verification are tracked in [ROADMAP](src-gpui/ROADMAP.md).
 
-**The native source has not reached feature or visual parity with previous desktop releases.** PDF/Word/HTML/image export, Quick Look, MSIX and Shell extensions are currently unavailable. External file monitoring, tray integration, full workspace restoration, custom shortcuts and localization remain incomplete. Existing releases remain available; this migration does not publish a new version.
+**The native source has not reached feature or visual parity with previous desktop releases.** See the build notes for the integration and validation status of PDF/Word/HTML/image export, MSIX and Shell extensions. External file monitoring, tray integration, full workspace restoration, custom shortcuts and localization are still being refined. macOS Quick Look now includes a native preview extension; Finder previews were tested on macOS 27.2; older macOS versions remain unverified. See [Quick Look notes](docs/macos-quick-look.md). Existing releases remain available; this migration does not publish a new version.
 
 ## Development
 

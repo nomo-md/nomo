@@ -2,6 +2,7 @@
 from pathlib import Path
 import argparse
 import hashlib
+import plistlib
 import re
 import tarfile
 import tomllib
@@ -44,6 +45,19 @@ with tarfile.open(args.directory / 'Nomo_aarch64.app.tar.gz') as archive:
     validate_paths(archive.getnames())
     if 'Nomo.app/Contents/MacOS/nomo' not in archive.getnames():
         raise SystemExit('Missing macOS app executable')
+    preview = 'Nomo.app/Contents/PlugIns/NomoPreview.appex/Contents'
+    if f'{preview}/MacOS/NomoPreview' not in archive.getnames():
+        raise SystemExit('Missing macOS Quick Look executable')
+    info_file = archive.extractfile(f'{preview}/Info.plist')
+    if info_file is None:
+        raise SystemExit('Missing Quick Look metadata')
+    info = plistlib.load(info_file)
+    extension = info.get('NSExtension', {})
+    if (info.get('CFBundleIdentifier') != 'com.nomo.desktop.gpui-preview'
+            or extension.get('NSExtensionPointIdentifier') != 'com.apple.quicklook.preview'
+            or extension.get('NSExtensionPrincipalClass') != 'NomoPreviewViewController'
+            or extension.get('NSExtensionAttributes', {}).get('QLSupportedContentTypes') != ['net.daringfireball.markdown']):
+        raise SystemExit('Invalid Quick Look registration metadata')
 lines = []
 for name in sorted(expected):
     with (args.directory / name).open('rb') as stream:

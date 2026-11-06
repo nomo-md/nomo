@@ -96,6 +96,9 @@ jobs:
       - name: Package macOS (rebuild default features)
         if: runner.os == 'macOS'
         run: bash scripts/package-macos.sh
+      - name: Verify native Quick Look rendering
+        if: runner.os == 'macOS'
+        run: bash scripts/test-macos-quick-look.sh
       - name: Package Linux (rebuild default features)
         if: runner.os == 'Linux'
         run: bash scripts/package-linux.sh

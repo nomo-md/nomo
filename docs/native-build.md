@@ -80,7 +80,7 @@ rustup target add aarch64-apple-darwin
 bash scripts/package-macos.sh
 ```
 
-应用名 `Nomo.app`、标识 `com.nomo.desktop`，最低系统版本元数据保持 12.0。使用 ad-hoc 签名，签名或校验失败终止打包；不包含公证和 Quick Look。`.app` 同时保留于输出的任务 staging 目录。
+应用名 `Nomo.app`、标识 `com.nomo.desktop`，最低系统版本元数据保持 12.0。打包自动构建并嵌入 `Contents/PlugIns/NomoPreview.appex`，先签 Quick Look 扩展再签主应用，签名或校验失败终止打包；仍不包含公证。`.app` 同时保留于输出的任务 staging 目录。已有另一版 Nomo 时可用 `bash scripts/package-macos.sh --side-by-side` 构建独立测试包。Quick Look 的独立测试、资源边界和 Finder 实测见 [macOS Quick Look](macos-quick-look.md)。
 
 ### Linux x64
 
@@ -126,7 +126,7 @@ bash scripts/package-linux.sh
 
 本次界面恢复的增量资源为静态主题预览令牌、三个小型内嵌 SVG 和文本设置的少量校验结果；专属页面只在选中分区时构造，禁用输入不创建实体或订阅。开关动效只在变化期间请求绘制，分区切换和窗口关闭时释放对应状态；不新增正文副本、进程常驻的字体列表、依赖或空闲轮询。字体列表只在展开时从 GPUI 文字系统后台读取；限 4096 个名称及约 512 KiB，超限时按查询重新筛选，列表只渲染可见行。构建检查与实机逐页视觉、DPI、交互验收分别记录，后者仍待执行。
 
-HTML／PDF／Word 导出与 MSIX／Shell 扩展已有原生入口；macOS Quick Look 本轮仍暂缓。默认 Workspace 与开发入口共用窗口化 NomoMark 和文档会话，feature 仅控制开发外壳，差距见 Roadmap。SQLite、编码、搜索及 Emoji 等沿用已锁定依赖，现由默认构建链接；没有新增依赖版本。
+HTML／PDF／Word 导出与 MSIX／Shell 扩展已有原生入口；macOS Quick Look 已接入独立原生预览扩展，Finder 激活已在 macOS 27.2 验证。默认 Workspace 与开发入口共用窗口化 NomoMark 和文档会话，`nomo-mark-demo` feature 仅控制开发外壳；`quick-look` feature 仅编译扩展桥接库，差距见 Roadmap。SQLite、编码、搜索及 Emoji 等沿用已锁定依赖，现由默认构建链接；没有新增依赖版本。
 
 隔离验收可设置进程变量 `NOMO_DATA_DIR` 为任务专用目录；配置、会话和保存前快照均落入该目录。未设置时沿用既有平台数据目录。该变量不修改系统环境，不用于默认安装或迁移用户数据。
 

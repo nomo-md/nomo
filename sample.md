@@ -518,7 +518,7 @@ Markdown 小窗复用当前文档、撤销历史、脏状态和自动保存，�
 | Markdown 格式检查 Beta | “设置 → 编辑器”启用，右下角检查按钮打开详情 | 默认关闭；宽松 / 默认规则；只报告不修改；大文档跳过；详情最多展示前 200 条，可跳到源码位置并手动重试 |
 | HTML 导出 | 文件菜单或 <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>E</kbd> | 生成单文件 HTML，有界下载并内嵌可访问的 HTTP(S) 图片，同时支持本地图片；无法内嵌时保留原链接并提示 |
 | PDF 导出 | 文件菜单或 <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd> | Windows / macOS 可用；当前固定 A4 纵向、四边 20 mm；尝试按标题写入书签，失败时仍保留已导出的 PDF 并提示 |
-| macOS Quick Look | Finder 中选择 UTF-8 Markdown 后空格预览 | 原版能力；当前 GPUI 版本暂未接入，本轮暂缓 |
+| macOS Quick Look | 安装包含扩展的 macOS 包后，在 Finder 选择 Markdown 并按空格 | 原生预览支持 UTF-8、带 BOM 的 UTF-16 和 GBK；文件上限 1 MiB，跟随系统明暗；已在 macOS 27.2 验证 Finder 空格预览 |
 | Windows 文件集成 | “设置 → 文件与窗口” | 管理 Markdown 默认应用候选和经典 `.md` / `.markdown` / 文件夹右键菜单；MSIX 包提供 Windows 11 新式菜单，尚未做安装激活验收；系统仍由用户确认默认程序 |
 | 安装信任提示 | 首次打开 GitHub Release 构建 | 当前未配置 Windows 发行者代码签名或 Apple 公证，SmartScreen / Gatekeeper 可能提示；只从项目 Release 下载并按需核对 `checksums.md5` |
 | 软件更新 | 设置或启动提醒 | Windows 安装版：发现新版后点“下载更新”，完成后点“重启并安装”，成功后自动重新打开；免安装版仍下载 ZIP 手动替换 |
