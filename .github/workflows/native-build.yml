@@ -62,10 +62,9 @@ jobs:
       - name: Select the MSVC linker
         if: runner.os == 'Windows'
         run: |
-          $linker = (Get-Command link.exe -CommandType Application -ErrorAction Stop).Source
-          if ($linker -notmatch '[\\/]VC[\\/]Tools[\\/]MSVC[\\/]') {
-            throw "Expected the MSVC linker, got $linker"
-          }
+          $linker = Join-Path $env:VCToolsInstallDir 'bin/Hostx64/x64/link.exe'
+          if (-not (Test-Path -LiteralPath $linker -PathType Leaf)) { throw "Missing MSVC linker: $linker" }
+          (Split-Path $linker) >> $env:GITHUB_PATH
           "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" >> $env:GITHUB_ENV
       - name: Install Windows packaging tools
         if: runner.os == 'Windows' && inputs.packages
