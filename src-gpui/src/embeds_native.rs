@@ -84,7 +84,7 @@ fn mermaid_font_file() -> std::path::PathBuf {
 
 /// Mermaid 文本测量用的真实字体。默认的确定性测量与实际字形宽度不一致，类图等会截断文字；
 /// 改用真实字体后布局与绘制使用同一份度量。首次渲染图表时加载并常驻；字体缺失时返回 None，
-/// 退回确定性测量。
+/// 退回确定性测量。限时入口先初始化字体，再开始单图计算的计时。
 pub(crate) fn mermaid_fonts() -> Option<merman::svg::export::NativeFontContext> {
     static CONTEXT: OnceLock<Option<merman::svg::export::NativeFontContext>> = OnceLock::new();
     CONTEXT
@@ -105,12 +105,14 @@ pub(crate) fn mermaid_svg(source: &str, dark: bool) -> Result<String, String> {
 
 /// 页首预览给图表单独设置时间预算；超时使用占位，不拖住后续文件。
 pub(crate) fn thumbnail_mermaid(source: &str, dark: bool) -> Result<String, String> {
+    let _ = mermaid_fonts();
     mermaid_svg_controlled(source, dark, merman::OperationControl::new().with_deadline(std::time::Duration::from_millis(150)))
 }
 
 /// 导出复用原生图表管线，单图限时且不进入编辑区位图缓存。
 pub(crate) fn export_mermaid(source: &str, dark: bool, palette: MermaidPalette) -> Result<String, String> {
     if source.len() > 64 * 1024 { return Err("图表超过 64 KiB 导出预算".into()); }
+    let _ = mermaid_fonts();
     mermaid_svg_with_palette(source, dark, Some(palette), merman::OperationControl::new().with_deadline(std::time::Duration::from_secs(3)))
 }
 
