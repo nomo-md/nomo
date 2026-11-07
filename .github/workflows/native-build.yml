@@ -83,8 +83,8 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v1-native-complete
           shared-key: native-${{ matrix.target }}
-          key: complete-build
       - name: Check default native entrypoint
         run: cargo check --locked --target ${{ matrix.target }} --bin nomo
       - name: Check development entrypoint and test targets
