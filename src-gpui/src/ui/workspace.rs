@@ -46,6 +46,8 @@ mod open_requests;
 mod recovery_ui;
 mod export;
 mod comparison;
+#[cfg(feature = "automation")]
+mod automation;
 use comparison::{TabItem, ComparisonState};
 use open_requests::{OpenRequests, OpenRequest, AfterOpen};
 use explorer::ExplorerState;
@@ -410,6 +412,8 @@ impl Workspace {
         workspace.drain_open_requests(window, cx);
         window.focus(&workspace.focus, cx);
         workspace.start_application_dialogs(window, cx);
+        #[cfg(feature = "automation")]
+        workspace.start_automation(window, cx);
         workspace
     }
 

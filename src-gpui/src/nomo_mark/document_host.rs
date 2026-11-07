@@ -38,6 +38,9 @@ mod markdown_lint;
 mod outline_queries;
 #[path = "quick_insert_host.rs"]
 mod quick_insert_host;
+#[cfg(feature = "automation")]
+#[path = "automation.rs"]
+mod automation;
 pub use workspace_host::DocumentEvent;
 pub(crate) use workspace_host::EditTarget;
 pub use outline_queries::OutlineHeading;

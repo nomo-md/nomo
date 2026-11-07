@@ -17,6 +17,8 @@
 | Markdown Mini 小窗 | `src-gpui/src/ui/workspace/mini.rs`、`ui/mini.rs`、`ui/mini/{native,bounds_motion}.rs`、`ui/mini/native/`、`nomo_mark/window_panes.rs` | Windows 共用进度收放；macOS 原生操作在 GPUI 更新借用外执行，X11 等待窗口管理器确认，Wayland 使用受限紧凑模式；复用原窗口、文档和阅读锚点，任务按代次失效 |
 | 打开耗时采样 | `src-gpui/src/open_profile.rs`、`ui/workspace.rs`、`nomo_mark/view.rs` | 显式启用；记录会话、首窗口、首帧和语义恢复，不记录正文或路径 |
 | 帧耗时采样 | `src-gpui/src/frame_profile.rs`、`ui/workspace.rs`、`scripts/gen-perf-doc.py` | `NOMO_FRAME_PROFILE` 显式启用；有界样本、帧耗时与按键上屏的中位数／p95，固定种子百万字样本 |
+| 原生自动化测试 | `test-lab/runner/`、`scripts/automation/run.mjs`、`src-gpui/src/automation.rs`、`ui/workspace/automation.rs`、`nomo_mark/automation.rs` | 独立 automation feature、隔离文件 RPC、正式编辑入口和有界诊断；固定语料、Windows 进程采样与 Release 报告，详见 `test-lab/README.md` |
+| 打开体验采样 | `test-lab/runner/opening.mjs`、`opening-capture.cs`、`opening-capture.ps1` | 显式 `opening` 命令；前台桌面像素、首屏资源及真实按键回显，短时有界采样与独立汇总，不影响普通产品构建 |
 | 文件树 | `src-gpui/src/ui/file_tree.rs`、`ui/workspace/explorer.rs`、`explorer_ui.rs`、`explorer_label.rs`、`explorer_actions.rs`、`explorer_search.rs` | 目录快照预算、后台按需刷新、虚拟滚动、名称省略、交互和键盘搜索；重命名同步现有文档会话 |
 | 标题栏和应用内菜单 | `src-gpui/src/ui/chrome.rs`、`ui/window_chrome.rs` | 轻量状态摘要、焦点恢复、窗口拖动与按钮；关闭交回 Workspace 确认 |
 | NomoMark 正式文档宿主 | `src-gpui/src/nomo_mark/document_host.rs`、`workspace_host.rs`、`save_dialog.rs` | 每标签窗口生命周期、控件事件、正式错误恢复；保存框按当前目录和首个 H1 提供默认值，不持有全文 |

@@ -32,3 +32,10 @@ Thumbs.db
 /src/paraglide/
 /src/lib/desktop/runtime/bindings.gen.ts
 /src-tauri/gen/schemas/
+
+# 本地原生测试样本、独立二进制、原始采样及显式基线
+/test-lab/fixtures/
+/test-lab/apps/
+/test-lab/results/
+/test-lab/baselines/
+/test-lab/.cache/

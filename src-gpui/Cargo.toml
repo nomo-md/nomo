@@ -15,6 +15,8 @@ name = "nomo_quick_look"
 path = "src/quick_look.rs"
 
 [features]
+# 本地隔离测试专用；普通发布构建不链接控制协议或轮询任务。
+automation = []
 # macOS 扩展单独构建为静态库；默认编辑器不编译预览桥接代码。
 quick-look = []
 # 文档会话是正式编辑器的基础；feature 仅保留 NomoMark 开发外壳。

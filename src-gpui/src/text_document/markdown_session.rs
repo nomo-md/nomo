@@ -301,6 +301,10 @@ pub(crate) struct MarkdownDocumentSessionManager {
     structure: super::structure_index::StructureService,
 }
 impl MarkdownDocumentSessionManager {
+    #[cfg(feature = "automation")]
+    pub(crate) fn automation_counts(&self) -> TextDocumentResult<serde_json::Value> {
+        Ok(serde_json::json!({"documentRuntimes":lock(&self.sessions)?.len(),"snapshots":lock(&self.snapshots)?.len()}))
+    }
     pub(crate) fn new(root: PathBuf) -> TextDocumentResult<Self> {
         if let Err(error) = super::writing_stats::WritingStatsService::clean_stale(&root) {
             crate::app_logger::warn("WritingStats", &format!("清理遗留统计文件失败：{}", error.message));

@@ -116,6 +116,21 @@ fn write_summary(samples: &Samples) {
     if let Err(error) = result { eprintln!("帧耗时采样写入失败: {error}"); }
 }
 
+/// 测试控制器按需读取；不写盘，不强制渲染。样本窗口容量与正常显式采样一致。
+#[cfg(feature = "automation")]
+pub(crate) fn snapshot(reset: bool) -> serde_json::Value {
+    let Some(state) = state() else { return serde_json::json!({"unavailable":"NOMO_FRAME_PROFILE 未启用"}); };
+    let Ok(mut samples) = state.lock() else { return serde_json::json!({"unavailable":"采样锁失败"}); };
+    let result = serde_json::json!({"frameCpu":summary(&samples.frames),"inputToPaint":summary(&samples.inputs),
+        "pendingInputs":usize::from(samples.pending_input.is_some()),"capacity":CAPACITY,
+        "scope":"most recent bounded samples; CPU render, not GPU/presentation FPS"});
+    if reset {
+        samples.frames.clear(); samples.inputs.clear(); samples.frame_cursor=0; samples.input_cursor=0;
+        samples.pending_input=None; samples.frame_started=None; samples.since_flush=0;
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

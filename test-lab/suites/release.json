@@ -1,0 +1,7 @@
+{
+  "dataset": "original",
+  "suites": ["performance"],
+  "repetitions": 3,
+  "cycles": 20,
+  "failFast": false
+}

@@ -2030,6 +2030,8 @@ impl EntityInputHandler for NomoMark {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "automation")]
+        crate::frame_profile::input();
         self.replace_ime(range, text, None, false, cx);
     }
     fn replace_and_mark_text_in_range(
@@ -2040,6 +2042,8 @@ impl EntityInputHandler for NomoMark {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "automation")]
+        crate::frame_profile::input();
         self.replace_ime(range, text, selected, true, cx);
     }
     fn bounds_for_range(

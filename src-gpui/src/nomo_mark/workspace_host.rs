@@ -428,7 +428,7 @@ impl DocumentHost {
         let draft=crate::nomo_mark::link_edit::LinkDraft::begin(&self.control.read(cx).host.parsed,target.selection)?;
         Ok((target,draft))
     }
-    pub(super) fn validate_target(&self,target:&EditTarget,cx:&App)->Result<(),ControlError> {
+    pub(crate) fn validate_target(&self,target:&EditTarget,cx:&App)->Result<(),ControlError> {
         self.ready(cx)?;
         let view=self.control.read(cx);
         if self.hidden || view.host.parsed.identity!=target.identity || view.host.selection!=target.selection || view.effective_mode()!=target.mode {return Err(ControlError::Stale);}

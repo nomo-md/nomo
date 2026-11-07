@@ -13,6 +13,8 @@ mod editor;
 mod nomo_mark;
 mod open_profile;
 mod frame_profile;
+#[cfg(feature = "automation")]
+mod automation;
 #[cfg(windows)]
 mod open_instance;
 #[cfg(windows)]
@@ -99,6 +101,11 @@ fn main() {
     let nomo_mark_file = std::env::args().any(|argument| matches!(argument.as_str(), "--nomo-mark" | "--editor-control"));
     let paths: Vec<PathBuf> = std::env::args().skip(1).filter(|argument| !matches!(argument.as_str(), "--nomo-mark-demo" | "--nomo-mark" | "--editor-control-demo" | "--editor-control")).map(PathBuf::from).collect();
     let development_entry = cfg!(feature = "nomo-mark-demo") && std::env::args().any(|argument| matches!(argument.as_str(), "--nomo-mark" | "--nomo-mark-demo" | "--editor-control" | "--editor-control-demo"));
+    #[cfg(feature = "automation")]
+    if let Err(error) = automation::initialize(&paths) {
+        eprintln!("自动化隔离校验失败：{error}");
+        std::process::exit(2);
+    }
     #[cfg(windows)]
     let instance=if !development_entry {
         match open_instance::start(&paths) {

@@ -102,6 +102,13 @@ pub struct EmbedStore {
 impl Global for EmbedStore {}
 
 impl EmbedStore {
+    #[cfg(feature = "automation")]
+    pub(crate) fn automation_state(&self) -> serde_json::Value {
+        serde_json::json!({"entries":self.entries.len(),"decodedBytes":self.bytes,
+            "pending":self.entries.values().filter(|e|matches!(e,Entry::Loading(_))).count(),
+            "failed":self.entries.values().filter(|e|matches!(e,Entry::Failed(_))).count(),
+            "scope":"process cache; requested resources only"})
+    }
     /// 查询状态；返回 None 表示尚未请求，调用方应登记到 `request`。
     pub fn state(&self, key: u64) -> Option<EmbedState> {
         Some(match self.entries.get(&key)? {

@@ -64,6 +64,12 @@ pub struct ImageStore {
 impl Global for ImageStore {}
 
 impl ImageStore {
+    #[cfg(feature = "automation")]
+    pub(crate) fn automation_state(&self) -> serde_json::Value {
+        serde_json::json!({"entries":self.entries.len(),"decodedBytes":self.bytes,"metadataBytes":self.metadata_bytes,
+            "pending":self.running+self.queued.len(),"failed":self.entries.values().filter(|e|matches!(e,Entry::Failed{..})).count(),
+            "scope":"process cache; requested resources only"})
+    }
     fn metadata_cost(path: &Path) -> usize { (path.as_os_str().len() + 256).saturating_mul(4) }
     fn path_key(path: &Path) -> u64 {
         use std::hash::{Hash, Hasher};
