@@ -42,6 +42,9 @@ impl<F: Fn() -> bool> Budget<F> {
         if self.enhancements > 64 || source.len() > 8192 { return Err("enhancement budget".into()); }
         self.check()?;
         let (svg, depth) = if mermaid {
+            // 首次字体加载属于预览总预算，不应耗尽后续图表计算的 150 ms。
+            let _ = native::mermaid_fonts();
+            self.check()?;
             let palette = dark.then_some(native::MermaidPalette { mode: 2,
                 colors: [0x202020, 0x303030, 0xe6e6e6, 0x888888, 0xc0c0c0, 0x262626, 0x303030, 0x7dbbff, 0xffffff] });
             (native::mermaid_svg_with_palette(source, dark, palette,

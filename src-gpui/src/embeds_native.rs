@@ -85,7 +85,7 @@ fn mermaid_font_file() -> std::path::PathBuf {
 /// Mermaid 文本测量用的真实字体。默认的确定性测量与实际字形宽度不一致，类图等会截断文字；
 /// 改用真实字体后布局与绘制使用同一份度量。首次渲染图表时加载并常驻；字体缺失时返回 None，
 /// 退回确定性测量。
-fn mermaid_fonts() -> Option<merman::svg::export::NativeFontContext> {
+pub(crate) fn mermaid_fonts() -> Option<merman::svg::export::NativeFontContext> {
     static CONTEXT: OnceLock<Option<merman::svg::export::NativeFontContext>> = OnceLock::new();
     CONTEXT
         .get_or_init(|| {
