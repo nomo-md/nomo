@@ -37,7 +37,7 @@ pub struct ResourceAdapter<'a> {
 #[derive(Default)]
 pub struct ResourceDependencies { images: BTreeSet<PathBuf>, embeds: BTreeSet<u64>, bytes: usize, overflow: bool }
 impl ResourceDependencies {
-    fn image(&mut self, path: &Path) -> bool {
+    pub(super) fn image(&mut self, path: &Path) -> bool {
         if self.images.contains(path) { return false; }
         let bytes = path.as_os_str().len() + 128;
         if self.bytes + bytes > 256 * 1024 || self.images.len() + self.embeds.len() >= 512 { self.overflow = true; return true; }
@@ -45,7 +45,7 @@ impl ResourceDependencies {
         self.images.insert(path.into());
         true
     }
-    fn embed(&mut self, key: u64) -> bool {
+    pub(super) fn embed(&mut self, key: u64) -> bool {
         if self.embeds.contains(&key) { return false; }
         if self.bytes + 48 > 256 * 1024 || self.images.len() + self.embeds.len() >= 512 { self.overflow = true; return true; }
         self.bytes += 48;
@@ -55,6 +55,13 @@ impl ResourceDependencies {
     pub fn estimated_bytes(&self) -> usize {
         self.bytes
     }
+    pub(super) fn extend(&mut self, other: &Self) {
+        self.overflow |= other.overflow;
+        for path in &other.images { self.image(path); }
+        for key in &other.embeds { self.embed(*key); }
+    }
+    pub(super) fn keeps_image(&self, path: &Path) -> bool { self.overflow || self.images.contains(path) }
+    pub(super) fn keeps_embed(&self, key: u64) -> bool { self.overflow || self.embeds.contains(&key) }
     pub fn generation(&self, images: &ImageStore, embeds: &EmbedStore) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -97,5 +104,31 @@ impl ResourceAdapter<'_> {
             if first { self.demands.borrow_mut().push(ResourceRequest::Embed(spec)); }
             (key, EmbedState::Pending)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_owners_merge_shared_keys_and_fail_closed_on_overflow() {
+        let mut first = ResourceDependencies::default();
+        first.image(Path::new("shared.png")); first.embed(1);
+        let mut second = ResourceDependencies::default();
+        second.image(Path::new("shared.png")); second.embed(2);
+        let mut live = ResourceDependencies::default();
+        live.extend(&first); live.extend(&second);
+        assert_eq!((live.images.len(), live.embeds.len()), (1, 2));
+        assert!(!live.keeps_embed(3));
+        let mut remaining = ResourceDependencies::default();
+        remaining.extend(&second);
+        assert!(remaining.keeps_image(Path::new("shared.png")));
+        assert!(!remaining.keeps_embed(1));
+        for key in 0..1024 { remaining.embed(key); }
+        assert!(remaining.estimated_bytes() <= 256 * 1024);
+        assert!(remaining.images.len() + remaining.embeds.len() <= 512);
+        assert!(remaining.keeps_embed(u64::MAX));
+        assert!(remaining.keeps_image(Path::new("untracked.png")));
     }
 }

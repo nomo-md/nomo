@@ -123,7 +123,7 @@ fn token_style(stack: &ScopeStack) -> InlineStyle {
         ("punctuation", ColorRole::Punct),
     ].into_iter().map(|(scope, color)| (Scope::new(scope).expect("static scope"), style(color))).collect());
     for scope in stack.scopes.iter().rev() {
-        if let Some((_, style)) = rules.iter().find(|(prefix, _)| prefix.is_prefix_of(*scope)) { return *style; }
+        if let Some((_, style)) = rules.iter().find(|(prefix, _)| prefix.is_prefix_of(*scope)) { return style.clone(); }
     }
     style(ColorRole::CodeFg)
 }

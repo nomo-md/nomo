@@ -67,6 +67,7 @@ impl DocumentHost {
             view
         });
         let subscription = cx.subscribe(&control, Self::event);
+        Self::register_resources(cx);
         let mut host = Self {
             total_bytes: status.byte_length,
             metadata: Metadata::new(status),
@@ -77,6 +78,7 @@ impl DocumentHost {
             mini_paper_padding: None,
             outline_layout: OutlineLayout::CENTERED,
             closed: false,
+            retained_resources: Default::default(),
             control: control.clone(),
             message: String::new(),
             hidden: false,
@@ -299,6 +301,8 @@ impl DocumentHost {
     /// 会话已由批量事务关闭或移交，只拆除旧控件和任务。
     pub(crate) fn release_closed_view(&mut self, discard: bool, cx: &mut Context<Self>) -> Result<(), ControlError> {
         self.closed = true;
+        self.retained_resources = Default::default();
+        super::resource_lifecycle::schedule_collection(cx);
         self.attachment_open = None;
         self.quick.cancel();
         self.request.cancel();

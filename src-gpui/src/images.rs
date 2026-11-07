@@ -41,7 +41,7 @@ type Decoded = (Arc<RenderImage>, u32, u32, usize);
 
 enum Entry {
     Queued,
-    Loading,
+    Loading(u64),
     /// `used` 用 Cell 记录访问时钟，使绘制阶段只需共享借用即可更新 LRU 顺序。
     Ready { image: Arc<RenderImage>, width: u32, height: u32, bytes: usize, used: Cell<u64>, version: u64, started: std::time::Instant },
     Failed { reason: Failure, used: Cell<u64>, version: u64 },
@@ -55,6 +55,7 @@ pub struct ImageStore {
     metadata_bytes: usize,
     queued: VecDeque<PathBuf>,
     running: usize,
+    next_request: u64,
     failures: HashMap<u64, (Failure, u64)>,
     failure_order: VecDeque<(u64, u64)>,
     pub generation: u64,
@@ -139,6 +140,27 @@ impl ImageStore {
         if let Entry::Ready { bytes, .. } = &entry { self.bytes -= bytes; }
         Some(entry)
     }
+    /// 关闭文档时移除无主资源，同时使排队和运行中的旧请求失效。
+    pub(crate) fn retain(&mut self, keep: impl Fn(&Path) -> bool) -> Vec<Arc<RenderImage>> {
+        let paths: Vec<_> = self.entries.keys().filter(|path| !keep(path)).cloned().collect();
+        if paths.is_empty() { return Vec::new(); }
+        let mut retired = Vec::new();
+        for path in paths {
+            if let Some(Entry::Ready { image, .. }) = self.remove(&path) { retired.push(image); }
+        }
+        self.queued.retain(|path| matches!(self.entries.get(path), Some(Entry::Queued)));
+        if self.entries.is_empty() { self.failures.clear(); self.failure_order.clear(); }
+        self.generation = self.generation.wrapping_add(1);
+        retired
+    }
+    fn complete(&mut self, path: PathBuf, request: u64, decoded: Result<Decoded, Failure>) -> Vec<Arc<RenderImage>> {
+        if !matches!(self.entries.get(&path), Some(Entry::Loading(current)) if *current == request) { return Vec::new(); }
+        let failure = decoded.as_ref().err().copied();
+        let retired = self.insert(path.clone(), decoded.ok());
+        if let (Some(reason), Some(Entry::Failed { reason: stored, .. })) = (failure, self.entries.get_mut(&path)) { *stored = reason; }
+        if let Some(reason) = failure { self.remember_failure(&path, reason); }
+        retired
+    }
     fn evict_oldest(&mut self, retired: &mut Vec<Arc<RenderImage>>) -> bool {
         let oldest = self.entries.iter().filter_map(|(path, entry)| match entry {
             Entry::Ready { used, .. } | Entry::Failed { used, .. } => Some((path.clone(), used.get())),
@@ -205,7 +227,9 @@ fn start_pending(cx: &mut App) {
         let store = cx.global_mut::<ImageStore>();
         if store.running >= MAX_DECODERS { break; }
         let Some(path) = store.queued.pop_front() else { break; };
-        store.entries.insert(path.clone(), Entry::Loading);
+        store.next_request = store.next_request.wrapping_add(1);
+        let request = store.next_request;
+        store.entries.insert(path.clone(), Entry::Loading(request));
         store.running += 1;
         let decode_path = path.clone();
         let task = cx.background_executor().spawn(async move { decode(&decode_path) });
@@ -214,10 +238,7 @@ fn start_pending(cx: &mut App) {
             cx.update(|cx| {
                 let store = cx.global_mut::<ImageStore>();
                 store.running -= 1;
-                let failure = decoded.as_ref().err().copied();
-                let retired = store.insert(path.clone(), decoded.ok());
-                if let (Some(reason), Some(Entry::Failed { reason: stored, .. })) = (failure, store.entries.get_mut(&path)) { *stored = reason; }
-                if let Some(reason) = failure { store.remember_failure(&path,reason); }
+                let retired = store.complete(path, request, decoded);
                 // 此处在 App 任务中，所有窗口都在 App 内，可完整移除纹理。
                 for image in retired { cx.drop_image(image, None); }
                 start_pending(cx);
@@ -365,6 +386,31 @@ mod tests {
 
     fn bitmap() -> Arc<RenderImage> {
         Arc::new(RenderImage::new(vec![Frame::new(image::RgbaImage::new(1, 1))]))
+    }
+
+    #[test]
+    fn closed_resources_release_textures_and_ignore_late_decode() {
+        let mut store = ImageStore::default();
+        store.insert("shared".into(), Some((bitmap(), 1, 1, 4)));
+        store.insert("closed".into(), Some((bitmap(), 1, 1, 4)));
+        store.enqueue("pending".into(), &mut Vec::new());
+        store.entries.insert("pending".into(), Entry::Loading(1));
+        store.queued.clear();
+        store.enqueue("queued".into(), &mut Vec::new());
+        assert_eq!(store.retain(|path| path == Path::new("shared")).len(), 1);
+        assert!(store.queued.is_empty());
+        assert_eq!(store.bytes, 4);
+        assert_eq!(store.metadata_bytes, ImageStore::metadata_cost(Path::new("shared")));
+        store.complete("pending".into(), 1, Ok((bitmap(), 1, 1, 4)));
+        assert!(!store.is_pending_or_known(Path::new("pending")));
+        store.enqueue("pending".into(), &mut Vec::new());
+        store.entries.insert("pending".into(), Entry::Loading(2));
+        store.complete("pending".into(), 1, Err(Failure::Read));
+        assert!(matches!(store.entries.get(Path::new("pending")), Some(Entry::Loading(2))));
+        store.complete("pending".into(), 2, Ok((bitmap(), 1, 1, 4)));
+        assert_eq!(store.bytes, 8);
+        assert_eq!(store.retain(|_| false).len(), 2);
+        assert_eq!((store.bytes, store.metadata_bytes, store.entries.len()), (0, 0, 0));
     }
 
     #[test]

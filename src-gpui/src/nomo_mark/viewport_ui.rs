@@ -103,7 +103,9 @@ impl DocumentHost {
         self.panes[pane].viewport.reserved=Cost::default(); self.update_pane_cost(pane, cx);
     }
     pub(super) fn update_pane_cost(&self, pane: usize, cx:&Context<Self>) {
-        self.panes[pane].viewport.budget.update(self.panes[pane].viewport.mounts.iter().fold(self.panes[pane].viewport.reserved,|cost,m| {let view=m.view.read(cx); Cost {views:cost.views+1,source:cost.source+view.host.parsed.source.len(),layout:cost.layout+view.estimated_bytes()}}));
+        let mut cost = self.panes[pane].viewport.reserved;
+        if pane == 0 { cost.layout += self.retained_resources.estimated_bytes(); }
+        self.panes[pane].viewport.budget.update(self.panes[pane].viewport.mounts.iter().fold(cost,|cost,m| {let view=m.view.read(cx); Cost {views:cost.views+1,source:cost.source+view.host.parsed.source.len(),layout:cost.layout+view.estimated_bytes()}}));
     }
     pub(super) fn replace_pane_groups(&mut self, pane:usize, groups:Vec<Group>, cx:&Context<Self>) {
         let viewport=&mut self.panes[pane].viewport;

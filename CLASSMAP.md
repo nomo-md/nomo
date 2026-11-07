@@ -24,13 +24,13 @@
 | NomoMark 剪贴板 | `src-gpui/src/clipboard.rs`、`clipboard_rich.rs`、`clipboard_images.rs`、`clipboard_{native,macos,linux,x11}.rs`、`nomo_mark/clipboard_content.rs`、`nomo_mark/html_style.rs`、`session_actions.rs` | 三平台局部及跨窗口语义复制、纯文本／HTML 双格式、受限 HTML 粘贴及有界图片输入；成功写入后才删除原文，跨窗口输出限制 64 MiB；非 Windows 所有者按需创建并在退出时释放 |
 | 旧编辑实现与共享动作 | `src-gpui/src/editor.rs`、`buffer.rs`、`document/mod.rs` | 默认 Workspace 不再创建 Buffer/EditorView；保留共用动作、渲染类型与保存前快照工具 |
 | Markdown 渲染 | `src-gpui/src/markdown/` | 块结构、行内标记、当前窗口代码布局 |
-| 跨行代码高亮 | `src-gpui/src/markdown/code_highlight.rs`、`highlight.rs`、`nomo_mark/source_view.rs` | syntect／two-face 原生语法，代码卡片与源码视图共用；按需语法库、8 MiB／120 项 LRU 和局部解析预算 |
+| 跨行代码高亮 | `src-gpui/src/markdown/code_highlight.rs`、`highlight.rs`、`nomo_mark/source_view.rs` | syntect／two-face 的 Oniguruma 后端，代码卡片与源码视图共用；按需语法库、8 MiB／120 项 LRU 和局部解析预算 |
 | 表格宽度与内容适配 | `src-gpui/src/nomo_mark/table_widths.rs`、`src-gpui/src/markdown/table_layout.rs` | 共享列宽约束、纯语义测量、表头字体与图片缩放；只作用于当前窗口布局，不写回自动列宽 |
 | 代码块原位编辑与语言选择 | `src-gpui/src/nomo_mark/code_blocks.rs`、`code_ui.rs`、`src-gpui/src/markdown/code_layout.rs` | 主会话局部输入与围栏保护；旧版卡片、固定行号与块内双向滚动、头部复制反馈／展开／语言选择；无代码草稿或独立历史 |
 | 行内注释标签与原位编辑 | `src-gpui/src/nomo_mark/comments.rs`、`object_ui.rs` | 跟随主题主色的完整注释，按正文或单元格宽度折行，支持原位输入；局部草稿按会话确认，IME 收尾后提交，关闭释放输入控件 |
 | HTML 容器与属性卡片 | `src-gpui/src/nomo_mark/html_table.rs`、`front_matter.rs`、`object_ui.rs` | 安全 HTML 文本及实体映射、Details 标题边界；Front Matter 字段摘要、块注释完整预览与原位草稿；仅解析当前窗口，不重写未知属性 |
 | 文字布局与 KP | `src-gpui/src/layout.rs`、`kp.rs`、`kp/hyphenation.rs`、`resources/hyph-en-us.tex` | GPUI 塑形、有界 KP 求解、按需英文 Liang 断词、悬挂标点与虚拟连字符几何；保留原文字节身份，字典不缓存用户词语 |
-| 图片／公式／图表 | `src-gpui/src/images.rs`、`embeds.rs`、`embeds_native.rs`、`cache.rs` | 本地／HTTP(S) 图片解码预检、有限任务队列、失败与位图预算、CPU／atlas 淘汰；无视图 SVG 管线供编辑器、导出和 Quick Look 共用 |
+| 图片／公式／图表 | `src-gpui/src/images.rs`、`embeds.rs`、`embeds_native.rs`、`cache.rs`、`nomo_mark/resource_lifecycle.rs` | 本地／HTTP(S) 图片解码预检、有限任务队列、失败与位图预算、CPU／atlas 淘汰；关闭文档按其他窗口与后台标签的有界资源键回收，旧异步请求失效；无视图 SVG 管线供编辑器、导出和 Quick Look 共用 |
 | macOS Quick Look | `src-gpui/macos-quick-look/`、`src-gpui/src/quick_look.rs`、`quick_look_model.rs`、`scripts/build-macos-quick-look.sh` | 按需沙箱预览扩展，AppKit 原生排版、内嵌图片和用户选定目录的相对图片；正文 1 MiB、可取消串行渲染、有限图片和增强结果，关闭释放；无编辑会话、网络或 WebView |
 | 公式字体回退 | `src-gpui/src/math_fallback.rs`、`vendor/latex-rust/NOMO-PATCH.md` | 固定版 TeX 引擎扩展缺字接口，系统字体度量及轮廓参与正常排版；缓存只活到单次公式完成，复用现有位图缓存 |
 | 主题、动效与平台字体 | `src-gpui/src/theme.rs`、`theme_catalog.rs`、`resources/color-themes.json`、`src-gpui/src/ui/motion.rs` | 四套原版主题、有限用户主题目录及 JSON 导入／导出；同明暗配色与字体变更也失效可见区布局，图表配色进入共享缓存键 |

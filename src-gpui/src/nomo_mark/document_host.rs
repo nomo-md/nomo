@@ -18,6 +18,8 @@ mod viewport_ui;
 mod window_panes;
 #[path = "workspace_host.rs"]
 mod workspace_host;
+#[path = "resource_lifecycle.rs"]
+mod resource_lifecycle;
 #[path = "save_dialog.rs"]
 mod save_dialog;
 #[path = "toolbar_commands.rs"]
@@ -54,6 +56,7 @@ pub struct DocumentHost {
     mini_paper_padding: Option<gpui::Edges<gpui::Pixels>>,
     outline_layout: OutlineLayout,
     closed: bool,
+    retained_resources: super::resources::ResourceDependencies,
     metadata: workspace_host::Metadata,
     queries: workspace_queries::Queries,
     control: Entity<NomoMark>,
@@ -114,6 +117,7 @@ impl DocumentHost {
             .expect("valid sample");
         let control = cx.new(|cx| { let mut view = NomoMark::new(host, cx); view.windowed_navigation = production; view });
         let subscription = cx.subscribe(&control, Self::event);
+        Self::register_resources(cx);
         let this = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             this.update(cx, |view, cx| view.request_close(window, cx))
@@ -128,6 +132,7 @@ impl DocumentHost {
             mini_paper_padding: None,
             outline_layout: OutlineLayout::CENTERED,
             closed: false,
+            retained_resources: Default::default(),
             port,
             control: control.clone(),
             message: crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text("host.connected").into(),
@@ -188,7 +193,10 @@ impl DocumentHost {
                 return;
             }
             ControlEvent::SelectionChanged { .. } => self.selection_changed(cx),
-            ControlEvent::ResourceUsage { .. } => { self.update_resident_cost(cx); self.schedule_viewport(16,cx); }
+            ControlEvent::ResourceUsage { .. } => {
+                if !self.closed { source.read(cx).retain_resources(&mut self.retained_resources, cx); }
+                self.update_resident_cost(cx); self.schedule_viewport(16,cx);
+            }
             ControlEvent::Submit(tx) | ControlEvent::SubmitDerived(tx) => {
                 let derived = matches!(event, ControlEvent::SubmitDerived(_));
                 self.refresh_toolbar_marks(cx);
@@ -351,15 +359,15 @@ impl DocumentHost {
                 identity,
                 requests: demands,
             } => {
-                if &source.read(cx).host.parsed.identity != identity {
+                if self.closed || &source.read(cx).host.parsed.identity != identity {
                     return;
                 }
                 let mut images = Vec::new();
                 let mut embeds = Vec::new();
                 for demand in demands {
                     match demand {
-                        ResourceRequest::Image(path) => images.push(path.clone()),
-                        ResourceRequest::Embed(spec) => embeds.push(spec.clone()),
+                        ResourceRequest::Image(path) => { self.retained_resources.image(path); images.push(path.clone()); }
+                        ResourceRequest::Embed(spec) => { self.retained_resources.embed(spec.key()); embeds.push(spec.clone()); }
                     }
                 }
                 crate::images::request(images, cx);
@@ -475,6 +483,7 @@ impl DocumentHost {
     }
     fn toggle_hidden(&mut self, cx: &mut Context<Self>) {
         if let Err(error)=self.ready(cx) { self.report(error,cx); return; }
+        self.remember_resources(cx);
         self.hidden=!self.hidden;
         if self.hidden {self.quick.cancel();self.metadata.front_matter_entry=None;}
         for pane in 0..self.panes.len() {

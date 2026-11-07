@@ -53,6 +53,14 @@ impl ObjectEditor {
 }
 
 impl NomoMark {
+    pub(crate) fn retain_resources(&self, into: &mut crate::nomo_mark::resources::ResourceDependencies, cx: &App) {
+        into.extend(&self.layout_resources);
+        if let Some(object) = &self.object {
+            for key in [object.preview_key, object.preview_ready_key.get()].into_iter().flatten() { into.embed(key); }
+            if let Some(path) = self.preview_image_path() { into.image(&path); }
+            object.child.read(cx).retain_resources(into, cx);
+        }
+    }
     pub(super) fn inline_editing(&self) -> bool {
         self.object.as_ref().is_some_and(|object| matches!(object.draft.kind, ObjectKind::InlineComment | ObjectKind::InlineMath))
     }

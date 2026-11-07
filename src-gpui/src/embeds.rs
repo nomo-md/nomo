@@ -85,7 +85,7 @@ pub enum EmbedState {
 }
 
 enum Entry {
-    Loading,
+    Loading(u64),
     Ready { info: EmbedInfo, image: Arc<RenderImage>, bytes: usize, used: Cell<u64> },
     Failed(Arc<str>),
 }
@@ -95,6 +95,7 @@ pub struct EmbedStore {
     entries: HashMap<u64, Entry>,
     bytes: usize,
     clock: Cell<u64>,
+    next_request: u64,
     pub generation: u64,
 }
 
@@ -104,7 +105,7 @@ impl EmbedStore {
     /// 查询状态；返回 None 表示尚未请求，调用方应登记到 `request`。
     pub fn state(&self, key: u64) -> Option<EmbedState> {
         Some(match self.entries.get(&key)? {
-            Entry::Loading => EmbedState::Pending,
+            Entry::Loading(_) => EmbedState::Pending,
             Entry::Ready { info, .. } => EmbedState::Ready(*info),
             Entry::Failed(message) => EmbedState::Failed(message.clone()),
         })
@@ -121,6 +122,22 @@ impl EmbedStore {
         }
     }
 
+    /// 关闭文档后不继续保留位图、失败结果或异步任务的旧登记。
+    pub(crate) fn retain(&mut self, keep: impl Fn(u64) -> bool) -> Vec<Arc<RenderImage>> {
+        let mut retired = Vec::new();
+        let old_len = self.entries.len();
+        self.entries.retain(|key, entry| {
+            if keep(*key) { return true; }
+            if let Entry::Ready { image, bytes, .. } = entry { self.bytes -= *bytes; retired.push(image.clone()); }
+            false
+        });
+        if old_len != self.entries.len() { self.generation = self.generation.wrapping_add(1); }
+        retired
+    }
+    fn complete(&mut self, key: u64, request: u64, result: Result<(EmbedInfo, RenderImage, usize), String>) -> Vec<Arc<RenderImage>> {
+        if !matches!(self.entries.get(&key), Some(Entry::Loading(current)) if *current == request) { return Vec::new(); }
+        self.insert(key, result)
+    }
     /// CPU 缓存和窗口 atlas 必须一起淘汰，避免公式／图表纹理持续累积。
     fn insert(&mut self, key: u64, result: Result<(EmbedInfo, RenderImage, usize), String>) -> Vec<Arc<RenderImage>> {
         let mut retired = Vec::new();
@@ -167,12 +184,14 @@ pub fn request(specs: Vec<EmbedSpec>, cx: &mut App) {
         if store.entries.contains_key(&key) {
             continue;
         }
-        store.entries.insert(key, Entry::Loading);
+        store.next_request = store.next_request.wrapping_add(1);
+        let request = store.next_request;
+        store.entries.insert(key, Entry::Loading(request));
         let task = cx.background_executor().spawn(async move { render(&spec) });
         cx.spawn(async move |cx| {
             let result = task.await;
             cx.update(|cx| {
-                let retired = cx.global_mut::<EmbedStore>().insert(key, result);
+                let retired = cx.global_mut::<EmbedStore>().complete(key, request, result);
                 for image in retired { cx.drop_image(image, None); }
                 cx.refresh_windows();
             });
@@ -233,6 +252,28 @@ fn rasterize(svg: &str, scale: f32, mermaid_text: bool) -> Result<(RenderImage, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_resources_release_textures_and_ignore_late_render() {
+        let mut store = EmbedStore::default();
+        let decoded = || Ok((EmbedInfo { width: 1.0, height: 1.0, depth: 0.0 },
+            RenderImage::new(vec![Frame::new(RgbaImage::new(1, 1))]), 4));
+        store.insert(1, decoded());
+        store.insert(2, decoded());
+        store.entries.insert(3, Entry::Loading(1));
+        store.insert(4, Err("failed".into()));
+        assert_eq!(store.retain(|key| key == 1).len(), 1);
+        assert_eq!((store.entries.len(), store.bytes), (1, 4));
+        store.complete(3, 1, decoded());
+        assert!(store.state(3).is_none());
+        store.entries.insert(3, Entry::Loading(2));
+        store.complete(3, 1, Err("late failure".into()));
+        assert!(matches!(store.state(3), Some(EmbedState::Pending)));
+        store.complete(3, 2, decoded());
+        assert_eq!(store.bytes, 8);
+        assert_eq!(store.retain(|_| false).len(), 2);
+        assert_eq!((store.entries.len(), store.bytes), (0, 0));
+    }
 
     #[test]
     fn cache_eviction_returns_embed_texture_and_preserves_budget() {
