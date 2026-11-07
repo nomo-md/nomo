@@ -52,7 +52,7 @@
 | 链接编辑与导航 | `src-gpui/src/nomo_mark/link_edit.rs`、`link_selection.rs`、`link_display.rs`、`link_target.rs`、`document_host.rs`、`src-gpui/src/ui/workspace.rs` | 局部链接弹层、按选区拆分／合并链接、可读地址与源码映射、本地 Markdown 标签／锚点导航、白名单附件后台预检及系统打开，正文仍按窗口加载 |
 | 脚注悬停预览 | `src-gpui/src/nomo_mark/footnote_preview.rs`、`workspace_queries.rs` | 共享结构索引定位，最多读取 8 KiB／显示 360 字；提示关闭、文档隐藏和后续悬停取消旧请求 |
 | 键盘与局部资源失效 | `src-gpui/src/nomo_mark/keyboard.rs`、`keyboard_session.rs`、`navigation.rs`、`resources.rs` | 按词、行、文档与翻页动作；有界跨窗查询；按资源依赖失效，无全文镜像 |
-| 连续窗口与预算 | `src-gpui/src/nomo_mark/native_port.rs`、`session_actions.rs`、`session_window.rs`、`viewport_ui.rs`、`resident_budget.rs` | 正式/开发共用会话连接、大编辑重分配、超大结构原文分片、失败重试、预取、回收和驻留预算 |
+| 连续窗口与预算 | `src-gpui/src/nomo_mark/native_port.rs`、`session_actions.rs`、`session_window.rs`、`viewport_ui.rs`、`viewport_model.rs`、`resident_budget.rs` | 正式/开发共用会话连接、已发布索引前缀增量分组、未索引尾部估算占位与阅读锚点、大编辑重分配、超大结构原文分片、失败重试、预取、回收和驻留预算 |
 | 同会话单栏/双栏 | `src-gpui/src/nomo_mark/window_panes.rs`、`src-gpui/src/ui/workspace/outline.rs` | 按需 Pane、唯一输入控件、全局导航、局部窗口同步、模式/历史阅读锚点与取消，不持有完整正文/历史。单栏按编辑区百分比排正文，大纲可自动隐藏或手动浮在当前编辑区右侧 |
 | 页面全文查询 | `src-gpui/src/nomo_mark/workspace_queries.rs` | 后台搜索分页、全文统计、大纲；查找与批量替换独立调度，按文档校验请求身份与修订 |
 | 应用界面语言 | `src-gpui/src/ui/toolbar_i18n.rs`、`resources/app-locales.json`、`resources/markdown-lint-locales.json`、`main.rs`、`settings.rs` | 四种语言与系统语言、稳定消息键及延迟解析；菜单、托盘与已缓存提示跟随界面语言，用户内容及底层错误原文不翻译 |

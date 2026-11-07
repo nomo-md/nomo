@@ -24,6 +24,9 @@ pub(super) struct Viewport {
     pub(super) references_failed: bool,
     pub(super) references_due: Instant,
     pub(super) dirty: bool,
+    groups_complete: bool,
+    groups_due: Instant,
+    groups_timer: Option<gpui::Task<()>>,
     failed: BTreeMap<u64, String>,
     demand: ScrollDemand,
     started: Instant,
@@ -32,7 +35,7 @@ pub(super) struct Viewport {
 }
 impl Viewport {
     pub fn new(view: Entity<NomoMark>, subscription: Subscription) -> Self {
-        Self { mounts: vec![Mounted { view, _subscription: subscription, height:32.0 }], groups:Vec::new(), heights:Heights::default(), budget:ResidentLease::default(), reserved:Cost::default(), saved_scroll:gpui::point(px(0.0),px(0.0)), request:WindowRequest::default(), generation:0, loading:false, references_loading:false, references_failed:false, references_due:Instant::now(), dirty:true, failed:BTreeMap::new(), demand:ScrollDemand::default(), started:Instant::now(), last_top:0.0, timer:None }
+        Self { mounts: vec![Mounted { view, _subscription: subscription, height:32.0 }], groups:Vec::new(), heights:Heights::default(), budget:ResidentLease::default(), reserved:Cost::default(), saved_scroll:gpui::point(px(0.0),px(0.0)), request:WindowRequest::default(), generation:0, loading:false, references_loading:false, references_failed:false, references_due:Instant::now(), dirty:true, groups_complete:false, groups_due:Instant::now(), groups_timer:None, failed:BTreeMap::new(), demand:ScrollDemand::default(), started:Instant::now(), last_top:0.0, timer:None }
     }
 }
 impl Drop for Viewport { fn drop(&mut self) { self.request.cancel(); } }
@@ -65,7 +68,7 @@ impl DocumentHost {
             let visible_ready=self.pane_visible_ready(pane,cx);
             // 输入确认后还会重取结构和邻窗；它们完成前不能把临时占位布局当作最终位置。
             if view.host.pending_count() == 0 && view.measured_height().is_some()
-                && !self.panes[pane].viewport.dirty && !self.panes[pane].viewport.loading && visible_ready {
+                && visible_ready {
                 self.panes[pane].reveal_selection = false;
             }
             return;
@@ -78,18 +81,19 @@ impl DocumentHost {
     }
     pub(super) fn pane_visible_ready(&self, pane:usize, cx:&Context<Self>) -> bool {
         let state=&self.panes[pane];
-        if state.viewport.dirty || state.viewport.loading {return false;}
+        // 屏外预取和尾部分组续取不能阻挡已经完成布局的可见窗口。
+        if state.viewport.dirty {return false;}
         if state.viewport.groups.is_empty() {return true;}
         let top=(-f32::from(state.scroll.offset().y)-32.0).max(0.0);
         let height=f32::from(state.scroll.bounds().size.height);
         (state.viewport.heights.at(top)..=state.viewport.heights.at(top+height)).all(|index| {
             let group=&state.viewport.groups[index];
-            state.viewport.failed.contains_key(&group.from) || state.viewport.mounts.iter().any(|mount| {
+            !group.is_pending() && (state.viewport.failed.contains_key(&group.from) || state.viewport.mounts.iter().any(|mount| {
                 let view=mount.view.read(cx);
                 let id=&view.host.parsed.identity;
                 id.revision==self.status().revision && id.from_byte==group.from && id.to_byte==group.to
                     && view.measured_height().is_some_and(|height|(height-mount.height).abs()<0.5)
-            })
+            }))
         })
     }
     pub(super) fn pause_pane(&mut self, pane: usize, cx:&Context<Self>) {
@@ -97,6 +101,7 @@ impl DocumentHost {
         self.panes[pane].scrollbar_drag = None;
         self.panes[pane].viewport.request.cancel(); self.panes[pane].viewport.request=WindowRequest::default();
         self.panes[pane].viewport.generation+=1; self.panes[pane].viewport.loading=false; self.panes[pane].viewport.timer=None;
+        self.panes[pane].viewport.groups_timer=None;
         self.panes[pane].viewport.references_loading=false;
         self.panes[pane].viewport.references_failed=false;
         self.panes[pane].viewport.references_due=Instant::now();
@@ -122,6 +127,37 @@ impl DocumentHost {
         }));
         viewport.groups=groups;
         viewport.dirty=false;
+        viewport.groups_complete=true;
+        viewport.groups_timer=None;
+    }
+    fn append_pane_groups(&mut self, pane:usize, groups:Vec<Group>, total:u64, complete:bool, cx:&Context<Self>) {
+        let viewport=&mut self.panes[pane].viewport;
+        let density=viewport.groups.last().filter(|group|group.is_pending()).map(|group| {
+            let index=viewport.groups.len()-1;
+            (viewport.heights.top(index+1)-viewport.heights.top(index)) as f64 / (group.to-group.from).max(1) as f64
+        });
+        if viewport.groups.last().is_some_and(|group|group.is_pending()) {
+            viewport.groups.pop(); viewport.heights.pop();
+        }
+        // 已知前缀不重建，保留当前阅读窗口及所有实测高度。
+        for group in groups {
+            let height=viewport.mounts.iter().find(|mount| {
+                let id=&mount.view.read(cx).host.parsed.identity;
+                id.from_byte==group.from && id.to_byte==group.to
+            }).map_or(group.estimate,|mount|mount.height);
+            viewport.heights.push(height);
+            viewport.groups.push(group);
+        }
+        let from=viewport.groups.last().map_or(0,|group|group.to);
+        if from<total {
+            let density=density.unwrap_or_else(|| viewport.heights.total() as f64 / from.max(1) as f64);
+            let estimate=((total-from) as f64 * density.max(24.0/160.0)) as f32;
+            viewport.groups.push(Group::pending(from,total,estimate));
+            viewport.heights.push(estimate);
+        }
+        viewport.groups_complete=complete && from==total;
+        viewport.groups_due=Instant::now()+Duration::from_millis(crate::nomo_mark::session_window::policy().quiet_ms);
+        viewport.groups_timer=None;
     }
     pub(super) fn reset_pane(&mut self, pane: usize, cx: &mut Context<Self>) {
         self.panes[pane].viewport.request.cancel();
@@ -133,6 +169,8 @@ impl DocumentHost {
         self.panes[pane].viewport.references_due=Instant::now();
         self.panes[pane].viewport.reserved=Cost::default();
         self.panes[pane].viewport.dirty = true;
+        self.panes[pane].viewport.groups_complete = false;
+        self.panes[pane].viewport.groups_timer = None;
         self.panes[pane].viewport.failed.clear();
         self.panes[pane].viewport.groups.clear();
         self.panes[pane].viewport.heights = Heights::default();
@@ -161,6 +199,22 @@ impl DocumentHost {
             let _=this.update(cx, |host,cx| { if host.panes.get(pane).is_some_and(|p|p.id==pane_id) { host.panes[pane].viewport.timer=None; host.pane_tick(pane, cx); } });
         }));
     }
+    fn schedule_groups(&mut self, pane:usize, cx:&mut Context<Self>) {
+        if self.hidden || self.panes[pane].viewport.groups_timer.is_some() { return; }
+        let id=self.panes[pane].id;
+        let generation=self.panes[pane].viewport.generation;
+        let delay=self.panes[pane].viewport.groups_due.saturating_duration_since(Instant::now());
+        // 进度合并使用独立的短期定时器，不占用输入和滚动的 16ms 调度入口。
+        self.panes[pane].viewport.groups_timer=Some(cx.spawn(async move |this,cx| {
+            cx.background_executor().timer(delay).await;
+            let _=this.update(cx,|host,cx| {
+                if host.pane_request_current(pane,id,generation) {
+                    host.panes[pane].viewport.groups_timer=None;
+                    host.schedule_pane(pane,0,cx);
+                }
+            });
+        }));
+    }
     pub(super) fn pane_edited(&mut self, pane: usize, edits: &[SourceEdit], cx: &mut Context<Self>) {
         if !self.production { return; }
         self.panes[pane].viewport.request.cancel();
@@ -172,6 +226,8 @@ impl DocumentHost {
         self.panes[pane].viewport.references_due=Instant::now();
         self.panes[pane].viewport.reserved=Cost::default();
         self.panes[pane].viewport.dirty=true;
+        self.panes[pane].viewport.groups_complete=false;
+        self.panes[pane].viewport.groups_timer=None;
         self.panes[pane].load_error=None;
         self.panes[pane].viewport.failed.clear();
         // 未改变正文的邻窗保留实体和已测高度，避免先变成占位再异步挂载。
@@ -252,7 +308,10 @@ impl DocumentHost {
             self.refresh_groups(pane, cx);
             return;
         }
-        if self.panes[pane].viewport.groups.is_empty() { return; }
+        if self.panes[pane].viewport.groups.is_empty() {
+            if !self.panes[pane].viewport.groups_complete { self.refresh_groups(pane,cx); }
+            return;
+        }
         let (before,after,retain_before,retain_after,scrolling)=self.panes[pane].viewport.demand.range(height,now);
         let first=self.panes[pane].viewport.heights.at((top-before).max(0.0));
         let last=self.panes[pane].viewport.heights.at(top+height+after);
@@ -283,6 +342,7 @@ impl DocumentHost {
         candidates.sort_by_key(|&i| if i>=visible_first && i<=visible_last { (0, i.abs_diff(visible_first)) } else { (1,i.abs_diff(visible_first)) });
         for index in candidates {
             let group=self.panes[pane].viewport.groups[index].clone();
+            if group.is_pending() { continue; }
             if self.panes[pane].viewport.failed.contains_key(&group.from) || self.panes[pane].viewport.mounts.iter().any(|m| {
                 let id=&m.view.read(cx).host.parsed.identity;
                 id.revision==self.status().revision && group.matches_mount(id,m.view==control)
@@ -298,9 +358,24 @@ impl DocumentHost {
             return;
         }
         if self.panes[pane].viewport.mounts.len()!=mounted_before { cx.notify(); }
+        if !self.panes[pane].viewport.groups_complete {
+            let pending_visible=self.panes[pane].viewport.groups[visible_last].is_pending();
+            let visible_due=Instant::now()+Duration::from_millis(50);
+            if pending_visible && self.panes[pane].viewport.groups_due>visible_due {
+                self.panes[pane].viewport.groups_due=visible_due;
+                self.panes[pane].viewport.groups_timer=None;
+            }
+            if Instant::now()>=self.panes[pane].viewport.groups_due {
+                self.refresh_groups(pane,cx);
+            } else {
+                self.schedule_groups(pane,cx);
+            }
+        }
     }
     fn refresh_groups(&mut self, pane: usize, cx: &mut Context<Self>) {
         self.panes[pane].viewport.loading=true;
+        let append=!self.panes[pane].viewport.dirty;
+        let from=if append { self.panes[pane].viewport.groups.last().map_or(0,|group|if group.is_pending() {group.from} else {group.to}) } else {0};
         let control=self.panes[pane].control.clone();
         let identity=control.read(cx).host.parsed.identity.clone();
         let revision=identity.revision;
@@ -313,7 +388,8 @@ impl DocumentHost {
             (id.revision==revision && (mount.view==control || id.to_byte<=identity.from_byte || id.from_byte>=identity.to_byte))
                 .then_some((id.from_byte,id.to_byte))
         }).collect::<Vec<_>>();
-        let task=cx.background_executor().spawn(async move {port.window_groups(revision,&retained,&request)});
+        let through=retained.iter().map(|&(_,to)|to).max().unwrap_or(identity.to_byte).max(from);
+        let task=cx.background_executor().spawn(async move {port.published_groups(revision,from,through,&retained,&request)});
         cx.spawn(async move |this,cx| {
             let result=task.await;
             let _=this.update(cx,|host,cx| {
@@ -328,11 +404,21 @@ impl DocumentHost {
                     return;
                 }
                 match result {
-                    Ok(groups)=> {
+                    Ok(batch)=> {
+                        let groups=batch.groups;
+                        let retained_count=if append {host.panes[pane].viewport.groups.len()} else {0};
+                        if (retained_count+groups.len()+1)*(std::mem::size_of::<Group>()+64)>32*1024*1024 {
+                            let error=ControlError::NeedsContext("窗口元数据超过宿主缓存预算".into());
+                            host.panes[pane].load_error=Some(error.to_string());host.report(error,cx);cx.notify();return;
+                        }
+                        if groups.first().is_some_and(|group|group.from!=from) {
+                            host.panes[pane].viewport.dirty=true;
+                            host.schedule_pane(pane,crate::nomo_mark::session_window::policy().quiet_ms,cx);return;
+                        }
                         let id=&host.panes[pane].control.read(cx).host.parsed.identity;
                         let matching=groups.iter().find(|g|g.from==id.from_byte&&g.to==id.to_byte);
                         let source_only=host.panes[pane].control.read(cx).host.parsed.context.source_only;
-                        if !groups.is_empty() && (matching.is_none() || matching.is_some_and(|group|group.semantic==source_only)) {
+                        if !append && !groups.is_empty() && (matching.is_none() || matching.is_some_and(|group|group.semantic==source_only)) {
                             // 删除结构边界后旧窗口不再独立，安全结束交互后重取真实完整结构。
                             let byte=host.panes[pane].control.read(cx).host.selection.head_byte;
                             let selection=host.panes[pane].control.read(cx).host.selection;
@@ -340,15 +426,28 @@ impl DocumentHost {
                         }
                         let old_scroll=(-f32::from(host.panes[pane].scroll.offset().y)).max(0.0);
                         let old_top=(old_scroll-32.0).max(0.0);
-                        let (anchor,offset)=if host.panes[pane].viewport.groups.is_empty() {(id.from_byte,old_top)} else {let index=host.panes[pane].viewport.heights.at(old_top);(host.panes[pane].viewport.groups[index].from,old_top-host.panes[pane].viewport.heights.top(index))};
-                        host.replace_pane_groups(pane,groups,cx);
+                        let (anchor,offset,pending_anchor)=if host.panes[pane].viewport.groups.is_empty() {(id.from_byte,old_top,false)} else {
+                            let viewport=&host.panes[pane].viewport;
+                            let index=viewport.heights.at(old_top);
+                            let (byte,offset)=viewport.groups[index].anchor(old_top-viewport.heights.top(index),viewport.heights.top(index+1)-viewport.heights.top(index));
+                            (byte,offset,viewport.groups[index].is_pending())
+                        };
+                        if append { host.append_pane_groups(pane,groups,batch.total_bytes,batch.complete,cx); }
+                        else {
+                            host.replace_pane_groups(pane,groups,cx);
+                            host.append_pane_groups(pane,Vec::new(),batch.total_bytes,batch.complete,cx);
+                        }
                         if let Some(index)=host.panes[pane].viewport.groups.iter().position(|g|g.contains(anchor)) {
-                            let top=host.panes[pane].viewport.heights.top(index)+offset;
+                            let viewport=&host.panes[pane].viewport;
+                            let height=viewport.heights.top(index+1)-viewport.heights.top(index);
+                            let top=viewport.heights.top(index)+viewport.groups[index].anchor_offset(anchor,offset,height);
+                            let resolved=pending_anchor && !viewport.groups[index].is_pending();
                             // 高度树不含纸面顶边距；重建索引时保留已滚过的边距。
                             host.panes[pane].scroll.set_offset(gpui::point(px(0.0),px(-(top+old_scroll.min(32.0)))));
                             host.panes[pane].viewport.last_top=top;
                             let now=host.panes[pane].viewport.started.elapsed().as_secs_f64()*1000.0;
                             host.panes[pane].viewport.demand.reset(top,now);
+                            if resolved { host.anchor_published_content(pane,anchor); }
                         }
                         host.schedule_pane(pane, 16,cx);
                     }

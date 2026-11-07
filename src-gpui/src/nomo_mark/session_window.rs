@@ -49,6 +49,11 @@ pub struct LoadedWindow {
     pub total_bytes: u64,
     pub index: StructureIdentity,
 }
+pub(super) struct PublishedGroups {
+    pub groups: Vec<super::viewport_model::Group>,
+    pub total_bytes: u64,
+    pub complete: bool,
+}
 #[derive(Clone, Default)]
 pub struct WindowRequest {
     cancelled: Arc<AtomicBool>,
@@ -81,13 +86,34 @@ impl NativeWindowPort {
     pub fn window_groups(&self, revision: u64, retained: &[(u64, u64)], request: &WindowRequest) -> Result<Vec<super::viewport_model::Group>, ControlError> {
         let index = self.ready_index(revision, request)?;
         let total = self.status()?.byte_length;
-        if total == 0 { return Ok(Vec::new()); }
+        self.groups_from_index(revision, index, 0..total, false, retained, request)
+    }
+    /// 只续取已经发布的连续前缀；未索引尾部由视口占位，不等待全文完成。
+    pub(super) fn published_groups(&self, revision: u64, from: u64, through: u64, retained: &[(u64, u64)], request: &WindowRequest) -> Result<PublishedGroups, ControlError> {
+        let index = self.wait_index(revision, Some(through), request)?;
+        let progress = self.manager.query_structure(&self.owner, index.clone(), StructureQuery::Progress).map_err(structure_error)?;
+        match progress.state.as_str() {
+            "ready" | "building" => {},
+            "cancelled" => return Err(ControlError::Stale),
+            _ => return Err(host_error(progress.failure.unwrap_or(progress.state))),
+        }
+        let complete = progress.state == "ready";
+        let groups = self.groups_from_index(revision, index, from..progress.indexed_bytes, !complete, retained, request)?;
+        if complete && groups.last().map_or(from,|group|group.to)!=progress.total_bytes {
+            return Err(ControlError::NeedsContext("索引未提供连续文档尾部".into()));
+        }
+        Ok(PublishedGroups { groups, total_bytes: progress.total_bytes, complete })
+    }
+    fn groups_from_index(&self, revision: u64, index: StructureIdentity, range: Range<u64>, building: bool, retained: &[(u64, u64)], request: &WindowRequest) -> Result<Vec<super::viewport_model::Group>, ControlError> {
+        request.check()?;
+        if self.status()?.revision != revision { return Err(ControlError::Stale); }
+        if range.is_empty() { return Ok(Vec::new()); }
         let mut cursor = None;
         let mut blocks = Vec::new();
         let mut bytes = 0usize;
         loop {
             request.check()?;
-            let page = self.manager.query_structure(&self.owner, index.clone(), StructureQuery::Blocks { from_byte: 0, to_byte: total, cursor }).map_err(structure_error)?;
+            let page = self.manager.query_structure(&self.owner, index.clone(), StructureQuery::Blocks { from_byte: range.start, to_byte: range.end, cursor }).map_err(structure_error)?;
             if page.fragment.is_some() {
                 return Err(ControlError::NeedsContext("结构元数据需要续取，保留当前可编辑窗口".into()));
             }
@@ -107,6 +133,7 @@ impl NativeWindowPort {
         let mut source_bytes = 0usize;
         for block in blocks {
             if block.mode == "semantic" && block.semantic_complete && block.kind != "native_region" {
+                if block.from_byte < range.start || block.to_byte > range.end { return Err(ControlError::Stale); }
                 source_bytes += std::mem::size_of_val(&block) + block.id.len() + block.kind.len() + block.mode.len();
                 if source_bytes > 32 * 1024 * 1024 {
                     return Err(ControlError::NeedsContext("窗口元数据超过宿主预算".into()));
@@ -114,13 +141,18 @@ impl NativeWindowPort {
                 bounded.push(block);
                 continue;
             }
-            let mut from = block.from_byte;
-            while from < block.to_byte {
+            let mut from = block.from_byte.max(range.start);
+            let end = block.to_byte.min(range.end);
+            while from < end {
                 request.check()?;
                 let mut nominal = (block.from_byte + ((from - block.from_byte) / chunk_bytes + 1) * chunk_bytes).min(block.to_byte);
+                // 正在增长的超大结构只发布完整原文分片，不能把暂时的尾端固定成窗口边界。
+                if building && block.to_byte >= range.end && nominal >= end
+                    && end - from < chunk_bytes { break; }
+                nominal = nominal.min(end);
                 let mut to = self.source_boundary(revision, nominal)?;
                 if to <= from {
-                    nominal = nominal.saturating_add(chunk_bytes).min(block.to_byte);
+                    nominal = nominal.saturating_add(chunk_bytes).min(end);
                     to = self.source_boundary(revision, nominal)?;
                 }
                 for &(start, end) in retained {
@@ -178,7 +210,7 @@ impl NativeWindowPort {
         self.source_window(revision, from..to, request, index)
     }
     pub(crate) fn load_source_range(&self, revision: u64, range: Range<u64>, request: &WindowRequest) -> Result<LoadedWindow, ControlError> {
-        let index = self.ready_index(revision, request)?;
+        let index = self.wait_index(revision, Some(range.end), request)?;
         self.source_window(revision, range, request, index)
     }
     fn source_window(&self, revision: u64, range: Range<u64>, request: &WindowRequest, index: StructureIdentity) -> Result<LoadedWindow, ControlError> {
@@ -256,7 +288,7 @@ impl NativeWindowPort {
         limit: Option<u64>,
         request: &WindowRequest,
     ) -> Result<LoadedWindow, ControlError> {
-        let index = self.ready_index(revision, request)?;
+        let index = self.wait_index(revision, limit, request)?;
         self.group_from_index(revision, byte, limit, request, index)
     }
     fn group_from_index(
@@ -476,6 +508,47 @@ impl NativeWindowPort {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incremental_groups_publish_before_eof_and_cover_unicode_raw_boundaries() {
+        for (name,text) in [
+            ("paragraphs","中文 😀 paragraph\r\n\r\n".repeat(90_000)),
+            ("raw",format!("```text\r\n{}\r\n```\r\n\r\n尾段\r\n","中文 😀 long line\r\n".repeat(12_000))),
+        ] {
+            let root=std::env::temp_dir().join(format!("nomo-incremental-groups-{}-{name}",std::process::id()));
+            let port=NativeWindowPort::open(root.clone(),name.into(),None,Some(text.clone())).unwrap();
+            let request=WindowRequest::default();
+            let loaded=port.load_initial_group(0,&request).unwrap();
+            let retained=[(loaded.input.from_byte,loaded.input.to_byte)];
+            let first=port.published_groups(0,0,loaded.input.to_byte,&retained,&request).unwrap();
+            if name=="paragraphs" {assert!(!first.complete,"首个局部窗口不应等待全文索引");}
+            assert!(first.groups.iter().any(|group|(group.from,group.to)==retained[0]));
+            let mut groups=first.groups;
+            let started=Instant::now();
+            loop {
+                assert!(started.elapsed()<Duration::from_secs(30),"续取没有结束：{name}");
+                let from=groups.last().unwrap().to;
+                let batch=port.published_groups(0,from,from,&retained,&request).unwrap();
+                groups.extend(batch.groups);
+                if batch.complete && groups.last().unwrap().to==text.len() as u64 {break;}
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(groups[0].from,0);
+            assert!(groups.windows(2).all(|pair|pair[0].to==pair[1].from));
+            for group in &groups {
+                assert!(text.is_char_boundary(group.from as usize) && text.is_char_boundary(group.to as usize));
+                assert!(!text[..group.to as usize].ends_with('\r'));
+                assert!(group.to-group.from<=policy().group_bytes);
+            }
+            for group in [groups.first().unwrap(),&groups[groups.len()/2],groups.last().unwrap()] {
+                let loaded=if group.semantic {port.load_group(0,group.from,Some(group.to),&request)}
+                    else {port.load_source_range(0,group.from..group.to,&request)}.unwrap();
+                assert_eq!(loaded.input.text,text[group.from as usize..group.to as usize]);
+            }
+            request.cancel();
+            assert!(matches!(port.published_groups(0,0,0,&[],&request),Err(ControlError::Stale)));
+            port.close(true).unwrap();drop(port);std::fs::remove_dir_all(root).unwrap();
+        }
+    }
     #[test]
     fn enter_exit_windows_keep_source_selection_and_history() {
         use crate::nomo_mark::{commands::{self, EditIntent}, parse::ParsedWindow};

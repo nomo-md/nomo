@@ -250,6 +250,13 @@ impl DocumentHost {
             })
         })
     }
+    /// 尾部占位变为真实内容后，首帧按同一正文位置排版，避免估值到实测值的二次跳动。
+    pub(super) fn anchor_published_content(&mut self, pane:usize, byte:u64) {
+        if self.panes[pane].reading_restore.is_none() && !self.panes[pane].reveal_selection {
+            self.panes[pane].reading_restore=Some(ReadingAnchor {byte,fraction:0.0,
+                revision:Some(self.status().revision),view_only:true,edge:None,motion:None});
+        }
+    }
     fn visible_source_bounds(&self, pane:usize, byte:u64, cx:&gpui::App) -> Option<gpui::Bounds<gpui::Pixels>> {
         let viewport=self.panes[pane].scroll.bounds();
         self.panes[pane].viewport.mounts.iter().find_map(|mount| {

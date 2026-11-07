@@ -206,12 +206,14 @@ export async function executeCase(test,host,root,config,result) {
     if(test.id==='performance.four-tabs') {
       result.notApplicableMetrics=['inputP95Ms'];
       const ids=[];for(const sample of test.samples)ids.push(await open(join(root,sample.path)));
-      await call('switch',{tabId:ids[0]});await call('reveal',{byte:1500});await wait('stable');const anchor=await host.readingAnchors();
+      await call('switch',{tabId:ids[0]});await call('scroll',{pixels:1200});await wait('stable');const anchor=await host.readingAnchors();
+      truth('已滚动至非零阅读位置',anchor.reading?.byte>0&&anchor.panes.some(p=>p.scrollTop>0));
       const hashes=[];for(const id of ids){await call('switch',{tabId:id});hashes.push((await digest()).sha256);}
       for(let i=0;i<config.cycles;i++){for(const id of ids)await call('switch',{tabId:id});if(i%5===0)await measure(`cycle-${i}`);}
       await call('switch',{tabId:ids[0]});await wait('stable');const restored=await host.readingAnchors();
       result.readingPosition={before:anchor,after:restored};check('同一正文阅读锚点',restored.reading?.byte,anchor.reading?.byte);
       truth('阅读锚点比例保留',Math.abs(restored.reading.fraction-anchor.reading.fraction)<.01);
+      truth('阅读滚动位置保留',Math.abs(restored.panes[0].scrollTop-anchor.panes[0].scrollTop)<1);
       for(let i=0;i<ids.length;i++){await call('switch',{tabId:ids[i]});check('后台标签全文保留',(await digest()).sha256,hashes[i]);}
       for(const id of ids){await call('switch',{tabId:id});await call('close');}
       check('全部标签关闭后会话释放',(await raw('diagnostics')).runtimeResources.documentRuntimes,0);

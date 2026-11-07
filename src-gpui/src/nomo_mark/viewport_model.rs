@@ -27,7 +27,25 @@ pub struct Group {
     blocks: usize,
 }
 impl Group {
+    /// 未发布的尾部只占几何空间，不创建正文控件或发起片段读取。
+    pub fn pending(from: u64, to: u64, estimate: f32) -> Self {
+        Self { id: String::new(), from, to, estimate: estimate.max(1.0), semantic: false, blocks: 0 }
+    }
+    pub fn is_pending(&self) -> bool { self.blocks == 0 }
     pub fn contains(&self, byte: u64) -> bool { self.from <= byte && byte < self.to }
+    pub fn anchor(&self, offset: f32, height: f32) -> (u64, f32) {
+        if self.is_pending() {
+            let fraction = (offset / height.max(1.0)).clamp(0.0, 1.0) as f64;
+            let byte = self.from + ((self.to - self.from) as f64 * fraction).round() as u64;
+            (byte.min(self.to.saturating_sub(1)), 0.0)
+        } else { (self.from, offset) }
+    }
+    pub fn anchor_offset(&self, byte: u64, offset: f32, height: f32) -> f32 {
+        // 原占位被细分时，以文档字节位置映射新高度，不能沿用旧大占位内的像素偏移。
+        if byte > self.from {
+            ((byte - self.from) as f64 / (self.to - self.from).max(1) as f64 * height as f64) as f32 + offset
+        } else { offset }
+    }
     /// 活动控件先应用局部输入，组边界随后才收到事务确认；期间必须保持挂载。
     /// 只读邻窗仍须完整匹配边界，不能把过期正文当作当前内容显示。
     pub fn matches_mount(&self, identity: &WindowIdentity, active: bool) -> bool {
@@ -84,6 +102,18 @@ pub fn groups(blocks: impl IntoIterator<Item = BlockSummary>, retained: &[(u64, 
 #[derive(Default)]
 pub struct Heights { values: Vec<f32>, tree: Vec<f64> }
 impl Heights {
+    pub fn push(&mut self, height: f32) {
+        let height = height.max(1.0);
+        let index = self.values.len() + 1;
+        let start = index - (index & index.wrapping_neg());
+        let prefix = self.prefix(index - 1) - self.prefix(start);
+        if self.tree.is_empty() { self.tree.push(0.0); }
+        self.values.push(height);
+        self.tree.push(prefix + height as f64);
+    }
+    pub fn pop(&mut self) {
+        if self.values.pop().is_some() { self.tree.pop(); }
+    }
     pub fn new(values: impl IntoIterator<Item = f32>) -> Self {
         let values: Vec<_> = values.into_iter().map(|v| v.max(1.0)).collect();
         let mut tree = vec![0.0; values.len() + 1];
@@ -94,12 +124,13 @@ impl Heights {
         }
         Self { values, tree }
     }
-    pub fn top(&self, mut index: usize) -> f32 {
+    fn prefix(&self, mut index: usize) -> f64 {
         index = index.min(self.values.len());
         let mut value = 0.0;
         while index > 0 { value += self.tree[index]; index -= index & index.wrapping_neg(); }
-        value as f32
+        value
     }
+    pub fn top(&self, index: usize) -> f32 { self.prefix(index) as f32 }
     pub fn total(&self) -> f32 { self.top(self.values.len()) }
     pub fn at(&self, top: f32) -> usize {
         let mut index = 0;
@@ -161,6 +192,30 @@ impl ScrollDemand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incremental_tail_preserves_measured_prefix_and_document_anchor() {
+        let mut heights=Heights::new([80.0,120.0,800.0]);
+        let tail=Group::pending(200,1000,800.0);
+        let (byte,offset)=tail.anchor(400.0,800.0);
+        assert_eq!((byte,offset),(600,0.0));
+        heights.update(0,95.5);
+        heights.pop();
+        for height in [70.0,150.0,580.0] {heights.push(height);}
+        assert_eq!(heights.top(2),215.5);
+        let remaining=Group::pending(400,1000,580.0);
+        let relocated=remaining.anchor_offset(byte,offset,580.0);
+        assert!((relocated-580.0/3.0).abs()<0.001);
+        assert_eq!(remaining.anchor(relocated,580.0).0,600);
+        assert_eq!(heights.total(),1015.5);
+        // 尾部反复拆分后 Fenwick 前缀和仍需和完整重建一致。
+        let mut values=vec![95.5,120.0,70.0,150.0,580.0];
+        for i in 1..257 {
+            heights.pop();values.pop();
+            for height in [i as f32+0.25,512.0] {heights.push(height);values.push(height);}
+            let rebuilt=Heights::new(values.iter().copied());
+            for index in 0..=values.len() {assert_eq!(heights.top(index),rebuilt.top(index));}
+        }
+    }
     #[test]
     fn confirmed_boundary_edits_keep_neighbor_mounts_and_measured_heights() {
         use crate::nomo_mark::host::WindowHostAdapter;
