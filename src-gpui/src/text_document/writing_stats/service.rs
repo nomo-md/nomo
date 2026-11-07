@@ -259,6 +259,8 @@ impl WritingStatsService {
             ));
             fs::create_dir(&path)?;
             let directory = Arc::new(Directory(path));
+            #[cfg(test)]
+            super::tests::pause_scratch_scan(&job.root);
             let (body_length, headings, reused) = scan::build(
                 &mut source,
                 &directory.0,

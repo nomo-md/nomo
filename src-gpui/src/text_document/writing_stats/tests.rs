@@ -6,6 +6,25 @@ use std::{
     time::Instant,
 };
 static NEXT: AtomicU64 = AtomicU64::new(1);
+type ScanPause = (PathBuf, std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+static SCAN_PAUSE: std::sync::Mutex<Option<ScanPause>> = std::sync::Mutex::new(None);
+
+pub(super) fn pause_scratch_scan(root: &Path) {
+    let pause = {
+        let mut pending = SCAN_PAUSE.lock().unwrap();
+        if pending.as_ref().is_some_and(|(path, _, _)| path == root) {
+            pending.take()
+        } else {
+            None
+        }
+    };
+    if let Some((_, started, resume)) = pause {
+        let _ = started.send(());
+        // The sender is dropped even if the test panics, so the worker cannot stay blocked.
+        let _ = resume.recv_timeout(std::time::Duration::from_secs(10));
+    }
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -587,13 +606,18 @@ fn failed_scratch_writes_and_cancelled_requests_release_the_session() {
             .await
             .is_err());
         fs::remove_file(&scratch).unwrap();
+        let (started, entered) = std::sync::mpsc::channel();
+        let (resume, paused) = std::sync::mpsc::channel();
+        *SCAN_PAUSE.lock().unwrap() = Some((root.join(&doc.document_id), started, paused));
         let copy = manager.clone();
         let waiting =
             crate::async_runtime::spawn(
                 async move { copy.writing_stats("main".into(), query).await },
             );
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        // Cancel only after the worker owns its scratch directory, before it can finish.
+        entered.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         manager.cancel_writing_stats("main", Some(1));
+        drop(resume);
         assert_eq!(waiting.await.unwrap().unwrap_err().code, "stats-cancelled");
         if scratch.exists() {
             assert_eq!(fs::read_dir(&scratch).unwrap().count(), 0);
