@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-labelledby="title desc">
+  <title id="title">Nomo — local-first native Markdown</title>
+  <desc id="desc">The Nomo application mark, a blue writing cursor, and a Markdown file extension on a quiet light background. This is a brand illustration, not an application screenshot.</desc>
+  <rect width="1200" height="300" rx="20" fill="#f6f7f9"/>
+  <g id="app-mark" transform="translate(56 54) scale(.75)">
+    <rect x="16" y="16" width="224" height="224" rx="48" fill="#ffffff"/>
+    <path d="M87.5 145V80.5L152.5 145V80.5" fill="none" stroke="#252c36" stroke-width="17.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="178.5" y="71.5" width="6.5" height="82.5" rx="3.25" fill="#4d86fd"/>
+    <rect x="78" y="173.5" width="69" height="8.5" rx="4.25" fill="#999ca3"/>
+    <rect x="78" y="192.5" width="49" height="8.5" rx="4.25" fill="#999ca3"/>
+  </g>
+  <g id="wordmark" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="284" y="90" font-size="20" font-weight="600" letter-spacing="3" fill="#2f7d6f">NATIVE MARKDOWN</text>
+    <text x="278" y="194" font-size="112" font-weight="650" letter-spacing="-5" fill="#202428">Nomo</text>
+    <text x="284" y="242" font-size="26" fill="#68707a">Local files. Room to think.</text>
+  </g>
+  <g id="markdown-file" transform="translate(980 79)">
+    <path d="M0 0H94L142 48V142H0Z" fill="#ffffff" stroke="#dfe3e8" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M94 0V48H142" fill="none" stroke="#dfe3e8" stroke-width="2" stroke-linejoin="round"/>
+    <text x="24" y="106" font-family="ui-monospace, 'Cascadia Code', Consolas, monospace" font-size="38" font-weight="600" fill="#2f7d6f">.md</text>
+  </g>
+</svg>
