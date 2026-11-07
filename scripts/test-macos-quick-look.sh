@@ -8,7 +8,7 @@ mkdir -p "$work"
 metadata="$(cargo metadata --locked --no-deps --format-version 1)"
 target_dir="$(jq -r '.target_directory' <<< "$metadata")"
 export MACOSX_DEPLOYMENT_TARGET=12.0
-cargo test --locked --release --lib --features quick-look
+cargo test --locked --release --target aarch64-apple-darwin --lib --features quick-look
 cargo rustc --locked --release -p nomo-gpui --target aarch64-apple-darwin --lib --features quick-look --crate-type staticlib
 source_dir="$root/src-gpui/macos-quick-look"
 xcrun swiftc -swift-version 5 -O -parse-as-library -target arm64-apple-macosx12.0 \

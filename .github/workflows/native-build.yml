@@ -89,6 +89,9 @@ jobs:
         run: cargo check --locked --target ${{ matrix.target }} --bin nomo
       - name: Check development entrypoint and test targets
         run: cargo check --locked --target ${{ matrix.target }} --features nomo-mark-demo --all-targets
+      - name: Verify native Quick Look rendering
+        if: runner.os == 'macOS'
+        run: bash scripts/test-macos-quick-look.sh
       - name: Existing default editor tests
         run: cargo test --locked --release --target ${{ matrix.target }} --bin nomo
       - name: Existing document and NomoMark tests
@@ -106,9 +109,6 @@ jobs:
             echo 'Unexpected WebView dependency' >&2
             exit 1
           fi
-      - name: Verify native Quick Look rendering
-        if: runner.os == 'macOS'
-        run: bash scripts/test-macos-quick-look.sh
       - name: Package Windows (rebuild default features)
         if: runner.os == 'Windows' && inputs.packages
         run: ./scripts/package-windows.ps1
