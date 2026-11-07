@@ -150,9 +150,6 @@ pub const CATEGORIES: &[Category] = &[
     Category {
         title: "settings.category.advanced", icon: IconName::SlidersHorizontal,
         page: Page::Groups(&[
-            group("settings.group.rendering", &[
-                item("renderMode", "settings.renderMode.label", "settings.renderMode.description", Control::Choice(&[("hardware", "settings.renderMode.choice.hardware"), ("software", "settings.renderMode.choice.software")]), Support::None("settings.renderMode.support")),
-            ]),
             group("settings.group.insertion", &[
                 item("defaultCodeBlockLanguage", "settings.defaultCodeBlockLanguage.label", "settings.defaultCodeBlockLanguage.description", Control::Text { placeholder: "ts", compact: true }, Support::Full),
                 item("defaultDiagramType", "settings.defaultDiagramType.label", "settings.defaultDiagramType.description", Control::Choice(&[("flowchart", "settings.defaultDiagramType.choice.flowchart"), ("sequenceDiagram", "settings.defaultDiagramType.choice.sequenceDiagram"), ("classDiagram", "settings.defaultDiagramType.choice.classDiagram"), ("stateDiagram", "settings.defaultDiagramType.choice.stateDiagram"), ("erDiagram", "settings.defaultDiagramType.choice.erDiagram"), ("gantt", "settings.defaultDiagramType.choice.gantt"), ("pie", "settings.defaultDiagramType.choice.pie")]), Support::Full),
