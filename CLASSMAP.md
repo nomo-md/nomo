@@ -67,7 +67,7 @@
 | 策略和既有语料 | `src-gpui/resources/` | 策略 JSON、搜索与结构样本 |
 | 应用资源 | `src-gpui/assets/`、`src-gpui/build.rs` | SVG、图标、Windows manifest／版本资源 |
 | 打包 | `scripts/package-windows.ps1`、`package-macos.sh`、`package-linux.sh`、`msix/Build-Msix.ps1`、`packaging/` | Windows x64 环境初始化、三平台原生包与产物目录组装；独立 MSIX 审阅包保留原包身份并校验 EXE／DLL／资源，不自动安装或签名 |
-| 发布 | `.github/workflows/release.yml`、`scripts/verify-release.py` | 六类资产齐备后发布；Homebrew 和下载站同步 |
+| 原生 CI 与发布 | `.github/workflows/{ci,native-build,release}.yml`、`scripts/verify-release.py` | 日常三平台检查；手动验证六类资产；仅版本标签触发发布、Homebrew 和下载站同步 |
 
 检查入口：`cargo check --locked --bin nomo`、`cargo build --locked --release --bin nomo`。NomoMark 开发入口附加 `--features nomo-mark-demo`；定向测试为 `cargo test --locked --release --features nomo-mark-demo --bin nomo <过滤条件>`。
 

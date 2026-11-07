@@ -108,7 +108,11 @@ bash scripts/package-linux.sh
 | macOS | `Nomo_VERSION_aarch64.dmg`、`Nomo_aarch64.app.tar.gz` |
 | Linux | `Nomo_VERSION_amd64.deb`、`Nomo-VERSION-1.x86_64.rpm` |
 
-分支推送、PR 和手动 workflow dispatch 仅构建、检查并上传工作流产物。只有推送匹配 Cargo 版本的 `v*.*.*` 标签才发布，且必须存在对应发布说明。
+日常检查由 `.github/workflows/ci.yml` 执行：`master`、`gpui-editor` 推送和面向 `master` 的 PR 检查三平台默认／开发入口、已有测试、Release 编译、原生依赖与 macOS Quick Look。三平台共用 `native-build.yml`，Windows 使用 PowerShell 7 和显式 MSVC linker，macOS 使用受支持的 `macos-15` arm64 runner，Linux 使用 Ubuntu 24.04。Cargo 依赖缓存按平台、工具链及锁文件区分。
+
+已有 Rust 测试通过 `RUST_TEST_THREADS=1` 串行执行：测试各自创建独立文档服务，但 SQLite 的 32 MiB 堆上限作用于同一进程内全部连接；正式应用多文档共享一个服务。串行执行避免测试服务互相挤占预算，保留全部已有断言和生产资源限制，不改变服务内部后台任务的并发行为。
+
+在 Actions 中手动运行 `Native packages and release`（`release.yml`），选择待验证分支，可构建 Windows 安装版／ZIP、macOS DMG／应用归档、Linux DEB／RPM，并验证六类资产及归档结构、生成校验文件，上传 `native-packages` 工作流产物。手动运行只验证打包，不创建 Release，也不更新 Homebrew 或下载站。只有推送匹配 Cargo 版本的 `v*.*.*` 标签才发布，且必须存在对应发布说明。
 
 三平台全部成功后，验证六类资产及归档结构、生成 `checksums.md5`，上传草稿 Release，最后转为公开。已公开的同名 Release 不允许覆盖。稳定版继续更新 Homebrew；下载站使用既有部署钩子，不在本次工作中触发。
 
