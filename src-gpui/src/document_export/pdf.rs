@@ -88,9 +88,10 @@ pub(super) fn render(model: &Model, mut media: PreparedMedia, title: &str, appea
                             surface.draw_image(image, Size::from_wh(item.width, item.height).ok_or("图片尺寸无效")?); surface.pop();
                         },
                         ItemKind::Text { text, glyphs, font, size, style } => {
-                            let color = style.color.unwrap_or_else(|| if style.link.is_some() { rgb_bytes(appearance.theme.accent) } else { rgb_bytes(appearance.theme.fg) });
+                            let color = style.foreground_rgb(&appearance.theme).or(style.color).unwrap_or_else(|| if style.link.is_some() { rgb_bytes(appearance.theme.accent) } else { rgb_bytes(appearance.theme.fg) });
                             let baseline = y + item.height * 0.78 - f32::from(style.shift) * size * 0.28;
-                            if style.highlight { rectangle(&mut surface, x, y, item.width, item.height, [255, 232, 122]); }
+                            if let Some(background) = style.background_rgb(&appearance.theme) { rectangle(&mut surface, x, y, item.width, item.height, background); }
+                            else if style.highlight { rectangle(&mut surface, x, y, item.width, item.height, [255, 232, 122]); }
                             else if style.mono { rectangle(&mut surface, x, y, item.width, item.height, rgb_bytes(appearance.theme.inline_code_bg)); }
                             surface.set_fill(Some(fill(color)));
                             surface.draw_glyphs(Point::from_xy(x, baseline), &glyphs, fonts.faces[font].font.clone(), &text, size, false);
@@ -201,7 +202,7 @@ impl Layout<'_> {
                 _ => {
                     let mut style = run.style.clone();
                     let text = match &run.content { Content::Footnote(label) => { style.shift = 1; style.link = Some(format!("#nomo-footnote-{label}")); label.as_str() }, _ => run.label() };
-                    let run_size = size * if style.shift != 0 { 0.75 } else { 1.0 };
+                    let run_size = size * style.scale() * if style.shift != 0 { 0.75 } else { 1.0 };
                     for word in text.split_word_bounds() {
                         if word.contains(['\n','\r']) { for ch in word.chars() { if ch == '\n' { lines.push(std::mem::take(&mut line)); line.height = size*1.5; } offset += ch.len_utf8(); } continue; }
                         let original_length = word.len(); let start = offset;
@@ -217,7 +218,7 @@ impl Layout<'_> {
                                 self.prepared += shaped.len() * std::mem::size_of::<KrillaGlyph>() + chunk.len() + 256;
                                 if self.prepared > 64 * 1024 * 1024 { return Err("PDF 待分页字形超过 64 MiB 预算。".into()); }
                                 let item = Item { kind: ItemKind::Text { text: chunk.to_string(), glyphs: shaped, font, size: run_size, style: style.clone() }, width,
-                                    height: size * self.appearance.line_height.clamp(1.0,2.5), level, whitespace: !style.mono && chunk.chars().all(char::is_whitespace) };
+                                    height: size * style.scale() * self.appearance.line_height.clamp(1.0,2.5), level, whitespace: !style.mono && chunk.chars().all(char::is_whitespace) };
                                 append(item, &mut line, &mut lines, available);
                             }
                             offset += part.len();
@@ -235,7 +236,7 @@ impl Layout<'_> {
         let levels = line.items.iter().map(|item| item.level).collect::<Vec<_>>();
         let order = BidiInfo::reorder_visual(&levels);
         let mut items: Vec<Option<Item>> = line.items.into_iter().map(Some).collect();
-        for i in order { let item = items[i].take().unwrap(); let width = item.width; let offset = (line.height-item.height).max(0.0);
+        for i in order { let item = items[i].take().unwrap(); let width = item.width; let offset = (line.height-item.height).max(0.0) * if matches!(&item.kind, ItemKind::Text { .. }) { 0.78 } else { 1.0 };
             self.add(Draw::Item { item, x, y: y + offset })?; x += width;
         }
         Ok(())

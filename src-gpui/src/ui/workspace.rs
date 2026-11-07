@@ -243,9 +243,9 @@ pub struct Workspace {
     pub(crate) active: usize,
     comparison: ComparisonState,
     tab_scroll: ScrollHandle,
-    toolbar_scroll: ScrollHandle,
+    toolbar_visible_tools: usize,
     toolbar_trigger_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
-    toolbar_popup_anchors: [Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>; 5],
+    toolbar_popup_anchors: [Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>; 6],
     toolbar_popup: Option<toolbar::ToolbarPopup>,
     toolbar_popup_focus: FocusHandle,
     toolbar_target: Option<bool>,
@@ -367,7 +367,7 @@ impl Workspace {
             active: 0,
             comparison: ComparisonState::new(cx),
             tab_scroll: ScrollHandle::new(),
-            toolbar_scroll: ScrollHandle::new(),
+            toolbar_visible_tools: 0,
             toolbar_trigger_bounds: Rc::new(Cell::new(None)),
             toolbar_popup_anchors: std::array::from_fn(|_| Rc::new(Cell::new(None))),
             toolbar_popup: None,
@@ -1313,7 +1313,7 @@ impl Workspace {
         let (target,link)=match draft {Ok(value)=>value,Err(error)=>{self.notice=Some(error.to_string().into());cx.notify();return;}};
         let anchor = if let Some(position) = toolbar_position {
             let index = if kind == EditorPopoverKind::Table { toolbar::TABLE_ANCHOR } else { toolbar::LINK_ANCHOR };
-            let bounds = self.toolbar_popup_anchors[index].clone();
+            let bounds = self.toolbar_anchor(index);
             self.toolbar_trigger_bounds.set(bounds.get());
             PopupAnchor::Tracked(bounds, position)
         } else {
@@ -1851,7 +1851,7 @@ impl Render for Workspace {
         } else { match mode {
             None => self.render_empty(&theme, cx).into_any_element(),
             Some(mode) => {
-                let toolbar = if !shell_visible { None } else { self.render_toolbar_animated(settings.show_toolbar, &theme, mode, cx) };
+                let toolbar = if !shell_visible { None } else { self.render_toolbar_animated(settings.show_toolbar, &theme, mode, window, cx) };
                 let tab = self.tab().expect("active tab");
                 tab.document.update(cx, |host, _| host.set_save_directory(self.tree.as_ref().map(|tree|tree.root.as_path())));
                 let editors = if let Some(pair)=self.active_pair() { self.render_comparison(pair, &theme, window, cx) } else { div().size_full().child(tab.document.clone()).into_any_element() };

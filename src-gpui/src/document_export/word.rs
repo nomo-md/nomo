@@ -7,9 +7,9 @@ use zip::{ZipWriter, CompressionMethod, write::SimpleFileOptions};
 const NS: &str = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"";
 const HEADER: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/";
-pub(super) fn write(file: &mut File, model: &Model, mut media: PreparedMedia, title: &str, path: Option<&Path>, job: &Job, report: &mut ExportReport) -> Result<(), String> {
+pub(super) fn write(file: &mut File, model: &Model, mut media: PreparedMedia, title: &str, path: Option<&Path>, appearance: &super::Appearance, job: &Job, report: &mut ExportReport) -> Result<(), String> {
     let mut writer = ZipWriter::new(LimitedFile { file, position: 0, job });
-    let mut document = Word { xml: String::new(), job, path, placements: &media.placements, links: BTreeMap::new(), bookmarks: BTreeMap::new(),
+    let mut document = Word { xml: String::new(), job, path, appearance, run_size: 22, placements: &media.placements, links: BTreeMap::new(), bookmarks: BTreeMap::new(),
         bookmark_id: 0, drawing_id: 0, footnotes: BTreeMap::new(), in_footnote: false, available: 481.9, report };
     visit(&model.blocks, &mut |p| {
         if let Some(id) = &p.id { let number = document.bookmarks.len()+1; document.bookmarks.entry(id.clone()).or_insert_with(|| format!("nomo_{number}")); }
@@ -94,6 +94,7 @@ impl Seek for LimitedFile<'_> { fn seek(&mut self, to: SeekFrom) -> io::Result<u
     if position > MAX_OUTPUT_BYTES { return Err(io::Error::other("Word 文件定位超过预算")); } self.position = position; Ok(position)
 } }
 struct Word<'a> {
+    appearance: &'a super::Appearance, run_size: u16,
     xml: String, job: &'a Job<'a>, path: Option<&'a Path>, placements: &'a [Placement], links: BTreeMap<String, usize>, bookmarks: BTreeMap<String,String>,
     bookmark_id: usize, drawing_id: usize, footnotes: BTreeMap<String, usize>, in_footnote: bool, available: f32, report: &'a mut ExportReport,
 }
@@ -124,6 +125,7 @@ impl Word<'_> {
         self.raw(&format!("<w:jc w:val=\"{}\"/>", alignment(align)))?; self.raw("</w:pPr>")?;
         let bookmark = p.id.as_ref().and_then(|id| self.bookmarks.get(id)).cloned();
         let id = self.bookmark_id; if let Some(name) = bookmark.as_ref() { self.bookmark_id += 1; self.raw(&format!("<w:bookmarkStart w:id=\"{id}\" w:name=\"{name}\"/>"))?; }
+        self.run_size = if p.heading > 0 { [40,32,28,24,22,22][usize::from(p.heading - 1).min(5)] } else { 22 };
         for run in &p.runs { self.run(run)?; }
         if bookmark.is_some() { self.raw(&format!("<w:bookmarkEnd w:id=\"{id}\"/>"))?; }
         self.raw("</w:p>")
@@ -143,11 +145,21 @@ impl Word<'_> {
         self.raw("<w:r><w:rPr>")?;
         let s = &run.style;
         if s.bold { self.raw("<w:b/><w:bCs/>")?; } if s.italic { self.raw("<w:i/><w:iCs/>")?; }
-        if s.mono { self.raw("<w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:eastAsia=\"宋体\"/><w:sz w:val=\"18\"/><w:shd w:val=\"clear\" w:fill=\"F3F4F6\"/>")?; }
+        if let Some(family) = s.font_family.as_ref() {
+            let name = xml(family);
+            self.raw(&format!("<w:rFonts w:ascii=\"{name}\" w:hAnsi=\"{name}\" w:eastAsia=\"{name}\" w:cs=\"{name}\"/>"))?;
+        } else if s.mono { self.raw("<w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:eastAsia=\"宋体\"/>")?; }
+        if s.font_scale > 0 || s.mono {
+            let size = (f32::from(if s.mono { 18 } else { self.run_size }) * s.scale()).round().clamp(2.0, 3276.0) as u16;
+            self.raw(&format!("<w:sz w:val=\"{size}\"/><w:szCs w:val=\"{size}\"/>"))?;
+        }
+        if let Some([r,g,b]) = s.background_rgb(&self.appearance.theme) {
+            self.raw(&format!("<w:shd w:val=\"clear\" w:fill=\"{r:02X}{g:02X}{b:02X}\"/>"))?;
+        } else if s.mono { self.raw("<w:shd w:val=\"clear\" w:fill=\"F3F4F6\"/>")?; }
         if s.strike { self.raw("<w:strike/>")?; } if s.underline || hyperlink { self.raw("<w:u w:val=\"single\"/>")?; }
-        if s.highlight { self.raw("<w:highlight w:val=\"yellow\"/>")?; }
+        if s.highlight && s.background.is_none() { self.raw("<w:highlight w:val=\"yellow\"/>")?; }
         if s.shift != 0 { self.raw(if s.shift > 0 { "<w:vertAlign w:val=\"superscript\"/>" } else { "<w:vertAlign w:val=\"subscript\"/>" })?; }
-        if let Some([r,g,b]) = s.color { self.raw(&format!("<w:color w:val=\"{r:02X}{g:02X}{b:02X}\"/>"))?; }
+        if let Some([r,g,b]) = s.foreground_rgb(&self.appearance.theme).or(s.color) { self.raw(&format!("<w:color w:val=\"{r:02X}{g:02X}{b:02X}\"/>"))?; }
         else if hyperlink { self.raw("<w:color w:val=\"2563EB\"/>")?; }
         self.raw("</w:rPr>")?;
         match &run.content {

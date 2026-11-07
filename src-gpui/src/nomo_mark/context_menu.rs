@@ -210,7 +210,14 @@ impl NomoMark {
                     item("copyLinkAddress", "copy", MenuAction::LinkCopy).enabled(ready), sep(),
                     item("removeLink", "link-2-off", MenuAction::LinkRemove).enabled(editable && ready)]
             }
-            Target::Heading(level) => vec![item("heading", "heading", MenuAction::None)
+            Target::Heading(level) => vec![
+                item("cut", "scissors", MenuAction::Cut).shortcut("Ctrl+X").enabled(editable && !menu.selection.range().is_empty()),
+                item("copy", "copy", MenuAction::Copy).shortcut("Ctrl+C").enabled(!menu.selection.range().is_empty()),
+                item("paste", "clipboard", MenuAction::Paste(false)).shortcut("Ctrl+V").enabled(editable),
+                item("pasteAsPlainText", "clipboard", MenuAction::Paste(true)).shortcut("Ctrl+Shift+V").enabled(editable),
+                edit("deleteAction", "trash-2", EditIntent::Replace(String::new())).enabled(editable && !menu.selection.range().is_empty()),
+                item("selectAll", "text-cursor-input", MenuAction::SelectAll).shortcut("Ctrl+A"), sep(),
+                item("heading", "heading", MenuAction::None)
                     .children((1..=6).map(|n| heading(n).checked(n == *level)).collect()),
                 edit("paragraph", "crop", EditIntent::Heading(0)), sep(),
                 edit("liftHeading", "heading", EditIntent::AdjustHeading { increase: true }).enabled(editable && *level > 1),
@@ -295,7 +302,9 @@ impl NomoMark {
         // 对象命令以右键命中目标为准，即使用户保留了另一端的选区。
         let target_at = match &menu.target { Target::Link(at) => Some(*at), Target::Block(r, _) | Target::Image(r) | Target::Details(r, _) => Some(r.start),
             Target::Table { source, row, column, .. } => self.context_table_cell(source, *row, *column), Target::Heading(_) => Some(menu.hit), _ => None };
-        if let Some(at) = target_at { self.move_to(at, false, cx); }
+        // 通用编辑命令保留右键打开时的选区；只有结构／对象动作重新定位到命中处。
+        let selection_action = matches!(&action, A::Cut | A::Copy | A::Paste(_) | A::SelectAll | A::Find | A::Undo | A::Redo | A::Edit(EditIntent::Replace(_)));
+        if !selection_action { if let Some(at) = target_at { self.move_to(at, false, cx); } }
         match action {
             A::None => {}, A::Edit(intent) => self.command(intent, cx),
             A::Undo => cx.emit(ControlEvent::Undo), A::Redo => cx.emit(ControlEvent::Redo),

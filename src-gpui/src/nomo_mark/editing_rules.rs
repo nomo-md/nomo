@@ -28,6 +28,9 @@ pub(super) fn trailing_prefix(parsed: &ParsedWindow) -> Option<String> {
             (raw.starts_with("![") || raw.starts_with("<img")) && super::image_properties::ImageProperties::read(raw).is_some()
         });
     if !special { return None; }
+    // CommonMark 会把独占一行的 <font>/<span> 开标签也解析成 HtmlBlock。
+    // 行内 HTML 和尚未闭合的容器仍在输入中，不能把后续字符移到新段落。
+    if matches!(event, Event::Start(Tag::HtmlBlock)) && !completed_html_block(&source[range.clone()]) { return None; }
     if matches!(event, Event::Start(Tag::CodeBlock(_))) {
         let raw = source[range.clone()].trim_end();
         let first = raw.lines().next()?.trim_start();
@@ -38,6 +41,34 @@ pub(super) fn trailing_prefix(parsed: &ParsedWindow) -> Option<String> {
     let tail = &source[source.trim_end_matches(['\r', '\n']).len()..];
     Some(commands::line_ending(source, source.len()).repeat(2usize.saturating_sub(tail.bytes().filter(|b| *b == b'\n').count())))
 }
+fn completed_html_block(source: &str) -> bool {
+    let raw = source.trim();
+    if raw.starts_with("<!--") { return raw.ends_with("-->"); }
+    let Some(first) = super::nomo_syntax::html_tag(raw, 0) else { return false; };
+    if first.closing { return false; }
+    if matches!(first.name.as_str(), "hr" | "img") { return first.end == raw.len(); }
+    if !matches!(first.name.as_str(), "table" | "details" | "div" | "p" | "blockquote" | "pre" | "ul" | "ol"
+        | "section" | "article" | "aside" | "figure" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6") { return false; }
+    let mut depth = 1usize;
+    let mut cursor = first.end;
+    while let Some(relative) = raw[cursor..].find('<') {
+        let at = cursor + relative;
+        if raw[at..].starts_with("<!--") {
+            let Some(end) = raw[at..].find("-->") else { return false; };
+            cursor = at + end + 3;
+        } else if let Some(tag) = super::nomo_syntax::html_tag(raw, at) {
+            cursor = tag.end;
+            if tag.name == first.name {
+                if tag.closing {
+                    depth -= 1;
+                    if depth == 0 { return cursor == raw.len(); }
+                } else { depth += 1; }
+            }
+        } else { cursor = at + 1; }
+    }
+    false
+}
+
 fn move_to(parsed: &ParsedWindow, at: usize) -> EditResult {
     EditResult { edits: Vec::new(), selection: DocumentSelection::caret(parsed.identity.from_byte + at as u64), template_update: None }
 }
@@ -108,6 +139,15 @@ pub(super) fn semantic(parsed: &ParsedWindow, selection: DocumentSelection, inte
             (span.start <= at && at <= end).then_some((kind, span.start..end))
         }).min_by_key(|(_, span)| span.len());
         if let Some((kind, span)) = quote {
+            if kind.is_some() && at == span.end && !source[span.clone()].contains('\n')
+                && matches!(intent, EditIntent::ParagraphBreak | EditIntent::Newline)
+            {
+                // 手写提示标记后的第一次 Enter 进入正文，已有空正文行才执行退出。
+                let before = &source[commands::line_start(source, at)..at];
+                let text = format!("{eol}{}", commands::continuation(before));
+                let caret = at + text.len();
+                return Some(replace(parsed, at..at, text, caret));
+            }
             // 提示类型是容器标记；空正文退出或删除时一并移除，避免留下不可删除的标题。
             let body = if kind.is_some() {
                 source[span.clone()].find('\n').map_or(span.end, |line| span.start + line + 1)

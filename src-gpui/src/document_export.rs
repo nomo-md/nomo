@@ -213,7 +213,7 @@ pub(crate) fn export(format: Format, snapshot: Arc<Snapshot>, target: &Path, tit
                 if bytes.len() as u64 > MAX_OUTPUT_BYTES { return Err("PDF 超过 128 MiB，已有输出文件未改动。".into()); }
                 for chunk in bytes.chunks(64 * 1024) { job.check()?; file.write_all(chunk).map_err(|e| e.to_string())?; }
             },
-            Format::Word => word::write(file, &model, assets, title, snapshot.path.as_deref(), &job, &mut report)?,
+            Format::Word => word::write(file, &model, assets, title, snapshot.path.as_deref(), &appearance, &job, &mut report)?,
             Format::Html => unreachable!(),
         }
         job.check()

@@ -48,7 +48,7 @@ fn word_is_editable_with_merged_cells_links_and_native_footnotes() {
     let request = WindowRequest::default(); let job = Job { request: &request, started: Instant::now() }; let mut report = ExportReport::default();
     let source = format!("# 中文标题\n\n[目录跳转](#中文标题) [网站](https://example.com/a?b=1&c=2)\n\n3. 第三项\n4. 第四项\n\n正文 **加粗** <u>下划线</u> <mark>高亮</mark> H~2~O 与脚注[^n]。\n\n{MERGED}\n\n[^n]: 中文脚注。\n");
     let model = model::parse(&source, &job, &mut report).unwrap();
-    let mut file = File::create(&path).unwrap(); word::write(&mut file, &model, Default::default(), "中文标题", None, &job, &mut report).unwrap(); drop(file);
+    let mut file = File::create(&path).unwrap(); word::write(&mut file, &model, Default::default(), "中文标题", None, &appearance(), &job, &mut report).unwrap(); drop(file);
     let bytes = std::fs::read(&path).unwrap();
     let xml = contents(&bytes, "word/document.xml");
     for expected in ["中文标题", "<w:tbl>", "<w:gridSpan w:val=\"2\"", "<w:vMerge w:val=\"restart\"", "<w:vMerge/>", "<w:numPr>", "<w:footnoteReference", "w:anchor=\"nomo_1\"", "<w:highlight", "subscript"] { assert!(xml.contains(expected), "missing {expected}"); }
@@ -86,7 +86,7 @@ fn embeds_formula_diagram_and_local_media_in_both_formats() {
         let appearance = appearance(); let assets = media::prepare(&mut model, None, &appearance, &job, &mut report).unwrap();
         assert_eq!(assets.image_count(), 3, "{:?}", report.warnings);
         let bytes = if format == Format::Pdf { pdf::render(&model, assets, "媒体验证", &appearance, None, &job, &mut report).unwrap() }
-        else { let folder = Folder::new(); let path = folder.0.join("media.docx"); let mut file = File::create(&path).unwrap(); word::write(&mut file, &model, assets, "媒体验证", None, &job, &mut report).unwrap(); drop(file); std::fs::read(path).unwrap() };
+        else { let folder = Folder::new(); let path = folder.0.join("media.docx"); let mut file = File::create(&path).unwrap(); word::write(&mut file, &model, assets, "媒体验证", None, &appearance, &job, &mut report).unwrap(); drop(file); std::fs::read(path).unwrap() };
         artifact(&format!("media.{}", format.extension()), &bytes);
         if format == Format::Word { assert!(contents(&bytes, "word/document.xml").contains("<w:drawing>")); }
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);

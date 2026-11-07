@@ -730,11 +730,14 @@ pub fn apply(
                 && !literal
                 && prefix.contains('>')
                 && prefix.trim_matches([' ', '\t', '>']).is_empty()
-                && before.strip_prefix(prefix.as_str()).is_some_and(|text| !text.trim().is_empty())
             {
                 // 引用内 Enter 仍是段落边界；单换行会在输入后变成上一段的 SoftBreak。
                 // 正文起点只新增一个空行，避免在前面重复插入空段。
-                format!("{ending}{prefix}{ending}{prefix}")
+                if before.strip_prefix(prefix.as_str()).is_some_and(|text| !text.trim().is_empty()) {
+                    format!("{ending}{prefix}{ending}{prefix}")
+                } else {
+                    format!("{ending}{prefix}")
+                }
             } else if matches!(intent, EditIntent::ParagraphBreak)
                 && !literal
                 && structural_prefix_len(before).is_none()
@@ -1071,11 +1074,12 @@ pub(super) fn selected_lines(source: &str, range: Range<usize>) -> Vec<Range<usi
     }
     lines
 }
-fn continuation(before: &str) -> String {
+pub(super) fn continuation(before: &str) -> String {
     let indent = &before[..before.len() - before.trim_start_matches([' ', '\t']).len()];
     let rest = &before[indent.len()..];
-    if let Some(quoted) = rest.strip_prefix("> ") {
-        return format!("{indent}> {}", continuation(quoted));
+    // > 后的空格不是必需语法；保留手写前缀，避免 Enter 插入块外空行。
+    if let Some(quoted) = rest.strip_prefix('>') {
+        return format!("{indent}>{}", continuation(quoted));
     }
     for marker in [
         "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",

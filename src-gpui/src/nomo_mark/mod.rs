@@ -20,6 +20,7 @@ mod dialect;
 pub mod emoji;
 pub mod host;
 pub mod html_table;
+pub(crate) mod html_style;
 pub(crate) mod image_properties;
 pub mod interaction;
 mod inline_commands;

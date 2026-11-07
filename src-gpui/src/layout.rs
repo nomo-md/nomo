@@ -10,6 +10,7 @@ use gpui::{
 };
 use std::hash::{Hash, Hasher};
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{collections::HashMap, rc::{Rc, Weak}};
@@ -59,6 +60,8 @@ pub enum ColorRole {
     Success,
     /// 飞书风格调色板文字色：0 红、1 橙、2 黄、3 绿、4 蓝、5 紫、6 灰。
     Palette(u8),
+    /// 显式 HTML/CSS 色值（RGBA），不随主题量化。
+    Rgba(u32),
 }
 
 impl ColorRole {
@@ -94,11 +97,12 @@ impl ColorRole {
             ColorRole::OnAccent => theme.on_accent,
             ColorRole::Success => theme.success,
             ColorRole::Palette(index) => theme.palette_fg[(index as usize).min(6)],
+            ColorRole::Rgba(value) => gpui::rgba(value).into(),
         }
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct InlineStyle {
     pub bold: bool,
     /// 表头沿用旧版的 800 字重；普通加粗仍为 700。
@@ -114,9 +118,25 @@ pub struct InlineStyle {
     pub no_hyphenation: bool,
     /// 文字底色：0 无，1 为 `<mark>` 默认高亮，2–8 对应调色板 0–6 的背景色。
     pub bg: u8,
+    pub bg_color: Option<u32>,
+    /// HTML 字号相对于段落字号的千分比；0 表示继承。
+    pub font_scale: u16,
+    /// 只随当前段落和有界布局缓存存活，不建立全局字体名称表。
+    pub font_family: Option<gpui::SharedString>,
     /// 基线偏移：1 为上标，-1 为下标；字形与字宽同步缩至 0.75em。
     pub shift: i8,
     pub color: ColorRole,
+}
+
+impl InlineStyle {
+    fn scale(&self) -> f32 { if self.font_scale == 0 { 1.0 } else { f32::from(self.font_scale) / 1000.0 } }
+
+    fn font(&self, family: Family) -> gpui::Font {
+        let mut font = font_for(family, self.bold, self.italic);
+        if let Some(name) = &self.font_family { font.family = name.clone(); }
+        if self.extra_bold { font.weight = gpui::FontWeight::EXTRA_BOLD; }
+        font
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -204,15 +224,15 @@ impl ParaSpec {
             let start = range.start.clamp(at, self.text.len());
             let end = range.end.clamp(start, self.text.len());
             if start > at {
-                runs.push((at..start, self.base));
+                runs.push((at..start, self.base.clone()));
             }
             if end > start {
-                runs.push((start..end, *style));
+                runs.push((start..end, style.clone()));
             }
             at = end;
         }
         if at < self.text.len() {
-            runs.push((at..self.text.len(), self.base));
+            runs.push((at..self.text.len(), self.base.clone()));
         }
         runs
     }
@@ -317,7 +337,8 @@ impl TextLayout {
             + self.glyphs.len() * std::mem::size_of::<Glyph>()
             + self.lines.capacity() * std::mem::size_of::<VisualLine>()
             + self.lines.iter().map(|line| line.glues.capacity() * std::mem::size_of::<(usize, f32)>()).sum::<usize>()
-            + self.styles.len() * 48
+            + self.styles.capacity() * std::mem::size_of::<(Range<usize>, InlineStyle)>()
+            + self.styles.iter().map(|(_, style)| style.font_family.as_ref().map_or(0, |name| name.len())).sum::<usize>()
             + self.objects.capacity() * std::mem::size_of::<InlineObject>()
             + self.objects.iter().map(|o| match &o.key { InlineAsset::Image(path) => path.as_os_str().len(), InlineAsset::Comment { label: Some(label), .. } => label.0.estimated_bytes(), _ => 0 }).sum::<usize>()
     }
@@ -411,6 +432,7 @@ impl TextLayout {
 
     /// 绘制段落。`clip` 为段落坐标系下需要绘制的纵向区间，区间外的视觉行直接跳过。
     pub fn paint(&self, origin: Point<Pixels>, clip: Range<f32>, theme: &Theme, window: &mut Window) {
+        let default_style = InlineStyle::default();
         for (line_index, line) in self.lines.iter().enumerate() {
             let top = line_index as f32 * self.line_height;
             if top + self.line_height < clip.start || top > clip.end {
@@ -418,13 +440,13 @@ impl TextLayout {
             }
             // 行内代码与高亮底色先画，保证在文字之下。
             for (range, style) in &self.styles {
-                if !(style.code_bg || style.footnote || style.bg > 0) || range.end <= line.start || range.start >= line.end {
+                if !(style.code_bg || style.footnote || style.bg > 0 || style.bg_color.is_some()) || range.end <= line.start || range.start >= line.end {
                     continue;
                 }
                 let inset = if style.code_bg || style.footnote { 0.0 } else { 1.0 };
                 let x0 = self.x_in_line(line, range.start.max(line.start)) - inset;
                 let x1 = self.x_in_line(line, range.end.min(line.end)) + inset;
-                let pad = (self.line_height - self.font_size * 1.35).max(0.0) / 2.0;
+                let pad = (self.line_height - self.font_size * style.scale() * 1.35).max(0.0) / 2.0;
                 if style.footnote {
                     let h = self.font_size * 0.95;
                     let y = top + self.baseline - self.font_size * 1.1;
@@ -443,11 +465,10 @@ impl TextLayout {
                             point(origin.x + px(x0), origin.y + px(top + pad)),
                             size(px(x1 - x0), px(self.line_height - pad * 2.0)),
                         ),
-                        match (style.code_bg, style.bg) {
-                            (true, _) => theme.inline_code_bg,
-                            (false, 1) => theme.mark_bg,
-                            (false, index) => theme.palette_bg[(index as usize - 2).min(6)],
-                        },
+                        style.bg_color.map_or_else(|| match style.bg {
+                            1 => theme.mark_bg,
+                            index => theme.palette_bg[(index.saturating_sub(2) as usize).min(6)],
+                        }, |value| gpui::rgba(value).into()),
                     )
                     .corner_radii(px(if style.code_bg { 4.0 } else { 2.0 })),
                 );
@@ -468,11 +489,11 @@ impl TextLayout {
                 while style_at + 1 < self.styles.len() && self.styles[style_at].0.end <= glyph.index {
                     style_at += 1;
                 }
-                let style = self.styles.get(style_at).map(|(_, style)| *style).unwrap_or_default();
+                let style = self.styles.get(style_at).map(|(_, style)| style).unwrap_or(&default_style);
                 let color = style.color.resolve(theme);
                 let lift = match style.shift {
-                    1 => -self.font_size * 0.35,
-                    -1 => self.font_size * 0.22,
+                    1 => -self.font_size * style.scale() * 0.35,
+                    -1 => self.font_size * style.scale() * 0.22,
                     _ => 0.0,
                 };
                 let font_size = px(glyph.font_size);
@@ -497,11 +518,11 @@ impl TextLayout {
                 let x1 = self.x_in_line(line, range.end.min(line.end));
                 let color = style.color.resolve(theme);
                 if style.strike {
-                    let y = baseline - self.font_size * 0.3;
+                    let y = baseline - self.font_size * style.scale() * 0.3;
                     window.paint_quad(fill(Bounds::new(point(origin.x + px(x0), origin.y + px(y)), size(px(x1 - x0), px(1.2))), color));
                 }
                 if style.underline {
-                    let y = baseline + self.font_size * 0.15;
+                    let y = baseline + self.font_size * style.scale() * 0.15;
                     window.paint_quad(fill(Bounds::new(point(origin.x + px(x0), origin.y + px(y)), size(px(x1 - x0), px(1.0))), color.opacity(0.55)));
                 }
             }
@@ -537,14 +558,10 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
     // 显式改用正文字体，而不交给 CoreText 级联回退：回退得到的苹方字形 ID 与 gpui 按 PostScript
     // 名复用的已加载字体不是同一字形表，光栅化会画出错字。
     let mut fonts: Vec<(usize, gpui::Font)> = Vec::with_capacity(styles.len());
-    let styled_font = |family, style: &InlineStyle| {
-        let mut font = font_for(family, style.bold, style.italic);
-        if style.extra_bold { font.weight = gpui::FontWeight::EXTRA_BOLD; }
-        font
-    };
+    let styled_font = |family, style: &InlineStyle| style.font(family);
     for (range, style) in &styles {
         let family = if style.mono { Family::Mono } else { spec.family };
-        if !matches!(family, Family::Mono | Family::Code) {
+        if style.font_family.is_some() || !matches!(family, Family::Mono | Family::Code) {
             fonts.push((range.len(), styled_font(family, style)));
             continue;
         }
@@ -601,13 +618,41 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
         .collect();
     let mut glyphs = glyphs;
     let mut natural_width = f32::from(shaped.width);
+    // CJK 回退字面通常不是两个拉丁单元宽。等宽区按 Unicode 列宽留位，
+    // 只移动字形，不拉伸笔画；位置修正同时供绘制、命中与选区使用。
+    if !spec.text.is_ascii() && (matches!(spec.family, Family::Mono | Family::Code) || styles.iter().any(|(_, style)| style.mono)) {
+        let family = if matches!(spec.family, Family::Mono | Family::Code) { spec.family } else { Family::Mono };
+        let probe = TextRun { len: 1, font: font_for(family, false, false), color: Hsla::black(),
+            background_color: None, underline: None, strikethrough: None };
+        let cell = f32::from(window.text_system().layout_line("0", px(spec.font_size), &[probe], None).width);
+        let mut shift = 0.0;
+        let mut style_at = 0;
+        let mut glyph_at = 0;
+        for (at, cluster) in spec.text.grapheme_indices(true) {
+            while style_at + 1 < styles.len() && styles[style_at].0.end <= at { style_at += 1; }
+            let style = &styles[style_at].1;
+            let first = glyph_at;
+            while glyph_at < glyphs.len() && glyphs[glyph_at].index < at + cluster.len() { glyph_at += 1; }
+            let last = glyph_at;
+            if first == last { continue; }
+            let left = glyphs[first].x;
+            let right = glyphs.get(last).map_or(natural_width, |glyph| glyph.x);
+            let columns = cluster.width();
+            let fallback = columns > 1 || cluster.chars().any(|ch| matches!(ch as u32, 0x2500..=0x259f | 0x2e80..=0xffff));
+            let mono = style.font_family.is_none() && (style.mono || matches!(spec.family, Family::Mono | Family::Code));
+            let delta = if mono && fallback && columns > 0 { cell * columns as f32 - (right - left) } else { 0.0 };
+            for glyph in &mut glyphs[first..last] { glyph.x += shift; glyph.ink_offset += delta * 0.5; }
+            shift += delta;
+        }
+        natural_width += shift;
+    }
     // 保留整段塑形的字素/连字结果，按样式缩放字形和 advance；留白参与断行与光标几何。
     let transforms: Vec<_> = styles.iter().enumerate().map(|(index, (range, style))| {
         let first = glyphs.partition_point(|glyph| glyph.index < range.start);
         let last = glyphs.partition_point(|glyph| glyph.index < range.end);
         let left = glyphs.get(first).map_or(natural_width, |glyph| glyph.x);
         let right = glyphs.get(last).map_or(natural_width, |glyph| glyph.x);
-        let scale = (if style.shift != 0 { 0.75 } else { 1.0 }) * if style.code_bg { 0.92 } else { 1.0 };
+        let scale = style.scale() * (if style.shift != 0 { 0.75 } else { 1.0 }) * if style.code_bg { 0.92 } else { 1.0 };
         let pad = spec.font_size * if style.footnote { 0.18 } else { 0.375 };
         let boxed = |s: &InlineStyle| s.code_bg || s.footnote;
         let before = if boxed(style) && (index == 0 || !boxed(&styles[index - 1].1)) { pad } else { 0.0 };
@@ -618,7 +663,8 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
     for (first, last, left, right, scale, before, after, start) in transforms {
         for glyph in &mut glyphs[first..last] {
             glyph.x = left + advance + (glyph.x - left) * scale;
-            if glyph.index == start { glyph.ink_offset = before; } else { glyph.x += before; }
+            glyph.ink_offset *= scale;
+            if glyph.index == start { glyph.ink_offset += before; } else { glyph.x += before; }
             glyph.font_size = spec.font_size * scale;
         }
         advance += (right - left) * (scale - 1.0) + before + after;
@@ -641,8 +687,9 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
         }
         natural_width += deltas.iter().map(|(_, delta)| delta).sum::<f32>();
     }
-    let ascent = spec.objects.iter().map(|o| o.ascent).fold(f32::from(shaped.ascent), f32::max);
-    let descent = spec.objects.iter().map(|o| o.descent).fold(f32::from(shaped.descent), f32::max);
+    let text_scale = styles.iter().map(|(_, style)| style.scale()).fold(1.0f32, f32::max);
+    let ascent = spec.objects.iter().map(|o| o.ascent).fold(f32::from(shaped.ascent) * text_scale, f32::max);
+    let descent = spec.objects.iter().map(|o| o.descent).fold(f32::from(shaped.descent) * text_scale, f32::max);
     let line_height = spec.line_height.max(ascent + descent);
     let baseline = ((line_height - (ascent + descent)) / 2.0).max(0.0) + ascent;
     let mut layout = TextLayout {
@@ -736,6 +783,7 @@ fn english_breaks(layout: &TextLayout, range: Range<usize>, spec: &ParaSpec, win
     if range.len() > 64 * 1024 || matches!(spec.family, Family::Mono | Family::Code) { return Vec::new(); }
     let mut output = Vec::new();
     let mut glyph_cache = HashMap::new();
+    let default_style = InlineStyle::default();
     kp::hyphenation::for_each_word(&layout.text[range.clone()], |word| {
         if output.len() >= 4096 { return; }
         let word = range.start + word.start..range.start + word.end;
@@ -753,23 +801,22 @@ fn english_breaks(layout: &TextLayout, range: Range<usize>, spec: &ParaSpec, win
             // 连字内部或零 advance 边界不参与断词，维持既有塑形簇的点击与 IME 坐标。
             if previous.object || layout.glyphs[next].x <= previous.x { continue; }
             let style_index = layout.styles.partition_point(|(span, _)| span.end <= at - 1);
-            let style = layout.styles.get(style_index).map(|(_, style)| *style).unwrap_or_default();
-            let key = (style.bold, style.extra_bold, style.italic, previous.font_size.to_bits());
+            let style = layout.styles.get(style_index).map(|(_, style)| style).unwrap_or(&default_style);
+            let key = (style.bold, style.extra_bold, style.italic, previous.font_size.to_bits(), style.font_family.clone());
             if !glyph_cache.contains_key(&key) {
                 if glyph_cache.len() >= 64 { continue; }
-                let mut font = font_for(spec.family, style.bold, style.italic);
-                if style.extra_bold { font.weight = gpui::FontWeight::EXTRA_BOLD; }
+                let font = style.font(spec.family);
                 let run = TextRun { len: 1, font, color: Hsla::black(), background_color: None, underline: None, strikethrough: None };
                 let shaped = window.text_system().layout_line("-", px(previous.font_size), &[run], None);
                 let mark = shaped.runs.first().filter(|run| shaped.runs.len() == 1 && run.glyphs.len() == 1)
                     .filter(|_| f32::from(shaped.width).is_finite() && f32::from(shaped.width) > 0.0)
                     .map(|run| HyphenGlyph { font_id: run.font_id, id: run.glyphs[0].id,
                         font_size: previous.font_size, width: f32::from(shaped.width), color: style.color, lift: 0.0 });
-                glyph_cache.insert(key, mark);
+                glyph_cache.insert(key.clone(), mark);
             }
             if let Some(mut glyph) = glyph_cache.get(&key).copied().flatten() {
                 glyph.color = style.color;
-                glyph.lift = match style.shift { 1 => -layout.font_size * 0.35, -1 => layout.font_size * 0.22, _ => 0.0 };
+                glyph.lift = match style.shift { 1 => -layout.font_size * style.scale() * 0.35, -1 => layout.font_size * style.scale() * 0.22, _ => 0.0 };
                 output.push(DiscretionaryHyphen { at, glyph });
             }
         }

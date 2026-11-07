@@ -47,7 +47,7 @@ fn preview_spec(markdown: &str) -> ParaSpec {
     for event in Parser::new_ext(markdown, Options::ENABLE_STRIKETHROUGH | Options::ENABLE_MATH) {
         let value = match event {
             Event::Start(tag) => {
-                stack.push(style);
+                stack.push(style.clone());
                 match tag {
                     Tag::Strong | Tag::Heading { .. } => style.bold = true,
                     Tag::Emphasis => style.italic = true, Tag::Strikethrough => style.strike = true,
@@ -67,7 +67,7 @@ fn preview_spec(markdown: &str) -> ParaSpec {
             Event::Code(value) => {
                 let code: String = value.chars().take(remaining).collect();
                 remaining -= code.chars().count(); let start = spec.text.len(); spec.text.push_str(&code);
-                spec.spans.push((start..spec.text.len(), InlineStyle { mono: true, code_bg: true, color: ColorRole::InlineCode, ..style }));
+                spec.spans.push((start..spec.text.len(), InlineStyle { mono: true, code_bg: true, color: ColorRole::InlineCode, ..style.clone() }));
                 if remaining == 0 { spec.text.push('…'); break; }
                 continue;
             }
@@ -76,7 +76,7 @@ fn preview_spec(markdown: &str) -> ParaSpec {
         };
         let value: String = value.chars().take(remaining).collect();
         remaining -= value.chars().count(); let start = spec.text.len(); spec.text.push_str(&value);
-        spec.spans.push((start..spec.text.len(), style));
+        spec.spans.push((start..spec.text.len(), style.clone()));
         if remaining == 0 { spec.text.push('…'); break; }
     }
     spec

@@ -30,8 +30,8 @@ pub(super) fn from_session(port: &super::native_port::NativeWindowPort, revision
 
 pub(super) fn selected(parsed: &ParsedWindow, range: Range<usize>, markdown: bool) -> Result<Payload, ControlError> {
     let raw = parsed.source.get(range.clone()).ok_or(ControlError::InvalidRange)?;
-    let mut before = String::new();
-    let mut after = String::new();
+    let mut before = html_scopes(parsed, range.start).iter().map(|(_, range)| parsed.source[range.clone()].to_string()).collect::<String>();
+    let mut after = html_scopes(parsed, range.end).iter().rev().map(|(name, _)| format!("</{name}>")).collect::<String>();
     let mut spans: Vec<_> = parsed.inline.iter().filter(|s| s.content.start < range.end && range.start < s.content.end).collect();
     spans.sort_by_key(|s| (s.open.start, std::cmp::Reverse(s.close.end)));
     for span in spans {
@@ -41,6 +41,34 @@ pub(super) fn selected(parsed: &ParsedWindow, range: Range<usize>, markdown: boo
     let fragment = format!("{before}{raw}{after}");
     let text = if markdown { fragment.clone() } else { plain(parsed, &range)? };
     Ok(Payload { text, html: html(&fragment) })
+}
+
+/// 只扫描解析器已确认的 HTML 事件，避免把代码里的标签当成选区格式。
+fn html_scopes(parsed: &ParsedWindow, to: usize) -> Vec<(String, Range<usize>)> {
+    let mut scopes: Vec<(String, Range<usize>)> = Vec::new();
+    let mut overflow = 0usize;
+    for (event, range) in &parsed.events {
+        if range.start >= to { break; }
+        if !matches!(event, Event::Html(_) | Event::InlineHtml(_)) { continue; }
+        let mut cursor = range.start;
+        let end = range.end.min(to);
+        while cursor < end {
+            let Some(relative) = parsed.source[cursor..end].find('<') else { break; };
+            let at = cursor + relative;
+            if parsed.source[at..].starts_with("<!--") {
+                cursor = parsed.source[at..end].find("-->").map_or(end, |n| at + n + 3); continue;
+            }
+            let Some(tag) = super::nomo_syntax::html_tag(&parsed.source, at).filter(|tag| tag.end <= end) else { cursor = at + 1; continue; };
+            cursor = tag.end;
+            if !matches!(tag.name.as_str(), "font" | "span") || tag.self_closing { continue; }
+            if tag.closing {
+                if overflow > 0 { overflow -= 1; }
+                else if let Some(index) = scopes.iter().rposition(|(name, _)| name == &tag.name) { scopes.truncate(index); }
+            } else if scopes.len() >= 64 || overflow > 0 { overflow = overflow.saturating_add(1); }
+            else { scopes.push((tag.name, at..tag.end)); }
+        }
+    }
+    scopes
 }
 
 fn plain(parsed: &ParsedWindow, range: &Range<usize>) -> Result<String, ControlError> {
@@ -196,11 +224,18 @@ pub(super) fn sanitize_html(input: &str) -> String {
             if matches!(tag.name.as_str(), "script" | "style" | "iframe" | "object") {
                 if !tag.closing { suppressed = Some(tag.name); } continue;
             }
-            if !matches!(tag.name.as_str(), "p" | "div" | "span" | "br" | "strong" | "b" | "em" | "i" | "u" | "s" | "del" | "mark" | "sub" | "sup" | "pre" | "code" | "blockquote" | "ul" | "ol" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "a" | "img" | "table" | "tbody" | "thead" | "tr" | "td" | "th" | "hr") { continue; }
+            if !matches!(tag.name.as_str(), "p" | "div" | "span" | "font" | "br" | "strong" | "b" | "em" | "i" | "u" | "s" | "del" | "mark" | "sub" | "sup" | "pre" | "code" | "blockquote" | "ul" | "ol" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "a" | "img" | "table" | "tbody" | "thead" | "tr" | "td" | "th" | "hr") { continue; }
             if tag.closing { output.push_str(&format!("</{}>", tag.name)); continue; }
             output.push('<'); output.push_str(&tag.name);
             if tag.name == "table" { output.push_str(" data-nomo-table=\"semantic\""); }
+            let css = super::html_style::safe_tag_style(&tag, None);
+            if !css.is_empty() { output.push_str(&format!(" style=\"{}\"", html_escape::encode_double_quoted_attribute(&css))); }
             for (key, value) in &tag.attrs {
+                if key == "style" { continue; }
+                if let Some(value) = super::html_style::safe_attribute(&tag.name, key, value) {
+                    output.push_str(&format!(" {key}=\"{}\"", html_escape::encode_double_quoted_attribute(&value)));
+                    continue;
+                }
                 if (matches!(key.as_str(), "rowspan" | "colspan" | "start") && value.parse::<u16>().is_ok())
                     || (key == "href" && tag.name == "a" && safe_url(value))
                     || (tag.name == "img" && ((key == "src" && safe_url(value)) || matches!(key.as_str(), "alt" | "title")))
@@ -270,7 +305,7 @@ pub(super) fn from_html(input: &str) -> String {
                 "br" => output.push_str("<br>"),
                 "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => { if tag.closing { output.push_str("\n\n"); } else { output.push_str(&format!("\n\n{} ", "#".repeat(tag.name.as_bytes()[1] as usize - b'0' as usize))); } }
                 "strong" | "b" => output.push_str("**"), "em" | "i" => output.push('*'), "s" | "del" => output.push_str("~~"),
-                "u" | "mark" | "sub" | "sup" => output.push_str(&input[start..at]),
+                "u" | "mark" | "sub" | "sup" | "font" | "span" => output.push_str(&input[start..at]),
                 "pre" if !tag.closing => {
                     if let Some(length) = input[at..].find("</pre>") {
                         let raw = &input[at..at + length];

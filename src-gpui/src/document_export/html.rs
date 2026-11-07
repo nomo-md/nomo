@@ -257,16 +257,19 @@ impl<'a, 'file> Renderer<'a, 'file> {
                     let props = ImageProperties { src: tag.attrs.get("src").cloned().unwrap_or_default(), alt: tag.attrs.get("alt").cloned().unwrap_or_default(), title: tag.attrs.get("title").cloned().unwrap_or_default(), width: tag.attrs.get("width").cloned().or(style_width).unwrap_or_default(), align: tag.attrs.get("data-align").or_else(|| tag.attrs.get("align")).cloned().unwrap_or_default() };
                     self.image(&props)?; continue;
                 }
-                if !matches!(tag.name.as_str(), "p" | "div" | "span" | "br" | "strong" | "b" | "em" | "i" | "u" | "s" | "del" | "mark" | "sub" | "sup" | "pre" | "code" | "blockquote" | "ul" | "ol" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "a" | "table" | "tbody" | "thead" | "tr" | "td" | "th" | "hr" | "details" | "summary" | "colgroup" | "col") { continue; }
+                if !matches!(tag.name.as_str(), "p" | "div" | "span" | "font" | "br" | "strong" | "b" | "em" | "i" | "u" | "s" | "del" | "mark" | "sub" | "sup" | "pre" | "code" | "blockquote" | "ul" | "ol" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "a" | "table" | "tbody" | "thead" | "tr" | "td" | "th" | "hr" | "details" | "summary" | "colgroup" | "col") { continue; }
                 if tag.closing { self.output.raw(&format!("</{}>", tag.name))?; continue; }
                 self.output.raw(&format!("<{}", tag.name))?;
+                let css = crate::nomo_mark::html_style::safe_tag_style(&tag, Some(&self.appearance.theme));
+                if !css.is_empty() { self.output.raw(" style=\"")?; self.output.attr(&css)?; self.output.raw("\"")?; }
                 for (name, value) in &tag.attrs {
+                    if name == "style" { continue; }
                     let value = match name.as_str() {
                         "href" if tag.name == "a" => self.link(value),
                         "title" => Some(value.clone()),
                         "open" if tag.name == "details" => Some(String::new()),
                         "rowspan" | "colspan" | "span" | "start" if value.parse::<u16>().is_ok() => Some(value.clone()),
-                        "style" => Some(safe_style(value)),
+                        "style" | "color" | "face" | "size" | "class" => crate::nomo_mark::html_style::safe_attribute(&tag.name, name, value),
                         "data-align" | "align" if matches!(value.as_str(), "left" | "center" | "right") => Some(value.clone()),
                         _ => None,
                     };
@@ -282,20 +285,6 @@ impl<'a, 'file> Renderer<'a, 'file> {
         }
         Ok(())
     }
-}
-
-fn safe_style(input: &str) -> String {
-    input.split(';').filter_map(|entry| {
-        let (key, value) = entry.split_once(':')?;
-        let (key, value) = (key.trim().to_ascii_lowercase(), value.trim());
-        let allowed = match key.as_str() {
-            "text-align" => matches!(value, "left" | "center" | "right" | "justify"),
-            "color" | "background-color" => value.strip_prefix('#').is_some_and(|s| matches!(s.len(), 3 | 4 | 6 | 8) && s.bytes().all(|c| c.is_ascii_hexdigit())) || matches!(value, "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "gray" | "black" | "white" | "transparent"),
-            "width" | "max-width" => crate::image_import::normalize_width(value).is_some(),
-            _ => false,
-        };
-        allowed.then(|| format!("{key}:{value}"))
-    }).collect::<Vec<_>>().join(";")
 }
 
 pub(super) fn color(value: gpui::Hsla) -> String {

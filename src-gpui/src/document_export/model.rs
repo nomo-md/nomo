@@ -9,8 +9,27 @@ pub(super) struct Style {
     pub bold: bool, pub italic: bool, pub mono: bool, pub strike: bool,
     pub underline: bool, pub highlight: bool, pub shift: i8,
     pub color: Option<[u8; 3]>, pub link: Option<String>,
+    pub foreground: Option<crate::layout::ColorRole>, pub background: Option<crate::layout::ColorRole>,
+    pub font_family: Option<gpui::SharedString>, pub font_scale: u16,
 }
 impl Style {
+    pub fn scale(&self) -> f32 { if self.font_scale == 0 { 1.0 } else { f32::from(self.font_scale) / 1000.0 } }
+    fn html(&mut self, html: crate::nomo_mark::html_style::HtmlStyle) {
+        self.foreground = html.foreground.or(self.foreground);
+        self.background = html.background.or(self.background);
+        if html.font_family.is_some() { self.font_family = html.font_family; }
+        if html.font_scale > 0 { self.font_scale = html.font_scale; }
+    }
+    pub fn background_rgb(&self, theme: &crate::theme::Theme) -> Option<[u8; 3]> {
+        self.background.map(|color| composite(match color {
+            crate::layout::ColorRole::Palette(index) => theme.palette_bg[usize::from(index).min(6)],
+            _ => color.resolve(theme),
+        }, super::pdf::rgb_bytes(theme.document_bg)))
+    }
+    pub fn foreground_rgb(&self, theme: &crate::theme::Theme) -> Option<[u8; 3]> {
+        self.foreground.map(|color| composite(color.resolve(theme), self.background_rgb(theme).unwrap_or_else(|| super::pdf::rgb_bytes(theme.document_bg))))
+    }
+
     fn format(&mut self, format: InlineFormat) {
         match format {
             InlineFormat::Strong => self.bold = true, InlineFormat::Emphasis => self.italic = true,
@@ -104,7 +123,7 @@ impl Builder<'_> {
     }
     fn push_run(&mut self, run: Run) -> Result<(), String> {
         let bytes = match &run.content { Content::Image(p) => p.src.len() + p.alt.len() + p.title.len(), _ => run.label().len() };
-        self.budget(bytes + run.style.link.as_ref().map_or(0, String::len))?;
+        self.budget(bytes + run.style.link.as_ref().map_or(0, String::len) + run.style.font_family.as_ref().map_or(0, |name| name.len()))?;
         if self.paragraph.runs.is_empty() {
             self.paragraph.indent = self.lists.len().saturating_sub(1).min(8);
             self.paragraph.quote = self.quote > 0;
@@ -264,12 +283,12 @@ impl Builder<'_> {
                     if nomo_syntax::html_tag(source, range.start).is_some_and(|t| t.name == "table" && !t.closing) {
                         if range.len() > 512 * 1024 { return Err("单个 HTML 表格超过 512 KiB 导出预算。".into()); }
                         if let Some(table) = HtmlTable::parse(source, range.clone()) {
-                            self.flush()?; self.html_table(table)?; skip = range.clone();
+                            self.flush()?; let mut cursor = table.source.start; self.html_table(source, table, &mut cursor)?; skip = range.clone();
                         }
                     } else if range.len() <= 512 * 1024 {
                         if let Some(fragments) = HtmlFragment::parse_all(source, range.clone()) {
                             self.flush()?;
-                            for fragment in fragments { self.html_fragment(fragment)?; }
+                            for fragment in fragments { self.html_fragment(source, fragment)?; }
                             skip = range.clone();
                         }
                     }
@@ -283,10 +302,10 @@ impl Builder<'_> {
                         self.flush()?; self.raw_html(&source[range.start..details.body_from])?; self.flush()?;
                         self.markdown(&source[details.body_from..details.body_to], depth + 1)?; self.flush()?; skip = range.start..details.end;
                     } else if let Some(t) = HtmlTable::parse(source, range.clone()) {
-                        self.flush()?; self.html_table(t)?;
+                        self.flush()?; let mut cursor = t.source.start; self.html_table(source, t, &mut cursor)?;
                     } else if let Some(fragments) = HtmlFragment::parse_all(source, range.clone()) {
                         self.flush()?;
-                        for fragment in fragments { self.html_fragment(fragment)?; }
+                        for fragment in fragments { self.html_fragment(source, fragment)?; }
                     } else { self.raw_html(&value)?; }
                 },
                 Event::End(TagEnd::HtmlBlock) => {},
@@ -295,16 +314,19 @@ impl Builder<'_> {
         }
         Ok(())
     }
-    fn html_fragment(&mut self, fragment: HtmlFragment) -> Result<(), String> {
+    fn html_fragment(&mut self, source: &str, fragment: HtmlFragment) -> Result<(), String> {
+        let mut cursor = fragment.source.start;
+        let end = fragment.source.end;
         let mut tables = fragment.tables.into_iter().peekable();
         for cell in fragment.cells {
             while tables.peek().is_some_and(|table| table.source.start < cell.source.start) {
-                self.html_table(tables.next().unwrap())?;
+                self.html_table(source, tables.next().unwrap(), &mut cursor)?;
             }
-            for run in cell.runs { self.html_run(run)?; }
+            for run in cell.runs { self.html_styles_until(source, &mut cursor, run.source.start)?; self.html_run(run)?; }
             self.flush()?;
         }
-        for table in tables { self.html_table(table)?; }
+        for table in tables { self.html_table(source, table, &mut cursor)?; }
+        self.html_styles_until(source, &mut cursor, end)?;
         Ok(())
     }
     fn html_run(&mut self, run: html_table::InlineRun) -> Result<(), String> {
@@ -320,17 +342,40 @@ impl Builder<'_> {
         };
         self.push_run(Run { content, style })
     }
-    fn html_table(&mut self, t: HtmlTable) -> Result<(), String> {
+    fn html_table(&mut self, source: &str, t: HtmlTable, cursor: &mut usize) -> Result<(), String> {
         if t.columns > 64 || t.rows > 2048 { return Err("表格超过导出预算（2048 行／64 列）。".into()); }
         let mut table = Table { rows: t.rows, columns: t.columns, cells: Vec::new(), widths: vec![0.0; t.columns] };
         for c in t.cells {
             for (offset, width) in c.widths.iter().enumerate() { if let Some(w) = table.widths.get_mut(c.column + offset) { *w = (*width as f32).max(*w); } }
-            for run in c.runs { self.html_run(run)?; }
+            for run in c.runs { self.html_styles_until(source, cursor, run.source.start)?; self.html_run(run)?; }
             let p = std::mem::take(&mut self.paragraph);
             table.cells.push(Cell { row: c.row, column: c.column, rowspan: c.rowspan, colspan: c.colspan, header: c.header,
                 align: match c.align.as_deref() { Some("center") => Alignment::Center, Some("right") => Alignment::Right, _ => Alignment::Left }, runs: p.runs });
         }
+        self.html_styles_until(source, cursor, t.source.end)?;
         self.block(Block::Table(table))
+    }
+    fn html_style_tag(&mut self, tag: &nomo_syntax::HtmlTag) -> Result<(), String> {
+        if !matches!(tag.name.as_str(), "font" | "span") || tag.self_closing { return Ok(()); }
+        if tag.closing { self.end_style(&tag.name); }
+        else {
+            self.start_style(&tag.name, None, None)?;
+            self.styles.last_mut().unwrap().1.html(crate::nomo_mark::html_style::HtmlStyle::parse(tag));
+        }
+        Ok(())
+    }
+    // HTML 表格/容器的语义 run 不含标签；按源位置顺序恢复样式作用域。
+    fn html_styles_until(&mut self, source: &str, cursor: &mut usize, to: usize) -> Result<(), String> {
+        while *cursor < to {
+            self.tick()?;
+            let Some(relative) = source[*cursor..to].find('<') else { *cursor = to; break; };
+            let at = *cursor + relative;
+            if source[at..].starts_with("<!--") { *cursor = source[at..to].find("-->").map_or(to, |end| at + end + 3); }
+            else if let Some(tag) = nomo_syntax::html_tag(source, at).filter(|tag| tag.end <= to) {
+                self.html_style_tag(&tag)?; *cursor = tag.end;
+            } else { *cursor = at + 1; }
+        }
+        Ok(())
     }
     fn raw_html(&mut self, source: &str) -> Result<(), String> {
         let mut at = 0;
@@ -346,6 +391,7 @@ impl Builder<'_> {
             if let Some(run) = html_table::atom_at(source, at).filter(|r| r.atom.is_some()) { at = run.source.end; self.html_run(run)?; continue; }
             if let Some(tag) = nomo_syntax::html_tag(source, at) {
                 at = tag.end;
+                if matches!(tag.name.as_str(), "font" | "span") { self.html_style_tag(&tag)?; continue; }
                 let format = match tag.name.as_str() { "b" | "strong" => Some(InlineFormat::Strong), "i" | "em" => Some(InlineFormat::Emphasis),
                     "u" => Some(InlineFormat::Underline), "mark" => Some(InlineFormat::Highlight), "code" => Some(InlineFormat::Code),
                     "s" | "strike" | "del" => Some(InlineFormat::Strike), "sup" => Some(InlineFormat::Superscript), "sub" => Some(InlineFormat::Subscript), _ => None };
@@ -364,4 +410,10 @@ impl Builder<'_> {
         }
         Ok(())
     }
+}
+
+fn composite(color: gpui::Hsla, background: [u8; 3]) -> [u8; 3] {
+    let color = gpui::Rgba::from(color);
+    let channels = [color.r, color.g, color.b];
+    std::array::from_fn(|index| (channels[index] * 255.0 * color.a + f32::from(background[index]) * (1.0 - color.a)).round() as u8)
 }

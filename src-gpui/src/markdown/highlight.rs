@@ -113,7 +113,7 @@ fn fill_gaps(spans: &mut Spans, range: Range<usize>, base: InlineStyle) {
     let mut at = range.start;
     for (span, style) in spans.drain(..) {
         if span.start > at {
-            filled.push((at..span.start, base));
+            filled.push((at..span.start, base.clone()));
         }
         at = span.end;
         filled.push((span, style));
@@ -133,7 +133,7 @@ pub fn inline_spans(text: &str, offset: usize) -> Spans {
     while index < bytes.len() {
         let byte = bytes[index];
         if byte == b'\\' && index + 1 < bytes.len() {
-            spans.push((offset + index..offset + index + 1, marker));
+            spans.push((offset + index..offset + index + 1, marker.clone()));
             index += 2;
             continue;
         }
@@ -142,9 +142,9 @@ pub fn inline_spans(text: &str, offset: usize) -> Spans {
             let fence = &text[index..index + run];
             if let Some(close) = text[index + run..].find(fence) {
                 let end = index + run + close;
-                spans.push((offset + index..offset + index + run, marker));
+                spans.push((offset + index..offset + index + run, marker.clone()));
                 spans.push((offset + index + run..offset + end, InlineStyle { mono: true, code_bg: true, ..style(ColorRole::InlineCode) }));
-                spans.push((offset + end..offset + end + run, marker));
+                spans.push((offset + end..offset + end + run, marker.clone()));
                 index = end + run;
                 continue;
             }
@@ -172,9 +172,9 @@ pub fn inline_spans(text: &str, offset: usize) -> Spans {
                                 content.italic = true;
                             }
                         }
-                        spans.push((offset + index..offset + index + run, marker));
+                        spans.push((offset + index..offset + index + run, marker.clone()));
                         spans.push((offset + index + run..offset + end, content));
-                        spans.push((offset + end..offset + end + run, marker));
+                        spans.push((offset + end..offset + end + run, marker.clone()));
                         index = end + run;
                         continue;
                     }
@@ -187,7 +187,7 @@ pub fn inline_spans(text: &str, offset: usize) -> Spans {
                 let label_end = open + close;
                 if let Some(url_close) = text[label_end + 2..].find(')') {
                     let end = label_end + 2 + url_close + 1;
-                    spans.push((offset + index..offset + open + 1, marker));
+                    spans.push((offset + index..offset + open + 1, marker.clone()));
                     spans.push((offset + open + 1..offset + label_end, InlineStyle { underline: true, ..style(ColorRole::Link) }));
                     spans.push((offset + label_end..offset + end, style(ColorRole::Muted)));
                     index = end;
@@ -196,7 +196,7 @@ pub fn inline_spans(text: &str, offset: usize) -> Spans {
             }
         }
         if byte == b'|' {
-            spans.push((offset + index..offset + index + 1, marker));
+            spans.push((offset + index..offset + index + 1, marker.clone()));
         }
         index += 1;
     }

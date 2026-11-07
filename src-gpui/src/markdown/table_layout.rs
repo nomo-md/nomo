@@ -48,7 +48,7 @@ pub(super) fn measure(
         text: String::with_capacity(spec.text.len()),
         spans: Vec::with_capacity(spec.spans.len()),
         objects: Vec::with_capacity(spec.objects.len()),
-        base: spec.base,
+        base: spec.base.clone(),
         family: spec.family,
         font_size: spec.font_size,
         line_height: spec.line_height,
@@ -83,7 +83,7 @@ fn append_semantic(spec: &ParaSpec, semantic: &mut ParaSpec, range: Range<usize>
         semantic.spans.push((
             start + span.start.max(range.start) - range.start
                 ..start + span.end.min(range.end) - range.start,
-            *style,
+            style.clone(),
         ));
     }
     let first = spec.objects.partition_point(|object| object.at < range.start);

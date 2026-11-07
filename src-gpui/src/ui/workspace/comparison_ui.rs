@@ -493,7 +493,7 @@ impl Workspace {
                         cx.reveal_path(&path);
                     } else {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                            path.to_string_lossy().into_owned(),
+                            super::explorer_actions::display_tree_path(&path),
                         ));
                     }
                 }

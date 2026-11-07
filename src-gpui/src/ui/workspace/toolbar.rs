@@ -2,14 +2,14 @@
 use super::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum ToolbarPopupKind { Width, Math, Diagram }
+pub(super) enum ToolbarPopupKind { Width, Math, Diagram, More }
 
 pub(super) const TABLE_ANCHOR: usize = 3;
 pub(super) const LINK_ANCHOR: usize = 4;
 
 impl ToolbarPopupKind {
     fn anchor_index(self) -> usize {
-        match self { Self::Width => 0, Self::Math => 1, Self::Diagram => 2 }
+        match self { Self::Width => 0, Self::Math => 1, Self::Diagram => 2, Self::More => 5 }
     }
 }
 
@@ -52,10 +52,6 @@ fn toolbar_button(id: &'static str, name: IconName, active: bool, theme: &Theme)
             .group_hover(id, |style| style.text_color(theme.accent_strong)))
 }
 
-fn toolbar_divider(theme: &Theme) -> gpui::Div {
-    div().w(px(1.0)).h(px(24.0)).mx(px(4.0)).flex_none().bg(theme.border)
-}
-
 fn toolbar_modes(theme: &Theme) -> gpui::Div {
     div().relative().flex().p(px(2.0)).rounded(px(4.0)).bg(theme.rail_bg).border_1().border_color(theme.border)
 }
@@ -96,11 +92,44 @@ pub(super) fn diagram_template(kind: crate::ui::chrome::DiagramKind, default_typ
     DIAGRAMS[index].2
 }
 
+struct FormatTool {
+    id: &'static str, icon: IconName, tip: &'static str, mark: u8, anchor: Option<usize>,
+    action: fn(&mut Workspace, gpui::Point<gpui::Pixels>, &mut Window, &mut Context<Workspace>),
+}
+const FORMAT_TOOLS: &[FormatTool] = &[
+    FormatTool { id: "h1", icon: IconName::Heading1, tip: "一级标题 ⌘⌥1", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.set_heading(1, cx)) },
+    FormatTool { id: "bold", icon: IconName::Bold, tip: "加粗 ⌘B", mark: 1, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("**", "**", cx)) },
+    FormatTool { id: "italic", icon: IconName::Italic, tip: "斜体 ⌘I", mark: 2, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("*", "*", cx)) },
+    FormatTool { id: "strike", icon: IconName::Strikethrough, tip: "删除线 Alt+Shift+5", mark: 4, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("~~", "~~", cx)) },
+    FormatTool { id: "underline", icon: IconName::Underline, tip: "下划线 ⌘U", mark: 8, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("<u>", "</u>", cx)) },
+    FormatTool { id: "highlight", icon: IconName::Highlighter, tip: "高亮", mark: 16, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("<mark>", "</mark>", cx)) },
+    FormatTool { id: "superscript", icon: IconName::Superscript, tip: "上标", mark: 32, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::ToggleInline(crate::nomo_mark::parse::InlineFormat::Superscript), cx)) },
+    FormatTool { id: "subscript", icon: IconName::Subscript, tip: "下标", mark: 64, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::ToggleInline(crate::nomo_mark::parse::InlineFormat::Subscript), cx)) },
+    FormatTool { id: "link", icon: IconName::Link, tip: "", mark: 0, anchor: Some(LINK_ANCHOR), action: |w, at, win, cx| w.open_editor_popover_at(EditorPopoverKind::Link, Some(at), win, cx) },
+    FormatTool { id: "inline-comment", icon: IconName::MessageSquare, tip: "行内注释", mark: 0, anchor: None, action: |w, _, win, cx| w.open_inline_comment(win, cx) },
+    FormatTool { id: "quote", icon: IconName::Quote, tip: "引用", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.toggle_line_prefix("> ", cx)) },
+    FormatTool { id: "callout", icon: IconName::Info, tip: "提示块", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.insert_block("> [!NOTE]\n> ", 12, cx)) },
+    FormatTool { id: "details", icon: IconName::PanelTopClose, tip: "折叠块", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::InsertDetails, cx)) },
+    FormatTool { id: "ul", icon: IconName::List, tip: "无序列表", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.toggle_line_prefix("- ", cx)) },
+    FormatTool { id: "task", icon: IconName::SquareCheck, tip: "任务列表", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.toggle_line_prefix("- [ ] ", cx)) },
+    FormatTool { id: "table", icon: IconName::Table, tip: "", mark: 0, anchor: Some(TABLE_ANCHOR), action: |w, at, win, cx| w.open_editor_popover_at(EditorPopoverKind::Table, Some(at), win, cx) },
+    FormatTool { id: "codeblock", icon: IconName::CodeXml, tip: "代码块 ⌘⇧K", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| insert_code_block(b, cx)) },
+    FormatTool { id: "math", icon: IconName::Sigma, tip: "", mark: 0, anchor: Some(1), action: |w, at, win, cx| w.open_toolbar_popup(ToolbarPopupKind::Math, at, win, cx) },
+    FormatTool { id: "diagram", icon: IconName::Braces, tip: "", mark: 0, anchor: Some(2), action: |w, at, win, cx| w.open_toolbar_popup(ToolbarPopupKind::Diagram, at, win, cx) },
+    FormatTool { id: "footnote", icon: IconName::Superscript, tip: "插入脚注", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.insert_footnote(cx)) },
+    FormatTool { id: "toc", icon: IconName::TableOfContents, tip: "插入目录", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.insert_toc(cx)) },
+];
+
 impl Workspace {
-    pub(super) fn render_toolbar_animated(&mut self, visible: bool, theme: &Theme, mode: EditorMode, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn toolbar_anchor(&self, anchor: usize) -> Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>> {
+        let folded = FORMAT_TOOLS.iter().enumerate().any(|(index, item)| item.anchor == Some(anchor) && index >= self.toolbar_visible_tools);
+        self.toolbar_popup_anchors[if folded { 5 } else { anchor }].clone()
+    }
+
+    pub(super) fn render_toolbar_animated(&mut self, visible: bool, theme: &Theme, mode: EditorMode, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if let Some(frame) = self.mini.shell_frame() {
             return (frame.toolbar_height > px(0.0)).then(|| {
-                let toolbar = self.render_toolbar(theme, frame.mode, cx).into_any_element();
+                let toolbar = self.render_toolbar(theme, frame.mode, window, cx).into_any_element();
                 mini::shell_row(toolbar, frame.toolbar_height, frame.visibility)
             });
         }
@@ -108,7 +137,7 @@ impl Workspace {
             self.toolbar_target = Some(visible);
             self.toolbar_motion = None;
             self.toolbar_motion_task = None;
-            return visible.then(|| self.render_toolbar(theme, mode, cx).into_any_element());
+            return visible.then(|| self.render_toolbar(theme, mode, window, cx).into_any_element());
         }
         let target = *self.toolbar_target.get_or_insert(visible);
         if target != visible {
@@ -134,7 +163,7 @@ impl Workspace {
         }
         if !visible && self.toolbar_motion.is_none() { return None; }
         let motion = self.toolbar_motion;
-        let toolbar = self.render_toolbar(theme, mode, cx).into_any_element();
+        let toolbar = self.render_toolbar(theme, mode, window, cx).into_any_element();
         if let Some((_, id, from, to, duration)) = motion {
             Some(div().relative().w_full().flex_none().overflow_hidden().child(toolbar)
                 .when(!visible, |element| element.child(div().absolute().top_0().left_0().size_full().occlude()))
@@ -146,7 +175,7 @@ impl Workspace {
         }
     }
 
-    pub(super) fn render_toolbar(&mut self, theme: &Theme, mode: EditorMode, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_toolbar(&mut self, theme: &Theme, mode: EditorMode, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = cx.global::<Settings>().clone();
         let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
         let marks = self.document().map_or(0, |document| document.read(cx).toolbar_marks());
@@ -160,45 +189,42 @@ impl Workspace {
                 .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| action(workspace, window, cx)))
                 .into_any_element()
         };
-        let left: Vec<AnyElement> = vec![
-            tool("h1", IconName::Heading1, "一级标题 ⌘⌥1", false, |w, win, cx| w.with_document(win, cx, |b, cx| b.set_heading(1, cx)), cx),
-            tool("bold", IconName::Bold, "加粗 ⌘B", marks & 1 != 0, |w, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("**", "**", cx)), cx),
-            tool("italic", IconName::Italic, "斜体 ⌘I", marks & 2 != 0, |w, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("*", "*", cx)), cx),
-            tool("strike", IconName::Strikethrough, "删除线 Alt+Shift+5", marks & 4 != 0, |w, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("~~", "~~", cx)), cx),
-            tool("underline", IconName::Underline, "下划线 ⌘U", marks & 8 != 0, |w, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("<u>", "</u>", cx)), cx),
-            tool("highlight", IconName::Highlighter, "高亮", marks & 16 != 0, |w, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("<mark>", "</mark>", cx)), cx),
-            tool("superscript", IconName::Superscript, "上标", marks & 32 != 0, |w, win, cx| w.with_document(win, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::ToggleInline(crate::nomo_mark::parse::InlineFormat::Superscript), cx)), cx),
-            tool("subscript", IconName::Subscript, "下标", marks & 64 != 0, |w, win, cx| w.with_document(win, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::ToggleInline(crate::nomo_mark::parse::InlineFormat::Subscript), cx)), cx),
-            toolbar_button("link", IconName::Link, self.popover.as_ref().is_some_and(|p| p.link.is_some()), theme)
-                .relative().child(trigger_marker(self.toolbar_popup_anchors[LINK_ANCHOR].clone()))
-                .relative().children(self.popover.as_ref().is_some_and(|p| p.link.is_some()).then(|| trigger_marker(self.toolbar_trigger_bounds.clone())))
-                .tooltip(tooltip(format!("{} {}", locale.text("link"), crate::ui::shortcuts::current("menu-link", cx))))
-                .on_click(cx.listener(|w, event: &ClickEvent, win, cx| w.open_editor_popover_at(EditorPopoverKind::Link, Some(event.position()), win, cx))).into_any_element(),
-            tool("inline-comment", IconName::MessageSquare, "行内注释", false, |w, win, cx| w.open_inline_comment(win, cx), cx),
-            tool("quote", IconName::Quote, "引用", false, |w, win, cx| w.with_document(win, cx, |b, cx| b.toggle_line_prefix("> ", cx)), cx),
-            tool("callout", IconName::Info, "提示块", false, |w, win, cx| w.with_document(win, cx, |b, cx| b.insert_block("> [!NOTE]\n> ", 12, cx)), cx),
-            tool("details", IconName::PanelTopClose, "折叠块", false, |w, win, cx| w.with_document(win, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::InsertDetails, cx)), cx),
-            tool("ul", IconName::List, "无序列表", false, |w, win, cx| w.with_document(win, cx, |b, cx| b.toggle_line_prefix("- ", cx)), cx),
-            tool("task", IconName::SquareCheck, "任务列表", false, |w, win, cx| w.with_document(win, cx, |b, cx| b.toggle_line_prefix("- [ ] ", cx)), cx),
-            toolbar_button("table", IconName::Table, self.popover.as_ref().is_some_and(|p| p.link.is_none()), theme).tooltip(tooltip(locale.text("table")))
-                .relative().child(trigger_marker(self.toolbar_popup_anchors[TABLE_ANCHOR].clone()))
-                .relative().children(self.popover.as_ref().is_some_and(|p| p.link.is_none()).then(|| trigger_marker(self.toolbar_trigger_bounds.clone())))
-                .on_click(cx.listener(|w, event: &ClickEvent, win, cx| w.open_editor_popover_at(EditorPopoverKind::Table, Some(event.position()), win, cx))).into_any_element(),
-            tool("codeblock", IconName::CodeXml, "代码块 ⌘⇧K", false, |w, win, cx| w.with_document(win, cx, |b, cx| insert_code_block(b, cx)), cx),
-            toolbar_button("math", IconName::Sigma, self.toolbar_popup.as_ref().is_some_and(|p| p.kind == ToolbarPopupKind::Math), theme)
-                .relative().child(trigger_marker(self.toolbar_popup_anchors[ToolbarPopupKind::Math.anchor_index()].clone()))
-                .relative().children(self.toolbar_popup.as_ref().is_some_and(|p| p.kind == ToolbarPopupKind::Math).then(|| trigger_marker(self.toolbar_trigger_bounds.clone())))
-                .tooltip(tooltip(locale.text("math")))
-                .on_click(cx.listener(|w, event: &ClickEvent, win, cx| w.open_toolbar_popup(ToolbarPopupKind::Math, event.position(), win, cx))).into_any_element(),
-            toolbar_button("diagram", IconName::Braces, self.toolbar_popup.as_ref().is_some_and(|p| p.kind == ToolbarPopupKind::Diagram), theme)
-                .relative().child(trigger_marker(self.toolbar_popup_anchors[ToolbarPopupKind::Diagram.anchor_index()].clone()))
-                .relative().children(self.toolbar_popup.as_ref().is_some_and(|p| p.kind == ToolbarPopupKind::Diagram).then(|| trigger_marker(self.toolbar_trigger_bounds.clone())))
-                .tooltip(tooltip(locale.text("diagram")))
-                .on_click(cx.listener(|w, event: &ClickEvent, win, cx| w.open_toolbar_popup(ToolbarPopupKind::Diagram, event.position(), win, cx))).into_any_element(),
-            tool("footnote", IconName::Superscript, "插入脚注", false, |w, win, cx| w.with_document(win, cx, |b, cx| b.insert_footnote(cx)), cx),
-            tool("toc", IconName::TableOfContents, "插入目录", false, |w, win, cx| w.with_document(win, cx, |b, cx| b.insert_toc(cx)), cx),
-            toolbar_divider(theme).into_any_element(),
-        ];
+        let available = self.outline_ui.bounds.get().map_or(0.0, |bounds| f32::from(bounds.size.width));
+        let narrow = available <= 820.0;
+        let gap = if available <= 620.0 { 0.0 } else { 16.0 };
+        // 固定右侧控件优先；剩余按钮按真实按钮宽度折入菜单，保持工具栏高度稳定。
+        let right_width = 114.0 + if narrow { 72.0 } else { 152.0 }
+            + 6.0 + if self.active_pair().is_some() { 68.0 } else { 102.0 }
+            + if mode == EditorMode::Split { 36.0 } else { 0.0 };
+        let room = (available - 32.0 - gap - right_width).max(0.0);
+        self.toolbar_visible_tools = if room >= FORMAT_TOOLS.len() as f32 * 36.0 - 4.0 { FORMAT_TOOLS.len() }
+            else { ((room - 36.0).max(0.0) / 36.0).floor() as usize };
+        if let Some(popup) = &mut self.toolbar_popup {
+            if popup.kind == ToolbarPopupKind::More {
+                if self.toolbar_visible_tools == FORMAT_TOOLS.len() {
+                    self.toolbar_popup = None;
+                    if let Some(document) = self.document() { window.focus(&document.focus_handle(cx), cx); }
+                }
+                else { popup.selected = popup.selected.max(self.toolbar_visible_tools).min(FORMAT_TOOLS.len() - 1); }
+            }
+        }
+        let left: Vec<AnyElement> = FORMAT_TOOLS.iter().take(self.toolbar_visible_tools).map(|item| {
+            let active = item.mark != 0 && marks & item.mark != 0 || match item.id {
+                "link" => self.popover.as_ref().is_some_and(|p| p.link.is_some()),
+                "table" => self.popover.as_ref().is_some_and(|p| p.link.is_none()),
+                "math" => self.toolbar_popup.as_ref().is_some_and(|p| p.kind == ToolbarPopupKind::Math),
+                "diagram" => self.toolbar_popup.as_ref().is_some_and(|p| p.kind == ToolbarPopupKind::Diagram),
+                _ => false,
+            };
+            let tip = if matches!(item.id, "codeblock" | "link") {
+                format!("{} {}", locale.text(item.id), crate::ui::shortcuts::current(if item.id == "link" { "menu-link" } else { "insert-code-block" }, cx))
+            } else { locale.tooltip(item.id, item.tip) };
+            toolbar_button(item.id, item.icon, active, theme).relative().tooltip(tooltip(tip))
+                .children(item.anchor.map(|anchor| trigger_marker(self.toolbar_popup_anchors[anchor].clone())))
+                .children((active && item.anchor.is_some()).then(|| trigger_marker(self.toolbar_trigger_bounds.clone())))
+                .on_click(cx.listener(move |w, event: &ClickEvent, win, cx| (item.action)(w, event.position(), win, cx)))
+                .into_any_element()
+        }).collect();
         let mode_segment = |id: &'static str, name: IconName, _label: &'static str, tip: &'static str, target: EditorMode, cx: &mut Context<Self>| {
             toolbar_mode_button(id, name, mode == target, theme)
                 .tooltip(tooltip(if id == "mode-source" { format!("{} {}", locale.text(id), crate::ui::shortcuts::current("toggle-source", cx)) } else { locale.tooltip(id, tip) }))
@@ -241,7 +267,6 @@ impl Workspace {
             })
             .ok();
         });
-        let narrow = self.outline_ui.bounds.get().is_some_and(|bounds| f32::from(bounds.size.width) <= 820.0);
         let width_control = if narrow {
             div().id("content-width-compact").h(px(28.0)).px(px(7.0)).flex().flex_none().items_center().gap(px(5.0)).tab_index(0)
                 .relative().child(trigger_marker(self.toolbar_popup_anchors[ToolbarPopupKind::Width.anchor_index()].clone()))
@@ -285,15 +310,6 @@ impl Workspace {
         }
         right.push(tool("outline", IconName::ListTree, "文档大纲 ⌘⌥O", self.outline_visible(cx), |w, _, cx| w.toggle_outline(cx), cx));
         right.push(tool("hide-toolbar", IconName::ChevronUp, "隐藏工具栏 ⌘⇧B", false, |w, _, cx| w.toggle_toolbar(cx), cx));
-        let scroll_offset = self.toolbar_scroll.offset().x;
-        let scroll_max = self.toolbar_scroll.max_offset().x;
-        let shadow = |left: bool| {
-            div().absolute().top_0().h_full().w(px(1.0)).bg(theme.fg.opacity(0.08))
-                .when(left, |el| el.left_0()).when(!left, |el| el.right_0())
-                .shadow(vec![gpui::BoxShadow { inset: false, color: theme.fg.opacity(0.14), offset: gpui::point(px(0.0), px(0.0)), blur_radius: px(12.0), spread_radius: px(0.0) }])
-        };
-        let show_left = scroll_offset < px(-1.0);
-        let show_right = -scroll_offset + px(1.0) < scroll_max;
         div()
             .h(px(44.0))
             .w_full()
@@ -304,24 +320,16 @@ impl Workspace {
             .px(px(16.0))
             .bg(theme.surface)
             .tab_group()
-            .child(div().relative().flex_1().min_w_0()
-                .child(div().id("toolbar-actions").w_full().flex().items_center().gap(px(4.0)).overflow_x_scroll().track_scroll(&self.toolbar_scroll)
-                    .on_scroll_wheel(cx.listener(|w, event: &gpui::ScrollWheelEvent, _, cx| {
-                        let delta = event.delta.pixel_delta(px(32.0));
-                        if f32::from(delta.x).abs() < 0.01 && f32::from(delta.y).abs() > 0.01 {
-                            let max = w.toolbar_scroll.max_offset().x.max(px(0.0));
-                            if max > px(0.0) {
-                                let current = w.toolbar_scroll.offset();
-                                let next = (current.x + delta.y).clamp(-max, px(0.0));
-                                w.toolbar_scroll.set_offset(gpui::point(next, current.y));
-                                cx.stop_propagation();
-                            }
-                        }
-                        cx.notify();
-                    })).children(left))
-                .children(show_left.then(|| shadow(true))).children(show_right.then(|| shadow(false))))
+            .child(div().flex().flex_1().min_w_0().items_center().gap(px(4.0)).children(left)
+                .children((self.toolbar_visible_tools < FORMAT_TOOLS.len()).then(|| {
+                    toolbar_button("more-tools", IconName::ChevronDown,
+                        self.toolbar_popup.as_ref().is_some_and(|p| p.kind == ToolbarPopupKind::More), theme)
+                        .relative().child(trigger_marker(self.toolbar_popup_anchors[5].clone()))
+                        .tooltip(tooltip(locale.text("more_tools")))
+                        .on_click(cx.listener(|w, event: &ClickEvent, win, cx| w.open_toolbar_popup(ToolbarPopupKind::More, event.position(), win, cx)))
+                })))
             .child(div().flex().flex_none().items_center().gap(px(4.0))
-                .ml(px(if self.outline_ui.bounds.get().is_some_and(|bounds| f32::from(bounds.size.width) <= 620.0) { 0.0 } else { 16.0 }))
+                .ml(px(gap))
                 .children(right))
     }
 
@@ -342,10 +350,10 @@ impl Workspace {
             };
             (Some(document.downgrade()), Some(target))
         };
-        let selected = if kind == ToolbarPopupKind::Diagram { 1 + crate::nomo_mark::quick_insert::default_diagram_index(&cx.global::<Settings>().string("defaultDiagramType")) }
+        let selected = if kind == ToolbarPopupKind::More { self.toolbar_visible_tools } else if kind == ToolbarPopupKind::Diagram { 1 + crate::nomo_mark::quick_insert::default_diagram_index(&cx.global::<Settings>().string("defaultDiagramType")) }
             else { usize::from(kind == ToolbarPopupKind::Math && target.as_ref().is_some_and(|t| !t.is_semantic())) };
         self.popover = None;
-        let anchor = self.toolbar_popup_anchors[kind.anchor_index()].get();
+        let anchor = self.toolbar_anchor(kind.anchor_index()).get();
         self.toolbar_trigger_bounds.set(anchor);
         self.toolbar_popup = Some(ToolbarPopup { kind, position, document, target, selected, keyboard_selection: false, scroll: ScrollHandle::new() });
         window.focus(&self.toolbar_popup_focus, cx);
@@ -357,6 +365,14 @@ impl Workspace {
         let Some(document) = popup.document.and_then(|document| document.upgrade()) else { cx.notify(); return; };
         let Some(target) = popup.target else { cx.notify(); return; };
         if self.document().as_ref() != Some(&document) { self.notice = Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).text("selection_changed").into()); cx.notify(); return; }
+        if popup.kind == ToolbarPopupKind::More {
+            if let Err(error) = document.read(cx).validate_target(&target, cx) {
+                self.notice = Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).error(&error).into());
+                window.focus(&document.focus_handle(cx), cx); cx.notify(); return;
+            }
+            if let Some(item) = FORMAT_TOOLS.get(index) { (item.action)(self, popup.position, window, cx); }
+            cx.notify(); return;
+        }
         let mut restore = true;
         let result = match popup.kind {
             ToolbarPopupKind::Math if index == 0 => {
@@ -382,9 +398,10 @@ impl Workspace {
         let inline_enabled = state.target.as_ref().is_some_and(EditTarget::is_semantic);
         let mut panel = div().id("toolbar-popup").track_focus(&self.toolbar_popup_focus)
             .track_scroll(&state.scroll)
-            .w(px(if kind == ToolbarPopupKind::Width { 220.0 } else { 190.0 }))
+            .w(px(if matches!(kind, ToolbarPopupKind::Width | ToolbarPopupKind::More) { 220.0 } else { 190.0 }))
             .p(px(if kind == ToolbarPopupKind::Width { 10.0 } else { 6.0 }))
             .flex().flex_col().gap(px(if kind == ToolbarPopupKind::Width { 10.0 } else { 0.0 }))
+            .when(kind == ToolbarPopupKind::More, |panel| panel.max_h(px(520.0)).overflow_y_scroll())
             .rounded(px(8.0)).border_1().border_color(theme.border).bg(theme.surface)
             .shadow(vec![gpui::BoxShadow { inset: false,
                 color: gpui::rgba(if theme.dark { 0x00000052 } else { 0x16202c14 }).into(),
@@ -402,12 +419,12 @@ impl Workspace {
                     "escape" => { w.toolbar_popup = None; w.width_dragging = false; if let Some(document)=w.document() { window.focus(&document.focus_handle(cx), cx); } cx.notify(); }
                     "up" | "down" if kind != ToolbarPopupKind::Width => {
                         if let Some(popup) = &mut w.toolbar_popup {
-                            let count = if kind == ToolbarPopupKind::Math { 2 } else { DIAGRAMS.len() };
-                            let first = usize::from(kind == ToolbarPopupKind::Math && !inline_enabled);
+                            let count = if kind == ToolbarPopupKind::More { FORMAT_TOOLS.len() } else if kind == ToolbarPopupKind::Math { 2 } else { DIAGRAMS.len() };
+                            let first = if kind == ToolbarPopupKind::More { w.toolbar_visible_tools } else { usize::from(kind == ToolbarPopupKind::Math && !inline_enabled) };
                             let available = count - first;
                             popup.selected = first + if event.keystroke.key == "up" { (popup.selected - first + available - 1) % available } else { (popup.selected - first + 1) % available };
                             popup.keyboard_selection = true;
-                            let row = if kind == ToolbarPopupKind::Diagram { popup.selected + 1 + usize::from(popup.selected > 0) } else { popup.selected };
+                            let row = if kind == ToolbarPopupKind::Diagram { popup.selected + 1 + usize::from(popup.selected > 0) } else { popup.selected - first };
                             popup.scroll.scroll_to_item(row);
                             cx.notify();
                         }
@@ -436,13 +453,16 @@ impl Workspace {
                     .text_color(theme.accent_strong).child(format!("{value:.0}%"))))
                 .child(slider("compact-width-slider", (value - 45.0) / 45.0, self.width_dragging, 200.0, theme, on_width));
         } else {
-            let entries: Vec<(&str, &str, bool)> = if kind == ToolbarPopupKind::Math {
+            let entries: Vec<(&str, &str, bool)> = if kind == ToolbarPopupKind::More {
+                FORMAT_TOOLS.iter().skip(self.toolbar_visible_tools).map(|item| (locale.text(item.id), "", true)).collect()
+            } else if kind == ToolbarPopupKind::Math {
                 vec![(locale.text("inline_math"), "$…$", inline_enabled), (locale.text("block_math"), "$$…$$", true)]
             } else { DIAGRAMS.iter().enumerate().map(|(index, (_, short, _))| {
                 let key = ["diagram_blank", "diagram_flowchart", "diagram_sequence", "diagram_class", "diagram_state", "diagram_pie", "diagram_gantt", "diagram_er"][index];
                 (locale.text(key), *short, true)
             }).collect() };
             for (index, (label, suffix, enabled)) in entries.into_iter().enumerate() {
+                let index = index + if kind == ToolbarPopupKind::More { self.toolbar_visible_tools } else { 0 };
                 if kind == ToolbarPopupKind::Diagram && index <= 1 {
                     panel = panel.child(div().pt(px(6.0)).pb(px(8.0)).px(px(8.0)).text_size(px(13.0))
                         .font_weight(FontWeight::BOLD).text_color(theme.muted)
@@ -460,7 +480,7 @@ impl Workspace {
         }
         let placement = if kind == ToolbarPopupKind::Width { PopupPlacement::BelowRight } else { PopupPlacement::BelowLeft };
         Some(gpui::deferred(popup(("toolbar-popup-open", kind.anchor_index()),
-            PopupAnchor::Tracked(self.toolbar_popup_anchors[kind.anchor_index()].clone(), position),
+            PopupAnchor::Tracked(self.toolbar_anchor(kind.anchor_index()), position),
             placement, panel, self.explorer.reduce_motion)).with_priority(5).into_any_element())
     }
 

@@ -436,7 +436,7 @@ impl ParsedWindow {
         let mut tables: Vec<_> = self.nodes.iter().filter(|node| node.kind == "table")
             .map(|node| &node.source).chain(self.html_tables.iter().map(|table| &table.source)).collect();
         tables.sort_unstable_by_key(|range| range.start);
-        self.inline
+        let mut markers: Vec<_> = self.inline
             .iter()
             .filter(|span| span.intersects(selection))
             .filter(|span| {
@@ -446,7 +446,20 @@ impl ParsedWindow {
                     .is_some_and(|run| run.source == span.range())
             })
             .flat_map(|span| [span.open.clone(), span.close.clone()])
-            .collect()
+            .collect();
+        if selection.is_empty() {
+            // 尚未配对的行内标签没有 InlineSpan；输入结束符后仍须保留真实落点。
+            for (event, range) in &self.events {
+                if range.start <= selection.start && selection.start <= range.end
+                    && matches!(event, Event::InlineHtml(html) if html_format(html).is_some())
+                    && !self.inline.iter().any(|span| span.open == *range || span.close == *range)
+                    && !markers.contains(range)
+                {
+                    markers.push(range.clone());
+                }
+            }
+        }
+        markers
     }
 
     /// 显示投影仍保留语义事件；只在真实语法位置插入当前需要显示的符号。
@@ -526,7 +539,7 @@ impl ParsedWindow {
         let mut blanks = self.blank_paragraphs.iter().copied().peekable();
         let mut depth = 0usize;
         let mut covered = 0usize;
-        let mut quotes: Vec<(usize, usize)> = Vec::new();
+        let mut quotes: Vec<(usize, usize, bool)> = Vec::new();
         let append = |at: usize, output: &mut Vec<_>| {
             output.push((Event::Start(Tag::Paragraph), at..at));
             let end = at + self.source[at..].bytes().take_while(|byte| matches!(byte, b' ' | b'\t')).count();
@@ -537,19 +550,19 @@ impl ParsedWindow {
         };
         for (event, range) in input {
             if matches!(event, Event::End(TagEnd::BlockQuote(_))) {
-                if let Some((_, tail)) = quotes.pop() {
-                    // Markdown 不为只有 > 前缀的空行产生段落事件；落点必须留在引用内部。
+                if let Some((_, tail, empty_callout)) = quotes.pop() {
+                    // 空引用和只有提示标记的块都没有段落事件，落点必须留在引用内部。
                     let end = tail + self.source[tail..range.end].trim_end_matches(['\r', '\n']).len();
                     let line = self.source[tail..end].rsplit('\n').next().unwrap_or("");
-                    if line.contains('>') && line.bytes().all(|byte| matches!(byte, b'>' | b' ' | b'\t')) {
+                    if empty_callout || (line.contains('>') && line.bytes().all(|byte| matches!(byte, b'>' | b' ' | b'\t'))) {
                         append(end, &mut output);
                     }
                 }
-            } else if let Some((quote_depth, tail)) = quotes.last_mut() {
-                if depth == *quote_depth { *tail = range.end; }
+            } else if let Some((quote_depth, tail, empty_callout)) = quotes.last_mut() {
+                if depth == *quote_depth { *tail = range.end; *empty_callout = false; }
             }
-            if matches!(event, Event::Start(Tag::BlockQuote(_))) {
-                quotes.push((depth + 1, range.start));
+            if let Event::Start(Tag::BlockQuote(kind)) = &event {
+                quotes.push((depth + 1, range.start, kind.is_some()));
             }
             if depth == 0 {
                 while blanks.peek().is_some_and(|at| *at <= range.start) {

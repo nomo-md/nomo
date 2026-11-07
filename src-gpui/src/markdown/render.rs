@@ -528,14 +528,15 @@ struct InlineState {
     mark: u8,
     sup: u8,
     sub: u8,
-    /// `<span style>` / `<font color>` 的颜色栈：(文字调色板序号, 背景调色板序号)。
-    colors: Vec<(Option<u8>, Option<u8>)>,
+    /// 只保留当前窗口最多 64 层的行内 HTML 样式，随段落释放。
+    html: Vec<HtmlStyle>,
+    html_overflow: usize,
     language: HyphenationLanguage,
 }
 
 impl InlineState {
-    fn style(&self, base: InlineStyle) -> InlineStyle {
-        let mut style = base;
+    fn style(&self, base: &InlineStyle) -> InlineStyle {
+        let mut style = base.clone();
         style.bold |= self.bold > 0;
         style.italic |= self.italic > 0;
         style.strike |= self.strike > 0;
@@ -545,13 +546,15 @@ impl InlineState {
         if self.mark > 0 {
             style.bg = 1;
         }
-        for (foreground, background) in &self.colors {
-            if let Some(index) = foreground {
-                style.color = ColorRole::Palette(*index);
+        for html in &self.html {
+            if let Some(color) = html.foreground { style.color = color; }
+            match html.background {
+                Some(ColorRole::Palette(index)) => { style.bg = index + 2; style.bg_color = None; }
+                Some(ColorRole::Rgba(value)) => { style.bg = 0; style.bg_color = Some(value); }
+                _ => {}
             }
-            if let Some(index) = background {
-                style.bg = index + 2;
-            }
+            if let Some(family) = &html.font_family { style.font_family = Some(family.clone()); }
+            if html.font_scale != 0 { style.font_scale = html.font_scale; }
         }
         if self.sup > 0 {
             style.shift = 1;
@@ -565,6 +568,20 @@ impl InlineState {
         style
     }
 
+    /// 容器和 HTML 表格复用同一套样式；只顺序扫描当前片段，不构建第二棵 HTML 树。
+    fn advance(&mut self, source: &str, cursor: &mut usize, to: usize) {
+        while *cursor < to {
+            let Some(relative) = source[*cursor..to].find('<') else { *cursor = to; break; };
+            let at = *cursor + relative;
+            if source[at..].starts_with("<!--") {
+                *cursor = source[at..to].find("-->").map_or(to, |end| at + end + 3);
+            } else if let Some(tag) = crate::nomo_mark::nomo_syntax::html_tag(source, at).filter(|tag| tag.end <= to) {
+                self.apply_html(&source[at..tag.end]);
+                *cursor = tag.end;
+            } else { *cursor = at + 1; }
+        }
+    }
+
     /// 识别常见行内 HTML 标签并调整样式计数；返回 true 表示已消费该标签，不再原样显示。
     fn apply_html(&mut self, html: &str) -> Option<bool> {
         self.language.observe(html);
@@ -575,23 +592,19 @@ impl InlineState {
         };
         match name.as_str() {
             "span" | "font" if closing => {
-                self.colors.pop();
+                if self.html_overflow > 0 { self.html_overflow -= 1; }
+                else if let Some(index) = self.html.iter().rposition(|style| style.tag == name) { self.html.truncate(index); }
                 return Some(true);
             }
             "span" | "font" => {
-                let style = html_attr(html, "style").unwrap_or_default().to_ascii_lowercase();
-                let declaration = |property: &str| {
-                    style.split(';').find_map(|part| {
-                        let (key, value) = part.split_once(':')?;
-                        (key.trim() == property).then(|| value.trim().to_string())
-                    })
-                };
-                // 推荐写法为 class（Web 版 HTML 白名单保留 class、丢弃 style）：nomo-fg-<色名> / nomo-bg-<色名>。
-                let classes = html_attr(html, "class").unwrap_or_default();
-                let class_color = |prefix: &str| classes.split_whitespace().find_map(|class| class.strip_prefix(prefix)).and_then(palette_index);
-                let foreground = class_color("nomo-fg-").or_else(|| declaration("color").or_else(|| html_attr(html, "color")).and_then(|value| palette_index(&value)));
-                let background = class_color("nomo-bg-").or_else(|| declaration("background-color").or_else(|| declaration("background")).and_then(|value| palette_index(&value)));
-                self.colors.push((foreground, background));
+                if html.trim_end().ends_with("/>") { return Some(true); }
+                if self.html.len() >= 64 || self.html_overflow > 0 {
+                    self.html_overflow = self.html_overflow.saturating_add(1);
+                    return Some(true);
+                }
+                if let Some(tag) = crate::nomo_mark::nomo_syntax::html_tag(html.trim(), 0) {
+                    self.html.push(HtmlStyle::parse(&tag));
+                }
                 return Some(true);
             }
             _ => {}
@@ -647,19 +660,7 @@ impl HyphenationLanguage {
         });
         self.scopes.push((tag.name.clone(), excluded));
     }
-    /// HTML 容器的文本 run 已有源码范围；顺序扫描标签，不新增第二份正文或 HTML 树。
-    fn advance(&mut self, source: &str, cursor: &mut usize, to: usize) {
-        while *cursor < to {
-            let Some(relative) = source[*cursor..to].find('<') else { *cursor = to; break; };
-            let at = *cursor + relative;
-            if source[at..].starts_with("<!--") {
-                *cursor = source[at..to].find("-->").map_or(to, |end| at + end + 3);
-            } else if let Some(tag) = crate::nomo_mark::nomo_syntax::html_tag(source, at).filter(|tag| tag.end <= to) {
-                self.tag(&tag);
-                *cursor = tag.end;
-            } else { *cursor = at + 1; }
-        }
-    }
+
 }
 
 /// 属性解析与结构模型共用同一套带边界、引号及实体处理的规则。
@@ -669,65 +670,7 @@ fn html_attr(html: &str, name: &str) -> Option<String> {
     tag.attrs.get(name).map(|value| html_escape::decode_html_entities(value).into_owned())
 }
 
-/// 把 CSS 颜色（#rgb、#rrggbb、rgb()、常见颜色名）归到最接近的调色板项：
-/// 低饱和度为灰，其余按色相分段，与飞书的 7 色色板对应。
-fn palette_index(value: &str) -> Option<u8> {
-    let value = value.trim().trim_end_matches("!important").trim().to_ascii_lowercase();
-    let named = match value.as_str() {
-        "red" | "crimson" | "tomato" => Some(0),
-        "orange" | "darkorange" | "coral" => Some(1),
-        "yellow" | "gold" | "khaki" => Some(2),
-        "green" | "lime" | "seagreen" | "limegreen" => Some(3),
-        "blue" | "royalblue" | "dodgerblue" | "skyblue" | "lightblue" => Some(4),
-        "purple" | "violet" | "magenta" | "orchid" => Some(5),
-        "gray" | "grey" | "silver" | "darkgray" | "lightgray" => Some(6),
-        _ => None,
-    };
-    if named.is_some() {
-        return named;
-    }
-    let (r, g, b) = if let Some(hex) = value.strip_prefix('#') {
-        let expand = |part: &str| u8::from_str_radix(part, 16).ok();
-        match hex.len() {
-            3 | 4 => {
-                let digit = |index: usize| expand(&hex[index..index + 1]).map(|value| value * 17);
-                (digit(0)?, digit(1)?, digit(2)?)
-            }
-            6 | 8 => (expand(&hex[0..2])?, expand(&hex[2..4])?, expand(&hex[4..6])?),
-            _ => return None,
-        }
-    } else if let Some(inner) = value.strip_prefix("rgb").map(|rest| rest.trim_start_matches('a')) {
-        let numbers: Vec<u8> = inner.trim_matches(|ch| ch == '(' || ch == ')').split(',').take(3).filter_map(|part| part.trim().parse::<f32>().ok()).map(|value| value.clamp(0.0, 255.0) as u8).collect();
-        if numbers.len() < 3 {
-            return None;
-        }
-        (numbers[0], numbers[1], numbers[2])
-    } else {
-        return None;
-    };
-    let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let delta = max - min;
-    if max < 0.08 || delta / max.max(0.001) < 0.18 {
-        return Some(6);
-    }
-    let hue = if max == r {
-        60.0 * (((g - b) / delta).rem_euclid(6.0))
-    } else if max == g {
-        60.0 * ((b - r) / delta + 2.0)
-    } else {
-        60.0 * ((r - g) / delta + 4.0)
-    };
-    Some(match hue {
-        hue if !(15.0..330.0).contains(&hue) => 0,
-        hue if hue < 42.0 => 1,
-        hue if hue < 70.0 => 2,
-        hue if hue < 170.0 => 3,
-        hue if hue < 255.0 => 4,
-        _ => 5,
-    })
-}
+use crate::nomo_mark::html_style::HtmlStyle;
 
 /// 识别紧随图片的属性块 `{align=center width=360}`（Web 版图片属性写法）。
 fn parse_image_attrs(text: &str) -> Option<(Option<String>, Option<ImageWidth>)> {
@@ -1091,7 +1034,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                 }
                 builder.image_only &= text.trim().is_empty();
                 let exact = text.len() == range.len() && source.get(range.clone()) == Some(text.as_ref());
-                let mut style = builder.inline.style(builder.base);
+                let mut style = builder.inline.style(&builder.base);
                 if is_revealed(revealed, range.clone()) { style.color = ColorRole::Muted; }
                 builder.para.push(&text, style, Some((range.start, exact)));
                 if let Some(map) = builder.para.map.last_mut() { map.source_end = range.end; }
@@ -1099,14 +1042,14 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
             Event::Code(_) if !env.inline_code => {
                 builder.image_only = false;
                 let raw = &source[range.clone()];
-                let style = builder.inline.style(builder.base);
+                let style = builder.inline.style(&builder.base);
                 builder.para.push(raw, style, Some((range.start, true)));
             }
             Event::Code(code) => {
                 builder.image_only = false;
                 let slice = &source[range.clone()];
                 let inner = slice.find(code.as_ref()).map_or(range.start, |at| range.start + at);
-                let style = InlineStyle { mono: true, code_bg: true, color: ColorRole::InlineCode, ..builder.inline.style(builder.base) };
+                let style = InlineStyle { mono: true, code_bg: true, color: ColorRole::InlineCode, ..builder.inline.style(&builder.base) };
                 builder.para.push(&code, style, Some((inner, slice.contains(code.as_ref()))));
             }
             Event::InlineMath(tex) => {
@@ -1145,7 +1088,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
             Event::Html(html) => builder.html_line(&html, range.start, html_fragments.iter().find(|fragment| fragment.source.start == range.start)),
             Event::FootnoteReference(label) => {
                 builder.image_only = false;
-                let style = InlineStyle { color: ColorRole::Link, shift: 1, footnote: true, ..builder.base };
+                let style = InlineStyle { color: ColorRole::Link, shift: 1, footnote: true, ..builder.base.clone() };
                 builder.para.push(&label, style, Some((range.start, false)));
                 if let Some(map) = builder.para.map.last_mut() { map.source_end = range.end; }
             }
@@ -1157,7 +1100,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                 let left = builder.para.text.chars().last();
                 let right = source[range.end..].chars().find(|ch| !ch.is_whitespace());
                 if !left.is_some_and(is_cjk) && !right.is_some_and(is_cjk) {
-                    builder.para.push(" ", builder.inline.style(builder.base), Some((range.start, false)));
+                    builder.para.push(" ", builder.inline.style(&builder.base), Some((range.start, false)));
                 }
             }
             Event::HardBreak => builder.line_break(range),
@@ -1297,17 +1240,17 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
             Event::InlineHtml(html) => {
                 if let Some(run) = html_table::atom_at(source, range.start).filter(|run| cell_range.as_ref().is_some_and(|cell| run.source.end <= cell.end)) {
                     if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
-                        push_table_atom(cell, run.atom.as_ref().unwrap(), run.source.clone(), inline.style(InlineStyle::default()), env, window);
+                        push_table_atom(cell, run.atom.as_ref().unwrap(), run.source.clone(), inline.style(&InlineStyle::default()), env, window);
                     }
                     skip = Some(run.source);
                 } else {
                     match inline.apply_html(&html) {
                         Some(true) => {}
                         Some(false) => {
-                            if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) { cell.push("\n", inline.style(InlineStyle::default()), Some((range.start, false))); if let Some(map)=cell.map.last_mut(){map.source_end=range.end;} }
+                            if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) { cell.push("\n", inline.style(&InlineStyle::default()), Some((range.start, false))); if let Some(map)=cell.map.last_mut(){map.source_end=range.end;} }
                         }
                         None => {
-                            if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) { cell.push(&html, InlineStyle { mono: true, color: ColorRole::Muted, ..inline.style(InlineStyle::default()) }, Some((range.start, true))); }
+                            if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) { cell.push(&html, InlineStyle { mono: true, color: ColorRole::Muted, ..inline.style(&InlineStyle::default()) }, Some((range.start, true))); }
                         }
                     }
                 }
@@ -1320,9 +1263,9 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
                 let atom = InlineAtom::Image { src: image.src, alt: image.alt, width: ImageWidth::parse(&image.width), align: Some(image.align) };
                 if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
                     if pending {
-                        cell.push(&atom.display_text(), inline.style(InlineStyle::default()), Some((range.start, false)));
+                        cell.push(&atom.display_text(), inline.style(&InlineStyle::default()), Some((range.start, false)));
                     } else {
-                        push_table_atom(cell, &atom, range.clone(), inline.style(InlineStyle::default()), env, window);
+                        push_table_atom(cell, &atom, range.clone(), inline.style(&InlineStyle::default()), env, window);
                     }
                 }
                 skip = Some(range);
@@ -1330,7 +1273,7 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
             Event::Text(text) => {
                 if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
                     let exact = source.get(range.clone())==Some(text.as_ref());
-                    let mut style = inline.style(InlineStyle::default());
+                    let mut style = inline.style(&InlineStyle::default());
                     if is_revealed(revealed, range.clone()) { style.color = ColorRole::Muted; }
                     cell.push(&text, style, Some((range.start, exact)));
                     if let Some(map)=cell.map.last_mut(){map.source_end=range.end;}
@@ -1338,7 +1281,7 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
             }
             Event::Code(code) => {
                 if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
-                    let style = InlineStyle { mono: true, code_bg: true, color: ColorRole::InlineCode, ..inline.style(InlineStyle::default()) };
+                    let style = InlineStyle { mono: true, code_bg: true, color: ColorRole::InlineCode, ..inline.style(&InlineStyle::default()) };
                     let inner=source[range.clone()].find(code.as_ref()).map(|offset|range.start+offset);
                     cell.push(&code, style, Some((inner.unwrap_or(range.start), inner.is_some())));
                     if inner.is_none(){if let Some(map)=cell.map.last_mut(){map.source_end=range.end;}}
@@ -1346,11 +1289,11 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
             }
             Event::InlineMath(tex) | Event::DisplayMath(tex) => {
                 if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
-                    push_table_atom(cell, &InlineAtom::Math(tex.to_string()), range, inline.style(InlineStyle::default()), env, window);
+                    push_table_atom(cell, &InlineAtom::Math(tex.to_string()), range, inline.style(&InlineStyle::default()), env, window);
                 }
             }
             Event::FootnoteReference(id) => {
-                if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) { push_table_atom(cell, &InlineAtom::Footnote(id.to_string()), range, inline.style(InlineStyle::default()), env, window); }
+                if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) { push_table_atom(cell, &InlineAtom::Footnote(id.to_string()), range, inline.style(&InlineStyle::default()), env, window); }
             }
             Event::End(TagEnd::Table) => break,
             _ => {}
@@ -1396,7 +1339,7 @@ impl Builder<'_> {
         if in_item {
             self.gap(self.env.metrics.paragraph_gap() * 0.5);
         }
-        self.base = if self.heading.is_some() { self.base } else { self.base_for_container() };
+        self.base = if self.heading.is_some() { self.base.clone() } else { self.base_for_container() };
         self.image_only = true;
         self.images.clear();
     }
@@ -1420,7 +1363,7 @@ impl Builder<'_> {
         let spec = ParaSpec {
             text: para.text,
             spans: para.spans,
-            base: self.base,
+            base: self.base.clone(),
             family: Family::Text,
             font_size: self.font_size,
             line_height: self.line_height,
@@ -1663,12 +1606,12 @@ impl Builder<'_> {
                 let limit = self.line_height * 1.3;
                 let scale = if info.height > limit { limit / info.height } else { 1.0 };
                 let object = InlineObject { at: 0, width: info.width * scale, width_percent:None, ascent: (info.height - info.depth) * scale, descent: info.depth * scale, key: InlineAsset::Embed(key) };
-                let style = self.inline.style(self.base);
+                let style = self.inline.style(&self.base);
                 self.para.push_object(object, style, source);
             }
             state => {
                 let color = if matches!(state, EmbedState::Failed(_)) { ColorRole::Caution } else { ColorRole::Accent };
-                let style = InlineStyle { mono: true, italic: true, color, ..self.base };
+                let style = InlineStyle { mono: true, italic: true, color, ..self.base.clone() };
                 self.para.push(tex, style, Some((source, true)));
             }
         }
@@ -1858,7 +1801,7 @@ impl Builder<'_> {
                 self.apply_gap();
                 if let Some(opening)=self.details.last().copied(){self.items.push(DisplayItem::Disclosure{x:self.indent-18.0*self.env.metrics.zoom,y:self.y,size:16.0*self.env.metrics.zoom,source:opening,open:!self.closed_details.contains(&opening)});}
                 if let Some(fragment) = fragment {
-                    let base = self.base;
+                    let base = self.base.clone();
                     self.base = style;
                     self.html_fragment(fragment, &[], &[]);
                     self.base = base;
@@ -1952,7 +1895,7 @@ impl Builder<'_> {
             }
             let end=html[at..].find('<').filter(|p|*p>0).map_or_else(||html.len(),|p|at+p);
             let text=html_escape::decode_html_entities(&html[at..end]);
-            self.para.push(&text,inline.style(base),Some((source+at,text.as_ref()==&html[at..end])));
+            self.para.push(&text,inline.style(&base),Some((source+at,text.as_ref()==&html[at..end])));
             if let Some(map)=self.para.map.last_mut(){map.source_end=source+end;}
             at=end;
         }
@@ -1961,10 +1904,8 @@ impl Builder<'_> {
     fn html_fragment(&mut self, fragment: &crate::nomo_mark::html_table::HtmlFragment,
         tables: &[crate::nomo_mark::html_table::HtmlTable], revealed: &[Range<usize>]) {
         use crate::nomo_mark::parse::InlineFormat;
-        let has_language = self.env.wrap == Wrap::KnuthPlass && self.source[fragment.source.clone()]
-            .as_bytes().windows(4).any(|word| word.eq_ignore_ascii_case(b"lang"));
-        let mut language = HyphenationLanguage::default();
-        let mut language_cursor = fragment.source.start;
+        let mut inline = InlineState::default();
+        let mut inline_cursor = fragment.source.start;
         self.flush_paragraph(); self.apply_gap();
         let top = self.y;
         let index = self.items.len();
@@ -1993,12 +1934,9 @@ impl Builder<'_> {
             if cell.runs.is_empty() { self.empty_anchor(cell.content.start); }
             for run in &cell.runs {
                 if run.text == "\n" && run.atom.is_none() { self.line_break(run.source.clone()); continue; }
-                let mut style = self.base;
+                inline.advance(self.source, &mut inline_cursor, run.source.start);
+                let mut style = inline.style(&self.base);
                 style.no_hyphenation |= run.link.is_some();
-                if has_language {
-                    language.advance(self.source, &mut language_cursor, run.source.start);
-                    style.no_hyphenation |= language.excluded();
-                }
                 for format in &run.formats {
                     match format {
                         InlineFormat::Strong => style.bold = true, InlineFormat::Emphasis => style.italic = true,
@@ -2186,6 +2124,7 @@ impl Builder<'_> {
         let border = zoom;
         let viewport_width = (self.width - self.indent).max(1.0);
         let mut prepared=Vec::new();let mut measures=Vec::new();
+        let mut inline=InlineState::default();let mut inline_cursor=table.source.start;
         for cell in &table.cells {
             let base=table_layout::header_style(InlineStyle::default(), cell.header);
             let font_size = if cell.header { 13.0 } else { 14.0 } * zoom;
@@ -2207,7 +2146,8 @@ impl Builder<'_> {
                     empty_anchor=range.end;
                     continue;
                 }
-                let mut style=base;
+                inline.advance(self.source, &mut inline_cursor, range.start);
+                let mut style=inline.style(&base);
                 for format in formats{match format{InlineFormat::Strong=>style.bold=true,InlineFormat::Emphasis=>style.italic=true,InlineFormat::Code=>{style.mono=true;style.code_bg=true;style.no_hyphenation=true;style.color=ColorRole::InlineCode;},InlineFormat::Strike=>style.strike=true,InlineFormat::Underline=>style.underline=true,InlineFormat::Highlight=>style.bg=1,InlineFormat::Superscript=>style.shift=1,InlineFormat::Subscript=>style.shift=-1,InlineFormat::Link=>{style.underline=true;style.no_hyphenation=true;style.color=ColorRole::Link;}}}
                 if is_revealed(revealed, range.clone()) { style.color = ColorRole::Muted; }
                 if let Some(atom) = atom {
@@ -2221,7 +2161,7 @@ impl Builder<'_> {
             let mut natural=0.0f32;let mut specs=Vec::new();
             let mut atomic = 0.0f32;
             for para in paragraphs {
-                let spec = ParaSpec { text:para.text, spans:para.spans, base, family:Family::Text,
+                let spec = ParaSpec { text:para.text, spans:para.spans, base:base.clone(), family:Family::Text,
                     font_size, line_height:font_size*1.55, wrap:Wrap::Greedy, objects:para.objects };
                 let measured = table_layout::measure(&spec, &para.map, revealed, &para.table_images, self.env, self.window);
                 natural = natural.max(measured.0);
@@ -2287,7 +2227,7 @@ impl Builder<'_> {
         let spec_for = |cell: &ParaBuilder, header: bool| ParaSpec {
             text: cell.text.clone(),
             spans: cell.spans.iter().map(|(range, style)| (range.clone(),
-                if self.controlled { table_layout::header_style(*style, header) } else { *style })).collect(),
+                if self.controlled { table_layout::header_style(style.clone(), header) } else { style.clone() })).collect(),
             base: if self.controlled { table_layout::header_style(InlineStyle::default(), header) }
                 else { InlineStyle { bold: header, color: if header { ColorRole::Heading } else { ColorRole::Fg }, ..Default::default() } },
             family: Family::Text,

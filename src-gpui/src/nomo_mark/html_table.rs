@@ -502,6 +502,11 @@ fn inline(
         });
         return Some(());
     }
+    if matches!(element.name.as_str(), "font" | "span")
+        && only_attrs(element, &["style", "class", "color", "face", "size"]) {
+        for child in &element.children { inline(source, child, formats, link, runs, spans)?; }
+        return Some(());
+    }
     let mut formats = formats.to_vec();
     let mut link = link.map(str::to_owned);
     let mark = if element.name == "a" {

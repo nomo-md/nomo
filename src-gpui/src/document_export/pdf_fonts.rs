@@ -8,12 +8,12 @@ use unicode_segmentation::UnicodeSegmentation;
 pub(super) struct Face { pub font: Font, bytes: Arc<Vec<u8>>, index: u32 }
 pub(super) struct Fonts {
     database: Arc<fontdb::Database>, pub faces: Vec<Face>, ids: HashMap<fontdb::ID, usize>,
-    files: HashMap<PathBuf, Arc<Vec<u8>>>, choices: HashMap<(u8, String), usize>, bytes: usize,
+    files: HashMap<PathBuf, Arc<Vec<u8>>>, choices: HashMap<(u8, Option<gpui::SharedString>, String), usize>, bytes: usize, choice_bytes: usize,
     body: String, mono: String,
 }
 impl Fonts {
     pub fn new(appearance: &Appearance) -> Self {
-        Self { database: crate::embeds::font_database(), faces: Vec::new(), ids: HashMap::new(), files: HashMap::new(), choices: HashMap::new(), bytes: 0,
+        Self { database: crate::embeds::font_database(), faces: Vec::new(), ids: HashMap::new(), files: HashMap::new(), choices: HashMap::new(), bytes: 0, choice_bytes: 0,
             body: appearance.font.clone(), mono: appearance.mono.clone() }
     }
     pub fn segments(&mut self, text: &str, style: &Style, job: &Job) -> Result<Vec<(usize, String)>, String> {
@@ -27,10 +27,10 @@ impl Fonts {
         Ok(parts)
     }
     fn select(&mut self, text: &str, style: &Style, job: &Job) -> Result<usize, String> {
-        let key = (u8::from(style.bold) | u8::from(style.italic) << 1 | u8::from(style.mono) << 2, text.to_owned());
+        let key = (u8::from(style.bold) | u8::from(style.italic) << 1 | u8::from(style.mono) << 2, style.font_family.clone(), text.to_owned());
         if let Some(id) = self.choices.get(&key) { return Ok(*id); }
-        let requested = if style.mono { &self.mono } else { &self.body };
-        let names = [requested.as_str(), "Microsoft YaHei", "SimSun", "Noto Sans CJK SC", "PingFang SC", "Noto Sans", "DejaVu Sans", "Segoe UI Symbol", "Segoe UI Emoji"];
+        let requested = style.font_family.as_ref().map(|name| name.as_ref()).unwrap_or(if style.mono { &self.mono } else { &self.body });
+        let names = [requested, "Microsoft YaHei", "SimSun", "Noto Sans CJK SC", "PingFang SC", "Noto Sans", "DejaVu Sans", "Segoe UI Symbol", "Segoe UI Emoji"];
         let mut candidates = Vec::new();
         for name in names {
             if let Some(id) = self.database.query(&Query { families: &[Family::Name(name)], weight: if style.bold { Weight::BOLD } else { Weight::NORMAL },
@@ -49,7 +49,11 @@ impl Fonts {
             }).unwrap_or(false);
             if !supported { continue; }
             if let Some(index) = self.load(id)? {
-                if self.choices.len() < 16_384 { self.choices.insert(key, index); }
+                let cost = std::mem::size_of_val(&key) + key.1.as_ref().map_or(0, |name| name.len()) + key.2.len() + 32;
+                // 选择缓存同时限制条数与字节，随导出任务释放；满后直接查询，不裁剪正文。
+                if self.choices.len() < 16_384 && self.choice_bytes + cost <= 2 * 1024 * 1024 {
+                    self.choice_bytes += cost; self.choices.insert(key, index);
+                }
                 return Ok(index);
             }
         }
