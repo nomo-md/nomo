@@ -1,0 +1,546 @@
+{
+  "description": "Latest Windows first-visible-content measurements selected for the bilingual README. Existing test results; no new benchmark run.",
+  "units": "milliseconds unless specified",
+  "definition": {
+    "start": "Open request in an already running application; includes file RPC and control polling, excludes process startup and file selection.",
+    "end": "First-screen text observed in foreground desktop pixels.",
+    "scope": "Content becoming visible, not completion of the whole document or all image, formula, and diagram rendering.",
+    "statistic": "Median of three rounds, rounded to the nearest millisecond in the README."
+  },
+  "build": {
+    "id": "native-release-3e2b199dc6ec",
+    "configuration": "release",
+    "features": [
+      "automation"
+    ],
+    "gpui": "0.3.10",
+    "commit": "c4ed6801e08245f3ffad9b340f60178198217084",
+    "dirty": true,
+    "sha256": "3e2b199dc6ec5b3dbbc97b0be30cb19abcf7d2d14cd23bc52f0536edd040fd50",
+    "sourceFingerprint": "1c75bafe4239715614e6200ef7d5101155e23b75a6570eaff1806d978d306b43",
+    "builtAt": "2026-11-07T07:53:22.985Z"
+  },
+  "environment": {
+    "memoryBytes": 16908595200,
+    "cpu": [
+      {
+        "Name": "12th Gen Intel(R) Core(TM) i5-12400",
+        "NumberOfCores": 6,
+        "NumberOfLogicalProcessors": 12
+      }
+    ],
+    "os": "Microsoft Windows NT 10.0.26200.0",
+    "gpu": [
+      {
+        "Name": "Intel(R) UHD Graphics 730",
+        "DriverVersion": "30.0.101.1371",
+        "AdapterRAM": 1073741824
+      }
+    ],
+    "powershell": "7.6.9"
+  },
+  "sources": [
+    {
+      "runId": "opening-2026-11-07T08-25-36-972Z",
+      "startedAt": "2026-11-07T08:25:36.974Z",
+      "status": "passed",
+      "archive": "test-lab/results/opening-2026-11-07T08-25-36-972Z/summary.json",
+      "datasetFingerprint": "3be368270aeded142a59c821d152f1812f1882cda7719fef57a0f2be6de079fd",
+      "runnerFingerprint": "084e5a8678685f3a27baf0f1045b8b54e3ddd880b29754dc1ff2bb06e79ce10a",
+      "sourceUnchanged": true,
+      "runnerUnchanged": true
+    },
+    {
+      "runId": "opening-2026-11-07T08-43-09-992Z",
+      "startedAt": "2026-11-07T08:43:09.993Z",
+      "status": "passed",
+      "archive": "test-lab/results/opening-2026-11-07T08-43-09-992Z/summary.json",
+      "datasetFingerprint": "3be368270aeded142a59c821d152f1812f1882cda7719fef57a0f2be6de079fd",
+      "runnerFingerprint": "96840225635c0f3264f9b6797e20db40a49cca819fb73d33b59f398539773939",
+      "sourceUnchanged": true,
+      "runnerUnchanged": true
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "performance.text",
+      "title": "5 MiB 纯文本",
+      "sourceRun": "opening-2026-11-07T08-25-36-972Z",
+      "runs": 3,
+      "passed": 3,
+      "firstVisibleMs": {
+        "n": 3,
+        "min": 148.99010002069554,
+        "median": 160.38689998559857,
+        "max": 178.0159499583242,
+        "p95": null,
+        "p99": null
+      },
+      "rounds": [
+        {
+          "round": 1,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 148.99010002069554,
+          "sampleGapMs": {
+            "n": 62,
+            "min": 30.307899951934814,
+            "median": 31.98970001935959,
+            "max": 62.45039999485016,
+            "p95": 61.86970001459122,
+            "p99": null
+          }
+        },
+        {
+          "round": 2,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 178.0159499583242,
+          "sampleGapMs": {
+            "n": 58,
+            "min": 30.129299998283386,
+            "median": 31.846749991178513,
+            "max": 63.235199987888336,
+            "p95": 61.11879998445511,
+            "p99": null
+          }
+        },
+        {
+          "round": 3,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 160.38689998559857,
+          "sampleGapMs": {
+            "n": 59,
+            "min": 30.137099981307983,
+            "median": 45.951200008392334,
+            "max": 62.170300006866455,
+            "p95": 60.499199986457825,
+            "p99": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "performance.mixed-10mib",
+      "title": "10 MiB 全节点混合",
+      "sourceRun": "opening-2026-11-07T08-43-09-992Z",
+      "runs": 3,
+      "passed": 3,
+      "firstVisibleMs": {
+        "n": 3,
+        "min": 187.30135006551427,
+        "median": 203.30024997787405,
+        "max": 211.62324996871757,
+        "p95": null,
+        "p99": null
+      },
+      "rounds": [
+        {
+          "round": 1,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 203.30024997787405,
+          "sampleGapMs": {
+            "n": 62,
+            "min": 30.14810001850128,
+            "median": 31.64734998345375,
+            "max": 63.54680001735687,
+            "p95": 61.36779999732971,
+            "p99": null
+          }
+        },
+        {
+          "round": 2,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 187.30135006551427,
+          "sampleGapMs": {
+            "n": 57,
+            "min": 30.328400015830994,
+            "median": 46.47799998521805,
+            "max": 63.44120001792908,
+            "p95": 62.81919997930527,
+            "p99": null
+          }
+        },
+        {
+          "round": 3,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 211.62324996871757,
+          "sampleGapMs": {
+            "n": 64,
+            "min": 30.199699997901917,
+            "median": 45.146850019693375,
+            "max": 62.79720002412796,
+            "p95": 61.85970002412796,
+            "p99": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "performance.images",
+      "title": "图片瀑布流",
+      "sourceRun": "opening-2026-11-07T08-25-36-972Z",
+      "runs": 3,
+      "passed": 3,
+      "firstVisibleMs": {
+        "n": 3,
+        "min": 117.84730004110315,
+        "median": 118.86520001239842,
+        "max": 118.96425001306488,
+        "p95": null,
+        "p99": null
+      },
+      "rounds": [
+        {
+          "round": 1,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 118.96425001306488,
+          "sampleGapMs": {
+            "n": 47,
+            "min": 30.27599996328354,
+            "median": 45.64429998397827,
+            "max": 62.584100008010864,
+            "p95": 62.29379999637604,
+            "p99": null
+          }
+        },
+        {
+          "round": 2,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 117.84730004110315,
+          "sampleGapMs": {
+            "n": 48,
+            "min": 30.467599987983704,
+            "median": 45.752599984407425,
+            "max": 62.444000005722046,
+            "p95": 61.87130004167557,
+            "p99": null
+          }
+        },
+        {
+          "round": 3,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 118.86520001239842,
+          "sampleGapMs": {
+            "n": 50,
+            "min": 30.157400012016296,
+            "median": 31.79795002937317,
+            "max": 62.22640001773834,
+            "p95": 61.40200001001358,
+            "p99": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "performance.diagrams",
+      "title": "七类 Mermaid",
+      "sourceRun": "opening-2026-11-07T08-25-36-972Z",
+      "runs": 3,
+      "passed": 3,
+      "firstVisibleMs": {
+        "n": 3,
+        "min": 96.79365000801045,
+        "median": 137.23410000628792,
+        "max": 144.00880002097983,
+        "p95": null,
+        "p99": null
+      },
+      "rounds": [
+        {
+          "round": 1,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 137.23410000628792,
+          "sampleGapMs": {
+            "n": 52,
+            "min": 30.40310001373291,
+            "median": 31.328850001096725,
+            "max": 62.084000051021576,
+            "p95": 61.85479998588562,
+            "p99": null
+          }
+        },
+        {
+          "round": 2,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 144.00880002097983,
+          "sampleGapMs": {
+            "n": 53,
+            "min": 30.4996999502182,
+            "median": 31.377300024032593,
+            "max": 61.317700028419495,
+            "p95": 47.86799997091293,
+            "p99": null
+          }
+        },
+        {
+          "round": 3,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 96.79365000801045,
+          "sampleGapMs": {
+            "n": 48,
+            "min": 30.324199974536896,
+            "median": 45.88754999637604,
+            "max": 48.246800005435944,
+            "p95": 47.49489998817444,
+            "p99": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "performance.code",
+      "title": "29 种代码语言",
+      "sourceRun": "opening-2026-11-07T08-25-36-972Z",
+      "runs": 3,
+      "passed": 3,
+      "firstVisibleMs": {
+        "n": 3,
+        "min": 211.59440004329372,
+        "median": 215.61830000314512,
+        "max": 249.2506999989564,
+        "p95": null,
+        "p99": null
+      },
+      "rounds": [
+        {
+          "round": 1,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 249.2506999989564,
+          "sampleGapMs": {
+            "n": 52,
+            "min": 30.26919996738434,
+            "median": 31.714399993419647,
+            "max": 63.076200008392334,
+            "p95": 62.31029999256134,
+            "p99": null
+          }
+        },
+        {
+          "round": 2,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 215.61830000314512,
+          "sampleGapMs": {
+            "n": 53,
+            "min": 30.471599996089935,
+            "median": 31.17759996652603,
+            "max": 47.698699951171875,
+            "p95": 47.44260001182556,
+            "p99": null
+          }
+        },
+        {
+          "round": 3,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 211.59440004329372,
+          "sampleGapMs": {
+            "n": 52,
+            "min": 30.268899977207184,
+            "median": 31.59825000166893,
+            "max": 61.525400042533875,
+            "p95": 47.740700006484985,
+            "p99": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "performance.four-tabs",
+      "title": "四标签（打开第 4 份）",
+      "sourceRun": "opening-2026-11-07T08-25-36-972Z",
+      "runs": 3,
+      "passed": 3,
+      "firstVisibleMs": {
+        "n": 3,
+        "min": 121.3816499721579,
+        "median": 145.57360003099893,
+        "max": 147.07800004472665,
+        "p95": null,
+        "p99": null
+      },
+      "rounds": [
+        {
+          "round": 1,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 121.3816499721579,
+          "sampleGapMs": {
+            "n": 48,
+            "min": 28.115000009536743,
+            "median": 32.33135002851486,
+            "max": 62.55500000715256,
+            "p95": 61.91980004310608,
+            "p99": null
+          }
+        },
+        {
+          "round": 2,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 147.07800004472665,
+          "sampleGapMs": {
+            "n": 52,
+            "min": 30.39920002222061,
+            "median": 31.982700020074844,
+            "max": 61.98379999399185,
+            "p95": 48.01620000600815,
+            "p99": null
+          }
+        },
+        {
+          "round": 3,
+          "status": "passed",
+          "environment": {
+            "width": 1280,
+            "height": 820,
+            "scaleFactor": 1,
+            "theme": "Light",
+            "gpui": "0.3.10",
+            "version": "0.6.2"
+          },
+          "firstVisibleMs": 145.57360003099893,
+          "sampleGapMs": {
+            "n": 54,
+            "min": 29.968600034713745,
+            "median": 31.427649974822998,
+            "max": 62.00950002670288,
+            "p95": 47.11309999227524,
+            "p99": null
+          }
+        }
+      ]
+    }
+  ]
+}

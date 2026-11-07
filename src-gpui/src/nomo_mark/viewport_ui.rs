@@ -1,0 +1,597 @@
+//! MarkdownViewportHost 的 GPUI 平台连接。沿用已发布结构组、预取距离和回收门禁。
+//! 仅一个活动输入控件；相邻已挂载控件可以显示/选择，焦点移交后才开放编辑。
+use super::*;
+use crate::nomo_mark::{session_window::WindowRequest, viewport_model::{Group, Heights, ScrollDemand}};
+use std::{collections::BTreeMap, time::{Duration, Instant}};
+use crate::nomo_mark::resident_budget::{Cost, ResidentLease};
+
+pub(super) struct Mounted {
+    pub view: Entity<NomoMark>,
+    pub(super) _subscription: Subscription,
+    pub height: f32,
+}
+pub(super) struct Viewport {
+    pub mounts: Vec<Mounted>,
+    pub groups: Vec<Group>,
+    pub heights: Heights,
+    pub(super) budget: ResidentLease,
+    reserved: Cost,
+    pub(super) saved_scroll: gpui::Point<gpui::Pixels>,
+    pub(super) request: WindowRequest,
+    pub(super) generation: u64,
+    pub(super) loading: bool,
+    pub(super) references_loading: bool,
+    pub(super) references_failed: bool,
+    pub(super) references_due: Instant,
+    pub(super) dirty: bool,
+    groups_complete: bool,
+    groups_due: Instant,
+    groups_timer: Option<gpui::Task<()>>,
+    failed: BTreeMap<u64, String>,
+    demand: ScrollDemand,
+    started: Instant,
+    last_top: f32,
+    pub(super) timer: Option<gpui::Task<()>>,
+}
+impl Viewport {
+    pub fn new(view: Entity<NomoMark>, subscription: Subscription) -> Self {
+        Self { mounts: vec![Mounted { view, _subscription: subscription, height:32.0 }], groups:Vec::new(), heights:Heights::default(), budget:ResidentLease::default(), reserved:Cost::default(), saved_scroll:gpui::point(px(0.0),px(0.0)), request:WindowRequest::default(), generation:0, loading:false, references_loading:false, references_failed:false, references_due:Instant::now(), dirty:true, groups_complete:false, groups_due:Instant::now(), groups_timer:None, failed:BTreeMap::new(), demand:ScrollDemand::default(), started:Instant::now(), last_top:0.0, timer:None }
+    }
+}
+impl Drop for Viewport { fn drop(&mut self) { self.request.cancel(); } }
+
+impl DocumentHost {
+    /// 仅在滚动容器及其子控件 prepaint 完成后运行；此时 clamp 和光标几何属于同一帧。
+    pub(super) fn reveal_pane(&mut self, pane: usize, cx: &mut Context<Self>) {
+        if !self.panes[pane].reveal_selection || self.hidden || self.navigating { return; }
+        let view = self.panes[pane].control.read(cx);
+        let Some((identity, caret_y, caret_height)) = view.caret_line(view.host.selection.head_byte) else { return; };
+        let bounds = self.panes[pane].scroll.bounds();
+        let height = f32::from(bounds.size.height);
+        if height <= 0.0 { return; }
+        let group_top = if self.panes[pane].viewport.groups.is_empty() { 0.0 } else {
+            let Ok(index) = self.panes[pane].viewport.groups.binary_search_by_key(&identity.from_byte, |group| group.from) else { return; };
+            // 局部乐观编辑会改变 to；同一起点的当前片段仍可用原高度树定位。
+            self.panes[pane].viewport.heights.top(index)
+        };
+        let actual = view.caret_bounds(view.host.selection.head_byte);
+        let caret_top = actual.as_ref().map_or(
+            group_top + 32.0 + caret_y + f32::from(self.panes[pane].scroll.offset().y),
+            |(_, caret)| f32::from(caret.origin.y - bounds.origin.y),
+        );
+        let caret_bottom = caret_top + caret_height;
+        let delta = if caret_top < 16.0 { caret_top - 16.0 }
+            else if caret_bottom > height - 16.0 { caret_bottom - height + 16.0 }
+            else { 0.0 };
+        if !delta.is_finite() { return; }
+        if actual.is_some() && caret_top >= 0.0 && caret_bottom <= height && delta.abs() < 0.5 {
+            let visible_ready=self.pane_visible_ready(pane,cx);
+            // 输入确认后还会重取结构和邻窗；它们完成前不能把临时占位布局当作最终位置。
+            if view.host.pending_count() == 0 && view.measured_height().is_some()
+                && visible_ready {
+                self.panes[pane].reveal_selection = false;
+            }
+            return;
+        }
+        let before = self.panes[pane].scroll.offset();
+        let requested = (before.y - px(delta)).min(px(0.0));
+        self.panes[pane].scroll.set_offset(gpui::point(before.x, requested));
+        self.schedule_pane(pane, 16, cx);
+        cx.notify();
+    }
+    pub(super) fn pane_visible_ready(&self, pane:usize, cx:&Context<Self>) -> bool {
+        let state=&self.panes[pane];
+        // 屏外预取和尾部分组续取不能阻挡已经完成布局的可见窗口。
+        if state.viewport.dirty {return false;}
+        if state.viewport.groups.is_empty() {return true;}
+        let top=(-f32::from(state.scroll.offset().y)-32.0).max(0.0);
+        let height=f32::from(state.scroll.bounds().size.height);
+        (state.viewport.heights.at(top)..=state.viewport.heights.at(top+height)).all(|index| {
+            let group=&state.viewport.groups[index];
+            !group.is_pending() && (state.viewport.failed.contains_key(&group.from) || state.viewport.mounts.iter().any(|mount| {
+                let view=mount.view.read(cx);
+                let id=&view.host.parsed.identity;
+                id.revision==self.status().revision && id.from_byte==group.from && id.to_byte==group.to
+                    && view.measured_height().is_some_and(|height|(height-mount.height).abs()<0.5)
+            }))
+        })
+    }
+    pub(super) fn pause_pane(&mut self, pane: usize, cx:&Context<Self>) {
+        self.cancel_pane_animation(pane);
+        self.panes[pane].scrollbar_drag = None;
+        self.panes[pane].viewport.request.cancel(); self.panes[pane].viewport.request=WindowRequest::default();
+        self.panes[pane].viewport.generation+=1; self.panes[pane].viewport.loading=false; self.panes[pane].viewport.timer=None;
+        self.panes[pane].viewport.groups_timer=None;
+        self.panes[pane].viewport.references_loading=false;
+        self.panes[pane].viewport.references_failed=false;
+        self.panes[pane].viewport.references_due=Instant::now();
+        self.panes[pane].viewport.reserved=Cost::default(); self.update_pane_cost(pane, cx);
+    }
+    pub(super) fn update_pane_cost(&self, pane: usize, cx:&Context<Self>) {
+        let mut cost = self.panes[pane].viewport.reserved;
+        if pane == 0 { cost.layout += self.retained_resources.estimated_bytes(); }
+        self.panes[pane].viewport.budget.update(self.panes[pane].viewport.mounts.iter().fold(cost,|cost,m| {let view=m.view.read(cx); Cost {views:cost.views+1,source:cost.source+view.host.parsed.source.len(),layout:cost.layout+view.estimated_bytes()}}));
+    }
+    pub(super) fn replace_pane_groups(&mut self, pane:usize, groups:Vec<Group>, cx:&Context<Self>) {
+        let viewport=&mut self.panes[pane].viewport;
+        // 同范围的实测高度可跨索引刷新复用，避免将已知几何退回估值。
+        viewport.heights=Heights::new(groups.iter().map(|group| {
+            if let Some(mount)=viewport.mounts.iter().find(|mount| {
+                let id=&mount.view.read(cx).host.parsed.identity;
+                id.from_byte==group.from && id.to_byte==group.to
+            }) { return mount.height; }
+            if let Ok(index)=viewport.groups.binary_search_by_key(&group.from,|old|old.from) {
+                if viewport.groups[index].to==group.to { return viewport.heights.top(index+1)-viewport.heights.top(index); }
+            }
+            group.estimate
+        }));
+        viewport.groups=groups;
+        viewport.dirty=false;
+        viewport.groups_complete=true;
+        viewport.groups_timer=None;
+    }
+    fn append_pane_groups(&mut self, pane:usize, groups:Vec<Group>, total:u64, complete:bool, cx:&Context<Self>) {
+        let viewport=&mut self.panes[pane].viewport;
+        let density=viewport.groups.last().filter(|group|group.is_pending()).map(|group| {
+            let index=viewport.groups.len()-1;
+            (viewport.heights.top(index+1)-viewport.heights.top(index)) as f64 / (group.to-group.from).max(1) as f64
+        });
+        if viewport.groups.last().is_some_and(|group|group.is_pending()) {
+            viewport.groups.pop(); viewport.heights.pop();
+        }
+        // 已知前缀不重建，保留当前阅读窗口及所有实测高度。
+        for group in groups {
+            let height=viewport.mounts.iter().find(|mount| {
+                let id=&mount.view.read(cx).host.parsed.identity;
+                id.from_byte==group.from && id.to_byte==group.to
+            }).map_or(group.estimate,|mount|mount.height);
+            viewport.heights.push(height);
+            viewport.groups.push(group);
+        }
+        let from=viewport.groups.last().map_or(0,|group|group.to);
+        if from<total {
+            let density=density.unwrap_or_else(|| viewport.heights.total() as f64 / from.max(1) as f64);
+            let estimate=((total-from) as f64 * density.max(24.0/160.0)) as f32;
+            viewport.groups.push(Group::pending(from,total,estimate));
+            viewport.heights.push(estimate);
+        }
+        viewport.groups_complete=complete && from==total;
+        viewport.groups_due=Instant::now()+Duration::from_millis(crate::nomo_mark::session_window::policy().quiet_ms);
+        viewport.groups_timer=None;
+    }
+    pub(super) fn reset_pane(&mut self, pane: usize, cx: &mut Context<Self>) {
+        self.panes[pane].viewport.request.cancel();
+        self.panes[pane].viewport.generation += 1;
+        self.panes[pane].viewport.request = WindowRequest::default();
+        self.panes[pane].viewport.loading = false;
+        self.panes[pane].viewport.references_loading=false;
+        self.panes[pane].viewport.references_failed=false;
+        self.panes[pane].viewport.references_due=Instant::now();
+        self.panes[pane].viewport.reserved=Cost::default();
+        self.panes[pane].viewport.dirty = true;
+        self.panes[pane].viewport.groups_complete = false;
+        self.panes[pane].viewport.groups_timer = None;
+        self.panes[pane].viewport.failed.clear();
+        self.panes[pane].viewport.groups.clear();
+        self.panes[pane].viewport.heights = Heights::default();
+        self.retain_pane_control(pane, cx);
+        if !self.panes[pane].viewport.mounts.iter().any(|m|m.view == self.panes[pane].control) {
+            let view=self.panes[pane].control.clone();
+            let subscription=cx.subscribe(&view,Self::event);
+            self.panes[pane].viewport.mounts.push(Mounted { view, _subscription:subscription, height:32.0 });
+        }
+        self.update_pane_cost(pane, cx);
+        self.schedule_pane(pane, 16, cx);
+    }
+    fn retain_pane_control(&mut self, pane: usize, cx: &mut Context<Self>) {
+        let control=self.panes[pane].control.clone();
+        self.panes[pane].viewport.mounts.retain(|mount| {
+            if mount.view == control { return true; }
+            // 任何未完成交互都不得被预算或滚动回收吞掉。
+            mount.view.update(cx, |view,cx| view.detach(false,cx)).is_err()
+        });
+    }
+    pub(super) fn schedule_pane(&mut self, pane: usize, ms: u64, cx: &mut Context<Self>) {
+        if !self.production || self.hidden || self.panes[pane].viewport.timer.is_some() { return; }
+        let pane_id=self.panes[pane].id;
+        self.panes[pane].viewport.timer = Some(cx.spawn(async move |this,cx| {
+            cx.background_executor().timer(Duration::from_millis(ms)).await;
+            let _=this.update(cx, |host,cx| { if host.panes.get(pane).is_some_and(|p|p.id==pane_id) { host.panes[pane].viewport.timer=None; host.pane_tick(pane, cx); } });
+        }));
+    }
+    fn schedule_groups(&mut self, pane:usize, cx:&mut Context<Self>) {
+        if self.hidden || self.panes[pane].viewport.groups_timer.is_some() { return; }
+        let id=self.panes[pane].id;
+        let generation=self.panes[pane].viewport.generation;
+        let delay=self.panes[pane].viewport.groups_due.saturating_duration_since(Instant::now());
+        // 进度合并使用独立的短期定时器，不占用输入和滚动的 16ms 调度入口。
+        self.panes[pane].viewport.groups_timer=Some(cx.spawn(async move |this,cx| {
+            cx.background_executor().timer(delay).await;
+            let _=this.update(cx,|host,cx| {
+                if host.pane_request_current(pane,id,generation) {
+                    host.panes[pane].viewport.groups_timer=None;
+                    host.schedule_pane(pane,0,cx);
+                }
+            });
+        }));
+    }
+    pub(super) fn pane_edited(&mut self, pane: usize, edits: &[SourceEdit], cx: &mut Context<Self>) {
+        if !self.production { return; }
+        self.panes[pane].viewport.request.cancel();
+        self.panes[pane].viewport.request=WindowRequest::default();
+        self.panes[pane].viewport.generation+=1;
+        self.panes[pane].viewport.loading=false;
+        self.panes[pane].viewport.references_loading=false;
+        self.panes[pane].viewport.references_failed=false;
+        self.panes[pane].viewport.references_due=Instant::now();
+        self.panes[pane].viewport.reserved=Cost::default();
+        self.panes[pane].viewport.dirty=true;
+        self.panes[pane].viewport.groups_complete=false;
+        self.panes[pane].viewport.groups_timer=None;
+        self.panes[pane].load_error=None;
+        self.panes[pane].viewport.failed.clear();
+        // 未改变正文的邻窗保留实体和已测高度，避免先变成占位再异步挂载。
+        // 引用依赖交给原有短查询刷新，不能继续使用过期目标。
+        let revision = self.status().revision;
+        let control = self.panes[pane].control.clone();
+        self.panes[pane].viewport.mounts.retain(|mount| {
+            if mount.view == control { return true; }
+            mount.view.update(cx, |view, cx| {
+                if view.rebase_passive(revision, edits, cx).is_ok() { true }
+                else { view.detach(false, cx).is_err() }
+            })
+        });
+        self.update_pane_cost(pane, cx);
+        let active_from=self.panes[pane].control.read(cx).host.parsed.identity.from_byte;
+        for group in &mut self.panes[pane].viewport.groups {
+            let active=group.from==active_from;
+            group.rebase(edits, active);
+        }
+        self.panes[pane].viewport.timer=None;
+        self.schedule_pane(pane, crate::nomo_mark::session_window::policy().quiet_ms, cx);
+    }
+    pub(super) fn promote(&mut self, view: &Entity<NomoMark>, cx: &mut Context<Self>) -> bool {
+        let Some(pane)=self.pane_for(view) else { return false; };
+        if *view == self.control { self.cancel_pane_follow(pane,cx);return true; }
+        if self.navigating || self.saving || self.close_prompt || self.hidden || self.panes[pane].stale || self.panes[pane].viewport.dirty { return false; }
+        if let Err(error)=self.control.read(cx).prepare_unmount() {
+            self.message=error.to_string(); self.focus_pending=true; return false;
+        }
+        if view.read(cx).host.parsed.identity.revision != self.status().revision { return false; }
+        self.cancel_pane_follow(pane,cx);
+        self.control.update(cx, |v,_| v.host.set_readonly(true));
+        self.active_pane=pane;
+        self.control=view.clone();
+        self.panes[pane].control=view.clone();
+        self.control.update(cx, |v,_| v.host.set_readonly(false));
+        self.refresh_toolbar_marks(cx);
+        true
+    }
+    pub(super) fn pane_height(&mut self, pane: usize, view: &Entity<NomoMark>, stamp: &LayoutStamp, height: f32, cx: &mut Context<Self>) {
+        if stamp.identity != view.read(cx).host.parsed.identity || stamp.identity.revision!=self.status().revision
+            || !height.is_finite() || height<1.0 { return; }
+        if let Some(mount)=self.panes[pane].viewport.mounts.iter_mut().find(|m| &m.view==view) { mount.height=height; }
+        if let Some(index)=self.panes[pane].viewport.groups.iter().position(|g| g.matches_mount(&stamp.identity, *view == self.panes[pane].control)) {
+            let old_bottom=self.panes[pane].viewport.heights.top(index+1);
+            let delta=self.panes[pane].viewport.heights.update(index,height);
+            let top=-f32::from(self.panes[pane].scroll.offset().y);
+            if delta.abs()>0.1 && old_bottom + 32.0 <= top {
+                // 屏外资源就绪/窗口精确测量改变前方高度时维持当前阅读位置。
+                self.panes[pane].scroll.set_offset(gpui::point(px(0.0),px(-(top+delta).max(0.0))));
+                self.panes[pane].viewport.last_top=(top+delta).max(0.0);
+            }
+            if delta.abs()>0.1 { cx.notify(); }
+        }
+        // 当前修订排版就绪后才释放同范围的旧邻窗，避免先清空再挂载。
+        let control=self.panes[pane].control.clone();
+        self.panes[pane].viewport.mounts.retain(|mount| {
+            let id=&mount.view.read(cx).host.parsed.identity;
+            if mount.view==control || mount.view==*view || id.from_byte!=stamp.identity.from_byte
+                || id.revision==stamp.identity.revision { return true; }
+            mount.view.update(cx,|view,cx|view.detach(false,cx)).is_err()
+        });
+        self.update_pane_cost(pane,cx);
+        self.schedule_pane(pane, 16,cx);
+    }
+    fn pane_tick(&mut self, pane: usize, cx: &mut Context<Self>) {
+        if !self.production || self.hidden || self.navigating || self.saving || self.close_prompt { return; }
+        let top=(-f32::from(self.panes[pane].scroll.offset().y)-32.0).max(0.0);
+        let height=f32::from(self.panes[pane].scroll.bounds().size.height).max(1.0);
+        let now=self.panes[pane].viewport.started.elapsed().as_secs_f64()*1000.0;
+        if (top-self.panes[pane].viewport.last_top).abs()>0.5 { self.panes[pane].viewport.demand.sample(top,height,now); self.panes[pane].viewport.last_top=top; }
+        self.refresh_pending_references(pane, cx);
+        if self.panes[pane].viewport.loading { return; }
+        if self.panes[pane].load_error.is_some() { return; }
+        if self.panes[pane].stale { self.refresh_stale_pane(pane,cx); return; }
+        if self.panes[pane].viewport.dirty {
+            if self.panes[pane].control.read(cx).prepare_unmount().is_err() { self.schedule_pane(pane, 300,cx); return; }
+            self.refresh_groups(pane, cx);
+            return;
+        }
+        if self.panes[pane].viewport.groups.is_empty() {
+            if !self.panes[pane].viewport.groups_complete { self.refresh_groups(pane,cx); }
+            return;
+        }
+        let (before,after,retain_before,retain_after,scrolling)=self.panes[pane].viewport.demand.range(height,now);
+        let first=self.panes[pane].viewport.heights.at((top-before).max(0.0));
+        let last=self.panes[pane].viewport.heights.at(top+height+after);
+        self.update_pane_cost(pane, cx);
+        let pressured=self.panes[pane].viewport.budget.pressured();
+        let retain_first=self.panes[pane].viewport.heights.at(if pressured {top} else {(top-retain_before).max(0.0)});
+        let retain_last=self.panes[pane].viewport.heights.at(top+height+if pressured {0.0} else {retain_after});
+        let from=self.panes[pane].viewport.groups[retain_first].from;
+        let to=self.panes[pane].viewport.groups[retain_last].to;
+        self.panes[pane].viewport.failed.retain(|start, _| *start >= from && *start < to);
+        let mounted_before=self.panes[pane].viewport.mounts.len();
+        let control=self.panes[pane].control.clone();
+        // 短动画只暂留已经挂载的目标；内存承压时仍服从原有回收预算。
+        let animated_target=if pressured {None}else{self.animated_outline_byte(pane)};
+        let viewport=&mut self.panes[pane].viewport;
+        let groups=&viewport.groups;
+        viewport.mounts.retain(|mount| {
+            let id=&mount.view.read(cx).host.parsed.identity;
+            let compatible=groups.binary_search_by_key(&id.from_byte,|group|group.from).is_ok_and(|index|groups[index].matches_mount(id,false));
+            if mount.view==control || (compatible && (id.to_byte>from && id.from_byte<to
+                || animated_target.is_some_and(|byte| id.from_byte<=byte && byte<id.to_byte))) { return true; }
+            mount.view.update(cx, |v,cx|v.detach(false,cx)).is_err()
+        });
+        self.update_pane_cost(pane, cx);
+        let visible_first=self.panes[pane].viewport.heights.at(top);
+        let visible_last=self.panes[pane].viewport.heights.at(top+height);
+        let mut candidates:Vec<_>=(first..=last).collect();
+        candidates.sort_by_key(|&i| if i>=visible_first && i<=visible_last { (0, i.abs_diff(visible_first)) } else { (1,i.abs_diff(visible_first)) });
+        for index in candidates {
+            let group=self.panes[pane].viewport.groups[index].clone();
+            if group.is_pending() { continue; }
+            if self.panes[pane].viewport.failed.contains_key(&group.from) || self.panes[pane].viewport.mounts.iter().any(|m| {
+                let id=&m.view.read(cx).host.parsed.identity;
+                id.revision==self.status().revision && group.matches_mount(id,m.view==control)
+            }) { continue; }
+            let required=index>=visible_first && index<=visible_last;
+            if !required {
+                if scrolling || self.panes[pane].control.read(cx).prepare_unmount().is_err() { self.schedule_pane(pane, 300,cx); return; }
+            }
+            let reservation=Cost {views:1,source:(group.to-group.from) as usize,layout:(group.to-group.from) as usize};
+            if !self.panes[pane].viewport.budget.reserve(reservation,required) { break; }
+            self.panes[pane].viewport.reserved=reservation;
+            self.mount_group(pane, group.clone(),cx);
+            return;
+        }
+        if self.panes[pane].viewport.mounts.len()!=mounted_before { cx.notify(); }
+        if !self.panes[pane].viewport.groups_complete {
+            let pending_visible=self.panes[pane].viewport.groups[visible_last].is_pending();
+            let visible_due=Instant::now()+Duration::from_millis(50);
+            if pending_visible && self.panes[pane].viewport.groups_due>visible_due {
+                self.panes[pane].viewport.groups_due=visible_due;
+                self.panes[pane].viewport.groups_timer=None;
+            }
+            if Instant::now()>=self.panes[pane].viewport.groups_due {
+                self.refresh_groups(pane,cx);
+            } else {
+                self.schedule_groups(pane,cx);
+            }
+        }
+    }
+    fn refresh_groups(&mut self, pane: usize, cx: &mut Context<Self>) {
+        self.panes[pane].viewport.loading=true;
+        let append=!self.panes[pane].viewport.dirty;
+        let from=if append { self.panes[pane].viewport.groups.last().map_or(0,|group|if group.is_pending() {group.from} else {group.to}) } else {0};
+        let control=self.panes[pane].control.clone();
+        let identity=control.read(cx).host.parsed.identity.clone();
+        let revision=identity.revision;
+        let port=self.port.clone();
+        let request=self.panes[pane].viewport.request.clone();
+        let generation=self.panes[pane].viewport.generation;
+        let pane_id=self.panes[pane].id;
+        let retained=self.panes[pane].viewport.mounts.iter().filter_map(|mount| {
+            let id=&mount.view.read(cx).host.parsed.identity;
+            (id.revision==revision && (mount.view==control || id.to_byte<=identity.from_byte || id.from_byte>=identity.to_byte))
+                .then_some((id.from_byte,id.to_byte))
+        }).collect::<Vec<_>>();
+        let through=retained.iter().map(|&(_,to)|to).max().unwrap_or(identity.to_byte).max(from);
+        let task=cx.background_executor().spawn(async move {port.published_groups(revision,from,through,&retained,&request)});
+        cx.spawn(async move |this,cx| {
+            let result=task.await;
+            let _=this.update(cx,|host,cx| {
+                if !host.pane_request_current(pane,pane_id,generation) { return; }
+                host.panes[pane].viewport.loading=false;
+                // 输入已在本地投影、但提交尚未确认时，Pane 代数还没有前进。
+                // 旧查询不能把新的选区/边界重新装载回旧修订。
+                if host.panes[pane].control != control || control.read(cx).host.parsed.identity != identity
+                    || host.status().revision != revision {
+                    host.panes[pane].viewport.dirty=true;
+                    host.schedule_pane(pane,crate::nomo_mark::session_window::policy().quiet_ms,cx);
+                    return;
+                }
+                match result {
+                    Ok(batch)=> {
+                        let groups=batch.groups;
+                        let retained_count=if append {host.panes[pane].viewport.groups.len()} else {0};
+                        if (retained_count+groups.len()+1)*(std::mem::size_of::<Group>()+64)>32*1024*1024 {
+                            let error=ControlError::NeedsContext("窗口元数据超过宿主缓存预算".into());
+                            host.panes[pane].load_error=Some(error.to_string());host.report(error,cx);cx.notify();return;
+                        }
+                        if groups.first().is_some_and(|group|group.from!=from) {
+                            host.panes[pane].viewport.dirty=true;
+                            host.schedule_pane(pane,crate::nomo_mark::session_window::policy().quiet_ms,cx);return;
+                        }
+                        let id=&host.panes[pane].control.read(cx).host.parsed.identity;
+                        let matching=groups.iter().find(|g|g.from==id.from_byte&&g.to==id.to_byte);
+                        let source_only=host.panes[pane].control.read(cx).host.parsed.context.source_only;
+                        if !append && !groups.is_empty() && (matching.is_none() || matching.is_some_and(|group|group.semantic==source_only)) {
+                            // 删除结构边界后旧窗口不再独立，安全结束交互后重取真实完整结构。
+                            let byte=host.panes[pane].control.read(cx).host.selection.head_byte;
+                            let selection=host.panes[pane].control.read(cx).host.selection;
+                            host.refresh_pane_at(pane,byte,Some(selection),cx); return;
+                        }
+                        let old_scroll=(-f32::from(host.panes[pane].scroll.offset().y)).max(0.0);
+                        let old_top=(old_scroll-32.0).max(0.0);
+                        let (anchor,offset,pending_anchor)=if host.panes[pane].viewport.groups.is_empty() {(id.from_byte,old_top,false)} else {
+                            let viewport=&host.panes[pane].viewport;
+                            let index=viewport.heights.at(old_top);
+                            let (byte,offset)=viewport.groups[index].anchor(old_top-viewport.heights.top(index),viewport.heights.top(index+1)-viewport.heights.top(index));
+                            (byte,offset,viewport.groups[index].is_pending())
+                        };
+                        if append { host.append_pane_groups(pane,groups,batch.total_bytes,batch.complete,cx); }
+                        else {
+                            host.replace_pane_groups(pane,groups,cx);
+                            host.append_pane_groups(pane,Vec::new(),batch.total_bytes,batch.complete,cx);
+                        }
+                        if let Some(index)=host.panes[pane].viewport.groups.iter().position(|g|g.contains(anchor)) {
+                            let viewport=&host.panes[pane].viewport;
+                            let height=viewport.heights.top(index+1)-viewport.heights.top(index);
+                            let top=viewport.heights.top(index)+viewport.groups[index].anchor_offset(anchor,offset,height);
+                            let resolved=pending_anchor && !viewport.groups[index].is_pending();
+                            // 高度树不含纸面顶边距；重建索引时保留已滚过的边距。
+                            host.panes[pane].scroll.set_offset(gpui::point(px(0.0),px(-(top+old_scroll.min(32.0)))));
+                            host.panes[pane].viewport.last_top=top;
+                            let now=host.panes[pane].viewport.started.elapsed().as_secs_f64()*1000.0;
+                            host.panes[pane].viewport.demand.reset(top,now);
+                            if resolved { host.anchor_published_content(pane,anchor); }
+                        }
+                        host.schedule_pane(pane, 16,cx);
+                    }
+                    Err(error)=> {
+                        if error == ControlError::Stale {
+                            // 旧索引被后续编辑取代；保留当前输入窗口并重新查询当前修订。
+                            host.panes[pane].viewport.dirty=true;
+                            host.schedule_pane(pane, crate::nomo_mark::session_window::policy().quiet_ms, cx);
+                        } else {
+                            host.panes[pane].viewport.dirty=false;
+                            host.panes[pane].load_error=Some(error.to_string());
+                            host.report(error,cx);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+    fn mount_group(&mut self, pane: usize, group:Group, cx:&mut Context<Self>) {
+        self.panes[pane].viewport.loading=true;
+        let reserved_height=self.panes[pane].viewport.groups.binary_search_by_key(&group.from,|group|group.from)
+            .map(|index|self.panes[pane].viewport.heights.top(index+1)-self.panes[pane].viewport.heights.top(index))
+            .unwrap_or(group.estimate);
+        let control=self.panes[pane].control.clone();
+        let identity=control.read(cx).host.parsed.identity.clone();
+        let revision=identity.revision;
+        let generation=self.panes[pane].viewport.generation;
+        let pane_id=self.panes[pane].id;
+        let request=self.panes[pane].viewport.request.clone();
+        let port=self.port.clone();
+        let started=Instant::now();
+        let from=group.from; let to=group.to;
+        let semantic=group.semantic;
+        let task=cx.background_executor().spawn(async move {
+            if semantic { port.load_group(revision,from,Some(to),&request) }
+            else { port.load_source_range(revision,from..to,&request) }
+        });
+        cx.spawn(async move |this,cx| {
+            let result=task.await;
+            let _=this.update(cx,|host,cx| {
+                if !host.pane_request_current(pane,pane_id,generation) { return; }
+                host.panes[pane].viewport.loading=false;
+                host.panes[pane].viewport.reserved=Cost::default();
+                if host.panes[pane].control != control || control.read(cx).host.parsed.identity != identity
+                    || host.status().revision != revision {
+                    host.panes[pane].viewport.dirty=true;
+                    host.update_pane_cost(pane,cx);
+                    host.schedule_pane(pane,crate::nomo_mark::session_window::policy().quiet_ms,cx);
+                    return;
+                }
+                let result=result.and_then(|loaded| {
+                    if loaded.input.from_byte!=from || loaded.input.to_byte!=to {return Err(ControlError::NeedsContext("结构窗口边界已变化".into()));}
+                    WindowHostAdapter::new(loaded.input,format!("pane-{pane_id}-{}-{generation}",group.id),generation,loaded.context)
+                });
+                match result {
+                    Ok(mut adapter)=> {
+                        adapter.set_readonly(true);
+                        let mode=host.panes[pane].mode;
+                        let base_dir=host.panes[pane].control.read(cx).base_dir.clone();
+                        let embedded=host.embedded;
+                        let view=cx.new(|cx| {let mut view=NomoMark::new(adapter,cx);view.reserve_layout_height(reserved_height);view.mode=mode;view.base_dir=base_dir;view.workspace_hosted=embedded;view.windowed_navigation=host.production;view});
+                        let subscription=cx.subscribe(&view,Self::event);
+                        host.panes[pane].viewport.mounts.push(Mounted{view,_subscription:subscription,height:reserved_height});
+                        host.panes[pane].viewport.demand.prepared(started.elapsed().as_secs_f64()*1000.0);
+                    }
+                    Err(error)=> {
+                        if error == ControlError::Stale {
+                            host.panes[pane].viewport.dirty=true;
+                            host.update_pane_cost(pane,cx);
+                            host.schedule_pane(pane, crate::nomo_mark::session_window::policy().quiet_ms, cx);
+                            return;
+                        }
+                        host.panes[pane].viewport.failed.insert(group.from,error.to_string());
+                        if let Ok(index)=host.panes[pane].viewport.groups.binary_search_by_key(&group.from,|group|group.from) {
+                            let height=(host.panes[pane].viewport.heights.top(index+1)-host.panes[pane].viewport.heights.top(index)).max(96.0);
+                            host.panes[pane].viewport.heights.update(index,height);
+                        }
+                        host.report(error,cx);
+                    }
+                }
+                host.update_pane_cost(pane, cx);
+                host.schedule_pane(pane, crate::nomo_mark::session_window::policy().batch_ms,cx);
+                cx.notify();
+            });
+        }).detach();
+    }
+    pub(super) fn pane_children(&self, pane: usize, cx:&Context<Self>) -> Vec<gpui::AnyElement> {
+        if self.hidden { return Vec::new(); }
+        if !self.production || self.panes[pane].viewport.groups.is_empty() { return vec![self.pane_mount(self.panes[pane].control.clone(),cx)]; }
+        let mut children=Vec::new();
+        let mut ready:Vec<(usize,u8,Entity<NomoMark>)>=Vec::new();
+        for mount in &self.panes[pane].viewport.mounts {
+            let view=mount.view.read(cx);
+            let id=&view.host.parsed.identity;
+            let Ok(index)=self.panes[pane].viewport.groups.binary_search_by_key(&id.from_byte,|g|g.from) else {continue;};
+            let group=&self.panes[pane].viewport.groups[index];
+            if self.panes[pane].viewport.failed.contains_key(&group.from)
+                || !group.matches_mount(id,mount.view==self.panes[pane].control) {continue;}
+            let priority=if id.revision==self.status().revision {
+                if view.measured_height().is_some() {3}else{2}
+            } else {1};
+            if let Some(previous)=ready.iter_mut().find(|(at,_,_)|*at==index) {
+                if previous.1<priority {*previous=(index,priority,mount.view.clone());}
+            } else {ready.push((index,priority,mount.view.clone()));}
+        }
+        let mut mounts:Vec<_>=ready.into_iter().map(|(index,_,view)|(index,self.pane_mount(view,cx))).collect();
+        for (&from,message) in &self.panes[pane].viewport.failed {
+            let Ok(index)=self.panes[pane].viewport.groups.binary_search_by_key(&from,|group|group.from) else {continue;};
+            let id=self.panes[pane].id;
+            let generation=self.panes[pane].viewport.generation;
+            let height=self.panes[pane].viewport.heights.top(index+1)-self.panes[pane].viewport.heights.top(index);
+            let error=div().h(px(height)).overflow_hidden().px_4().py_2().flex().flex_col().gap_2()
+                .child(format!("此处内容加载失败：{message}"))
+                .child(crate::ui::components::button(("retry-window",index),"重新加载",None,
+                    crate::ui::components::ButtonKind::Secondary,cx.global::<Theme>())
+                    .on_click(cx.listener(move |host,_,_,cx| {
+                        if host.pane_request_current(pane,id,generation) {
+                            host.panes[pane].viewport.failed.remove(&from);
+                            host.schedule_pane(pane,16,cx);
+                            cx.notify();
+                        }
+                    })));
+            mounts.push((index,error.into_any_element()));
+        }
+        mounts.sort_by_key(|(index,_)|*index);
+        let mut bottom=0.0;
+        // 滚动热路径只处理有界挂载集合与连续占位，不遍历全部正文/结构组。
+        for (index,mount) in mounts {
+            let top=self.panes[pane].viewport.heights.top(index);
+            if top>bottom {children.push(div().h(px(top-bottom)).flex_shrink_0().into_any_element());}
+            children.push(mount);
+            bottom=self.panes[pane].viewport.heights.top(index+1);
+        }
+        let total=self.panes[pane].viewport.heights.total();
+        if total>bottom {children.push(div().h(px(total-bottom)).flex_shrink_0().into_any_element());}
+        children
+    }
+    fn pane_mount(&self, view:Entity<NomoMark>, cx:&Context<Self>) -> gpui::AnyElement {
+        // 高度由子控件本帧测量决定，不能让上一帧组高度阻止段落收缩。
+        div().w_full().min_w_0().flex_shrink_0().child(view.clone()).capture_any_mouse_down(cx.listener(move |host,event:&gpui::MouseDownEvent,window,cx| {
+            if matches!(event.button, gpui::MouseButton::Left | gpui::MouseButton::Right) && !host.promote(&view,cx) {
+                window.focus(&host.control.focus_handle(cx), cx);cx.stop_propagation();
+            }
+        })).into_any_element()
+    }
+}

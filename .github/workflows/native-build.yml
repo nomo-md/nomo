@@ -1,0 +1,154 @@
+name: Native build
+
+on:
+  workflow_call:
+    inputs:
+      packages:
+        description: Build and validate the complete native package set
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    env:
+      # Tests create independent services; SQLite's 32 MiB heap budget is process-wide.
+      # The application shares one service. Keep its budget and run test cases serially.
+      RUST_TEST_THREADS: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-2022
+            shell: pwsh
+            target: x86_64-pc-windows-msvc
+            artifact: windows-x64
+          - name: macOS arm64
+            runner: macos-15
+            shell: bash
+            target: aarch64-apple-darwin
+            artifact: macos-arm64
+          - name: Linux x64
+            runner: ubuntu-24.04
+            shell: bash
+            target: x86_64-unknown-linux-gnu
+            artifact: linux-x64
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Linux build and packaging tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libssl-dev \
+            libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libxcb1-dev libxcb-xkb-dev libxcb-randr0-dev \
+            libxcb-xinput-dev libxcb-cursor-dev libvulkan-dev libegl1-mesa-dev \
+            libasound2-dev libudev-dev fonts-noto-cjk xdg-desktop-portal \
+            dpkg-dev rpm desktop-file-utils jq
+      - name: Initialize Windows SDK and MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Select the MSVC linker
+        if: runner.os == 'Windows'
+        run: |
+          $linker = Join-Path $env:VCToolsInstallDir 'bin/Hostx64/x64/link.exe'
+          if (-not (Test-Path -LiteralPath $linker -PathType Leaf)) { throw "Missing MSVC linker: $linker" }
+          (Split-Path $linker) >> $env:GITHUB_PATH
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" >> $env:GITHUB_ENV
+      - name: Install Windows packaging tools
+        if: runner.os == 'Windows' && inputs.packages
+        run: |
+          choco install nsis --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
+      - name: Check macOS toolchain
+        if: runner.os == 'macOS'
+        run: |
+          xcodebuild -version
+          xcrun --find metal
+          xcrun --find metallib
+          command -v jq
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-native-complete
+          shared-key: native-${{ matrix.target }}
+      - name: Check default native entrypoint
+        run: cargo check --locked --target ${{ matrix.target }} --bin nomo
+      - name: Check development entrypoint and test targets
+        run: cargo check --locked --target ${{ matrix.target }} --features nomo-mark-demo --all-targets
+      - name: Verify native Quick Look rendering
+        if: runner.os == 'macOS'
+        run: bash scripts/test-macos-quick-look.sh
+      - name: Existing default editor tests
+        run: cargo test --locked --release --target ${{ matrix.target }} --bin nomo
+      - name: Existing document and NomoMark tests
+        run: cargo test --locked --release --target ${{ matrix.target }} --features nomo-mark-demo --bin nomo
+      - name: Build developer entrypoint
+        run: cargo build --locked --release --target ${{ matrix.target }} --features nomo-mark-demo --bin nomo
+      - name: Build default native application
+        if: ${{ !inputs.packages }}
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin nomo
+      - name: Verify native dependencies
+        shell: bash
+        run: |
+          cargo tree --locked --target ${{ matrix.target }} --all-features --prefix none > dependency-tree.txt
+          if grep -E '^(tauri(-[^ ]*)?|wry|webview2-com|objc2-web-kit) v' dependency-tree.txt; then
+            echo 'Unexpected WebView dependency' >&2
+            exit 1
+          fi
+      - name: Package Windows (rebuild default features)
+        if: runner.os == 'Windows' && inputs.packages
+        run: ./scripts/package-windows.ps1
+      - name: Package macOS (rebuild default features)
+        if: runner.os == 'macOS' && inputs.packages
+        run: bash scripts/package-macos.sh
+      - name: Package Linux (rebuild default features)
+        if: runner.os == 'Linux' && inputs.packages
+        run: bash scripts/package-linux.sh
+      - uses: actions/upload-artifact@v4
+        if: inputs.packages
+        with:
+          name: ${{ matrix.artifact }}
+          path: .artifacts/packages/*
+          include-hidden-files: true
+          if-no-files-found: error
+
+  validate-packages:
+    name: Validate complete native package set
+    needs: build
+    if: inputs.packages
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-x64'
+          path: release-assets
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-arm64
+          path: release-assets
+      - name: Validate version, complete asset set and archives
+        shell: bash
+        run: |
+          version="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")"
+          python3 scripts/verify-release.py release-assets --tag "v$version"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-packages
+          path: release-assets/*
+          if-no-files-found: error

@@ -1,70 +1,33 @@
+#Requires -Version 7.0
 [CmdletBinding()]
-param(
-    [ValidateSet('Debug', 'Release')]
-    [string]$Configuration = 'Release',
-    [switch]$RunTests
-)
-
-$ErrorActionPreference = 'Stop'
-$repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-$projectRoot = Join-Path $repoRoot 'src-tauri\windows-shell-extension'
-
-function Resolve-MSBuildEnvironment {
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (-not (Test-Path -LiteralPath $vswhere)) {
-        throw '找不到 Visual Studio Installer 的 vswhere.exe。'
-    }
-
-    $installationPath = (& $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1)
-    if (-not $installationPath) {
-        throw '未找到包含 MSBuild 的 Visual Studio。'
-    }
-
-    $msbuild = Join-Path $installationPath 'MSBuild\Current\Bin\MSBuild.exe'
-    if (-not (Test-Path -LiteralPath $msbuild)) {
-        throw "找不到 MSBuild：$msbuild"
-    }
-    $toolsetCandidates = Get-ChildItem -Path (Join-Path $installationPath 'MSBuild\Microsoft\VC\v*\Platforms\x64\PlatformToolsets\*') -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^v\d+$' } |
-        Sort-Object { [int]$_.Name.Substring(1) } -Descending
-    $platformToolset = $toolsetCandidates | Select-Object -First 1 -ExpandProperty Name
-    if (-not $platformToolset) {
-        throw '未找到可用的 Visual C++ x64 平台工具集。'
-    }
-
-    return [pscustomobject]@{
-        MSBuild = $msbuild
-        PlatformToolset = $platformToolset
-    }
+param()
+. (Join-Path $PSScriptRoot 'Common.ps1')
+$tools = Initialize-NomoMsixTools
+$work = New-NomoMsixWorkDirectory 'shell'
+$project = Join-Path $NomoRepositoryRoot 'src-gpui/windows-shell-extension/NomoShellExtension.vcxproj'
+$output = Join-Path $work 'bin/'
+$objects = Join-Path $work 'obj/'
+$log = Join-Path $work 'build.log'
+& $tools.MSBuild $project /nologo /m:1 /t:Build /p:Configuration=Release /p:Platform=x64 "/p:PlatformToolset=$($tools.PlatformToolset)" "/p:OutDir=$output" "/p:IntDir=$objects" /v:minimal "/flp:logfile=$log;verbosity=normal" | Out-Host
+if ($LASTEXITCODE -ne 0) { throw "Shell extension build failed; see $log" }
+$dll = Join-Path $output 'NomoShellExtension.dll'
+Assert-NomoX64Pe $dll -Dll
+$exports = & dumpbin /nologo /exports $dll
+if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect Shell extension exports.' }
+foreach ($name in @('DllGetClassObject', 'DllCanUnloadNow')) {
+    if (-not ($exports -match "\s$name\s*$")) { throw "Shell extension is missing $name" }
 }
-
-$buildEnvironment = Resolve-MSBuildEnvironment
-$msbuild = $buildEnvironment.MSBuild
-$platformToolset = $buildEnvironment.PlatformToolset
-$dllProject = Join-Path $projectRoot 'NomoShellExtension.vcxproj'
-$testProject = Join-Path $projectRoot 'NomoShellExtensionTests.vcxproj'
-
-& $msbuild $dllProject /nologo /m /t:Build "/p:Configuration=$Configuration" '/p:Platform=x64' "/p:PlatformToolset=$platformToolset"
-if ($LASTEXITCODE -ne 0) {
-    throw "NomoShellExtension 构建失败，退出码：$LASTEXITCODE"
+if (@(Get-NomoRuntimeImports $dll).Count -ne 0) { throw 'Shell extension must use the static C++ runtime.' }
+$result = [ordered]@{
+    dll = $dll
+    pdb = Join-Path $output 'NomoShellExtension.pdb'
+    sha256 = (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash.ToLowerInvariant()
+    architecture = 'x64'
+    configuration = 'Release'
+    log = $log
+    registered = $false
 }
-
-if ($RunTests) {
-    & $msbuild $testProject /nologo /m /t:Build "/p:Configuration=$Configuration" '/p:Platform=x64' "/p:PlatformToolset=$platformToolset"
-    if ($LASTEXITCODE -ne 0) {
-        throw "NomoShellExtensionTests 构建失败，退出码：$LASTEXITCODE"
-    }
-
-    $testExe = Join-Path $projectRoot "bin\x64\$Configuration\NomoShellExtensionTests.exe"
-    & $testExe
-    if ($LASTEXITCODE -ne 0) {
-        throw "NomoShellExtensionTests 执行失败，退出码：$LASTEXITCODE"
-    }
-}
-
-$dllPath = Join-Path $projectRoot "bin\x64\$Configuration\NomoShellExtension.dll"
-if (-not (Test-Path -LiteralPath $dllPath)) {
-    throw "Shell 扩展构建完成但未找到 DLL：$dllPath"
-}
-
-Write-Output $dllPath
+$json = $result | ConvertTo-Json
+[IO.File]::WriteAllText((Join-Path $work 'shell-build-report.json'), $json, [Text.UTF8Encoding]::new($false))
+# 唯一成功输出供 MSIX 构建读取；日志走 Host，不注册 DLL 或启动应用。
+Write-Output $json

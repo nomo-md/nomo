@@ -1,0 +1,458 @@
+//! 本地图片的异步解码与有界缓存（GPUI 全局状态）。
+//!
+//! 解码前检查输入预算；后台任务和排队数量有界，按最长边和像素数缩小后上传；
+//! 缓存按估算字节淘汰最久未用的条目。解码完成后递增 `generation` 并刷新窗口，
+//! 语义视图把 generation 纳入含图片块的布局缓存键，从而在尺寸就绪后重排。
+
+use gpui::{App, Global, RenderImage};
+use image::{AnimationDecoder, Frame, ImageDecoder, imageops::FilterType};
+use std::cell::Cell;
+use std::collections::{HashMap, VecDeque};
+use std::io::{Cursor, Read};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// 解码宽度上限：2× 视网膜屏下约 1200 逻辑像素，足够正文宽度使用。
+const MAX_DECODE_WIDTH: u32 = 2400;
+/// 位图缓存总量上限（BGRA 字节）。
+const MAX_CACHE_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_INPUT_BYTES: u64 = 32 * 1024 * 1024;
+pub(crate) const MAX_INPUT_PIXELS: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_DECODE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_BITMAP_PIXELS: u64 = 4 * 1024 * 1024;
+const MAX_ANIMATION_FRAMES: usize = 256;
+const MAX_ANIMATION_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_SVG_BYTES: usize = 2 * 1024 * 1024;
+const MAX_DECODERS: usize = 2;
+const MAX_QUEUED: usize = 64;
+const MAX_ENTRIES: usize = 512;
+const MAX_METADATA_BYTES: usize = 512 * 1024;
+// 路径元数据淘汰后仍记住近期失败，避免同一屏大量坏图片随每次完成重新排队。
+const MAX_FAILURES: usize = 2048;
+
+#[derive(Clone, Copy)]
+enum Failure { Budget, Read, Decode }
+impl Failure {
+    fn message(self) -> &'static str {
+        match self { Self::Budget => "图片超过解码资源预算", Self::Read => "图片文件无法读取", Self::Decode => "图片格式不支持或内容损坏" }
+    }
+}
+type Decoded = (Arc<RenderImage>, u32, u32, usize);
+
+enum Entry {
+    Queued,
+    Loading(u64),
+    /// `used` 用 Cell 记录访问时钟，使绘制阶段只需共享借用即可更新 LRU 顺序。
+    Ready { image: Arc<RenderImage>, width: u32, height: u32, bytes: usize, used: Cell<u64>, version: u64, started: std::time::Instant },
+    Failed { reason: Failure, used: Cell<u64>, version: u64 },
+}
+
+#[derive(Default)]
+pub struct ImageStore {
+    entries: HashMap<PathBuf, Entry>,
+    bytes: usize,
+    clock: Cell<u64>,
+    metadata_bytes: usize,
+    queued: VecDeque<PathBuf>,
+    running: usize,
+    next_request: u64,
+    failures: HashMap<u64, (Failure, u64)>,
+    failure_order: VecDeque<(u64, u64)>,
+    pub generation: u64,
+}
+
+impl Global for ImageStore {}
+
+impl ImageStore {
+    #[cfg(feature = "automation")]
+    pub(crate) fn automation_state(&self) -> serde_json::Value {
+        serde_json::json!({"entries":self.entries.len(),"decodedBytes":self.bytes,"metadataBytes":self.metadata_bytes,
+            "pending":self.running+self.queued.len(),"failed":self.entries.values().filter(|e|matches!(e,Entry::Failed{..})).count(),
+            "scope":"process cache; requested resources only"})
+    }
+    fn metadata_cost(path: &Path) -> usize { (path.as_os_str().len() + 256).saturating_mul(4) }
+    fn path_key(path: &Path) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        path.hash(&mut hash);
+        hash.finish()
+    }
+    fn remember_failure(&mut self, path: &Path, failure: Failure) {
+        let key = Self::path_key(path);
+        if let Some((stored,version)) = self.failures.get_mut(&key) {
+            if *version == self.generation { *stored = failure; return; }
+        }
+        while self.failure_order.len() >= MAX_FAILURES {
+            if let Some((key,version)) = self.failure_order.pop_front() {
+                if self.failures.get(&key).is_some_and(|(_,current)| *current == version) { self.failures.remove(&key); }
+            }
+        }
+        self.failures.insert(key,(failure,self.generation));
+        self.failure_order.push_back((key,self.generation));
+    }
+
+    pub fn version(&self, path: &Path) -> (u8, u64) {
+        if Self::metadata_cost(path) > MAX_METADATA_BYTES { return (2,0); }
+        match self.entries.get(path) {
+            Some(Entry::Ready { version, .. }) => (1, *version),
+            Some(Entry::Failed { version, .. }) => (2, *version),
+            Some(_) => (0, 0),
+            None => self.failures.get(&Self::path_key(path)).map_or((3,self.generation), |(_,version)| (2,*version)),
+        }
+    }
+    pub fn failure(&self, path: &Path) -> Option<&'static str> {
+        if Self::metadata_cost(path) > MAX_METADATA_BYTES { return Some(Failure::Budget.message()); }
+        match self.entries.get(path) { Some(Entry::Failed { reason, .. }) => Some(reason.message()), Some(_) => None,
+            None => self.failures.get(&Self::path_key(path)).map(|(reason,_)| reason.message()) }
+    }
+    /// 已解码图片的原始像素尺寸（缩放前）；未就绪返回 None。
+    pub fn size(&self, path: &Path) -> Option<(u32, u32)> {
+        match self.entries.get(path) {
+            Some(Entry::Ready { width, height, .. }) => Some((*width, *height)),
+            _ => None,
+        }
+    }
+
+    pub fn image(&self, path: &Path) -> Option<Arc<RenderImage>> {
+        self.clock.set(self.clock.get() + 1);
+        match self.entries.get(path) {
+            Some(Entry::Ready { image, used, .. }) => {
+                used.set(self.clock.get());
+                Some(image.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// 只有实际绘制到视口的动画才请求下一帧；无后台计时器，淘汰即释放全部帧。
+    pub fn frame(&self, path: &Path, window: &mut gpui::Window, cx: &App) -> usize {
+        let Some(Entry::Ready { image, started, .. }) = self.entries.get(path) else { return 0; };
+        if image.frame_count() < 2 || crate::ui::popup::reduced_motion(cx) { return 0; }
+        let delay = |index| { let (n, d) = image.delay(index).numer_denom_ms(); (u64::from(n) / u64::from(d.max(1))).max(20) };
+        let total: u64 = (0..image.frame_count()).map(delay).sum();
+        let mut elapsed = (started.elapsed().as_millis() % u128::from(total)) as u64;
+        window.request_animation_frame();
+        for index in 0..image.frame_count() { let ms = delay(index); if elapsed < ms { return index; } elapsed -= ms; }
+        0
+    }
+
+    pub fn is_pending_or_known(&self, path: &Path) -> bool {
+        self.entries.contains_key(path) || Self::metadata_cost(path) > MAX_METADATA_BYTES || self.failures.contains_key(&Self::path_key(path))
+    }
+
+    fn remove(&mut self, path: &Path) -> Option<Entry> {
+        let entry = self.entries.remove(path)?;
+        self.metadata_bytes = self.metadata_bytes.saturating_sub(Self::metadata_cost(path));
+        if let Entry::Ready { bytes, .. } = &entry { self.bytes -= bytes; }
+        Some(entry)
+    }
+    /// 关闭文档时移除无主资源，同时使排队和运行中的旧请求失效。
+    pub(crate) fn retain(&mut self, keep: impl Fn(&Path) -> bool) -> Vec<Arc<RenderImage>> {
+        let paths: Vec<_> = self.entries.keys().filter(|path| !keep(path)).cloned().collect();
+        if paths.is_empty() { return Vec::new(); }
+        let mut retired = Vec::new();
+        for path in paths {
+            if let Some(Entry::Ready { image, .. }) = self.remove(&path) { retired.push(image); }
+        }
+        self.queued.retain(|path| matches!(self.entries.get(path), Some(Entry::Queued)));
+        if self.entries.is_empty() { self.failures.clear(); self.failure_order.clear(); }
+        self.generation = self.generation.wrapping_add(1);
+        retired
+    }
+    fn complete(&mut self, path: PathBuf, request: u64, decoded: Result<Decoded, Failure>) -> Vec<Arc<RenderImage>> {
+        if !matches!(self.entries.get(&path), Some(Entry::Loading(current)) if *current == request) { return Vec::new(); }
+        let failure = decoded.as_ref().err().copied();
+        let retired = self.insert(path.clone(), decoded.ok());
+        if let (Some(reason), Some(Entry::Failed { reason: stored, .. })) = (failure, self.entries.get_mut(&path)) { *stored = reason; }
+        if let Some(reason) = failure { self.remember_failure(&path, reason); }
+        retired
+    }
+    fn evict_oldest(&mut self, retired: &mut Vec<Arc<RenderImage>>) -> bool {
+        let oldest = self.entries.iter().filter_map(|(path, entry)| match entry {
+            Entry::Ready { used, .. } | Entry::Failed { used, .. } => Some((path.clone(), used.get())),
+            _ => None,
+        }).min_by_key(|(_, used)| *used);
+        let Some((path, _)) = oldest else { return false; };
+        if let Some(Entry::Ready { image, .. }) = self.remove(&path) { retired.push(image); }
+        true
+    }
+    fn enqueue(&mut self, path: PathBuf, retired: &mut Vec<Arc<RenderImage>>) {
+        if self.is_pending_or_known(&path) || self.queued.len() >= MAX_QUEUED { return; }
+        let cost = Self::metadata_cost(&path);
+        if cost > MAX_METADATA_BYTES { return; }
+        while self.entries.len() >= MAX_ENTRIES || self.metadata_bytes + cost > MAX_METADATA_BYTES {
+            if !self.evict_oldest(retired) { return; }
+        }
+        self.metadata_bytes += cost;
+        self.entries.insert(path.clone(), Entry::Queued);
+        self.queued.push_back(path);
+    }
+
+    /// 返回已淘汰位图，由调用方同时释放各窗口的 GPU atlas 条目。
+    fn insert(&mut self, path: PathBuf, decoded: Option<Decoded>) -> Vec<Arc<RenderImage>> {
+        let mut retired = Vec::new();
+        if let Some(Entry::Ready { image, .. }) = self.remove(&path) {
+            retired.push(image);
+        }
+        self.clock.set(self.clock.get() + 1);
+        self.metadata_bytes += Self::metadata_cost(&path);
+        self.generation = self.generation.wrapping_add(1);
+        match decoded {
+            Some((image, width, height, bytes)) => {
+                self.failures.remove(&Self::path_key(&path));
+                self.bytes += bytes;
+                self.entries.insert(path, Entry::Ready { image, width, height, bytes, used: Cell::new(self.clock.get()), version: self.generation, started: std::time::Instant::now() });
+                while self.bytes > MAX_CACHE_BYTES {
+                    if !self.evict_oldest(&mut retired) { break; }
+                }
+            }
+            None => {
+                self.remember_failure(&path,Failure::Decode);
+                self.entries.insert(path, Entry::Failed { reason: Failure::Decode, used: Cell::new(self.clock.get()), version: self.generation });
+            }
+        }
+        while self.entries.len() > MAX_ENTRIES || self.metadata_bytes > MAX_METADATA_BYTES {
+            if !self.evict_oldest(&mut retired) { break; }
+        }
+        retired
+    }
+}
+
+/// 请求解码一批图片；已在缓存或正在解码的路径会被跳过。
+pub fn request(paths: Vec<PathBuf>, cx: &mut App) {
+    let mut retired = Vec::new();
+    for path in paths {
+        cx.global_mut::<ImageStore>().enqueue(path, &mut retired);
+    }
+    for image in retired { cx.drop_image(image, None); }
+    start_pending(cx);
+}
+
+fn start_pending(cx: &mut App) {
+    loop {
+        let store = cx.global_mut::<ImageStore>();
+        if store.running >= MAX_DECODERS { break; }
+        let Some(path) = store.queued.pop_front() else { break; };
+        store.next_request = store.next_request.wrapping_add(1);
+        let request = store.next_request;
+        store.entries.insert(path.clone(), Entry::Loading(request));
+        store.running += 1;
+        let decode_path = path.clone();
+        let task = cx.background_executor().spawn(async move { decode(&decode_path) });
+        cx.spawn(async move |cx| {
+            let decoded = task.await;
+            cx.update(|cx| {
+                let store = cx.global_mut::<ImageStore>();
+                store.running -= 1;
+                let retired = store.complete(path, request, decoded);
+                // 此处在 App 任务中，所有窗口都在 App 内，可完整移除纹理。
+                for image in retired { cx.drop_image(image, None); }
+                start_pending(cx);
+                cx.refresh_windows();
+            });
+        })
+        .detach();
+    }
+}
+
+pub(crate) fn resolve_source(source: &str, base: Option<&Path>) -> Option<PathBuf> {
+    if let Ok(url) = url::Url::parse(source) {
+        if matches!(url.scheme(), "http" | "https") { return Some(PathBuf::from(url.as_str())); }
+        if url.scheme() == "file" { return url.to_file_path().ok(); }
+    }
+    if source.contains("://") || source.starts_with("data:") { return None; }
+    let decoded = crate::markdown::render::percent_decode(source);
+    let path = Path::new(&decoded);
+    if path.is_absolute() { Some(path.into()) } else { base.map(|base| base.join(path)) }
+}
+
+async fn download(source: &str) -> Result<Vec<u8>, Failure> {
+    let client = reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(15)).redirect(reqwest::redirect::Policy::limited(3))
+        .build().map_err(|_| Failure::Read)?;
+    let mut response = client.get(source).send().await.map_err(|_| Failure::Read)?
+        .error_for_status().map_err(|_| Failure::Read)?;
+    if response.content_length().is_some_and(|length| length > MAX_INPUT_BYTES) { return Err(Failure::Budget); }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| Failure::Read)? {
+        if bytes.len() as u64 + chunk.len() as u64 > MAX_INPUT_BYTES { return Err(Failure::Budget); }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn decode(path: &Path) -> Result<Decoded, Failure> {
+    let source = path.to_string_lossy();
+    let encoded = if source.starts_with("http://") || source.starts_with("https://") {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| Failure::Read)?
+            .block_on(download(&source))?
+    } else {
+        let file = std::fs::File::open(path).map_err(|_| Failure::Read)?;
+        if file.metadata().map_err(|_| Failure::Read)?.len() > MAX_INPUT_BYTES { return Err(Failure::Budget); }
+        let mut bytes = Vec::new();
+        file.take(MAX_INPUT_BYTES + 1).read_to_end(&mut bytes).map_err(|_| Failure::Read)?;
+        bytes
+    };
+    if encoded.len() as u64 > MAX_INPUT_BYTES { return Err(Failure::Budget); }
+    if encoded.starts_with(b"GIF87a") || encoded.starts_with(b"GIF89a") {
+        return decode_gif(encoded);
+    }
+    if std::str::from_utf8(&encoded).is_ok_and(|text| text.trim_start_matches('\u{feff}').trim_start().starts_with('<')) {
+        return decode_svg(&encoded);
+    }
+    let mut reader = image::ImageReader::new(Cursor::new(encoded)).with_guessed_format().map_err(|_| Failure::Decode)?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    limits.max_image_width = Some(32_768);
+    limits.max_image_height = Some(32_768);
+    reader.limits(limits);
+    let error = |error| if matches!(error, image::ImageError::Limits(_)) { Failure::Budget } else { Failure::Decode };
+    let decoder = reader.into_decoder().map_err(error)?;
+    let (width, height) = decoder.dimensions();
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels == 0 || pixels > MAX_INPUT_PIXELS || decoder.total_bytes() > MAX_DECODE_BYTES { return Err(Failure::Budget); }
+    let image = image::DynamicImage::from_decoder(decoder).map_err(error)?;
+    let scale = (MAX_DECODE_WIDTH as f64 / width.max(height) as f64).min((MAX_BITMAP_PIXELS as f64 / pixels as f64).sqrt()).min(1.0);
+    let image = if scale < 1.0 { image.resize_exact((width as f64 * scale).floor().max(1.0) as u32, (height as f64 * scale).floor().max(1.0) as u32, FilterType::Triangle) } else { image };
+    let mut buffer = image.into_rgba8();
+    // GPUI 的图片纹理为 BGRA。
+    for pixel in buffer.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let bytes = buffer.len();
+    let render = RenderImage::new(vec![Frame::new(buffer)]);
+    Ok((Arc::new(render), width, height, bytes))
+}
+
+fn decode_gif(encoded: Vec<u8>) -> Result<Decoded, Failure> {
+    let error = |error| if matches!(error, image::ImageError::Limits(_)) { Failure::Budget } else { Failure::Decode };
+    let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(encoded)).map_err(error)?;
+    let (width, height) = decoder.dimensions();
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels == 0 || pixels > MAX_INPUT_PIXELS || width > 32_768 || height > 32_768 { return Err(Failure::Budget); }
+    let mut limits = image::Limits::default(); limits.max_alloc = Some(MAX_DECODE_BYTES);
+    limits.max_image_width = Some(32_768); limits.max_image_height = Some(32_768);
+    decoder.set_limits(limits).map_err(|_| Failure::Budget)?;
+    let scale = (MAX_DECODE_WIDTH as f64 / width.max(height) as f64).min((MAX_BITMAP_PIXELS as f64 / pixels as f64).sqrt()).min(1.0);
+    let (w, h) = ((width as f64 * scale).max(1.0) as u32, (height as f64 * scale).max(1.0) as u32);
+    let mut frames = Vec::new(); let mut bytes = 0usize;
+    for frame in decoder.into_frames() {
+        if frames.len() >= MAX_ANIMATION_FRAMES || bytes.saturating_add(w as usize * h as usize * 4) > MAX_ANIMATION_BYTES { return Err(Failure::Budget); }
+        let frame = frame.map_err(error)?;
+        let delay = frame.delay();
+        let mut buffer = frame.into_buffer();
+        if buffer.dimensions() != (w, h) { buffer = image::imageops::resize(&buffer, w, h, FilterType::Triangle); }
+        for pixel in buffer.chunks_exact_mut(4) { pixel.swap(0, 2); }
+        bytes += buffer.len();
+        frames.push(Frame::from_parts(buffer, 0, 0, delay));
+    }
+    if frames.is_empty() { return Err(Failure::Decode); }
+    Ok((Arc::new(RenderImage::new(frames)), width, height, bytes))
+}
+
+fn svg_tree(encoded: &[u8]) -> Result<resvg::usvg::Tree, Failure> {
+    if encoded.len() > MAX_SVG_BYTES { return Err(Failure::Budget); }
+    let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (data_refused, path_refused) = (refused.clone(), refused.clone());
+    let options = resvg::usvg::Options { fontdb: crate::embeds::font_database(),
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_data: Box::new(move |_, _, _| { data_refused.store(true, std::sync::atomic::Ordering::Relaxed); None }),
+            resolve_string: Box::new(move |_, _| { path_refused.store(true, std::sync::atomic::Ordering::Relaxed); None }),
+        }, ..Default::default() };
+    let tree = resvg::usvg::Tree::from_data(encoded, &options).map_err(|_| Failure::Decode)?;
+    let size = tree.size();
+    if refused.load(std::sync::atomic::Ordering::Relaxed) { return Err(Failure::Decode); }
+    if size.width() > 32_768.0 || size.height() > 32_768.0 || size.width() * size.height() > MAX_INPUT_PIXELS as f32 { return Err(Failure::Budget); }
+    Ok(tree)
+}
+
+pub(crate) fn validate_svg(encoded: &[u8]) -> Result<(), String> {
+    svg_tree(encoded).map(|_| ()).map_err(|reason| reason.message().to_owned())
+}
+
+fn decode_svg(encoded: &[u8]) -> Result<Decoded, Failure> {
+    let tree = svg_tree(encoded)?;
+    let size = tree.size();
+    let (width, height) = (size.width().ceil() as u32, size.height().ceil() as u32);
+    let scale = (MAX_DECODE_WIDTH as f32 / size.width().max(size.height()))
+        .min((MAX_BITMAP_PIXELS as f32 / (size.width() * size.height())).sqrt()).min(2.0);
+    let (w, h) = ((size.width() * scale).floor().max(1.0) as u32, (size.height() * scale).floor().max(1.0) as u32);
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).ok_or(Failure::Budget)?;
+    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    let mut data = pixmap.take();
+    for pixel in data.chunks_exact_mut(4) { pixel.swap(0, 2); }
+    let bytes = data.len();
+    let buffer = image::RgbaImage::from_raw(w, h, data).ok_or(Failure::Decode)?;
+    Ok((Arc::new(RenderImage::new(vec![Frame::new(buffer)])), width, height, bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bitmap() -> Arc<RenderImage> {
+        Arc::new(RenderImage::new(vec![Frame::new(image::RgbaImage::new(1, 1))]))
+    }
+
+    #[test]
+    fn closed_resources_release_textures_and_ignore_late_decode() {
+        let mut store = ImageStore::default();
+        store.insert("shared".into(), Some((bitmap(), 1, 1, 4)));
+        store.insert("closed".into(), Some((bitmap(), 1, 1, 4)));
+        store.enqueue("pending".into(), &mut Vec::new());
+        store.entries.insert("pending".into(), Entry::Loading(1));
+        store.queued.clear();
+        store.enqueue("queued".into(), &mut Vec::new());
+        assert_eq!(store.retain(|path| path == Path::new("shared")).len(), 1);
+        assert!(store.queued.is_empty());
+        assert_eq!(store.bytes, 4);
+        assert_eq!(store.metadata_bytes, ImageStore::metadata_cost(Path::new("shared")));
+        store.complete("pending".into(), 1, Ok((bitmap(), 1, 1, 4)));
+        assert!(!store.is_pending_or_known(Path::new("pending")));
+        store.enqueue("pending".into(), &mut Vec::new());
+        store.entries.insert("pending".into(), Entry::Loading(2));
+        store.complete("pending".into(), 1, Err(Failure::Read));
+        assert!(matches!(store.entries.get(Path::new("pending")), Some(Entry::Loading(2))));
+        store.complete("pending".into(), 2, Ok((bitmap(), 1, 1, 4)));
+        assert_eq!(store.bytes, 8);
+        assert_eq!(store.retain(|_| false).len(), 2);
+        assert_eq!((store.bytes, store.metadata_bytes, store.entries.len()), (0, 0, 0));
+    }
+
+    #[test]
+    fn cache_eviction_returns_only_lru_texture_and_allows_reload() {
+        let mut store = ImageStore::default();
+        let images = [bitmap(), bitmap(), bitmap()];
+        let bytes = MAX_CACHE_BYTES / 2;
+        assert!(store.insert("a".into(), Some((images[0].clone(), 1, 1, bytes))).is_empty());
+        assert!(store.insert("b".into(), Some((images[1].clone(), 1, 1, bytes))).is_empty());
+        store.image(Path::new("a"));
+        let retired = store.insert("c".into(), Some((images[2].clone(), 1, 1, bytes)));
+        assert_eq!(retired.len(), 1);
+        assert!(Arc::ptr_eq(&retired[0], &images[1]));
+        assert!(!store.is_pending_or_known(Path::new("b")));
+        assert!(store.image(Path::new("a")).is_some());
+        assert_eq!(store.bytes, MAX_CACHE_BYTES);
+        let retired = store.insert("b".into(), Some((images[1].clone(), 1, 1, bytes)));
+        assert_eq!(retired.len(), 1);
+        assert!(store.image(Path::new("b")).is_some());
+        assert_eq!(store.bytes, MAX_CACHE_BYTES);
+    }
+
+    #[test]
+    fn cache_eviction_replacement_and_failure_release_old_texture_once() {
+        let mut store = ImageStore::default();
+        let old = bitmap();
+        let new = bitmap();
+        store.insert("a".into(), Some((old.clone(), 1, 1, 4)));
+        let retired = store.insert("a".into(), Some((new.clone(), 1, 1, 4)));
+        assert_eq!(retired.len(), 1);
+        assert!(Arc::ptr_eq(&retired[0], &old));
+        assert_eq!(store.bytes, 4);
+        let retired = store.insert("a".into(), None);
+        assert_eq!(retired.len(), 1);
+        assert!(Arc::ptr_eq(&retired[0], &new));
+        assert_eq!(store.bytes, 0);
+        assert!(store.insert("a".into(), None).is_empty());
+    }
+}

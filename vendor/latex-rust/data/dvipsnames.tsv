@@ -1,0 +1,110 @@
+# data/dvipsnames.tsv
+#
+# THIS FILE HAS BEEN MODIFIED. It is not the original dvipsnam.def, and it
+# is not a replacement for that file.
+#
+# Source: the `%<*dvipsnames>` section of drivers.dtx in the LaTeX graphics
+# bundle, which generates dvipsnam.def.
+# Checked against
+# https://github.com/latex3/latex2e/blob/develop/required/graphics/drivers.dtx
+# on 2026-10-06.
+#
+# Copyright 1994 David Carlisle and Sebastian Rahtz
+# Copyright 1995-1999 David Carlisle
+# Copyright 2000-2026 The LaTeX Project
+#
+# This file may be distributed and/or modified under the conditions of the
+# LaTeX Project Public License, either version 1.3c of this license or (at
+# your option) any later version.
+# The latest version of this license is in
+#   https://www.latex-project.org/lppl.txt
+# and version 1.3c or later is part of all distributions of LaTeX
+# version 2008 or later.
+#
+# The original authors and The LaTeX Project do not maintain or support
+# this modified file.
+#
+# Modifications from dvipsnam.def / drivers.dtx, by Jeffrey S Carr
+# (2026-09-01; notice and TealBlue correction 2026-10-06):
+# - The \DefineNamedColor lines were rewritten as a tab-separated table
+#   with the header name, c, m, y, k.
+# - Rows were re-sorted alphabetically by name. Upstream keeps the dvips
+#   color-wheel order.
+# - CMYK tuples are the upstream values, including TealBlue
+#   (0.86, 0, 0.34, 0.02).
+#
+# A complete unmodified copy of the Work (the graphics bundle, including
+# drivers.dtx) can be obtained from
+#   https://github.com/latex3/latex2e/tree/develop/required/graphics
+# CTAN path: macros/latex/required/graphics
+#
+# latex-rust also records this file in NOTICE and CHANGELOG.md.
+name	c	m	y	k
+Apricot	0	0.32	0.52	0
+Aquamarine	0.82	0	0.30	0
+Bittersweet	0	0.75	1	0.24
+Black	0	0	0	1
+Blue	1	1	0	0
+BlueGreen	0.85	0	0.33	0
+BlueViolet	0.86	0.91	0	0.04
+BrickRed	0	0.89	0.94	0.28
+Brown	0	0.81	1	0.60
+BurntOrange	0	0.51	1	0
+CadetBlue	0.62	0.57	0.23	0
+CarnationPink	0	0.63	0	0
+Cerulean	0.94	0.11	0	0
+CornflowerBlue	0.65	0.13	0	0
+Cyan	1	0	0	0
+Dandelion	0	0.29	0.84	0
+DarkOrchid	0.40	0.80	0.20	0
+Emerald	1	0	0.50	0
+ForestGreen	0.91	0	0.88	0.12
+Fuchsia	0.47	0.91	0	0.08
+Goldenrod	0	0.10	0.84	0
+Gray	0	0	0	0.50
+Green	1	0	1	0
+GreenYellow	0.15	0	0.69	0
+JungleGreen	0.99	0	0.52	0
+Lavender	0	0.48	0	0
+LimeGreen	0.50	0	1	0
+Magenta	0	1	0	0
+Mahogany	0	0.85	0.87	0.35
+Maroon	0	0.87	0.68	0.32
+Melon	0	0.46	0.50	0
+MidnightBlue	0.98	0.13	0	0.43
+Mulberry	0.34	0.90	0	0.02
+NavyBlue	0.94	0.54	0	0
+OliveGreen	0.64	0	0.95	0.40
+Orange	0	0.61	0.87	0
+OrangeRed	0	1	0.50	0
+Orchid	0.32	0.64	0	0
+Peach	0	0.50	0.70	0
+Periwinkle	0.57	0.55	0	0
+PineGreen	0.92	0	0.59	0.25
+Plum	0.50	1	0	0
+ProcessBlue	0.96	0	0	0
+Purple	0.45	0.86	0	0
+RawSienna	0	0.72	1	0.45
+Red	0	1	1	0
+RedOrange	0	0.77	0.87	0
+RedViolet	0.07	0.90	0	0.34
+Rhodamine	0	0.82	0	0
+RoyalBlue	1	0.50	0	0
+RoyalPurple	0.75	0.90	0	0
+RubineRed	0	1	0.13	0
+Salmon	0	0.53	0.38	0
+SeaGreen	0.69	0	0.50	0
+Sepia	0	0.83	1	0.70
+SkyBlue	0.62	0	0.12	0
+SpringGreen	0.26	0	0.76	0
+Tan	0.14	0.42	0.56	0
+TealBlue	0.86	0	0.34	0.02
+Thistle	0.12	0.59	0	0
+Turquoise	0.85	0	0.20	0
+Violet	0.79	0.88	0	0
+VioletRed	0	0.81	0	0
+White	0	0	0	0
+WildStrawberry	0	0.96	0.39	0
+Yellow	0	0	1	0
+YellowGreen	0.44	0	0.74	0
+YellowOrange	0	0.42	1	0

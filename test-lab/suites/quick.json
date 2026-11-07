@@ -1,0 +1,6 @@
+{
+  "suites": ["standard"],
+  "caseIds": ["smoke", "editing.commands", "editing.blocks", "editing.table", "search.behavior", "structure.outline"],
+  "repetitions": 1,
+  "cycles": 2
+}

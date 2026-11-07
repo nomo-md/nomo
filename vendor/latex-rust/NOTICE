@@ -1,0 +1,43 @@
+LaTeX-Rust
+Copyright 2026 Jeffrey S Carr
+
+Licensed under MIT OR Apache-2.0.
+
+This product embeds STIX Two Math (version 2.13), licensed under the
+SIL Open Font License 1.1. See fonts/stix-two-math/OFL.txt.
+
+STIX Fonts is a trademark of The Institute of Electrical and
+Electronics Engineers, Inc.
+
+This product includes a modified copy of the dvips color names
+(dvipsnam.def), taken from the `%<*dvipsnames>` section of drivers.dtx
+in the LaTeX graphics bundle.
+
+Copyright 1994 David Carlisle and Sebastian Rahtz
+Copyright 1995-1999 David Carlisle
+Copyright 2000-2026 The LaTeX Project
+
+That material is licensed under the LaTeX Project Public License,
+version 1.3c or any later version. The latest version of the license
+is at https://www.latex-project.org/lppl.txt and version 1.3c or later
+is part of all distributions of LaTeX version 2008 or later.
+
+data/dvipsnames.tsv is the modified file. It is clearly marked as
+changed in its own header: the definitions were rewritten as a
+tab-separated table and the rows were re-sorted alphabetically by
+name. Upstream dvipsnam.def keeps the dvips color-wheel order. The
+CMYK numbers, including TealBlue (0.86, 0, 0.34, 0.02), match
+drivers.dtx. The file is named dvipsnames.tsv so it is not a drop-in
+replacement for dvipsnam.def under LaTeX. The original authors and
+The LaTeX Project do not maintain or support this file.
+
+A complete unmodified copy of the graphics bundle, including
+drivers.dtx, is available from
+https://github.com/latex3/latex2e/tree/develop/required/graphics
+(CTAN: macros/latex/required/graphics).
+
+The MIT and Apache-2.0 terms apply to the Rust source. They do not
+relicense data/dvipsnames.tsv or the STIX font. Anyone who distributes
+the color table must keep the header in data/dvipsnames.tsv and this
+notice, so the file stays identified as a modified work and a recipient
+can still obtain the original graphics bundle.

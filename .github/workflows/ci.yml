@@ -1,0 +1,19 @@
+name: Native CI
+
+on:
+  push:
+    branches: [master, gpui-editor]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    uses: ./.github/workflows/native-build.yml

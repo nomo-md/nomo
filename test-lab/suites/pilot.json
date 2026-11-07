@@ -1,0 +1,8 @@
+{
+  "dataset": "original",
+  "suites": ["performance"],
+  "caseIds": ["performance.blank", "performance.text", "performance.four-tabs"],
+  "repetitions": 1,
+  "cycles": 2,
+  "failFast": true
+}
