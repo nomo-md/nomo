@@ -62,7 +62,7 @@
 
 ## 下载与安装
 
-当前原生源码使用 Rust + GPUI，首个原生正式版本尚未发布；Releases 中的历史版本与本文展示的原生开发版本不同。体验原生版本可从源码运行，或下载 Actions 中手动验证生成的安装包。
+从 v0.7.0 起，Nomo 正式版本采用 Rust + GPUI 原生架构，不再依赖 WebView。v0.6.x 及更早的 Releases 为历史版本。
 
 从 [GitHub Releases](https://github.com/nomo-md/nomo/releases) 下载适合系统的版本：
 
