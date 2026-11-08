@@ -114,7 +114,9 @@ bash scripts/package-linux.sh
 
 在 Actions 中手动运行 `Native packages and release`（`release.yml`），选择待验证分支，可构建 Windows 安装版／ZIP、macOS DMG／应用归档、Linux DEB／RPM，并验证六类资产及归档结构、生成校验文件，上传 `native-packages` 工作流产物。手动运行只验证打包，不创建 Release，也不更新 Homebrew 或下载站。只有推送匹配 Cargo 版本的 `v*.*.*` 标签才发布，且必须存在对应发布说明。
 
-三平台全部成功后，验证六类资产及归档结构、生成 `checksums.md5`，上传草稿 Release，最后转为公开。已公开的同名 Release 不允许覆盖。稳定版继续更新 Homebrew；下载站使用既有部署钩子，不在本次工作中触发。
+三平台全部成功后，验证六类资产及归档结构、生成 `checksums.md5`，上传草稿 Release，最后转为公开。已公开的同名 Release 不允许覆盖。稳定版发布后更新 Homebrew，并通过既有部署钩子同步下载站。
+
+发布说明位于 `.github/release-notes/vVERSION.md`，GitHub Release 保留完整正文。应用的更新详情和更新成功弹窗优先显示 `<!-- nomo-update-summary:start -->` 与 `<!-- nomo-update-summary:end -->` 之间的简短 Markdown 总结，并附上该 Release 的完整发布日志链接；角落通知取总结中的首条列表项。没有摘要标记的旧版本仍显示安装包标题之前的内容。
 
 上述资产名已对照 v0.6.2 正式 Release，RPM 包身份保持 `nomo`。预发布标签仍可使用：资产名保留完整 Cargo 版本，Linux 包内部以 `~` 表示预发布，macOS bundle 数字版本取主／次／补丁段。
 
