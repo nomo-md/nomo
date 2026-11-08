@@ -1,5 +1,5 @@
-//! 默认编辑器的内存文档层，复用持久化 PieceTree，并维护行首索引。
-//! 开发控件的磁盘会话另由 text_document 管理。
+//! 块索引增量编辑测试使用的内存文档夹具，复用 PieceTree 并维护行首索引。
+//! 仅在 cfg(test) 下编译；正式与开发编辑入口均使用 text_document 的磁盘会话。
 
 #[allow(dead_code)]
 #[path = "../text_document/piece_tree.rs"]
@@ -8,7 +8,7 @@ mod piece_tree;
 use piece_tree::{Piece, PieceSource, PieceTree};
 use std::ops::Range;
 
-/// PieceTree 在默认编辑器中的窄错误类型。
+/// PieceTree 测试夹具使用的窄错误类型。
 #[derive(Debug, Clone)]
 pub(crate) struct TextDocumentError {
     pub(crate) code: &'static str,

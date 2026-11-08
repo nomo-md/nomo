@@ -137,7 +137,7 @@ impl NativeWindowPort {
         let saved = (|| {
             if let Some(path) = target {
                 if snapshot_before_save && path.exists() {
-                    crate::buffer::write_snapshot(&path).map_err(|e| ControlError::HostFailure(format!("创建保存前快照失败：{e}")))?;
+                    crate::snapshots::write_snapshot(&path).map_err(|e| ControlError::HostFailure(format!("创建保存前快照失败：{e}")))?;
                 }
                 self.manager.save(&self.owner, &snapshot.snapshot_id, path, false).map_err(convert_error)
             } else {

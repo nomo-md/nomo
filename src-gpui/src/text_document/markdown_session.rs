@@ -1139,7 +1139,7 @@ impl MarkdownDocumentSessionManager {
         };
         verify()?;
         if snapshot_before_save && target.exists() {
-            crate::buffer::write_snapshot(&target).map_err(|cause| error("snapshot-failed", format!("创建保存前快照失败：{cause}")))?;
+            crate::snapshots::write_snapshot(&target).map_err(|cause| error("snapshot-failed", format!("创建保存前快照失败：{cause}")))?;
         }
         // 编码、保存点和意图均先成功落盘，再碰目标文件。写入失败保留原文和历史。
         let mut digest = DigestWriter(Sha256::new());

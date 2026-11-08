@@ -24,7 +24,8 @@
 | NomoMark 正式文档宿主 | `src-gpui/src/nomo_mark/document_host.rs`、`workspace_host.rs`、`save_dialog.rs` | 每标签窗口生命周期、控件事件、正式错误恢复；保存框按当前目录和首个 H1 提供默认值，不持有全文 |
 | 文档元数据入口 | `src-gpui/src/nomo_mark/metadata_commands.rs`、`object_ui.rs` | 按需加载文首、已有属性原位编辑、缺少时通过主会话插入模板；复用窗口预算、取消与撤销历史 |
 | NomoMark 剪贴板 | `src-gpui/src/clipboard.rs`、`clipboard_rich.rs`、`clipboard_images.rs`、`clipboard_{native,macos,linux,x11}.rs`、`nomo_mark/clipboard_content.rs`、`nomo_mark/html_style.rs`、`session_actions.rs` | 三平台局部及跨窗口语义复制、纯文本／HTML 双格式、受限 HTML 粘贴及有界图片输入；成功写入后才删除原文，跨窗口输出限制 64 MiB；非 Windows 所有者按需创建并在退出时释放 |
-| 旧编辑实现与共享动作 | `src-gpui/src/editor.rs`、`buffer.rs`、`document/mod.rs` | 默认 Workspace 不再创建 Buffer/EditorView；保留共用动作、渲染类型与保存前快照工具 |
+| 共享编辑动作与保存前快照 | `src-gpui/src/editor.rs`、`snapshots.rs` | 正式与开发入口共用动作、视图模式及快照策略；各活动控件注册自身键位，不保留旧 Buffer/EditorView |
+| 块索引测试文档 | `src-gpui/src/document/mod.rs`、`markdown/blocks.rs` | 仅在测试构建中提供内存文档夹具，保留增量结构编辑的既有验证 |
 | Markdown 渲染 | `src-gpui/src/markdown/` | 块结构、行内标记、当前窗口代码布局 |
 | 跨行代码高亮 | `src-gpui/src/markdown/code_highlight.rs`、`highlight.rs`、`nomo_mark/source_view.rs` | syntect／two-face 的 Oniguruma 后端，代码卡片与源码视图共用；按需语法库、8 MiB／120 项 LRU 和局部解析预算 |
 | 表格宽度与内容适配 | `src-gpui/src/nomo_mark/table_widths.rs`、`src-gpui/src/markdown/table_layout.rs` | 共享列宽约束、纯语义测量、表头字体与图片缩放；只作用于当前窗口布局，不写回自动列宽 |

@@ -7,6 +7,7 @@
 //! 增量更新：从编辑位置前一块开始重扫，直到新块起点越过编辑区、且与平移后的旧块起点重合时停止，
 //! 拼接新块并平移其后的旧块。开闭围栏这类改变后文结构的编辑会自然扫到真正对齐处。
 
+#[cfg(test)]
 use crate::document::Document;
 use std::borrow::Cow;
 
@@ -41,6 +42,7 @@ pub trait Lines {
     fn line(&self, index: usize) -> Cow<'_, str>;
 }
 
+#[cfg(test)]
 impl Lines for Document {
     fn count(&self) -> usize {
         self.line_count()

@@ -4,9 +4,10 @@
 
 #![cfg_attr(all(target_os = "windows", not(debug_assertions), not(test)), windows_subsystem = "windows")]
 
-mod buffer;
+mod snapshots;
 mod cache;
 mod clipboard;
+#[cfg(test)]
 mod document;
 mod document_export;
 mod editor;
