@@ -450,8 +450,11 @@ impl Render for SettingsWindow {
             Page::Groups(groups) => self.render_groups(groups, &theme, viewport, cx),
             Page::About => self.render_about(&theme, viewport, cx),
         };
+        // 原生按钮位于透明标题栏内。窄侧栏同样将图标放到按钮下方。
+        let has_traffic_lights = cfg!(target_os = "macos") && !window.is_fullscreen();
         let mut nav_drag = div().id("settings-nav-drag-area").relative().h(px(42.0)).flex_none()
             .flex().items_center().gap(px(10.0)).px(px(if compact { 0.0 } else { 14.0 }))
+            .when(has_traffic_lights, |el| el.h(px(76.0)).pt(px(34.0)))
             .when(compact, |el| el.justify_center())
             .border_b_1().border_color(theme.border)
             .child(gpui::img("app/128x128.png").size(px(22.0)).flex_none())
@@ -473,7 +476,8 @@ impl Render for SettingsWindow {
                 CaptionAction::Close => window.remove_window(),
             }));
         #[cfg(not(target_os = "windows"))]
-        let header = div().h(px(56.0)).flex_none().flex().items_end().px(px(24.0)).pb(px(10.0))
+        let header = div().h(px(if has_traffic_lights { 76.0 } else { 56.0 }))
+            .flex_none().flex().items_end().px(px(24.0)).pb(px(10.0))
             .text_size(px(18.0)).font_weight(FontWeight::BOLD).text_color(theme.heading)
             .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.start_window_move())
             .child(category_title);

@@ -8,7 +8,7 @@ impl SettingsWindow {
         if let Some(field) = self.fields.get(id) { return field.clone(); }
         let current = shortcuts::current(id, cx);
         let field = cx.new(|cx| {
-            let mut field = TextField::new("Ctrl+Shift+K", cx);
+            let mut field = TextField::new(shortcuts::INPUT_EXAMPLE, cx);
             field.set_settings_style(); field.set_settings_monospace(); field.content = current; field
         });
         self._subscriptions.push(cx.subscribe(&field, move |this, field, event, cx| {
@@ -25,7 +25,7 @@ impl SettingsWindow {
                     field.update(cx, |field, cx| field.set_invalid(false, cx));
                     if matches!(event, FieldEvent::Submit { .. }) {
                         Settings::set(cx, &format!("shortcutPreferences.{id}"), json!(normalized));
-                        field.update(cx, |field, cx| field.set_text(&normalized, cx));
+                        field.update(cx, |field, cx| field.set_text(&shortcuts::display(&normalized), cx));
                     }
                 }
                 Err(error) => {
@@ -52,12 +52,14 @@ impl SettingsWindow {
                 .child(div().w(px(control_width(viewport).max(220.0))).flex_none().flex().flex_col().gap(px(4.0))
                     .child(div().flex().gap(px(6.0)).child(div().flex_1().child(field))
                         .child(button(eid("shortcut-reset", id), locale.app_text("shortcuts.reset"), None, ButtonKind::Secondary, theme)
-                            .tooltip(tooltip(locale.app_format("shortcuts.resetTo", &[("shortcut", entry.default)])))
+                            .tooltip(tooltip(locale.app_format("shortcuts.resetTo", &[("shortcut", &shortcuts::display(entry.default))])))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 match shortcuts::validate_message(id, entry.default, cx) {
                                     Ok(value) => {
                                         Settings::set(cx, &format!("shortcutPreferences.{id}"), json!(value));
-                                        if let Some(field) = this.fields.get(id) { field.update(cx, |field, cx| field.set_text(&value, cx)); }
+                                        if let Some(field) = this.fields.get(id) {
+                                            field.update(cx, |field, cx| field.set_text(&shortcuts::display(&value), cx));
+                                        }
                                         this.shortcut_errors.remove(id);
                                     }
                                     Err(error) => { this.shortcut_errors.insert(id, error); }
@@ -69,7 +71,7 @@ impl SettingsWindow {
         }).collect();
         div().id("settings-shortcuts").flex_none().flex().flex_col()
             .child(div().py(px(10.0)).text_size(px(13.0)).text_color(theme.muted)
-                .child(locale.app_text("shortcuts.help")))
+                .child(locale.app_format("shortcuts.help", &[("shortcut", shortcuts::INPUT_EXAMPLE)])))
             .children(shortcuts::warnings(cx).map(|message| div().text_size(px(12.0)).text_color(theme.warning).child(message)))
             .children(rows).into_any_element()
     }

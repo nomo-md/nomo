@@ -33,20 +33,44 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
 struct Bindings { values: Vec<String>, pub errors: Vec<UiMessage> }
 impl Global for Bindings {}
 
+const MACOS: bool = cfg!(target_os = "macos");
+const PRIMARY_MODIFIER: &str = if MACOS { "Command" } else { "Ctrl" };
+const ALT_MODIFIER: &str = if MACOS { "Option" } else { "Alt" };
+pub(super) const INPUT_EXAMPLE: &str = if MACOS { "Command+Shift+K" } else { "Ctrl+Shift+K" };
+
 pub(crate) fn defaults() -> Value {
     Value::Object(SHORTCUTS.iter().map(|entry| (entry.id.into(), json!(entry.default))).collect())
 }
 
 pub(crate) fn current(id: &str, cx: &App) -> String {
     let Some(index) = SHORTCUTS.iter().position(|entry| entry.id == id) else { return String::new(); };
-    cx.try_global::<Bindings>().map(|bindings| bindings.values[index].clone()).unwrap_or_else(|| SHORTCUTS[index].default.into())
+    let value = cx.try_global::<Bindings>()
+        .map_or(SHORTCUTS[index].default, |bindings| bindings.values[index].as_str());
+    display(value)
+}
+
+/// 从配置中的规范格式生成界面标签。
+pub(super) fn display(value: &str) -> String {
+    if !MACOS { return value.into(); }
+    let mut parts = value.rsplit('+');
+    let key = parts.next().unwrap_or_default();
+    let mut label = String::with_capacity(value.len());
+    // 配置中的顺序是 Ctrl、Shift、Alt，反向读取得到 macOS 的符号顺序。
+    for modifier in parts {
+        label.push(match modifier {
+            "Ctrl" => '⌘',
+            "Shift" => '⇧',
+            "Alt" => '⌥',
+            _ => return value.into(),
+        });
+    }
+    label.push_str(key);
+    label
 }
 
 pub(crate) fn action_label(action: &dyn Action, cx: &App) -> Option<String> {
-    SHORTCUTS.iter().find(|entry| (entry.action)().name() == action.name()).map(|entry| {
-        let text = current(entry.id, cx);
-        if cfg!(target_os = "macos") { text.replace("Ctrl+", "⌘").replace("Shift+", "⇧").replace("Alt+", "⌥") } else { text }
-    })
+    SHORTCUTS.iter().find(|entry| (entry.action)().name() == action.name())
+        .map(|entry| current(entry.id, cx))
 }
 
 pub(crate) fn warnings(cx: &App) -> Option<String> {
@@ -55,32 +79,46 @@ pub(crate) fn warnings(cx: &App) -> Option<String> {
 
 fn normalize(text: &str) -> Result<(String, String), UiMessage> {
     if text.len() > 40 { return Err(UiMessage::new("shortcuts.maxLength")); }
+    let text = text.trim();
+    let named;
+    let text = if text.starts_with(['⌘', '⇧', '⌥']) {
+        named = text.replace('⌘', "Command+").replace('⇧', "Shift+").replace('⌥', "Option+");
+        named.as_str()
+    } else {
+        text
+    };
     let parts: Vec<_> = text.split('+').map(str::trim).collect();
-    if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) { return Err(UiMessage::new("shortcuts.format")); }
+    if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
+        return Err(UiMessage::new("shortcuts.format").arg("shortcut", INPUT_EXAMPLE));
+    }
     let (mut primary, mut shift, mut alt) = (false, false, false);
     for modifier in &parts[..parts.len() - 1] {
         let flag = match modifier.to_ascii_lowercase().as_str() {
             "ctrl" | "control" | "cmd" | "command" | "meta" => &mut primary,
             "shift" => &mut shift, "alt" | "option" => &mut alt,
-            _ => return Err(UiMessage::new("shortcuts.modifiers")),
+            _ => return Err(UiMessage::new("shortcuts.modifiers").arg("primary", PRIMARY_MODIFIER).arg("alt", ALT_MODIFIER)),
         };
         if *flag { return Err(UiMessage::new("shortcuts.duplicateModifiers")); }
         *flag = true;
     }
-    if !primary && !alt { return Err(UiMessage::new("shortcuts.primary")); }
+    if !primary && !alt {
+        return Err(UiMessage::new("shortcuts.primary").arg("primary", PRIMARY_MODIFIER).arg("alt", ALT_MODIFIER));
+    }
     let key = parts.last().unwrap().to_ascii_lowercase();
     let valid = (key.len() == 1 && key.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"\\-=[]`,./;'".contains(&byte)))
         || key.strip_prefix('f').and_then(|number| number.parse::<u8>().ok()).is_some_and(|number| (1..=12).contains(&number) && key == format!("f{number}"));
     if !valid { return Err(UiMessage::new("shortcuts.invalidKey")); }
-    // 系统直接消费的组合不能伪装为应用快捷键。
-    if alt && !primary && key == "f4" { return Err(UiMessage::new("shortcuts.reservedClose")); }
-    let mut display = String::new();
+    // 偏好跨平台共用，保留 Windows 用于关闭窗口的组合。
+    if alt && !primary && key == "f4" {
+        return Err(UiMessage::new("shortcuts.reservedClose").arg("shortcut", display("Alt+F4")));
+    }
+    let mut canonical = String::new();
     let mut binding = String::new();
     for (enabled, label, token) in [(primary, "Ctrl+", "secondary-"), (shift, "Shift+", "shift-"), (alt, "Alt+", "alt-")] {
-        if enabled { display.push_str(label); binding.push_str(token); }
+        if enabled { canonical.push_str(label); binding.push_str(token); }
     }
-    display.push_str(&key.to_ascii_uppercase()); binding.push_str(&key);
-    Ok((display, binding))
+    canonical.push_str(&key.to_ascii_uppercase()); binding.push_str(&key);
+    Ok((canonical, binding))
 }
 
 fn binding(entry: &Shortcut, value: &str, cx: &App) -> Result<KeyBinding, UiMessage> {
@@ -103,7 +141,7 @@ pub(crate) fn validate_message(id: &str, value: &str, cx: &App) -> Result<String
             return Err(UiMessage::new("shortcuts.conflict").text_arg("label", label));
         }
     }
-    normalize(value).map(|(display, _)| display)
+    normalize(value).map(|(canonical, _)| canonical)
 }
 
 /// 由 reload_key_bindings 在所有固定快捷键之后调用。无效旧配置仅回退，不覆盖原文件。
