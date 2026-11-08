@@ -39,22 +39,80 @@ mod windows {
         ParentElement, Stateful, StatefulInteractiveElement, Styled, Window, WindowControlArea,
         div, point, prelude::*, px, rgb,
     };
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use std::rc::Rc;
+    use windows_sys::Win32::{
+        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+        UI::{
+            Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+            WindowsAndMessaging::{
+                GWL_STYLE, GetWindowLongPtrW, HTCAPTION, SC_MAXIMIZE, SWP_FRAMECHANGED,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
+                SetWindowPos, WM_NCDESTROY, WM_NCLBUTTONDBLCLK, WM_SYSCOMMAND, WS_MAXIMIZEBOX,
+            },
+        },
+    };
+
+    const NO_MAXIMIZE_SUBCLASS: usize = 0x4e4f4d58;
+
+    pub(crate) fn disable_maximize(window: &Window) -> Result<(), String> {
+        let RawWindowHandle::Win32(handle) = HasWindowHandle::window_handle(window)
+            .map_err(|error| error.to_string())?.as_raw()
+        else {
+            return Err("不是 Windows 窗口".into());
+        };
+        let hwnd = handle.hwnd.get() as HWND;
+        // GPUI 将缩放边框与最大化一起开启。只移除最大化样式，并拦截系统命令和标题栏双击。
+        // SAFETY: 只在创建窗口的 UI 线程调用，回调不引用 Rust 状态。
+        unsafe {
+            if SetWindowSubclass(hwnd, Some(block_maximize), NO_MAXIMIZE_SUBCLASS, 0) == 0 {
+                return Err("注册窗口回调失败".into());
+            }
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            // 创建时的样式包含 WS_MAXIMIZEBOX，写入成功时返回非零的旧样式。
+            if SetWindowLongPtrW(hwnd, GWL_STYLE, style & !(WS_MAXIMIZEBOX as isize)) == 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            if SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0,
+                SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER) == 0
+            {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+        }
+        Ok(())
+    }
+
+    unsafe extern "system" fn block_maximize(
+        hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, id: usize, _: usize,
+    ) -> LRESULT {
+        if (message == WM_SYSCOMMAND && (wparam & 0xfff0) == SC_MAXIMIZE as usize)
+            || (message == WM_NCLBUTTONDBLCLK && wparam == HTCAPTION as usize)
+        {
+            return 0;
+        }
+        // SAFETY: 使用系统传入的窗口句柄和消息，销毁时移除这个窗口的回调。
+        unsafe {
+            if message == WM_NCDESTROY {
+                RemoveWindowSubclass(hwnd, Some(block_maximize), id);
+            }
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+    }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub(crate) enum CaptionAction { Minimize, Maximize, Close }
 
     pub(crate) struct CaptionFocus {
         minimize: FocusHandle,
-        maximize: FocusHandle,
+        maximize: Option<FocusHandle>,
         close: FocusHandle,
     }
 
     impl CaptionFocus {
-        pub(crate) fn new(cx: &mut App) -> Self {
+        pub(crate) fn new(cx: &mut App, allow_maximize: bool) -> Self {
             Self {
                 minimize: cx.focus_handle().tab_index(0).tab_stop(true),
-                maximize: cx.focus_handle().tab_index(0).tab_stop(true),
+                maximize: allow_maximize.then(|| cx.focus_handle().tab_index(0).tab_stop(true)),
                 close: cx.focus_handle().tab_index(0).tab_stop(true),
             }
         }
@@ -115,7 +173,6 @@ mod windows {
         focus: &CaptionFocus,
         on_action: impl Fn(CaptionAction, &mut Window, &mut App) + 'static,
     ) -> Div {
-        let maximized = window.is_maximized();
         let on_action = Rc::new(on_action);
         let button = |id, action, glyph, area, label, focus: &FocusHandle| {
             let on_action = on_action.clone();
@@ -144,12 +201,15 @@ mod windows {
         };
         div().flex().h_full().flex_none().tab_group()
             .child(button("window-minimize", CaptionAction::Minimize, WindowGlyph::Minimize, WindowControlArea::Min, "window.minimize", &focus.minimize))
-            .child(button("window-maximize", CaptionAction::Maximize,
-                if maximized { WindowGlyph::Restore } else { WindowGlyph::Maximize },
-                WindowControlArea::Max, if maximized { "window.restore" } else { "window.maximize" }, &focus.maximize))
+            .when_some(focus.maximize.as_ref(), |el, focus| {
+                let maximized = window.is_maximized();
+                el.child(button("window-maximize", CaptionAction::Maximize,
+                    if maximized { WindowGlyph::Restore } else { WindowGlyph::Maximize },
+                    WindowControlArea::Max, if maximized { "window.restore" } else { "window.maximize" }, focus))
+            })
             .child(button("window-close", CaptionAction::Close, WindowGlyph::Close, WindowControlArea::Close, "window.close", &focus.close))
     }
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) use windows::{CaptionAction, CaptionFocus, caption_controls, drag_surface, top_resize_guard};
+pub(crate) use windows::{CaptionAction, CaptionFocus, caption_controls, disable_maximize, drag_surface, top_resize_guard};

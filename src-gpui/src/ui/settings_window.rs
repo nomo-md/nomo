@@ -77,6 +77,10 @@ pub fn open(cx: &mut App) {
         ..Default::default()
     };
     if let Ok(handle) = cx.open_window(options, |window, cx| {
+        #[cfg(target_os = "windows")]
+        if let Err(error) = window_chrome::disable_maximize(window) {
+            eprintln!("禁用设置窗口最大化失败：{error}");
+        }
         let view = cx.new(|cx| SettingsWindow::new(window,cx));
         window.focus(&view.read(cx).focus.clone(), cx);
         view
@@ -152,7 +156,7 @@ impl SettingsWindow {
         Self {
             focus: cx.focus_handle(),
             #[cfg(target_os = "windows")]
-            caption_focus: window_chrome::CaptionFocus::new(cx),
+            caption_focus: window_chrome::CaptionFocus::new(cx, false),
             title_locale: ToolbarLocale::current(cx),
             category: 0, open_select: None, font_picker: None, dragging: None,
             tray_unavailable: crate::ui::tray::unavailable_reason_key(window),
@@ -465,7 +469,7 @@ impl Render for SettingsWindow {
                 .text_color(theme.heading).child(category_title))
             .child(window_chrome::caption_controls(&theme, window, &self.caption_focus, |action, window, _| match action {
                 CaptionAction::Minimize => window.minimize_window(),
-                CaptionAction::Maximize => window_chrome::toggle_maximize(window),
+                CaptionAction::Maximize => {}
                 CaptionAction::Close => window.remove_window(),
             }));
         #[cfg(not(target_os = "windows"))]

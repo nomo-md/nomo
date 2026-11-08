@@ -176,7 +176,7 @@ impl Chrome {
         Self {
             focus: cx.focus_handle(), restore_focus: None, state: ChromeState::default(),
             #[cfg(target_os = "windows")]
-            caption_focus: window_chrome::CaptionFocus::new(cx),
+            caption_focus: window_chrome::CaptionFocus::new(cx, true),
             menu: None, submenu: None, selected: None, subselected: None,
             menu_scroll: ScrollHandle::new(), submenu_scroll: ScrollHandle::new(), context_position: None,
         }

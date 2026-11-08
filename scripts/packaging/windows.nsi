@@ -16,6 +16,8 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "AGPL-3.0-or-later"
 OutFile "${OUTPUT}"
 InstallDir "$LOCALAPPDATA\Nomo"
 RequestExecutionLevel user
+ManifestDPIAware true
+ManifestDPIAwareness "PerMonitorV2,System"
 SetCompressor /SOLID lzma
 !define MUI_ICON "${APPICON}"
 !define MUI_UNICON "${APPICON}"
