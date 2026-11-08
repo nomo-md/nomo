@@ -123,7 +123,9 @@ fn show_release(release:Release,success:bool,window:&mut Window,cx:&mut App) {
     let dismiss = if success {"softwareUpdateStartUsing"} else if newer {"softwareUpdateLater"} else {"close"};
     let mut actions=vec![A::new(UiMessage::toolbar(dismiss),if success{IconName::Check}else{IconName::Close},if success || !newer{Tone::Primary}else{Tone::Normal})];
     if newer && !success {actions.push(A::new(UiMessage::toolbar(if in_app {"nativeUpdateDownload"}else if download.is_some(){"softwareUpdateDownloadPortable"}else{"nativeViewRelease"}),if in_app {IconName::Download} else {IconName::ExternalLink},Tone::Primary));}
-    let notes=release.body.as_deref().map(strip_packages).filter(|text|!text.trim().is_empty()).unwrap_or("").to_owned();
+    let summary=update_summary(release.body.as_deref().unwrap_or(""));
+    let locale=ToolbarLocale::current(cx);
+    let notes=format!("{}\n\n[{}]({})",if summary.is_empty(){locale.text("softwareUpdateReleaseFallback")}else{summary},locale.text("softwareUpdateFullReleaseNotes"),release.html_url);
     let detail=if success{Some(UiMessage::toolbar("softwareUpdateInstalledHint"))}else if in_app {Some(UiMessage::toolbar("nativeUpdateDownloadHint"))}else if !newer {Some(UiMessage::toolbar("nativeUpdateCurrent"))}else if download.is_some(){Some(UiMessage::new("updates.portableHint"))}else{None};
     let dialog=SecondaryDialog {kind:if success {SecondaryKind::UpdateSuccess}else{SecondaryKind::Update},title,message:UiMessage::raw(message),detail,notes:Some(notes),actions,cancel:0,remember:None,leading:Vec::new()};
     let response=dialogs::choose(dialog,window,cx);
@@ -153,6 +155,13 @@ pub(crate) fn prune_closed_windows(cx:&mut App) {
         if state.notice.as_ref().is_some_and(|(owner,_)|!windows.contains(owner)){state.notice=None;}
         if state.pending.as_ref().is_some_and(|(owner,_)|!windows.contains(owner)){state.pending=None;}
     }
+}
+// 发布正文保留完整内容；应用优先读取显式摘要，旧版正文继续沿用安装包前的内容。
+fn update_summary(source:&str)->&str {
+    source.split_once("<!-- nomo-update-summary:start -->")
+        .and_then(|(_,rest)|rest.split_once("<!-- nomo-update-summary:end -->"))
+        .map(|(summary,_)|summary.trim()).filter(|summary|!summary.is_empty())
+        .unwrap_or_else(||strip_packages(source).trim())
 }
 fn strip_packages(source:&str)->&str {
     let mut offset=0;

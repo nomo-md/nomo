@@ -62,7 +62,7 @@ Tested on November 7, 2026, on Windows with an Intel Core i5-12400. Values are m
 
 ## Download and install
 
-The native Rust + GPUI edition has not had its first official release yet. Existing Releases contain the historical edition, which differs from the native development version shown here. To try the native edition, build from source or download packages from a manually verified Actions run.
+Starting with v0.7.0, official Nomo releases use the native Rust + GPUI architecture without WebView. Releases v0.6.x and earlier are the historical edition.
 
 Get the version for your system from [GitHub Releases](https://github.com/nomo-md/nomo/releases):
 

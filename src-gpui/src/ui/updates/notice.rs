@@ -16,7 +16,7 @@ pub(super) struct UpdateNotice {
 impl UpdateNotice {
     pub(super) fn new(release:Release,cx:&mut Context<Self>)->Self {
         let locale=ToolbarLocale::current(cx);
-        let item=strip_packages(release.body.as_deref().unwrap_or("")).lines().map(str::trim).find(|line| {
+        let item=update_summary(release.body.as_deref().unwrap_or("")).lines().map(str::trim).find(|line| {
             let mut chars=line.chars();matches!(chars.next(),Some('-'|'*'|'+'))&&chars.next().is_some_and(char::is_whitespace)&&!chars.as_str().trim().is_empty()
         }).unwrap_or("");
         let plain=item.trim_start_matches(['-','*','+']).chars().filter(|value|!"`*_~[]#".contains(*value)).collect::<String>();
