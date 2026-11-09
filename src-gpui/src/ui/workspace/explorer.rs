@@ -17,8 +17,16 @@ impl Drop for TreeScan {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum SidebarTab {
+    #[default]
+    Files,
+    Outline,
+}
+
 #[derive(Default)]
 pub(super) struct ExplorerState {
+    pub(super) sidebar_tab: SidebarTab,
     generation: u64,
     scan: Option<TreeScan>,
     queue: VecDeque<PathBuf>,
@@ -184,7 +192,8 @@ impl Workspace {
             loop {
                 cx.background_executor().timer(Duration::from_secs(5)).await;
                 if this.update(cx, |workspace, cx| {
-                    if !workspace.home_visible && workspace.tree.is_some() && cx.global::<Settings>().show_sidebar {
+                    if !workspace.home_visible && workspace.explorer.sidebar_tab == SidebarTab::Files
+                        && workspace.tree.is_some() && cx.global::<Settings>().show_sidebar {
                         workspace.refresh_tree(cx);
                     }
                 }).is_err() { break; }

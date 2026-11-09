@@ -64,12 +64,30 @@ impl Workspace {
             let label = ToolbarLocale::current(cx).app_text("tree.name");
             edit.field.update(cx, |field, cx| field.set_placeholder(label, cx));
         }
-        let tree = self.render_explorer_tree(width, theme, cx);
+        let locale = ToolbarLocale::current(cx);
+        let sidebar_tab = self.explorer.sidebar_tab;
+        let files_active = sidebar_tab == super::explorer::SidebarTab::Files;
+        let outline_active = sidebar_tab == super::explorer::SidebarTab::Outline;
+        let tabs = segmented(theme).w_full()
+            .child(segment("sidebar-tab-files", IconName::FolderOpen, locale.app_text("sidebar.files"), files_active, theme)
+                .flex_1().justify_center()
+                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    workspace.set_sidebar_tab(super::explorer::SidebarTab::Files, window, cx);
+                })))
+            .child(segment("sidebar-tab-outline", IconName::ListTree, locale.app_text("sidebar.outline"), outline_active, theme)
+                .flex_1().justify_center()
+                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    workspace.set_sidebar_tab(super::explorer::SidebarTab::Outline, window, cx);
+                })));
+        let content = if outline_active { self.render_sidebar_outline(width, theme, cx) } else { self.render_explorer_tree(width, theme, cx) };
         let home = crate::ui::home::nav_home_row(false, theme, cx)
             .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| workspace.show_home(window, cx)));
         div().w(px(width)).h_full().min_h(px(0.0)).flex_none().flex().flex_col().bg(theme.rail_bg)
-            .child(div().w_full().flex_none().px(px(8.0)).pt(px(10.0)).pb(px(6.0)).child(home))
-            .child(div().w_full().flex_1().min_h(px(0.0)).child(tree))
+            .child(div().w_full().flex_none().px(px(8.0)).pt(px(10.0)).pb(px(4.0)).child(home))
+            .child(div().w_full().flex_none().px(px(8.0)).pb(px(6.0)).child(tabs))
+            .child(div().w_full().flex_1().min_h(px(0.0)).child(content))
             .into_any_element()
     }
 

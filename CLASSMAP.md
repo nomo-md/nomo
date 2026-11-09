@@ -19,7 +19,7 @@
 | 帧耗时采样 | `src-gpui/src/frame_profile.rs`、`ui/workspace.rs`、`scripts/gen-perf-doc.py` | `NOMO_FRAME_PROFILE` 显式启用；有界样本、帧耗时与按键上屏的中位数／p95，固定种子百万字样本 |
 | 原生自动化测试 | `test-lab/runner/`、`scripts/automation/run.mjs`、`src-gpui/src/automation.rs`、`ui/workspace/automation.rs`、`nomo_mark/automation.rs` | 独立 automation feature、隔离文件 RPC、正式编辑入口和有界诊断；固定语料、Windows 进程采样与 Release 报告，详见 `test-lab/README.md` |
 | 打开体验采样 | `test-lab/runner/opening.mjs`、`opening-capture.cs`、`opening-capture.ps1` | 显式 `opening` 命令；前台桌面像素、首屏资源及真实按键回显，短时有界采样与独立汇总，不影响普通产品构建 |
-| 文件树 | `src-gpui/src/ui/file_tree.rs`、`ui/workspace/explorer.rs`、`explorer_ui.rs`、`explorer_label.rs`、`explorer_actions.rs`、`explorer_search.rs` | 目录快照预算、后台按需刷新、虚拟滚动、名称省略、交互和键盘搜索；重命名同步现有文档会话 |
+| 文件树与侧栏大纲 | `src-gpui/src/ui/file_tree.rs`、`ui/workspace/explorer.rs`、`explorer_ui.rs`、`explorer_label.rs`、`explorer_actions.rs`、`explorer_search.rs`、`sidebar_outline.rs` | 文件树与当前文档大纲两个侧栏页签；目录快照预算、后台按需刷新、虚拟滚动、名称省略、交互和键盘搜索；大纲复用有界结构分页，隐藏文件树时暂停扫描；重命名同步现有文档会话 |
 | 标题栏和应用内菜单 | `src-gpui/src/ui/chrome.rs`、`ui/window_chrome.rs` | 轻量状态摘要、焦点恢复、窗口拖动与按钮；关闭交回 Workspace 确认 |
 | NomoMark 正式文档宿主 | `src-gpui/src/nomo_mark/document_host.rs`、`workspace_host.rs`、`save_dialog.rs` | 每标签窗口生命周期、控件事件、正式错误恢复；保存框按当前目录和首个 H1 提供默认值，不持有全文 |
 | 文档元数据入口 | `src-gpui/src/nomo_mark/metadata_commands.rs`、`object_ui.rs` | 按需加载文首、已有属性原位编辑、缺少时通过主会话插入模板；复用窗口预算、取消与撤销历史 |

@@ -308,7 +308,8 @@ impl Workspace {
         if mode == EditorMode::Split {
             right.push(tool("split-guide", IconName::ScanLine, "显示 / 隐藏分栏对齐线", self.split_guide_visible, |w, _, cx| { w.split_guide_visible = !w.split_guide_visible; cx.notify(); }, cx));
         }
-        right.push(tool("outline", IconName::ListTree, "文档大纲 ⌘⌥O", self.outline_visible(cx), |w, _, cx| w.toggle_outline(cx), cx));
+        let outline_visible = self.outline_visible(cx) || self.sidebar_outline_requested(cx);
+        right.push(tool("outline", IconName::ListTree, "文档大纲 ⌘⌥O", outline_visible, |w, win, cx| w.toggle_outline(win, cx), cx));
         right.push(tool("hide-toolbar", IconName::ChevronUp, "隐藏工具栏 ⌘⇧B", false, |w, _, cx| w.toggle_toolbar(cx), cx));
         div()
             .h(px(44.0))

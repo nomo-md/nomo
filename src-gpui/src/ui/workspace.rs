@@ -7,7 +7,7 @@ use crate::nomo_mark::{document_host::{DocumentHost, DocumentEvent, EditTarget, 
 use crate::text_document::markdown_session::MarkdownDocumentSessionManager;
 use crate::settings::{EditorMode, Settings, StatsMetric};
 use crate::theme::Theme;
-use crate::ui::components::{ButtonKind, IconName, button, floating_card, icon, slider, small_icon_button, tooltip};
+use crate::ui::components::{ButtonKind, IconName, button, floating_card, icon, segment, segmented, slider, small_icon_button, tooltip};
 use crate::ui::file_tree::FileTree;
 use crate::ui::home::{self, Home, HomeEvent, library::{Library, Change as LibraryChange}};
 use crate::nomo_mark::{link_edit::LinkDraft, protocol::ControlError};
@@ -35,6 +35,7 @@ mod explorer;
 mod explorer_actions;
 mod explorer_ui;
 mod explorer_search;
+mod sidebar_outline;
 mod outline;
 mod toolbar;
 mod status;
@@ -271,6 +272,8 @@ pub struct Workspace {
     popover: Option<PendingPopover>,
     outline_scroll: UniformListScrollHandle,
     outline_ui: outline::OutlineUi,
+    sidebar_outline_scroll: UniformListScrollHandle,
+    sidebar_outline_document: Option<String>,
     tree_scroll: UniformListScrollHandle,
     /// 待显示的短提示；渲染时消费，同一条消息再次出现也会重新计时。
     notice: Option<SharedString>,
@@ -394,6 +397,8 @@ impl Workspace {
             popover: None,
             outline_scroll: UniformListScrollHandle::new(),
             outline_ui: outline::OutlineUi::new(window, cx),
+            sidebar_outline_scroll: UniformListScrollHandle::new(),
+            sidebar_outline_document: None,
             tree_scroll: UniformListScrollHandle::new(),
             notice: None,
             failure_notice: service_error,
@@ -1820,7 +1825,7 @@ impl Render for Workspace {
         if !mini && let Some(area) = self.outline_ui.bounds.get() && let Some(document) = self.document() {
             document.update(cx, |host, cx| host.update_outline_layout(f32::from(area.size.width), settings.content_width_percent, cx));
         }
-        let outline_visible = self.outline_visible(cx);
+        let outline_visible = self.outline_visible(cx) || self.sidebar_outline_requested(cx);
         let status=self.document().map(|document|document.read(cx).status().clone());
         // 编辑页始终保留标签栏，单个文档也通过标签显示名称与修改状态。
         let show_tabs = !self.home_visible && shell_visible;
@@ -1981,7 +1986,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &ModeSemantic, window, cx| w.set_mode(EditorMode::Semantic, window, cx)))
             .on_action(cx.listener(|w, _: &ModeSource, window, cx| w.set_mode(EditorMode::Source, window, cx)))
             .on_action(cx.listener(|w, _: &ModeSplit, window, cx| w.set_mode(EditorMode::Split, window, cx)))
-            .on_action(cx.listener(|w, _: &ToggleOutline, _, cx| w.toggle_outline(cx)))
+            .on_action(cx.listener(|w, _: &ToggleOutline, window, cx| w.toggle_outline(window, cx)))
             .on_action(cx.listener(|_, _: &ToggleSidebar, _, cx| Settings::toggle(cx, "sidebarHidden")))
             .on_action(cx.listener(|w, _: &ToggleToolbar, _, cx| w.toggle_toolbar(cx)))
             .on_action(cx.listener(|_, _: &ToggleTheme, _, cx| Theme::toggle(cx)))

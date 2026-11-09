@@ -244,7 +244,14 @@ impl Workspace {
             && self.document().is_some_and(|doc| doc.read(cx).outline_can_show())
     }
 
-    pub(super) fn toggle_outline(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn toggle_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 侧栏大纲已显示时，快捷键/菜单项按“隐藏大纲”处理：回到文件树并关闭浮动大纲；
+        // 再次触发时再按普通浮动大纲打开，避免两个大纲同时请求不同分页。
+        if self.sidebar_outline_requested(cx) {
+            self.set_sidebar_tab(super::explorer::SidebarTab::Files, window, cx);
+            self.set_outline_open(false, cx);
+            return;
+        }
         self.set_outline_open(!self.outline_visible(cx), cx);
     }
 
@@ -335,7 +342,9 @@ impl Workspace {
         let area = self.outline_ui.bounds.get()?;
         let width = f32::from(area.size.width);
         let can_show = width > 0.0 && document.read(cx).outline_can_show();
-        let visible = settings.show_outline && can_show;
+        // 侧栏大纲是同一份投影的另一种展示，显示时不再叠加浮动卡片，避免两处滚动位置互相抢分页。
+        let sidebar_outline = self.sidebar_outline_requested(cx);
+        let visible = settings.show_outline && can_show && !sidebar_outline;
         let reduced = self.explorer.reduce_motion;
         if visible != self.outline_ui.showing {
             self.outline_ui.exit_snapshot = if !visible && can_show { Some(document.read(cx).outline_snapshot()) } else { None };
@@ -354,7 +363,8 @@ impl Workspace {
         }
         if !can_show { self.outline_ui.visibility.reset(); self.outline_ui.exit_snapshot = None; }
         // 小窗过渡只绘制已有分页；结束后才恢复查询，避免把目录或大纲重载放进动画热路径。
-        if !self.mini.active() { document.update(cx, |host, cx| host.set_outline_enabled(visible, settings.outline_level, cx)); }
+        // 侧栏大纲与浮动大纲共用同一份有界投影；任一入口可见都应保持查询。
+        if !self.mini.active() { document.update(cx, |host, cx| host.set_outline_enabled(visible || sidebar_outline, settings.outline_level, cx)); }
         if !visible && !self.outline_ui.visibility.running() {
             self.outline_ui.exit_snapshot = None;
             return None;
