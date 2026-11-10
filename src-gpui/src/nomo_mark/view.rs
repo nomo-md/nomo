@@ -1558,6 +1558,19 @@ impl NomoMark {
         if local > self.host.parsed.source.len() {
             return None;
         }
+        let local = if self.host.parsed.source.as_bytes().get(local) == Some(&b'<')
+            && self.effective_mode() == ViewMode::Semantic
+        {
+            // 大纲定位到开标签，几何应落到标题文字，避免吸附到上一段末尾。
+            self.host.parsed.html_fragments.iter()
+                .find(|fragment| fragment.source.start == local && fragment.heading_level.is_some())
+                .map_or(local, |fragment| {
+                    let cell = &fragment.cells[0];
+                    cell.runs.first().map_or(cell.content.start, |run| run.source.start)
+                })
+        } else {
+            local
+        };
         for item in &self.layout.as_ref()?.items {
             if let DisplayItem::CodeBody { source, w, h, body, .. } = item {
                 if source.contains(&local) && !body.caret_visible(local, *w, *h) { return None; }

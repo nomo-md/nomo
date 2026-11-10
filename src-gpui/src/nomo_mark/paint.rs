@@ -181,7 +181,7 @@ pub fn paint_block(
     window: &mut Window,
     cx: &App,
 ) {
-    // 背景必须先于选区；表格和代码块的实色底不能覆盖选择反馈。
+    // 选区叠在块与行内底色上，字形随后绘制。
     paint_layer(layout, origin, clip.clone(), true, theme, store, window, cx);
     if let Some(selection) = selection {
         for (x, y, w, h) in layout.source_rects_clipped(selection, clip.clone()) {
@@ -228,7 +228,7 @@ fn paint_layer(
         }
     };
     for item in &layout.items {
-        if !matches!(item, DisplayItem::Horizontal { .. } | DisplayItem::CodeBody { .. })
+        if !matches!(item, DisplayItem::Text { .. } | DisplayItem::Horizontal { .. } | DisplayItem::CodeBody { .. })
             && matches!(item, DisplayItem::Rect { .. }) != background { continue; }
         match item {
             DisplayItem::CalloutHeader { x, y, size: side, kind, role, .. } => {
@@ -373,14 +373,15 @@ fn paint_layer(
                 if y + layout.height() < clip.start || *y > clip.end {
                     continue;
                 }
-                layout.paint(
-                    origin + point(px(*x), px(*y)),
-                    (clip.start - y)..(clip.end - y),
-                    theme,
-                    window,
-                );
+                let text_origin = origin + point(px(*x), px(*y));
+                let text_clip = (clip.start - y)..(clip.end - y);
+                if background {
+                    layout.paint_backgrounds(text_origin, text_clip, theme, window);
+                    continue;
+                }
+                layout.paint_foreground(text_origin, text_clip.clone(), theme, window);
                 // 行内公式位图按基线贴到占位位置。
-                for (key, ox, oy, w, h) in layout.object_rects_clipped((clip.start-y)..(clip.end-y)) {
+                for (key, ox, oy, w, h) in layout.object_rects_clipped(text_clip) {
                     let image = match key {
                         crate::layout::InlineAsset::MathInput => {
                             let bounds = Bounds::new(origin + point(px(x + ox), px(y + oy)), size(px(w), px(h)));

@@ -490,7 +490,11 @@ impl ParaBuilder {
     }
 
     /// 追加一个行内对象（占位字符），整体映射到 `source`。
-    fn push_object(&mut self, object: InlineObject, style: InlineStyle, source: usize) {
+    fn push_object(&mut self, object: InlineObject, mut style: InlineStyle, source: usize) {
+        // 图片链接通过对象的源码范围命中，位图省去文字下划线。
+        if matches!(&object.key, InlineAsset::Image(_)) {
+            style.underline = false;
+        }
         let at = self.text.len();
         self.push(&OBJECT_CHAR.to_string(), style, Some((source, false)));
         self.objects.push(InlineObject { at, ..object });
@@ -513,6 +517,43 @@ impl ParaBuilder {
         }
         if let Some((source, exact)) = source {
             self.map.push(MapSeg { text: start..end, source, source_end: source + if exact { text.len() } else { 1 }, exact });
+        }
+    }
+
+    /// 延后输出源码空白，遇到下一段内容才在同一视觉行内插入一个空格。
+    fn push_html_literal(&mut self, text: &str, source: usize, style: InlineStyle,
+        space: &mut Option<(Range<usize>, InlineStyle)>) {
+        let bytes = text.as_bytes();
+        let mut cursor = 0;
+        let mut literal_start = 0;
+        while let Some(offset) = bytes[cursor..].iter().position(u8::is_ascii_whitespace) {
+            let start = cursor + offset;
+            let end = start + bytes[start..].iter().take_while(|byte| byte.is_ascii_whitespace()).count();
+            cursor = end;
+            // 节点内的普通单空格仍属于原样映射的文本片段。
+            if start > 0 && end < bytes.len() && bytes[start..end] == [b' '] {
+                continue;
+            }
+            if literal_start < start {
+                self.flush_html_space(space);
+                self.push(&text[literal_start..start], style.clone(), Some((source + literal_start, true)));
+            }
+            if !self.text.is_empty() && space.is_none() {
+                *space = Some((source + start..source + end, style.clone()));
+            }
+            literal_start = end;
+        }
+        if literal_start < text.len() {
+            self.flush_html_space(space);
+            self.push(&text[literal_start..], style, Some((source + literal_start, true)));
+        }
+    }
+
+    fn flush_html_space(&mut self, space: &mut Option<(Range<usize>, InlineStyle)>) {
+        if let Some((source, style)) = space.take() {
+            self.push(" ", style, Some((source.start, false)));
+            // 只映射一段真实空白，跨行内标签的合并不会把标签包含进空格选区。
+            self.map.last_mut().unwrap().source_end = source.end;
         }
     }
 }
@@ -827,13 +868,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
         match event {
             Event::Start(tag) => match tag {
                 Tag::Heading { level, .. } => {
-                    let level = level as u8;
-                    if builder.controlled&&!builder.items.is_empty(){builder.gap(metrics.heading(level).1);}
-                    let (size, _, _) = metrics.heading(level);
-                    builder.heading = Some(level);
-                    builder.font_size = size;
-                    builder.line_height = size * 1.35;
-                    builder.base = InlineStyle { bold: true, color: ColorRole::Heading, ..builder.base_for_container() };
+                    builder.begin_heading(level as u8);
                     if builder.controlled && source[range.clone()].trim_matches(['#',' ','\t','\r','\n']).is_empty() {
                         let at=range.start+source[range.clone()].trim_end_matches(['\r','\n']).len();
                         builder.empty_anchor(at);
@@ -980,14 +1015,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                 _ => {}
             },
             Event::End(tag) => match tag {
-                TagEnd::Heading(level) => {
-                    builder.flush_paragraph();
-                    if builder.controlled {builder.gap(metrics.heading(level as u8).2);}
-                    builder.heading = None;
-                    builder.font_size = metrics.body_size();
-                    builder.line_height = metrics.body_line_height();
-                    builder.base = builder.base_for_container();
-                }
+                TagEnd::Heading(level) => builder.end_heading(level as u8),
                 TagEnd::Paragraph => builder.end_paragraph(),
                 TagEnd::BlockQuote(_) => builder.end_quote(),
                 TagEnd::List(_) => {
@@ -1342,6 +1370,24 @@ impl Builder<'_> {
         self.base = if self.heading.is_some() { self.base.clone() } else { self.base_for_container() };
         self.image_only = true;
         self.images.clear();
+    }
+
+    fn begin_heading(&mut self, level: u8) {
+        let (size, top, _) = self.env.metrics.heading(level);
+        if self.controlled && !self.items.is_empty() { self.gap(top); }
+        self.heading = Some(level);
+        self.font_size = size;
+        self.line_height = size * 1.35;
+        self.base = InlineStyle { bold: true, color: ColorRole::Heading, ..self.base_for_container() };
+    }
+
+    fn end_heading(&mut self, level: u8) {
+        self.flush_paragraph();
+        if self.controlled { self.gap(self.env.metrics.heading(level).2); }
+        self.heading = None;
+        self.font_size = self.env.metrics.body_size();
+        self.line_height = self.env.metrics.body_line_height();
+        self.base = self.base_for_container();
     }
 
     fn end_paragraph(&mut self) {
@@ -1906,7 +1952,9 @@ impl Builder<'_> {
         use crate::nomo_mark::parse::InlineFormat;
         let mut inline = InlineState::default();
         let mut inline_cursor = fragment.source.start;
-        self.flush_paragraph(); self.apply_gap();
+        self.flush_paragraph();
+        if let Some(level) = fragment.heading_level { self.begin_heading(level); }
+        self.apply_gap();
         let top = self.y;
         let index = self.items.len();
         let pad = 12.0 * self.env.metrics.zoom;
@@ -1931,9 +1979,14 @@ impl Builder<'_> {
                     self.html_align = Some(align.clone());
                 }
             }
-            if cell.runs.is_empty() { self.empty_anchor(cell.content.start); }
+            let mut space = None;
             for run in &cell.runs {
-                if run.text == "\n" && run.atom.is_none() { self.line_break(run.source.clone()); continue; }
+                let exact = self.source.get(run.source.clone()) == Some(run.text.as_str());
+                if !exact && run.text == "\n" && run.atom.is_none() {
+                    space = None;
+                    self.line_break(run.source.clone());
+                    continue;
+                }
                 inline.advance(self.source, &mut inline_cursor, run.source.start);
                 let mut style = inline.style(&self.base);
                 style.no_hyphenation |= run.link.is_some();
@@ -1947,15 +2000,25 @@ impl Builder<'_> {
                         InlineFormat::Link => { style.underline = true; style.no_hyphenation = true; style.color = ColorRole::Link; }
                     }
                 }
-                if let Some(atom) = &run.atom { push_table_atom(&mut self.para, atom, run.source.clone(), style, self.env, self.window); }
-                else {
-                    self.para.push(&run.text, style, Some((run.source.start, self.source.get(run.source.clone()) == Some(run.text.as_str()))));
+                if let Some(atom) = &run.atom {
+                    self.para.flush_html_space(&mut space);
+                    push_table_atom(&mut self.para, atom, run.source.clone(), style, self.env, self.window);
+                } else if exact && !style.code_bg {
+                    self.para.push_html_literal(&run.text, run.source.start, style, &mut space);
+                } else {
+                    self.para.flush_html_space(&mut space);
+                    self.para.push(&run.text, style, Some((run.source.start, exact)));
                     if let Some(map) = self.para.map.last_mut() { map.source_end = run.source.end; }
                 }
             }
-            self.flush_paragraph();
+            if self.para.is_empty() { self.empty_anchor(cell.content.start); }
+            if let Some(level) = fragment.heading_level {
+                self.end_heading(level);
+            } else {
+                self.flush_paragraph();
+                self.gap(self.env.metrics.paragraph_gap());
+            }
             self.html_align = None;
-            self.gap(self.env.metrics.paragraph_gap());
         }
         for table in tables { self.html_table(table, revealed); }
         if fragment.card {
@@ -2159,19 +2222,19 @@ impl Builder<'_> {
             }
             if para.map.is_empty(){para.map.push(MapSeg{text:0..0,source:empty_anchor,source_end:empty_anchor,exact:true});}paragraphs.push(para);
             let mut natural=0.0f32;let mut specs=Vec::new();
-            let mut atomic = 0.0f32;
+            let mut minimum = 0.0f32;
             for para in paragraphs {
                 let spec = ParaSpec { text:para.text, spans:para.spans, base:base.clone(), family:Family::Text,
-                    font_size, line_height:font_size*1.55, wrap:Wrap::Greedy, objects:para.objects };
+                    font_size, line_height:font_size*1.55, wrap:Wrap::TableCell, objects:para.objects };
                 let measured = table_layout::measure(&spec, &para.map, revealed, &para.table_images, self.env, self.window);
                 natural = natural.max(measured.0);
-                atomic = atomic.max(measured.1);
+                minimum = minimum.max(measured.1);
                 specs.push((spec, para.map));
             }
-            measures.push(CellMetrics{column:cell.column,span:cell.colspan,header:cell.header,natural,atomic,chrome:pad_x*2.0+zoom,explicit:cell.widths.iter().map(|width|*width as f32*zoom).collect()});
+            measures.push(CellMetrics{column:cell.column,span:cell.colspan,header:cell.header,natural,minimum,chrome:pad_x*2.0+zoom,explicit:cell.widths.iter().map(|width|*width as f32*zoom).collect()});
             prepared.push(specs);
         }
-        let widths=table_widths::allocate(&table_widths::constraints(table.columns,&measures,em),(viewport_width-border).max(0.0));
+        let widths=table_widths::allocate(&table_widths::constraints(table.columns,&measures,zoom),(viewport_width-border).max(0.0));
         let mut xs=vec![self.indent+border];for width in &widths{xs.push(xs.last().unwrap()+width);}
         let mut row_heights=vec![line_height+pad_y*2.0;table.rows];let mut laid=Vec::new();
         for (cell,paragraphs) in table.cells.iter().zip(prepared){
@@ -2233,7 +2296,7 @@ impl Builder<'_> {
             family: Family::Text,
             font_size: if self.controlled && header { 13.0 * metrics.zoom } else { font_size },
             line_height: if self.controlled && header { 13.0 * 1.55 * metrics.zoom } else { line_height },
-            wrap: Wrap::Greedy,
+            wrap: Wrap::TableCell,
             objects: cell.objects.clone(),
         };
         // NomoMark 使用共享语义约束；旧 Buffer 渲染入口保留原有分配方式。
@@ -2243,9 +2306,9 @@ impl Builder<'_> {
             for (column, cell) in cells.iter().enumerate() {
                 let spec = spec_for(cell, *header);
                 if self.controlled {
-                    let (natural, atomic) = table_layout::measure(&spec, &cell.map, revealed, &cell.table_images, self.env, self.window);
+                    let (natural, minimum) = table_layout::measure(&spec, &cell.map, revealed, &cell.table_images, self.env, self.window);
                     cell_metrics.push(crate::nomo_mark::table_widths::CellMetrics {
-                        column, span:1, header:*header, natural, atomic, chrome:pad_x*2.0+border, explicit:Vec::new() });
+                        column, span:1, header:*header, natural, minimum, chrome:pad_x*2.0+border, explicit:Vec::new() });
                 } else {
                     let layout = self.env.layout(&spec, 10_000.0, self.window);
                     natural[column] = natural[column].max(layout.max_line_width() + pad_x * 2.0 + 2.0);
@@ -2254,7 +2317,7 @@ impl Builder<'_> {
         }
         let total: f32 = natural.iter().sum();
         let widths: Vec<f32> = if self.controlled {
-            let constraints=crate::nomo_mark::table_widths::constraints(columns,&cell_metrics,font_size);
+            let constraints=crate::nomo_mark::table_widths::constraints(columns,&cell_metrics,metrics.zoom);
             crate::nomo_mark::table_widths::allocate(&constraints,available)
         } else if total <= available {
             natural

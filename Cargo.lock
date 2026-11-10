@@ -3903,6 +3903,7 @@ dependencies = [
  "ttf-parser",
  "two-face",
  "unicode-bidi",
+ "unicode-linebreak",
  "unicode-normalization",
  "unicode-properties",
  "unicode-segmentation",

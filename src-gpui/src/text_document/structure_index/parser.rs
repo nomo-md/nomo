@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::nomo_mark::html_table::{HtmlFragment, InlineAtom};
+
 pub const SYNTAX_VERSION: &str = "nomo-markdown-v1";
 pub const MAX_SEMANTIC_BYTES: usize = 32 * 1024;
 static NEXT_BLOCK: AtomicU64 = AtomicU64::new(1);
@@ -609,6 +611,29 @@ fn metadata(source: &str, span: &Span, revision: u64, depth: usize) -> Block {
             Event::Start(Tag::HtmlBlock) => {
                 block.enhancements.html_details += 1;
                 block.metrics_complete = false;
+                // 仅为可能含标题的 HTML 块运行与编辑视图相同的白名单解析。
+                if part[range.clone()].as_bytes().windows(3).any(|tag| matches!(tag, [b'<', b'h' | b'H', b'1'..=b'6']))
+                    && let Some(fragments) = HtmlFragment::parse_all(part, range)
+                {
+                    for fragment in fragments {
+                        let Some(level) = fragment.heading_level else { continue; };
+                        let cell = &fragment.cells[0];
+                        let title: String = cell.runs.iter().map(|run| match &run.atom {
+                            Some(InlineAtom::Image { alt, .. }) => alt.as_str(),
+                            Some(InlineAtom::Comment(_)) => "",
+                            _ => run.text.as_str(),
+                        }).collect();
+                        let byte = fragment.source.start;
+                        block.headings.push(Heading {
+                            level,
+                            text: part[cell.content.clone()].to_owned(),
+                            title: title.replace(['\r', '\n'], " ").trim().to_owned(),
+                            byte: (span.from + byte) as u64,
+                            line: block.from_line + line_count(&part[..byte]),
+                        });
+                        block.layout_units += 1;
+                    }
+                }
             }
             Event::InlineHtml(_) => {
                 if let Some((end, _)) = syntax::html_code(part, range.start) {

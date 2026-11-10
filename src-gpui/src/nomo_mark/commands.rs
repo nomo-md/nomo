@@ -52,6 +52,17 @@ pub fn apply_semantic(
     let large_text = matches!(&intent, EditIntent::Replace(text) if text.len() > super::session_window::policy().group_bytes as usize);
     let base = parsed.identity.from_byte;
     let range = local_range(&parsed.source, base, selection.range())?;
+    if matches!(&intent, EditIntent::Heading(_) | EditIntent::AdjustHeading { .. })
+        && parsed.html_fragments.iter().any(|fragment| fragment.heading_level.is_some())
+    {
+        let lines = selected_lines(&parsed.source, range.clone());
+        let affected = lines[0].start..lines.last().unwrap().end;
+        if parsed.html_fragments.iter().any(|fragment| fragment.heading_level.is_some()
+            && fragment.source.start < affected.end && affected.start < fragment.source.end)
+        {
+            return Err(ControlError::Unsupported("请在源码模式调整 HTML 标题级别。".into()));
+        }
+    }
     if let Some(result) = super::editing_rules::semantic(parsed, selection, &intent) {
         return Ok(result);
     }

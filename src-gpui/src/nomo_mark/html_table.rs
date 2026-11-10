@@ -93,6 +93,7 @@ pub struct HtmlFragment {
     pub source: Range<usize>,
     pub label: String,
     pub card: bool,
+    pub heading_level: Option<u8>,
     pub cells: Vec<Cell>,
     /// 解析后移交 ParsedWindow 的共享表格集合，不保留第二份单元格模型。
     pub tables: Vec<HtmlTable>,
@@ -104,18 +105,28 @@ impl HtmlFragment {
         while at < range.end {
             at += source.get(at..range.end)?.len() - source[at..range.end].trim_start().len();
             if at == range.end { break; }
-            let start = at;
-            element(source, &mut at, 0)?;
+            let root = element(source, &mut at, 0)?;
             if at > range.end { return None; }
-            fragments.push(Self::parse(source, start..at)?);
+            fragments.push(Self::from_element(source, root)?);
         }
         (!fragments.is_empty()).then_some(fragments)
     }
     pub fn parse(source: &str, range: Range<usize>) -> Option<Self> {
         let mut at = range.start + source.get(range.clone())?.len() - source[range.clone()].trim_start().len();
         let root = element(source, &mut at, 0)?;
-        if at > range.end || !source[at..range.end].trim().is_empty()
-            || !matches!(root.name.as_str(), "p" | "div" | "section" | "summary") { return None; }
+        if at > range.end || !source[at..range.end].trim().is_empty() { return None; }
+        Self::from_element(source, root)
+    }
+
+    fn from_element(source: &str, mut root: Element) -> Option<Self> {
+        let heading_level = match root.name.as_bytes() {
+            [b'h', level @ b'1'..=b'6'] => Some(*level - b'0'),
+            _ if matches!(root.name.as_str(), "p" | "div" | "section" | "summary") => None,
+            _ => return None,
+        };
+        if heading_level.is_some() && let Some(align) = root.attrs.get_mut("align") {
+            align.make_ascii_lowercase();
+        }
         let mut cells = Vec::new();
         let mut tables = Vec::new();
         fragment_cells(source, &root, &mut cells, &mut tables)?;
@@ -125,7 +136,7 @@ impl HtmlFragment {
                 label.push_str(&format!(" {prefix}{value}"));
             }
         }
-        Some(Self { source: root.source, label, card: matches!(root.name.as_str(), "div" | "section"), cells, tables })
+        Some(Self { source: root.source, label, card: matches!(root.name.as_str(), "div" | "section"), heading_level, cells, tables })
     }
 
     pub fn estimated_bytes(&self) -> usize {
@@ -141,15 +152,15 @@ impl HtmlFragment {
 }
 
 fn fragment_cells(source: &str, node: &Element, cells: &mut Vec<Cell>, tables: &mut Vec<HtmlTable>) -> Option<()> {
-    if !matches!(node.name.as_str(), "p" | "div" | "section" | "summary")
-        || !only_attrs(node, &["class", "id", "align", "title"]) { return None; }
-    if node.children.iter().any(|child| matches!(child.name.as_str(), "p" | "div" | "section" | "table")) {
+    if !only_attrs(node, &["class", "id", "align", "title"]) { return None; }
+    if matches!(node.name.as_str(), "p" | "div" | "section" | "summary")
+        && node.children.iter().any(|child| matches!(child.name.as_str(), "p" | "div" | "section" | "table")) {
         if matches!(node.name.as_str(), "p" | "summary") && node.children.iter().any(|child| child.name == "table") { return None; }
         let mut pending: Vec<&Element> = Vec::new();
         let flush = |pending: &mut Vec<&Element>, cells: &mut Vec<Cell>| -> Option<()> {
             let (first, last) = (pending.first()?, pending.last()?);
             let content = first.source.start..last.source.end;
-            if !source[content.clone()].trim().is_empty() {
+            if source[content.clone()].bytes().any(|byte| !byte.is_ascii_whitespace()) {
                 let mut runs = Vec::new(); let mut spans = Vec::new();
                 for child in pending.iter() { inline(source, child, &[], None, &mut runs, &mut spans)?; }
                 trim_image_padding(source, &mut runs);

@@ -144,6 +144,7 @@ pub enum Wrap {
     None,
     Greedy,
     KnuthPlass,
+    TableCell,
 }
 
 /// 行内对象的占位字符（U+FFFC OBJECT REPLACEMENT CHARACTER）。
@@ -284,6 +285,7 @@ pub struct TextLayout {
     glyphs: Vec<Glyph>,
     natural_width: f32,
     max_width: f32,
+    min_content_width: f32,
     pub lines: Vec<VisualLine>,
     pub line_height: f32,
     font_size: f32,
@@ -347,6 +349,9 @@ impl TextLayout {
     pub fn max_line_width(&self) -> f32 {
         self.max_width
     }
+
+    /// 表格正常断点之间的最大宽度；紧急拆词不参与列宽下限。
+    pub(crate) fn min_content_width(&self) -> f32 { self.min_content_width }
 
     fn shaped_x(&self, byte: usize) -> f32 {
         let at = self.glyphs.partition_point(|glyph| glyph.index < byte);
@@ -430,15 +435,22 @@ impl TextLayout {
         rects
     }
 
-    /// 绘制段落。`clip` 为段落坐标系下需要绘制的纵向区间，区间外的视觉行直接跳过。
+    fn visible_lines(&self, clip: Range<f32>) -> impl Iterator<Item = (&VisualLine, f32)> {
+        let first = ((clip.start / self.line_height) as usize).saturating_sub(1);
+        self.lines.iter().enumerate().skip(first)
+            .map(|(index, line)| (line, index as f32 * self.line_height))
+            .take_while(move |&(_, top)| top <= clip.end)
+            .filter(move |&(_, top)| top + self.line_height >= clip.start)
+    }
+
+    /// 绘制段落。`clip` 使用段落坐标。
     pub fn paint(&self, origin: Point<Pixels>, clip: Range<f32>, theme: &Theme, window: &mut Window) {
-        let default_style = InlineStyle::default();
-        for (line_index, line) in self.lines.iter().enumerate() {
-            let top = line_index as f32 * self.line_height;
-            if top + self.line_height < clip.start || top > clip.end {
-                continue;
-            }
-            // 行内代码与高亮底色先画，保证在文字之下。
+        self.paint_backgrounds(origin, clip.clone(), theme, window);
+        self.paint_foreground(origin, clip, theme, window);
+    }
+
+    pub(crate) fn paint_backgrounds(&self, origin: Point<Pixels>, clip: Range<f32>, theme: &Theme, window: &mut Window) {
+        for (line, top) in self.visible_lines(clip) {
             for (range, style) in &self.styles {
                 if !(style.code_bg || style.footnote || style.bg > 0 || style.bg_color.is_some()) || range.end <= line.start || range.start >= line.end {
                     continue;
@@ -473,6 +485,12 @@ impl TextLayout {
                     .corner_radii(px(if style.code_bg { 4.0 } else { 2.0 })),
                 );
             }
+        }
+    }
+
+    pub(crate) fn paint_foreground(&self, origin: Point<Pixels>, clip: Range<f32>, theme: &Theme, window: &mut Window) {
+        let default_style = InlineStyle::default();
+        for (line, top) in self.visible_lines(clip) {
             let baseline = top + self.baseline;
             let first = self.glyphs.partition_point(|glyph| glyph.index < line.start);
             let mut glue = 0;
@@ -698,6 +716,7 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
         glyphs,
         natural_width,
         max_width: 0.0,
+        min_content_width: 0.0,
         lines: Vec::new(),
         line_height,
         font_size: spec.font_size,
@@ -716,7 +735,12 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
             start += logical.len() + 1;
             continue;
         }
-        let mut items = kp::build_items(text, spec.font_size, space_width, |byte| layout.shaped_x(start + byte));
+        let x_at = |byte| layout.shaped_x(start + byte);
+        let mut items = if spec.wrap == Wrap::TableCell {
+            kp::build_table_items(text, x_at)
+        } else {
+            kp::build_items(text, spec.font_size, space_width, x_at)
+        };
         for item in &mut items {
             item.from += start;
             item.to += start;
@@ -731,7 +755,8 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
         let mut atomic: Vec<Item> = Vec::with_capacity(items.len());
         let mut item_index = 0;
         let mut code_index = 0;
-        let code: Vec<_> = layout.styles.iter().filter(|(_, style)| style.code_bg || style.footnote).map(|(range, _)| range).collect();
+        let code: Vec<_> = layout.styles.iter().filter(|(_, style)|
+            style.footnote || (style.code_bg && spec.wrap != Wrap::TableCell)).map(|(range, _)| range).collect();
         while item_index < items.len() {
             let item = items[item_index];
             while code_index < code.len() && code[code_index].end <= item.from { code_index += 1; }
@@ -744,11 +769,14 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
             } else { atomic.push(item); item_index += 1; }
         }
         items = atomic;
+        if spec.wrap == Wrap::TableCell {
+            layout.min_content_width = layout.min_content_width.max(table_min_content_width(&items, &layout));
+        }
         let hyphens = if spec.wrap == Wrap::KnuthPlass && items.len() <= kp::MAX_KP_ITEMS {
             english_breaks(&layout, start..start + text.len(), spec, window)
         } else { Vec::new() };
         split_at_hyphens(&mut items, &layout, &hyphens);
-        split_oversized_boxes(&mut items, &layout, width, &hyphens);
+        split_oversized_boxes(&mut items, &layout, width, &hyphens, spec.wrap == Wrap::TableCell);
         let edges = if spec.wrap == Wrap::KnuthPlass { punctuation_edges(&items, &layout, window) } else { Vec::new() };
         let mut hyphen_index = 0;
         let breaks: Vec<_> = items.iter().enumerate().filter_map(|(index, item)| {
@@ -764,7 +792,7 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
                 Wrap::None => unreachable!("unwrapped lines are handled before line breaking"),
                 Wrap::KnuthPlass => if edges.is_empty() && breaks.is_empty() { kp::break_lines(&items, width) }
                     else { kp::break_lines_with(&items, width, &edges, &breaks) },
-                Wrap::Greedy => kp::greedy_lines(&items, width),
+                Wrap::Greedy | Wrap::TableCell => kp::greedy_lines(&items, width),
             };
             layout.lines.reserve(lines.len());
             for line in &lines {
@@ -776,6 +804,38 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
     }
     layout.max_width = layout.lines.iter().map(|line| (layout.x_in_line(line, line.end) - line.hang).max(0.0)).fold(0.0, f32::max);
     layout
+}
+
+/// 与实际折行共用条目；允许缩小的图片不撑大最小列宽，公式等对象保持完整。
+fn table_min_content_width(items: &[Item], layout: &TextLayout) -> f32 {
+    let mut minimum = 0.0_f32;
+    let mut unbroken = 0.0;
+    let mut after_break = false;
+    let first = items.first().map_or(0, |item| item.from);
+    let mut object = layout.objects.partition_point(|object| object.at < first);
+    for (index, item) in items.iter().enumerate() {
+        if matches!(item.kind, ItemKind::Glue { .. }) {
+            if index > 0 && matches!(items[index - 1].kind, ItemKind::Box) {
+                minimum = minimum.max(unbroken);
+                unbroken = 0.0;
+                after_break = true;
+            } else if !after_break {
+                // 首行缩进在实际排版中保留；仅断点之后的空白可被跳过。
+                unbroken += item.width;
+            }
+            continue;
+        }
+        after_break = false;
+        let mut width = item.width;
+        while let Some(inline) = layout.objects.get(object).filter(|inline| inline.at < item.to) {
+            if inline.at >= item.from && matches!(inline.key, InlineAsset::Image(_)) {
+                width -= inline.width;
+            }
+            object += 1;
+        }
+        unbroken += width.max(0.0);
+    }
+    minimum.max(unbroken)
 }
 
 /// 单次可见段落最多识别 64 KiB、4,096 个断词候选；不缓存正文词语。
@@ -844,25 +904,49 @@ fn split_at_hyphens(items: &mut Vec<Item>, layout: &TextLayout, hyphens: &[Discr
     *items = output;
 }
 
-/// 紧急字素断行只处理仍超宽的盒；禁则、NBSP、对象及塑形簇继续保持原子性。
-fn split_oversized_boxes(items: &mut Vec<Item>, layout: &TextLayout, width: f32, hyphens: &[DiscretionaryHyphen]) {
+/// 紧急断行只处理超宽的盒，保留字素和塑形簇；表格中的行内代码允许折行。
+fn split_oversized_boxes(
+    items: &mut Vec<Item>,
+    layout: &TextLayout,
+    width: f32,
+    hyphens: &[DiscretionaryHyphen],
+    wrap_inline_code: bool,
+) {
     let break_width = |at| hyphens.binary_search_by_key(&at, |hyphen| hyphen.at).ok().map_or(0.0, |index| hyphens[index].glyph.width);
     if !items.iter().any(|item| matches!(item.kind, ItemKind::Box) && item.width + break_width(item.to) > width) { return; }
     let mut output = Vec::with_capacity(items.len());
     for item in items.drain(..) {
-        if !matches!(item.kind, ItemKind::Box) || item.width + break_width(item.to) <= width
-            || layout.styles.iter().any(|(range, style)| (style.code_bg || style.footnote) && item.from < range.end && range.start < item.to) {
+        if !matches!(item.kind, ItemKind::Box) || item.width + break_width(item.to) <= width {
             output.push(item);
             continue;
+        }
+        let first_style = layout.styles.partition_point(|(range, _)| range.end <= item.from);
+        let mut styles = &layout.styles[first_style..];
+        if !wrap_inline_code {
+            if styles.iter().take_while(|(range, _)| range.start < item.to)
+                .any(|(_, style)| style.code_bg || style.footnote) {
+                output.push(item);
+                continue;
+            }
+            styles = &[];
         }
         let word = &layout.text[item.from..item.to];
         let mut from = item.from;
         let mut previous = "";
         for (offset, grapheme) in word.grapheme_indices(true) {
             let at = item.from + offset;
-            let glyph = layout.glyphs.partition_point(|glyph| glyph.index < at);
-            if at > from && kp::can_break_between(previous, grapheme)
-                && layout.glyphs.get(glyph).is_some_and(|glyph| glyph.index == at) {
+            while styles.first().is_some_and(|(range, _)| range.end <= at) {
+                styles = &styles[1..];
+            }
+            // 代码中的标点是字面内容；脚注标签仍保持完整。
+            let can_break = match styles.first() {
+                Some((range, style)) if range.start < at && style.footnote => false,
+                Some((range, style)) if range.start < at && style.code_bg => true,
+                _ => kp::can_break_between(previous, grapheme),
+            };
+            if at > from && can_break
+                && layout.glyphs.get(layout.glyphs.partition_point(|glyph| glyph.index < at))
+                    .is_some_and(|glyph| glyph.index == at) {
                 output.push(Item { kind: ItemKind::Box, from, to: at, width: layout.shaped_x(at) - layout.shaped_x(from) });
                 output.push(Item { kind: ItemKind::Glue { stretch: 0.0, shrink: 0.0 }, from: at, to: at, width: 0.0 });
                 from = at;

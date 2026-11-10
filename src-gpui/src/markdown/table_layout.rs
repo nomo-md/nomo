@@ -1,4 +1,4 @@
-//! 表格测量只使用语义内容；图片按旧版的测量宽度参与分配，再适配最终单元格。
+//! 语义内容的固有宽度参与自动分配；图片保留名义宽度并适配最终单元格。
 use super::{InlineAsset, InlineObject, InlineStyle, MapSeg, OBJECT_CHAR, ParaSpec, RenderEnv, TextLayout};
 use gpui::Window;
 use std::{ops::Range, rc::Rc};
@@ -28,11 +28,6 @@ pub(super) fn measure(
     env: &RenderEnv,
     window: &Window,
 ) -> (f32, f32) {
-    // 公式和注释标签作为完整行内对象；图片、代码和长链接均可适配列宽。
-    let atomic = spec.objects.iter()
-        .filter(|object| matches!(object.key, InlineAsset::Embed(_) | InlineAsset::Comment { .. }))
-        .map(|object| object.width)
-        .fold(0.0, f32::max);
     let mut replacements: Vec<_> = map.iter()
         .filter(|segment| !segment.text.is_empty()
             && super::is_revealed(revealed, segment.source..segment.source_end))
@@ -41,7 +36,8 @@ pub(super) fn measure(
     replacements.extend(images.iter().filter(|image| !image.text.is_empty())
         .map(|image| (image.text.clone(), Some(image.width.unwrap_or(12.0 * spec.font_size)))));
     if replacements.is_empty() {
-        return (env.layout(spec, f32::MAX, window).max_line_width(), atomic);
+        let layout = env.layout(spec, f32::MAX, window);
+        return (layout.max_line_width(), layout.min_content_width());
     }
     replacements.sort_unstable_by_key(|(range, _)| (range.start, range.end));
     let mut semantic = ParaSpec {
@@ -71,7 +67,8 @@ pub(super) fn measure(
         cursor = range.end;
     }
     append_semantic(spec, &mut semantic, cursor..spec.text.len());
-    (env.layout(&semantic, f32::MAX, window).max_line_width(), atomic)
+    let layout = env.layout(&semantic, f32::MAX, window);
+    (layout.max_line_width(), layout.min_content_width())
 }
 
 fn append_semantic(spec: &ParaSpec, semantic: &mut ParaSpec, range: Range<usize>) {

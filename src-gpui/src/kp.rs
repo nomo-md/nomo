@@ -134,6 +134,24 @@ fn push_han_glue(items: &mut Vec<Item>, at: usize, font_size: f32) {
     });
 }
 
+/// 表格的固有尺寸与最终折行共用 Unicode 正常断点；不把紧急拆词当作最小宽度。
+pub(crate) fn build_table_items(text: &str, x_at: impl Fn(usize) -> f32) -> Vec<Item> {
+    let mut items = Vec::new();
+    let mut from = 0;
+    for (end, _) in unicode_linebreak::linebreaks(text) {
+        let content_end = from + text[from..end].trim_end_matches([' ', '\t']).len();
+        if content_end > from {
+            items.push(Item { kind: ItemKind::Box, from, to: content_end, width: x_at(content_end) - x_at(from) });
+        }
+        if content_end < end || end < text.len() {
+            items.push(Item { kind: ItemKind::Glue { stretch: 0.0, shrink: 0.0 },
+                from: content_end, to: end, width: x_at(end) - x_at(content_end) });
+        }
+        from = end;
+    }
+    items
+}
+
 #[derive(Clone, Copy)]
 struct Node {
     at: usize,

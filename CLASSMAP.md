@@ -28,7 +28,7 @@
 | 块索引测试文档 | `src-gpui/src/document/mod.rs`、`markdown/blocks.rs` | 仅在测试构建中提供内存文档夹具，保留增量结构编辑的既有验证 |
 | Markdown 渲染 | `src-gpui/src/markdown/` | 块结构、行内标记、当前窗口代码布局 |
 | 跨行代码高亮 | `src-gpui/src/markdown/code_highlight.rs`、`highlight.rs`、`nomo_mark/source_view.rs` | syntect／two-face 的 Oniguruma 后端，代码卡片与源码视图共用；按需语法库、8 MiB／120 项 LRU 和局部解析预算 |
-| 表格宽度与内容适配 | `src-gpui/src/nomo_mark/table_widths.rs`、`src-gpui/src/markdown/table_layout.rs` | 共享列宽约束、纯语义测量、表头字体与图片缩放；只作用于当前窗口布局，不写回自动列宽 |
+| 表格宽度与内容适配 | `src-gpui/src/nomo_mark/table_widths.rs`、`src-gpui/src/markdown/table_layout.rs`、`layout.rs`、`kp.rs` | 共享固有尺寸与 Unicode 断点，短表按内容收窄、长表适配正文、过宽时表格内滚动；保留表头字体和图片缩放，只作用于当前窗口布局，不写回自动列宽 |
 | 代码块原位编辑与语言选择 | `src-gpui/src/nomo_mark/code_blocks.rs`、`code_ui.rs`、`src-gpui/src/markdown/code_layout.rs` | 主会话局部输入与围栏保护；旧版卡片、固定行号与块内双向滚动、头部复制反馈／展开／语言选择；无代码草稿或独立历史 |
 | 行内注释标签与原位编辑 | `src-gpui/src/nomo_mark/comments.rs`、`object_ui.rs` | 跟随主题主色的完整注释，按正文或单元格宽度折行，支持原位输入；局部草稿按会话确认，IME 收尾后提交，关闭释放输入控件 |
 | HTML 容器与属性卡片 | `src-gpui/src/nomo_mark/html_table.rs`、`front_matter.rs`、`object_ui.rs` | 安全 HTML 文本及实体映射、Details 标题边界；Front Matter 字段摘要、块注释完整预览与原位草稿；仅解析当前窗口，不重写未知属性 |
