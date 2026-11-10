@@ -99,6 +99,8 @@ pwsh -File scripts/package-windows.ps1
 
 通过 [Issue](https://github.com/nomo-md/nomo/issues) 反馈问题时，请附系统、应用版本、复现步骤与可分享的样例；也欢迎提交 [Pull Request](https://github.com/nomo-md/nomo/pulls)。
 
+社区交流见 [linux.do](https://linux.do/)。
+
 原生开发以 `master` 为主线，新功能从 `master` 创建分支并通过 PR 合回；提交推送与正式版本发布分开进行。
 
 Nomo 采用 [AGPL-3.0-or-later](./LICENSE)。Lucide 图标采用 [ISC 许可](./src-gpui/assets/icons/LICENSE)，其他组件保留各自许可证。感谢 GPUI、pulldown-cmark、latex-rust、merman、resvg 等开源项目。

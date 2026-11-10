@@ -99,6 +99,8 @@ The installer and portable ZIP are written to `.artifacts/packages/`. See [NomoM
 
 When reporting an [issue](https://github.com/nomo-md/nomo/issues), include your system, app version, reproduction steps, and a shareable sample. [Pull requests](https://github.com/nomo-md/nomo/pulls) are welcome.
 
+Visit [linux.do](https://linux.do/) for community discussions.
+
 Native development uses `master` as its mainline. Create feature branches from `master` and merge them back through pull requests; pushing code and publishing an official release are separate steps.
 
 Nomo is licensed under [AGPL-3.0-or-later](./LICENSE). Lucide icons retain their [ISC license](./src-gpui/assets/icons/LICENSE); other components retain their own licenses. Thanks to GPUI, pulldown-cmark, latex-rust, merman, resvg, and the projects behind them.
