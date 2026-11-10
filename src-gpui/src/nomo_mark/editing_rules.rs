@@ -217,13 +217,24 @@ pub(super) fn triple_selection(parsed: &ParsedWindow, at: usize) -> Range<usize>
     if let Some(node) = parsed.nodes.iter().filter(|n| n.source.start <= at && at < n.source.end
         && matches!(n.kind, "paragraph" | "heading" | "code" | "table" | "image" | "html")).min_by_key(|n| n.source.len()) {
         if matches!(node.kind, "paragraph" | "heading") {
-            let spans = parsed.events.iter().filter(|(e, r)| node.source.start <= r.start && r.end <= node.source.end
-                && matches!(e, pulldown_cmark::Event::Text(_) | pulldown_cmark::Event::Code(_) | pulldown_cmark::Event::InlineMath(_))).map(|(_, r)| r);
-            let mut content: Option<Range<usize>> = None;
-            for r in spans { if let Some(c) = &mut content { c.end = c.end.max(r.end); } else { content = Some(r.clone()); } }
-            if let Some(content) = content { return content; }
+            return text_block_selection(parsed, &node.source, false);
         }
         return node.source.clone();
     }
     commands::line_start(&parsed.source, at)..parsed.source[at..].find('\n').map_or(parsed.source.len(), |p| at + p)
+}
+
+pub(super) fn text_block_selection(
+    parsed: &ParsedWindow, source: &Range<usize>, include_inline_objects: bool,
+) -> Range<usize> {
+    use pulldown_cmark::{Event, Tag};
+    let mut spans = parsed.events.iter().filter_map(|(event, range)| {
+        if range.start < source.start || range.end > source.end { return None; }
+        let text = matches!(event, Event::Text(_) | Event::Code(_) | Event::InlineMath(_));
+        let object = include_inline_objects && matches!(event,
+            Event::Start(Tag::Image { .. }) | Event::FootnoteReference(_) | Event::InlineHtml(_));
+        (text || object).then_some(range)
+    });
+    let Some(first) = spans.next() else { return source.clone(); };
+    first.start..spans.fold(first.end, |end, range| end.max(range.end))
 }

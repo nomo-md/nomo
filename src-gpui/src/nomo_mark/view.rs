@@ -411,6 +411,7 @@ impl NomoMark {
             cx.emit(ControlEvent::SelectionChanged {
                 identity: self.host.parsed.identity.clone(),
                 selection: self.host.selection,
+                reveal: true,
             });
         }
         cx.notify();
@@ -652,6 +653,9 @@ impl NomoMark {
             .min(self.host.parsed.source.len() as u64) as usize
     }
     pub fn select(&mut self, selection: DocumentSelection, cx: &mut Context<Self>) {
+        self.select_with_reveal(selection, true, cx);
+    }
+    fn select_with_reveal(&mut self, selection: DocumentSelection, reveal: bool, cx: &mut Context<Self>) {
         self.upstream_caret = None;
         self.context_menu = None;
         self.context_form = None;
@@ -669,6 +673,7 @@ impl NomoMark {
         cx.emit(ControlEvent::SelectionChanged {
             identity: self.host.parsed.identity.clone(),
             selection,
+            reveal,
         });
         cx.notify();
     }
@@ -1494,6 +1499,42 @@ impl NomoMark {
     }
     pub(crate) fn content_bounds(&self) -> Option<Bounds<Pixels>> {
         (self.layout_key.as_ref()?.0.identity == self.host.parsed.identity).then_some(self.bounds).flatten()
+    }
+    /// 严格命中当前窗口的正文几何，段间空白不吸附到最近段落。
+    pub(crate) fn paragraph_at_y(&self, y: Pixels) -> Option<(Range<usize>, Range<Pixels>)> {
+        let parsed = &self.host.parsed;
+        if self.effective_mode() != ViewMode::Semantic || self.layout_key.as_ref()?.1 != ViewMode::Semantic
+            || !matches!(self.host.presentation, Presentation::Editable | Presentation::ReadOnly)
+            || !parsed.context.ancestors.is_empty()
+        {
+            return None;
+        }
+        let origin = self.content_bounds()?.top();
+        let visible = self.visible_bounds?;
+        if !(visible.top()..visible.bottom()).contains(&y) { return None; }
+        let local_y = f32::from(y - origin);
+        self.layout.as_ref()?.items.iter().find_map(|item| {
+            let DisplayItem::Text { x, y: top, layout, map } = item else { return None; };
+            let bottom = *top + layout.height();
+            // 折叠块正文可能在片段解析中没有父节点，仍可通过实际缩进排除。
+            if *x != 0.0 || !(*top..bottom).contains(&local_y) || layout.max_line_width() <= 0.0 { return None; }
+            let at = map.first()?.source;
+            let node = parsed.nodes.iter().find(|node| node.parent.is_none()
+                && matches!(node.kind, "paragraph" | "heading") && node.source.contains(&at))?;
+            Some((node.source.clone(), (origin + px(*top))..(origin + px(bottom))))
+        })
+    }
+    pub(crate) fn select_paragraph(&mut self, source: Range<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let parsed = &self.host.parsed;
+        let range = super::editing_rules::text_block_selection(parsed, &source, true);
+        let end = range.start + parsed.source[range.clone()].trim_end_matches(['\r', '\n']).len();
+        if range.start == end { return; }
+        let base = parsed.identity.from_byte;
+        window.focus(&self.focus, cx);
+        self.select_with_reveal(
+            DocumentSelection { anchor_byte: base + range.start as u64, head_byte: base + end as u64 }, false, cx,
+        );
+        self.preferred_x = None;
     }
     fn visit_visible_links(&self, visit: impl FnMut(Bounds<Pixels>, &str)) {
         if self.auxiliary_input || !matches!(self.host.presentation, Presentation::Editable | Presentation::ReadOnly) { return; }

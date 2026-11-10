@@ -778,7 +778,7 @@ impl DocumentHost {
             };
             if !self.promote(&source,cx) { return; }
             source.update(cx,|view,cx| view.restore_session_selection(DocumentSelection::caret(end),cx));
-            self.selection_changed(cx);
+            self.selection_changed(true, cx);
             self.focus_pending=true;
         }
         self.position_outline_heading(byte,revision,loaded.is_some(),cx);
@@ -798,11 +798,15 @@ impl DocumentHost {
         self.schedule_pane(pane, 16, cx);
         cx.notify();
     }
+    fn paper_input_ready(&self, pane: usize, cx: &gpui::App) -> bool {
+        !self.hidden && !self.closed && !self.navigating && !self.saving && !self.close_prompt
+            && self.panes.get(pane).is_some_and(|pane| !pane.stale && pane.load_error.is_none())
+            && !self.control.read(cx).host.interaction.protected()
+    }
+
     fn paper_mouse_down(&mut self, pane: usize, event: &gpui::MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if event.modifiers.shift || event.modifiers.control || event.modifiers.platform || event.modifiers.alt
-            || self.hidden || self.closed || self.navigating || self.saving || self.close_prompt
-            || self.panes[pane].stale || self.panes[pane].load_error.is_some()
-            || self.control.read(cx).host.interaction.protected()
+            || !self.paper_input_ready(pane, cx)
         { return; }
         let viewport = &self.panes[pane].viewport;
         let candidate = viewport.mounts.iter().find_map(|mount| {
@@ -832,6 +836,91 @@ impl DocumentHost {
             }
         }
     }
+
+    fn paragraph_gutter_target(
+        &self, pane: usize, id: u64, view: &Entity<NomoMark>, y: gpui::Pixels, cx: &gpui::App,
+    ) -> Option<(std::ops::Range<usize>, std::ops::Range<gpui::Pixels>)> {
+        let pane_state = self.panes.get(pane)?;
+        if pane_state.id != id || pane_state.scrollbar_drag.is_some() || self.split_dragging
+            || !self.paper_input_ready(pane, cx)
+        {
+            return None;
+        }
+        let target = view.read(cx);
+        if *view != self.control && (pane_state.viewport.dirty
+            || target.host.parsed.identity.revision != self.status().revision
+            || self.control.read(cx).prepare_unmount().is_err()) {
+            return None;
+        }
+        target.paragraph_at_y(y)
+    }
+
+    pub(super) fn paragraph_gutter(&self, pane: usize, view: &Entity<NomoMark>, cx: &Context<Self>) -> impl IntoElement {
+        let id = self.panes[pane].id;
+        let scroll = self.panes[pane].scroll.clone();
+        let zoom = cx.global::<Settings>().zoom;
+        let owner = cx.entity().downgrade();
+        let view = view.downgrade();
+        gpui::canvas(
+            move |bounds, window, _| {
+                let strip = bounds.intersect(&scroll.bounds()).intersect(&window.content_mask().bounds);
+                (!strip.is_empty() && strip.size.width >= px(10.0 * zoom))
+                    .then(|| window.insert_hitbox(strip, gpui::HitboxBehavior::Normal))
+            },
+            move |_, strip, window, cx| {
+                let Some(strip) = strip else { return; };
+                let position = window.mouse_position();
+                let hovered = window.is_window_hovered() && window.is_window_active()
+                    && strip.contains(&position) && strip.is_hovered(window)
+                    && !window.modifiers().modified() && !cx.has_active_drag() && !window.has_active_prompt();
+                if hovered && let Some(view) = view.upgrade()
+                    && let Ok(Some((_, band))) = owner.read_with(cx, |host, cx| {
+                        host.paragraph_gutter_target(pane, id, &view, position.y, cx)
+                    })
+                {
+                    let top = band.start.max(strip.top());
+                    let bottom = band.end.min(strip.bottom());
+                    let height = (bottom - top - px(4.0 * zoom)).min(px(16.0 * zoom));
+                    if height > px(0.0) {
+                        let y = (position.y - height / 2.0).clamp(top, bottom - height);
+                        let marker = gpui::Bounds::new(
+                            gpui::point(strip.right() - px(4.0 * zoom), y), gpui::size(px(2.0 * zoom), height),
+                        );
+                        crate::layout::paint_box(marker, cx.global::<Theme>().accent, zoom, None, window);
+                        window.set_cursor_style(gpui::CursorStyle::PointingHand, &strip);
+                    }
+                }
+                let repaint = window.current_view();
+                let hover_strip = strip.clone();
+                window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, window, cx| {
+                    if phase != gpui::DispatchPhase::Capture { return; }
+                    let over = hover_strip.contains(&event.position) && hover_strip.is_hovered(window)
+                        && event.pressed_button.is_none() && !event.modifiers.modified()
+                        && window.is_window_active() && window.is_window_hovered()
+                        && !window.has_active_prompt() && !cx.has_active_drag();
+                    if over != hovered || over && event.position.y != position.y { cx.notify(repaint); }
+                });
+                window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, window, cx| {
+                    if phase != gpui::DispatchPhase::Bubble || event.button != gpui::MouseButton::Left
+                        || event.modifiers.modified() || !strip.contains(&event.position) || !strip.is_hovered(window)
+                        || window.has_active_prompt() || cx.has_active_drag()
+                    { return; }
+                    let Some(view) = view.upgrade() else { return; };
+                    let _ = owner.update(cx, |host, cx| {
+                        // 单击按最新排版重新命中，滚动和片段替换不会沿用悬停的字节坐标。
+                        let Some((source, _)) = host.paragraph_gutter_target(pane, id, &view, event.position.y, cx) else {
+                            return;
+                        };
+                        if host.promote(&view, cx) {
+                            view.update(cx, |view, cx| view.select_paragraph(source, window, cx));
+                            cx.stop_propagation();
+                        }
+                    });
+                });
+            },
+        ).absolute().top_0().bottom_0().left(px(-24.0 * zoom)).w(px(20.0 * zoom))
+    }
+
     fn drag_pane_scrollbar(&mut self, pane:usize, y:gpui::Pixels, track:gpui::Bounds<gpui::Pixels>, thumb_height:f32, cx:&mut Context<Self>) {
         let Some(grab) = self.panes[pane].scrollbar_drag else { return; };
         let travel = f32::from(track.size.height) - thumb_height;

@@ -537,7 +537,7 @@ impl DocumentHost {
     }
     pub(super) fn pane_children(&self, pane: usize, cx:&Context<Self>) -> Vec<gpui::AnyElement> {
         if self.hidden { return Vec::new(); }
-        if !self.production || self.panes[pane].viewport.groups.is_empty() { return vec![self.pane_mount(self.panes[pane].control.clone(),cx)]; }
+        if !self.production || self.panes[pane].viewport.groups.is_empty() { return vec![self.pane_mount(pane,self.panes[pane].control.clone(),cx)]; }
         let mut children=Vec::new();
         let mut ready:Vec<(usize,u8,Entity<NomoMark>)>=Vec::new();
         for mount in &self.panes[pane].viewport.mounts {
@@ -554,7 +554,7 @@ impl DocumentHost {
                 if previous.1<priority {*previous=(index,priority,mount.view.clone());}
             } else {ready.push((index,priority,mount.view.clone()));}
         }
-        let mut mounts:Vec<_>=ready.into_iter().map(|(index,_,view)|(index,self.pane_mount(view,cx))).collect();
+        let mut mounts:Vec<_>=ready.into_iter().map(|(index,_,view)|(index,self.pane_mount(pane,view,cx))).collect();
         for (&from,message) in &self.panes[pane].viewport.failed {
             let Ok(index)=self.panes[pane].viewport.groups.binary_search_by_key(&from,|group|group.from) else {continue;};
             let id=self.panes[pane].id;
@@ -586,9 +586,10 @@ impl DocumentHost {
         if total>bottom {children.push(div().h(px(total-bottom)).flex_shrink_0().into_any_element());}
         children
     }
-    fn pane_mount(&self, view:Entity<NomoMark>, cx:&Context<Self>) -> gpui::AnyElement {
+    fn pane_mount(&self, pane:usize, view:Entity<NomoMark>, cx:&Context<Self>) -> gpui::AnyElement {
         // 高度由子控件本帧测量决定，不能让上一帧组高度阻止段落收缩。
-        div().w_full().min_w_0().flex_shrink_0().child(view.clone()).capture_any_mouse_down(cx.listener(move |host,event:&gpui::MouseDownEvent,window,cx| {
+        let gutter = (view.read(cx).effective_mode() == ViewMode::Semantic).then(|| self.paragraph_gutter(pane, &view, cx));
+        div().relative().w_full().min_w_0().flex_shrink_0().child(view.clone()).children(gutter).capture_any_mouse_down(cx.listener(move |host,event:&gpui::MouseDownEvent,window,cx| {
             if matches!(event.button, gpui::MouseButton::Left | gpui::MouseButton::Right) && !host.promote(&view,cx) {
                 window.focus(&host.control.focus_handle(cx), cx);cx.stop_propagation();
             }

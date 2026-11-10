@@ -81,7 +81,7 @@ impl DocumentHost {
         self.message = format!("原版窗口会话 · 索引代数 {}", loaded.index.index_generation);
         self.reset_viewport(cx);
         self.document_changed(cx);
-        self.selection_changed(cx);
+        self.selection_changed(true, cx);
         Ok(())
     }
     pub(super) fn action_failed(&mut self, error: ControlError, cx: &mut Context<Self>) {

@@ -195,7 +195,7 @@ impl DocumentHost {
                 if (self.panes[self.active_pane].reveal_selection || self.control.read(cx).quick_insert.is_some()) && source == self.control && stamp.identity == source.read(cx).host.parsed.identity { cx.notify(); }
                 return;
             }
-            ControlEvent::SelectionChanged { .. } => self.selection_changed(cx),
+            ControlEvent::SelectionChanged { reveal, .. } => self.selection_changed(*reveal, cx),
             ControlEvent::ResourceUsage { .. } => {
                 if !self.closed { source.read(cx).retain_resources(&mut self.retained_resources, cx); }
                 self.update_resident_cost(cx); self.schedule_viewport(16,cx);
@@ -443,8 +443,8 @@ impl DocumentHost {
             });
         }));
     }
-    pub(super) fn selection_changed(&mut self, cx:&mut Context<Self>) {
-        self.panes[self.active_pane].reveal_selection=true;
+    pub(super) fn selection_changed(&mut self, reveal: bool, cx:&mut Context<Self>) {
+        self.panes[self.active_pane].reveal_selection=reveal;
         self.sync_selection(cx);
         self.refresh_toolbar_marks(cx);
         self.toc_selection_changed(cx);

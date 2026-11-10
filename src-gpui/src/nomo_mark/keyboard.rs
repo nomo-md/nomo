@@ -28,7 +28,7 @@ impl NomoMark {
         };
         // 恢复只校正本视图；真实导航才同步全局锚点，避免把模式/历史恢复伪装成用户移动。
         self.host.selection = selection;
-        if navigation { cx.emit(ControlEvent::SelectionChanged { identity: identity.clone(), selection }); }
+        if navigation { cx.emit(ControlEvent::SelectionChanged { identity: identity.clone(), selection, reveal: true }); }
         cx.notify();
     }
 

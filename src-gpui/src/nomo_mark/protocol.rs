@@ -227,6 +227,7 @@ pub enum ControlEvent {
     SelectionChanged {
         identity: WindowIdentity,
         selection: DocumentSelection,
+        reveal: bool,
     },
     Navigate {
         identity: WindowIdentity,
