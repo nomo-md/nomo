@@ -4,6 +4,8 @@ pub(crate) mod dialogs;
 pub mod editor_popovers;
 pub mod emoji_picker;
 pub mod file_tree;
+pub(crate) mod path_drag;
+pub(crate) mod tree_drag;
 pub(crate) mod home;
 pub mod icon_assets;
 pub mod motion;

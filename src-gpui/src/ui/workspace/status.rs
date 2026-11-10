@@ -1,6 +1,10 @@
-//! 原版右下角缩放与统计；仅保存浮层交互，不持有文档、正文或统计任务。
+//! 右下角缩放、统计、格式检查与编辑锁；仅保存交互状态，文档锁由会话持有。
 use super::*;
-use crate::ui::{components::status_slider, popup::status_popup, toolbar_i18n::ToolbarLocale};
+use crate::ui::{
+    components::{STATUS_SLIDER_THUMB_RADIUS, status_slider},
+    popup::status_popup,
+    toolbar_i18n::ToolbarLocale,
+};
 use gpui::{BoxShadow, Bounds, Div, EntityId, KeyDownEvent, Pixels, Stateful, point, relative, rgba};
 #[path = "markdown_lint.rs"]
 mod markdown_lint;
@@ -19,6 +23,7 @@ pub(super) struct StatusUi {
     locale: &'static str,
     anchors: [Rc<Cell<Option<Bounds<Pixels>>>>; 3],
     triggers: [FocusHandle; 3],
+    edit_lock_focus: FocusHandle,
     focus: FocusHandle,
     hover: [bool; 3],
     motion: [ScalarMotion; 3],
@@ -42,7 +47,8 @@ impl StatusUi {
         Self {
             open: None, opened: Instant::now(), generation: 0, document: None, locale: "",
             anchors: std::array::from_fn(|_| Rc::new(Cell::new(None))),
-            triggers: std::array::from_fn(|_| cx.focus_handle()), focus: cx.focus_handle(),
+            triggers: std::array::from_fn(|_| cx.focus_handle()), edit_lock_focus: cx.focus_handle(),
+            focus: cx.focus_handle(),
             hover: [false; 3], motion: [ScalarMotion::default(); 3],
             metric_hover: [false; 4], metric_motion: [ScalarMotion::default(); 4],
             step_hover: [false; 2], step_motion: [ScalarMotion::default(); 2],
@@ -181,18 +187,61 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(super) fn toggle_editing_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(document) = self.document() else { return; };
+        let locked = !document.read(cx).editing_locked();
+        if locked {
+            let target = document.downgrade();
+            if !self.prepare_document_transition(&document, false, window, cx, move |workspace, window, cx| {
+                if let Some(document) = target.upgrade() {
+                    workspace.set_document_editing_locked(&document, true, window, cx);
+                }
+            }) {
+                return;
+            }
+        }
+        self.set_document_editing_locked(&document, locked, window, cx);
+    }
+
+    fn set_document_editing_locked(&mut self, document: &Entity<DocumentHost>, locked: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.document().as_ref() != Some(document) { return; }
+        if let Err(error) = document.update(cx, |host, cx| host.set_editing_locked(locked, cx)) {
+            self.failure_notice = Some(ToolbarLocale::current(cx).error(&error).into());
+            cx.notify();
+            return;
+        }
+        self.close_status(cx);
+        if locked {
+            self.popover = None;
+            self.toolbar_popup = None;
+            self.cancel_outline_drag(cx);
+            if let Some(search) = &mut self.search {
+                search.show_replace = false;
+            }
+        }
+        window.focus(&document.focus_handle(cx), cx);
+        cx.notify();
+    }
+
     pub(super) fn render_status_controls(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if let Some(document) = self.document() { document.update(cx, |host, cx| { host.sync_stats_visibility(cx); host.sync_lint(cx); }); }
-        let document = self.document().map(|doc| doc.entity_id());
-        let stats_visible = cx.global::<Settings>().stats_visible;
-        let lint_visible = cx.global::<Settings>().bool("markdownLintEnabled");
-        let visible = document.is_some() && (stats_visible || lint_visible);
+        let doc = self.document();
+        if let Some(document) = &doc { document.update(cx, |host, cx| { host.sync_stats_visibility(cx); host.sync_lint(cx); }); }
+        let document = doc.as_ref().map(|doc| doc.entity_id());
+        let settings = cx.global::<Settings>();
+        let zoom_visible = settings.zoom_control_visible;
+        let stats_visible = settings.stats_visible;
+        let lint_visible = settings.lint_indicator_visible;
+        let edit_lock_visible = settings.edit_lock_button_visible;
+        let panels = [zoom_visible, stats_visible, lint_visible];
         let locale = ToolbarLocale::current(cx);
         let language = locale.text("status_stats");
-        let panel_hidden = match self.status_ui.open { Some(Panel::Lint) => !lint_visible, Some(_) => !stats_visible, None => false };
-        if !visible || panel_hidden || document != self.status_ui.document || language != self.status_ui.locale {
-            let focused = self.status_ui.focus.contains_focused(window, cx)
-                || self.status_ui.triggers.iter().any(|focus| focus.contains_focused(window, cx));
+        let context_changed = document != self.status_ui.document || language != self.status_ui.locale;
+        let panel_hidden = self.status_ui.open.is_some_and(|panel| !panels[panel.index()]);
+        let dismiss_panel = context_changed || panel_hidden;
+        let focus_lost = (dismiss_panel && self.status_ui.focus.contains_focused(window, cx))
+            || self.status_ui.triggers.iter().zip(panels).any(|(focus, visible)| (context_changed || !visible) && focus.is_focused(window))
+            || ((!edit_lock_visible || document.is_none()) && self.status_ui.edit_lock_focus.is_focused(window));
+        if dismiss_panel {
             self.close_status(cx);
             self.status_ui.document = document;
             self.status_ui.locale = language;
@@ -202,26 +251,47 @@ impl Workspace {
             self.status_ui.pulse = None;
             self.status_ui.stats = StatsTransition::default();
             for anchor in &self.status_ui.anchors { anchor.set(None); }
-            if focused {
-                if let Some(document) = self.document() { window.focus(&document.focus_handle(cx), cx); }
-                else { window.focus(&self.focus, cx); }
+        }
+        if focus_lost {
+            if let Some(document) = &doc { window.focus(&document.focus_handle(cx), cx); }
+            else { window.focus(&self.focus, cx); }
+        }
+        let doc = doc?;
+        let reduced = self.explorer.reduce_motion;
+        for (index, visible) in panels.into_iter().enumerate() {
+            if visible {
+                let active = self.status_ui.hover[index] || self.status_ui.open.is_some_and(|panel| panel.index() == index);
+                self.status_ui.motion[index].set(active, reduced, Duration::from_millis(140));
+            } else {
+                self.status_ui.anchors[index].set(None);
+                self.status_ui.hover[index] = false;
+                self.status_ui.motion[index].reset();
             }
         }
-        if !visible { return None; }
+        if !zoom_visible {
+            self.status_ui.last_zoom = None;
+            self.status_ui.pulse = None;
+        }
+        if !stats_visible { self.status_ui.stats = StatsTransition::default(); }
+        let edit_lock = edit_lock_visible.then(|| self.edit_lock_button(doc.read(cx).editing_locked(), theme, cx));
+        let controls = div().absolute().right(px(16.0)).bottom(px(14.0)).flex().items_center().gap(px(8.0));
+        if !zoom_visible && !stats_visible && !lint_visible {
+            return edit_lock.map(|button| gpui::deferred(controls.child(button)).with_priority(3).into_any_element());
+        }
         let settings = cx.global::<Settings>();
         let percent = (settings.zoom * 100.0).round() as i64;
         let metric = METRICS.iter().position(|m| m.0 == settings.stats_metric).unwrap_or(1);
-        let doc = self.document()?;
-        let host = doc.read(cx);
-        let metric_value = |stats: &crate::text_document::DocumentStats| [stats.lines, stats.words, stats.visible_chars, stats.chars][metric];
-        let value = host.stats().map(metric_value);
-        let label = format!("{}{}", value.map(|value| value.to_string()).unwrap_or_else(|| "—".into()), locale.text(METRICS[metric].3));
-        let reduced = self.explorer.reduce_motion;
-        self.status_ui.stats.update(metric, value, host.full_stats().map(metric_value), host.stats_are_selected(), reduced);
-        if self.status_ui.last_zoom.is_some_and(|previous| previous != percent) {
+        let stats_label = stats_visible.then(|| {
+            let host = doc.read(cx);
+            let metric_value = |stats: &crate::text_document::DocumentStats| [stats.lines, stats.words, stats.visible_chars, stats.chars][metric];
+            let value = host.stats().map(metric_value);
+            self.status_ui.stats.update(metric, value, host.full_stats().map(metric_value), host.stats_are_selected(), reduced);
+            format!("{}{}", value.map(|value| value.to_string()).unwrap_or_else(|| "—".into()), locale.text(METRICS[metric].3))
+        });
+        if zoom_visible && self.status_ui.last_zoom.is_some_and(|previous| previous != percent) {
             self.status_ui.pulse = Some(Instant::now());
         }
-        self.status_ui.last_zoom = Some(percent);
+        self.status_ui.last_zoom = zoom_visible.then_some(percent);
         let mut scale = 1.0;
         if let Some(started) = self.status_ui.pulse {
             let progress = (started.elapsed().as_secs_f32() / if reduced { 0.08 } else { 0.12 }).min(1.0);
@@ -233,12 +303,8 @@ impl Workspace {
                 scale = 1.0 - amount + amount * eased;
             }
         }
-        for index in 0..3 {
-            let active = self.status_ui.hover[index] || self.status_ui.open.is_some_and(|panel| panel.index() == index);
-            self.status_ui.motion[index].set(active, reduced, Duration::from_millis(140));
-        }
         for index in 0..2 {
-            let enabled = if index == 0 { percent > 80 } else { percent < 160 };
+            let enabled = zoom_visible && if index == 0 { percent > 80 } else { percent < 160 };
             self.status_ui.step_motion[index].set(enabled && self.status_ui.step_hover[index], reduced, Duration::from_millis(120));
         }
         for index in 0..4 {
@@ -253,14 +319,38 @@ impl Workspace {
             || self.status_ui.pulse.is_some()
             || self.status_ui.stats.outgoing.is_some()
             || (!reduced && self.status_ui.open.is_some() && self.status_ui.opened.elapsed() < Duration::from_millis(140));
-        let controls = div().absolute().right(px(16.0)).bottom(px(14.0))
-            .flex().items_center().gap(px(8.0))
-            .children(animate.then(motion::theme_frame))
-            .when(stats_visible, |controls| controls
-                .child(self.status_trigger(Panel::Zoom, format!("{percent}%"), scale, theme, cx))
-                .child(self.status_trigger(Panel::Stats, label, 1.0, theme, cx)))
-            .when(lint_visible, |controls| controls.child(self.status_trigger(Panel::Lint, self.lint_label(cx), 1.0, theme, cx)));
+        let controls = controls.children(animate.then(motion::theme_frame))
+            .when(zoom_visible, |controls| controls.child(self.status_trigger(Panel::Zoom, format!("{percent}%"), scale, theme, cx)))
+            .children(stats_label.map(|label| self.status_trigger(Panel::Stats, label, 1.0, theme, cx)))
+            .when(lint_visible, |controls| controls.child(self.status_trigger(Panel::Lint, self.lint_label(cx), 1.0, theme, cx)))
+            .children(edit_lock);
         Some(gpui::deferred(controls).with_priority(3).into_any_element())
+    }
+
+    fn edit_lock_button(&self, locked: bool, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
+        let locale = ToolbarLocale::current(cx);
+        let title = locale.app_text(if locked { "documentLock.unlock" } else { "documentLock.lock" });
+        let shortcut = crate::ui::shortcuts::current("toggle-edit-lock", cx);
+        let icon = if locked { IconName::Lock } else { IconName::LockOpen };
+        small_icon_button("status-edit-lock", icon, locked, theme)
+            .size(px(28.0)).rounded(px(8.0)).border_1().border_color(theme.border.opacity(0.82))
+            .when(!locked, |button| button.bg(motion::color(theme.surface, theme.rail_bg, 0.06)))
+            .shadow(vec![shadow(theme, 0.0, false)])
+            .role(gpui::Role::Button).aria_label(title)
+            .track_focus(&self.status_ui.edit_lock_focus).tab_index(0)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .tooltip(tooltip(format!("{title} ({shortcut})")))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|workspace, _, window, cx| {
+                workspace.toggle_editing_lock(window, cx);
+                cx.stop_propagation();
+            }))
+            .on_key_down(cx.listener(|workspace, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    if !event.is_held { workspace.toggle_editing_lock(window, cx); }
+                    cx.stop_propagation();
+                }
+            }))
     }
 
     fn status_trigger(&self, panel: Panel, label: String, scale: f32, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -328,10 +418,15 @@ impl Workspace {
             .bg(motion::color(theme.surface, theme.rail_bg, 0.03))
             .shadow(vec![shadow(theme, 0.0, true)]).text_color(theme.fg).text_size(sp(13.0)).occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_down_out(cx.listener(|workspace, event: &gpui::MouseDownEvent, _, cx| {
+            .on_mouse_down_out(cx.listener(|workspace, event: &gpui::MouseDownEvent, window, cx| {
                 if !workspace.status_ui.dragging && !workspace.status_ui.anchors.iter()
                     .any(|anchor| anchor.get().is_some_and(|bounds| bounds.contains(&event.position))) {
-                    workspace.close_status(cx); cx.notify();
+                    let restore_focus = workspace.status_ui.focus.contains_focused(window, cx);
+                    workspace.close_status(cx);
+                    if restore_focus && let Some(document) = workspace.document() {
+                        window.focus(&document.focus_handle(cx), cx);
+                    }
+                    cx.notify();
                 }
             }))
             .on_key_down(cx.listener(move |workspace, event: &KeyDownEvent, window, cx| {
@@ -361,6 +456,27 @@ impl Workspace {
             }));
         if kind == Panel::Zoom {
             let value = (cx.global::<Settings>().zoom * 100.0).round() as i64;
+            let slider_width = 154.0 * scale;
+            let slider_fraction = |percent: i64| (percent - 80) as f32 / 80.0;
+            let track_width = (slider_width - 2.0 * STATUS_SLIDER_THUMB_RADIUS).max(1.0);
+            let reset_center = STATUS_SLIDER_THUMB_RADIUS + track_width * slider_fraction(100);
+            let reset_width = 44.0 * scale;
+            let reset_title = format!("{} (100%)", locale.app_text("menu.zoomReset"));
+            let reset_marker = div().id("status-zoom-reset")
+                .ml(px(reset_center - reset_width / 2.0))
+                .w(px(reset_width)).h(sp(22.0))
+                .flex().items_center().justify_center()
+                .rounded(sp(5.0)).border_1().border_color(theme.border.opacity(0.7))
+                .text_size(sp(11.0)).font_weight(FontWeight::MEDIUM).text_color(theme.heading)
+                .role(gpui::Role::Button).aria_label(reset_title.clone())
+                .tab_index(0).cursor_pointer().tooltip(tooltip(reset_title))
+                .hover(|style| style.bg(theme.accent.opacity(0.10)))
+                .focus_visible(|style| style.border_color(theme.accent))
+                .child("100%")
+                .on_click(cx.listener(|workspace, _, _, cx| {
+                    workspace.zoom(0.0, cx);
+                    cx.stop_propagation();
+                }));
             let weak = cx.entity().downgrade();
             let on_change = Rc::new(move |fraction: f32, dragging: bool, _: &mut Window, cx: &mut App| {
                 let percent = 80 + (fraction * 16.0).round() as i64 * 5;
@@ -377,16 +493,17 @@ impl Workspace {
                 .child(div().text_size(sp(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme.heading)
                     .font_family(crate::theme::font_for(crate::theme::Family::Mono, true, false).family).child(format!("{value}%")))
                 .child(self.status_zoom_step(5, value < 160, scale, theme, cx)))
-                .child(div().p(sp(12.0)).flex_none()
-                    .child(status_slider("status-zoom-slider", (value - 80) as f32 / 80.0,
-                        self.status_ui.dragging, 154.0 * scale, theme, on_change, self.status_ui.slider_motion.value())
+                .child(div().p(sp(12.0)).flex_none().flex().flex_col().items_start().gap(sp(2.0))
+                    .child(status_slider("status-zoom-slider", slider_fraction(value),
+                        self.status_ui.dragging, slider_width, theme, on_change, self.status_ui.slider_motion.value())
                         .role(gpui::Role::Slider).aria_label(locale.text("status_zoom"))
                         .aria_numeric_value(value as f64).aria_min_numeric_value(80.0).aria_max_numeric_value(160.0).aria_numeric_value_step(5.0)
                         .tab_index(0).tooltip(tooltip(locale.text("status_zoom")))
                         .focus_visible(|style| style.bg(theme.accent.opacity(0.07)))
                         .on_hover(cx.listener(|workspace, hovered, _, cx| {
                             workspace.status_ui.slider_hover = *hovered; cx.notify();
-                        }))));
+                        })))
+                    .child(reset_marker));
         } else {
             let document = self.document()?;
             let stats = document.read(cx).stats().cloned();

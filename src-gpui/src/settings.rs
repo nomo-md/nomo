@@ -58,13 +58,14 @@ pub fn default_value(key: &str) -> Value {
         "contentWidthPercent" => json!(60),
         "openDefaultBehavior" => json!("ask-every-time"),
         "filePreviewEnabled" => json!(true),
+        "openMarkdownReadOnly" => json!(false),
         "closeWindowBehavior" => json!("ask-every-time"),
         "externalFileChangeBehavior" => json!("reload-external"),
-        "sidebarHidden" => json!(false),
+        "homeSidebarHidden" | "sidebarHidden" => json!(false),
         "toolbarHidden" => json!(false),
         "outlineVisible" => json!(true),
         "outlinePanelPosition" => json!({"positioned": false}),
-        "writingStatsVisible" => json!(true),
+        "writingStatsVisible" | "zoomControlVisible" | "markdownLintIndicatorVisible" | "editLockButtonVisible" => json!(true),
         "writingStatsMetric" => json!("words"),
         "readingTimeVisible" => json!(false),
         "defaultCodeBlockLanguage" => json!("ts"),
@@ -105,12 +106,17 @@ pub struct Settings {
     /// 分栏时源码在左（`source-semantic`）。
     pub split_source_first: bool,
     pub show_outline: bool,
+    pub show_home_sidebar: bool,
     pub show_sidebar: bool,
     pub show_toolbar: bool,
     pub autosave: Option<Duration>,
     pub snapshot_before_save: bool,
     pub ctrl_wheel_zoom: bool,
+    pub zoom_control_visible: bool,
     pub stats_visible: bool,
+    pub markdown_lint_enabled: bool,
+    pub lint_indicator_visible: bool,
+    pub edit_lock_button_visible: bool,
     pub stats_metric: StatsMetric,
     pub reading_time: bool,
     pub outline_level: u8,
@@ -137,12 +143,17 @@ impl Default for Settings {
             default_mode: EditorMode::Semantic,
             split_source_first: false,
             show_outline: true,
+            show_home_sidebar: true,
             show_sidebar: true,
             show_toolbar: true,
             autosave: None,
             snapshot_before_save: true,
             ctrl_wheel_zoom: true,
+            zoom_control_visible: true,
             stats_visible: true,
+            markdown_lint_enabled: false,
+            lint_indicator_visible: false,
+            edit_lock_button_visible: true,
             stats_metric: StatsMetric::Words,
             reading_time: false,
             outline_level: 2,
@@ -171,6 +182,8 @@ impl Settings {
                 }
             }
         }
+        let legacy_zoom_visibility = settings.bool("writingStatsVisible");
+        settings.values.entry("zoomControlVisible".into()).or_insert(Value::Bool(legacy_zoom_visibility));
         settings.derive();
         settings
     }
@@ -241,7 +254,7 @@ impl Settings {
         settings.values.insert(key.to_string(), value.clone());
         settings.derive();
         if persist {
-            if let Err(error) = write_setting(key, &value) {
+            if let Err(error) = write_setting(key, &value, settings.zoom_control_visible) {
                 eprintln!("保存设置 {key} 失败：{error}");
             }
         }
@@ -289,12 +302,17 @@ impl Settings {
         };
         self.split_source_first = self.string("splitViewLayout") == "source-semantic";
         self.show_outline = self.bool("outlineVisible");
+        self.show_home_sidebar = !self.bool("homeSidebarHidden");
         self.show_sidebar = !self.bool("sidebarHidden");
         self.show_toolbar = !self.bool("toolbarHidden");
         self.autosave = self.bool("autoSaveEnabled").then(|| Duration::from_millis(self.number("autoSaveDelayMs").clamp(300.0, 60_000.0) as u64));
         self.snapshot_before_save = self.bool("createSnapshotBeforeSave");
         self.ctrl_wheel_zoom = self.bool("ctrlWheelZoomEnabled");
+        self.zoom_control_visible = self.bool("zoomControlVisible");
         self.stats_visible = self.bool("writingStatsVisible");
+        self.markdown_lint_enabled = self.bool("markdownLintEnabled");
+        self.lint_indicator_visible = self.markdown_lint_enabled && self.bool("markdownLintIndicatorVisible");
+        self.edit_lock_button_visible = self.bool("editLockButtonVisible");
         self.stats_metric = match self.string("writingStatsMetric").as_str() {
             "lines" => StatsMetric::Lines,
             "visibleChars" => StatsMetric::VisibleChars,
@@ -338,7 +356,7 @@ fn read_config() -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
-fn write_setting(key: &str, value: &Value) -> std::io::Result<()> {
+fn write_setting(key: &str, value: &Value, zoom_control_visible: bool) -> std::io::Result<()> {
     let path = config_path().ok_or_else(|| std::io::Error::other("无法确定配置目录"))?;
     let mut config = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str::<Value>(&text).map_err(|error| std::io::Error::other(format!("配置文件格式错误，未写入：{error}")))?,
@@ -346,7 +364,7 @@ fn write_setting(key: &str, value: &Value) -> std::io::Result<()> {
         Err(error) => return Err(error),
     };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
-    let record = json!({ "key": key, "value_json": value.to_string(), "updated_at": now });
+    let record = |key, value: &Value| json!({ "key": key, "value_json": value.to_string(), "updated_at": now });
     let root = config.as_object_mut().ok_or_else(|| std::io::Error::other("配置根节点不是对象"))?;
     let app = root.entry("app").or_insert_with(|| json!({ "settings": {} }));
     let settings = app
@@ -354,7 +372,11 @@ fn write_setting(key: &str, value: &Value) -> std::io::Result<()> {
         .and_then(|app| Some(app.entry("settings").or_insert_with(|| json!({}))))
         .and_then(Value::as_object_mut)
         .ok_or_else(|| std::io::Error::other("配置 app.settings 不是对象"))?;
-    settings.insert(key.to_string(), record);
+    if key == "writingStatsVisible" {
+        // 旧配置共用统计开关。第一次改统计时同时保存此前的缩放显隐，避免重启后重新绑定。
+        settings.entry("zoomControlVisible").or_insert_with(|| record("zoomControlVisible", &json!(zoom_control_visible)));
+    }
+    settings.insert(key.to_string(), record(key, value));
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

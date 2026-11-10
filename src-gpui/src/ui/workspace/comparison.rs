@@ -180,6 +180,7 @@ impl Workspace {
             || self.close_prompt
             || self.comparison.closing.is_some()
             || self.closing_window
+            || self.folder_open_pending()
             || self.application_dialogs.busy
             || self.mini.active()
     }
@@ -431,7 +432,7 @@ impl Workspace {
         self.activate_key(item.focused(), window, cx);
     }
 }
-fn markdown_path(path: &Path) -> bool {
+pub(super) fn markdown_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {

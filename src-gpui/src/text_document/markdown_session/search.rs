@@ -227,6 +227,7 @@ impl MarkdownDocumentSessionManager {
         let (mut batch, history_file) = {
             let session = lock(&handle)?;
             session.owner(&task.owner)?;
+            session.ensure_editable()?;
             if session.current.revision != task.query.base_revision {
                 return Err(TextDocumentError::revision_conflict(
                     task.query.base_revision,
@@ -416,6 +417,7 @@ impl MarkdownDocumentSessionManager {
                 }
                 return Ok(result.clone());
             }
+            session.ensure_editable()?;
         }
         let task = self.search.get(owner, task_id)?;
         if task.query.document_id != document_id {
@@ -460,6 +462,7 @@ impl MarkdownDocumentSessionManager {
             check_cancel(&task.cancel)?;
             let mut session = lock(&handle)?;
             session.owner(owner)?;
+            session.ensure_editable()?;
             if session.current.revision != task.query.base_revision {
                 return Err(TextDocumentError::revision_conflict(
                     task.query.base_revision,

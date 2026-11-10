@@ -811,7 +811,7 @@ impl Workspace {
                     let queued = std::mem::take(&mut self.open_requests.pending);
                     let _ = target.update(cx, |w, win, cx| {
                         for r in queued {
-                            w.enqueue_open(r.path, r.preview, r.anchor, r.choose_window, cx);
+                            w.enqueue_open_request(r, cx);
                         }
                         w.drain_open_requests(win, cx);
                     });

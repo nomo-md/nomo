@@ -6,10 +6,12 @@ mod outline_move;
 pub(crate) use outline_move::{OutlineMove, OutlinePlacement};
 mod toc;
 mod rename;
+mod delete;
 mod external;
 mod recovery;
 mod legacy;
 pub(crate) use external::ExternalChange;
+pub(crate) use delete::{DeleteDocument, DeleteReport};
 pub(crate) use recovery::{RecoveryCandidate, SessionLease};
 #[cfg(test)]
 mod templates;
@@ -89,6 +91,8 @@ pub(crate) struct MarkdownStatus {
     pub(crate) revision: u64,
     pub(crate) byte_length: u64,
     pub(crate) dirty: bool,
+    #[serde(skip)]
+    pub(crate) editing_locked: bool,
     pub(crate) can_undo: bool,
     pub(crate) can_redo: bool,
     pub(crate) selection: Option<MarkdownSelection>,
@@ -157,6 +161,7 @@ struct Session {
     saved: DocumentSnapshot,
     history: DiskHistory,
     dirty: bool,
+    editing_locked: bool,
     ack: HashMap<String, ([u8; 32], MarkdownStatus)>,
     ack_order: VecDeque<String>,
     search_ack: VecDeque<(String, super::markdown_search::ReplaceResult)>,
@@ -215,6 +220,7 @@ impl Session {
             revision: self.manifest.revision,
             byte_length: self.current.len(),
             dirty: self.dirty,
+            editing_locked: self.editing_locked,
             can_undo: self.manifest.undo.is_some(),
             can_redo: self.manifest.redo.is_some(),
             selection: self.manifest.selection.clone(),
@@ -233,6 +239,12 @@ impl Session {
         }
         if self.owner != owner {
             return Err(error("document-owner-conflict", "文档已移交给另一个窗口"));
+        }
+        Ok(())
+    }
+    fn ensure_editable(&self) -> TextDocumentResult<()> {
+        if self.editing_locked {
+            return Err(error("document-read-only", "文档当前已锁定编辑"));
         }
         Ok(())
     }
@@ -324,23 +336,6 @@ impl MarkdownDocumentSessionManager {
             .get(document_id)
             .cloned()
             .ok_or_else(|| error("document-closed", "Markdown 会话不存在或已关闭"))
-    }
-    /// 文件树修改须与打开/保存路径操作串行，避免其他窗口正在使用的文档被移动或删除。
-    pub(crate) fn with_unopened_path<T>(
-        &self,
-        path: &std::path::Path,
-        operation: impl FnOnce() -> Result<T, String>,
-    ) -> Result<T, String> {
-        let _paths = lock(&self.path_operations).map_err(|error| error.message)?;
-        let target = fs::canonicalize(path).map_err(|error| format!("无法访问目标：{error}"))?;
-        let handles: Vec<_> = lock(&self.sessions).map_err(|error| error.message)?.values().cloned().collect();
-        for handle in handles {
-            let session = lock(&handle).map_err(|error| error.message)?;
-            if !session.closed && session.manifest.path.as_ref().is_some_and(|open| open == &target || open.starts_with(&target)) {
-                return Err("请先关闭该文件或目录内所有窗口中已打开的文档。".into());
-            }
-        }
-        operation()
     }
     pub(crate) fn open(
         &self,
@@ -453,6 +448,7 @@ impl MarkdownDocumentSessionManager {
             current: content.clone(),
             saved: content,
             dirty: false,
+            editing_locked: false,
             ack: HashMap::new(),
             ack_order: VecDeque::new(),
             search_ack: VecDeque::new(),
@@ -593,6 +589,7 @@ impl MarkdownDocumentSessionManager {
             saved,
             history,
             dirty,
+            editing_locked: false,
             ack: HashMap::new(),
             ack_order: VecDeque::new(),
             search_ack: VecDeque::new(),
@@ -621,6 +618,17 @@ impl MarkdownDocumentSessionManager {
         let session = lock(&session)?;
         session.owner(owner)?;
         Ok(session.status())
+    }
+    /// 手动编辑锁仅属于当前会话，与编辑事务共用同一把互斥锁。
+    pub(crate) fn set_editing_locked(&self, owner: &str, document_id: &str, locked: bool) -> TextDocumentResult<()> {
+        let handle = self.session(document_id)?;
+        let mut session = lock(&handle)?;
+        session.owner(owner)?;
+        session.editing_locked = locked;
+        if locked {
+            session.active_group = None;
+        }
+        Ok(())
     }
     pub(crate) async fn writing_stats(
         &self, owner: String, query: super::writing_stats::StatsQuery,
@@ -688,6 +696,7 @@ impl MarkdownDocumentSessionManager {
             }
             return Ok(result.clone());
         }
+        session.ensure_editable()?;
         if transaction.base_revision != session.current.revision {
             return Err(TextDocumentError::revision_conflict(
                 transaction.base_revision,
@@ -843,6 +852,7 @@ impl MarkdownDocumentSessionManager {
         let handle = self.session(document_id)?;
         let mut session = lock(&handle)?;
         session.owner(owner)?;
+        session.ensure_editable()?;
         if revision != session.current.revision {
             return Err(TextDocumentError::revision_conflict(
                 revision,

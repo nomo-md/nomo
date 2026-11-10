@@ -131,6 +131,7 @@ impl MarkdownDocumentSessionManager {
                 if old != &fingerprint { return Err(error("operation-conflict", "同一操作身份携带了不同内容")); }
                 return Ok(OutlineMoveResult { status: status.clone(), byte: status.selection.as_ref().map_or(0, |s| s.head_byte) });
             }
+            session.ensure_editable()?;
             if session.current.revision != request.identity.revision { return Err(TextDocumentError::revision_conflict(request.identity.revision, session.current.revision)); }
             session.current.clone()
         };
@@ -162,6 +163,7 @@ impl MarkdownDocumentSessionManager {
         patches.sort_by_key(|p| (p.from, p.to));
         if patches.windows(2).any(|w| w[0].to > w[1].from) || patches.iter().any(|p| p.from < source.from || p.to > source.to) { return Err(error("outline-invalid", "章节标题范围重叠。")); }
         let mut session = lock(&handle)?; session.owner(owner)?;
+        session.ensure_editable()?;
         if session.current.revision != request.identity.revision { return Err(TextDocumentError::revision_conflict(request.identity.revision, session.current.revision)); }
         if session.manifest.inline_templates.iter().any(|t| (t.from_byte < source.to && t.to_byte > source.from) || (t.from_byte < destination && destination < t.to_byte)) { return Err(error("outline-template", "章节或目标包含活动格式模板，请先完成编辑再移动。")); }
         let mut used = patches.len() * std::mem::size_of::<Patch>();

@@ -17,6 +17,7 @@ pub struct WindowHostAdapter {
     serial: u64,
     failure: Option<String>,
     readonly: bool,
+    editing_locked: bool,
     layout: Option<LayoutStamp>,
     last_ack: Option<String>,
 }
@@ -40,6 +41,7 @@ impl WindowHostAdapter {
             serial: 0,
             failure: None,
             readonly: false,
+            editing_locked: false,
             layout: None,
             last_ack: None,
         })
@@ -75,15 +77,25 @@ impl WindowHostAdapter {
     }
     pub fn set_readonly(&mut self, readonly: bool) {
         self.readonly = readonly;
-        if matches!(
-            self.presentation,
-            Presentation::Editable | Presentation::ReadOnly
-        ) {
-            self.presentation = if readonly {
-                Presentation::ReadOnly
-            } else {
-                Presentation::Editable
-            };
+        self.refresh_ready_presentation();
+    }
+    pub(crate) fn editing_locked(&self) -> bool {
+        self.editing_locked
+    }
+    pub(crate) fn set_editing_locked(&mut self, locked: bool) {
+        self.editing_locked = locked;
+        self.refresh_ready_presentation();
+    }
+    fn refresh_ready_presentation(&mut self) {
+        if matches!(self.presentation, Presentation::Editable | Presentation::ReadOnly) {
+            self.presentation = self.ready_presentation();
+        }
+    }
+    fn ready_presentation(&self) -> Presentation {
+        if self.readonly || self.editing_locked {
+            Presentation::ReadOnly
+        } else {
+            Presentation::Editable
         }
     }
     pub fn mark_layout_ready(
@@ -110,11 +122,7 @@ impl WindowHostAdapter {
             return Err(ControlError::InvalidRange);
         }
         self.layout = Some(stamp.clone());
-        self.presentation = if self.readonly {
-            Presentation::ReadOnly
-        } else {
-            Presentation::Editable
-        };
+        self.presentation = self.ready_presentation();
         Ok(ControlEvent::LayoutReady { stamp, height })
     }
     pub fn queue_edit(
@@ -295,7 +303,7 @@ impl WindowHostAdapter {
     }
     /// 目录补丁与用户输入共用队列；只更新当前窗口内的文本，其余位置仅映射坐标。
     pub(crate) fn queue_derived(&mut self, edits: Vec<SourceEdit>) -> Result<(), ControlError> {
-        if self.pending_count() != 0 || self.failure.is_some() || self.readonly
+        if self.pending_count() != 0 || self.failure.is_some() || self.readonly || self.editing_locked
             || self.interaction.protected()
             || !matches!(self.presentation, Presentation::Editable | Presentation::Suspended)
         {
@@ -416,11 +424,7 @@ impl WindowHostAdapter {
         self.failure = None;
         if self.presentation == Presentation::Failed {
             self.presentation = if self.layout.is_some() {
-                if self.readonly {
-                    Presentation::ReadOnly
-                } else {
-                    Presentation::Editable
-                }
+                self.ready_presentation()
             } else {
                 Presentation::Preparing
             };

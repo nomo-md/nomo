@@ -178,7 +178,9 @@ impl Workspace {
     pub(super) fn render_toolbar(&mut self, theme: &Theme, mode: EditorMode, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = cx.global::<Settings>().clone();
         let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
-        let marks = self.document().map_or(0, |document| document.read(cx).toolbar_marks());
+        let document = self.document();
+        let locked = document.as_ref().is_some_and(|document| document.read(cx).editing_locked());
+        let marks = document.map_or(0, |document| document.read(cx).toolbar_marks());
         type Action = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
         let tool = |id: &'static str, name: IconName, tip: &'static str, active: bool, action: Action, cx: &mut Context<Self>| {
             let key = if id == "outline" { if active { "outline_hide" } else { "outline_show" } } else { id };
@@ -222,7 +224,8 @@ impl Workspace {
             toolbar_button(item.id, item.icon, active, theme).relative().tooltip(tooltip(tip))
                 .children(item.anchor.map(|anchor| trigger_marker(self.toolbar_popup_anchors[anchor].clone())))
                 .children((active && item.anchor.is_some()).then(|| trigger_marker(self.toolbar_trigger_bounds.clone())))
-                .on_click(cx.listener(move |w, event: &ClickEvent, win, cx| (item.action)(w, event.position(), win, cx)))
+                .when(locked, |button| button.opacity(0.45).tab_index(-1).cursor(gpui::CursorStyle::OperationNotAllowed))
+                .when(!locked, |button| button.on_click(cx.listener(move |w, event: &ClickEvent, win, cx| (item.action)(w, event.position(), win, cx))))
                 .into_any_element()
         }).collect();
         let mode_segment = |id: &'static str, name: IconName, _label: &'static str, tip: &'static str, target: EditorMode, cx: &mut Context<Self>| {
@@ -306,7 +309,7 @@ impl Workspace {
                 .into_any_element(),
         ];
         if mode == EditorMode::Split {
-            right.push(tool("split-guide", IconName::ScanLine, "显示 / 隐藏分栏对齐线", self.split_guide_visible, |w, _, cx| { w.split_guide_visible = !w.split_guide_visible; cx.notify(); }, cx));
+            right.push(tool("split-guide", IconName::ScanLine, "显示 / 隐藏分栏对齐线", self.split_guide_visible, |w, _, cx| w.toggle_split_guide(cx), cx));
         }
         right.push(tool("outline", IconName::ListTree, "文档大纲 ⌘⌥O", self.outline_visible(cx), |w, _, cx| w.toggle_outline(cx), cx));
         right.push(tool("hide-toolbar", IconName::ChevronUp, "隐藏工具栏 ⌘⇧B", false, |w, _, cx| w.toggle_toolbar(cx), cx));
@@ -326,7 +329,8 @@ impl Workspace {
                         self.toolbar_popup.as_ref().is_some_and(|p| p.kind == ToolbarPopupKind::More), theme)
                         .relative().child(trigger_marker(self.toolbar_popup_anchors[5].clone()))
                         .tooltip(tooltip(locale.text("more_tools")))
-                        .on_click(cx.listener(|w, event: &ClickEvent, win, cx| w.open_toolbar_popup(ToolbarPopupKind::More, event.position(), win, cx)))
+                        .when(locked, |button| button.opacity(0.45).tab_index(-1).cursor(gpui::CursorStyle::OperationNotAllowed))
+                        .when(!locked, |button| button.on_click(cx.listener(|w, event: &ClickEvent, win, cx| w.open_toolbar_popup(ToolbarPopupKind::More, event.position(), win, cx))))
                 })))
             .child(div().flex().flex_none().items_center().gap(px(4.0))
                 .ml(px(gap))

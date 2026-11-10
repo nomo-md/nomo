@@ -67,6 +67,7 @@ pub struct DocumentHost {
     hidden: bool,
     close_prompt: bool,
     saving: bool,
+    deletion_pending: bool,
     production: bool,
     navigating: bool,
     attachment_open: Option<gpui::Task<()>>,
@@ -142,6 +143,7 @@ impl DocumentHost {
             hidden: false,
             close_prompt: false,
             saving: false,
+            deletion_pending: false,
             production,
             navigating: false,
             attachment_open: None,
@@ -166,6 +168,7 @@ impl DocumentHost {
             return;
         }
         if let ControlEvent::InsertImages { identity, selection, inputs } = event {
+            if self.editing_locked() { return; }
             if source.read(cx).host.parsed.identity != *identity || !self.promote(&source, cx) { return; }
             let mode = source.read(cx).effective_mode();
             self.quick.images = Some((EditTarget { identity: identity.clone(), selection: *selection, mode }, inputs.clone()));

@@ -24,11 +24,12 @@ impl DocumentHost {
         }
     }
 
-    pub(super) fn cancel_toc(&mut self) {
+    /// 返回是否有保存正在等待目录检查。
+    pub(super) fn cancel_toc(&mut self) -> bool {
         self.queries.toc.request.cancel();
         self.queries.toc.task = None;
         self.queries.toc.serial = self.queries.toc.serial.wrapping_add(1);
-        self.queries.toc.for_save = false;
+        std::mem::take(&mut self.queries.toc.for_save)
     }
 
     pub(super) fn toc_selection_changed(&mut self, cx: &mut Context<Self>) {
@@ -40,7 +41,7 @@ impl DocumentHost {
 
     /// 保存调用方先等待当前已确认修订的目录检查；失败时仍允许保存原文并提示。
     pub(crate) fn toc_ready_for_save(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.production || (self.queries.toc.checked_revision == Some(self.status().revision) && self.ready(cx).is_ok()) {
+        if self.editing_locked() || !self.production || (self.queries.toc.checked_revision == Some(self.status().revision) && self.ready(cx).is_ok()) {
             return true;
         }
         if self.queries.toc.for_save { return false; }
@@ -50,7 +51,7 @@ impl DocumentHost {
     }
 
     pub(super) fn schedule_toc(&mut self, delay_ms: u64, for_save: bool, cx: &mut Context<Self>) {
-        if !self.production || self.closed { return; }
+        if !self.production || self.closed || self.editing_locked() { return; }
         let revision = self.status().revision;
         if self.queries.toc.checked_revision == Some(revision) { return; }
         self.queries.toc.for_save |= for_save;

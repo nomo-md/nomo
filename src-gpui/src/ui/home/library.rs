@@ -3,6 +3,9 @@ use crate::ui::toolbar_i18n::UiMessage;
 use gpui::{App, AppContext, Context, Entity, Global, Task};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{collections::VecDeque, path::{Path, PathBuf}, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
+#[path = "library_order.rs"]
+mod order;
+pub(crate) use order::TreeOrder;
 
 pub(super) const RECENT_LIMIT: usize = 200;
 const FOLDER_LIMIT: usize = 64;
@@ -22,6 +25,7 @@ pub(crate) struct Entry {
 pub(crate) struct Snapshot {
     pub folders: Vec<Entry>,
     pub recent: Vec<Entry>,
+    pub order: Arc<TreeOrder>,
 }
 
 pub(crate) enum Change {
@@ -32,6 +36,7 @@ pub(crate) enum Change {
     Remove { path: PathBuf, folder: bool },
     ClearRecent,
     Rename(Vec<(PathBuf, PathBuf)>),
+    Place { placement: crate::ui::tree_drag::Placement, path: PathBuf },
 }
 
 pub(crate) struct Library {
@@ -81,6 +86,7 @@ impl Library {
                     library.loaded = true;
                     match result {
                         Ok((mut snapshot, warning)) => {
+                            if snapshot.order == library.snapshot.order { snapshot.order = library.snapshot.order.clone(); }
                             for entry in &mut snapshot.recent {
                                 entry.revision = if saved.as_ref() == Some(&entry.path) { library.generation.wrapping_add(1) }
                                     else { library.snapshot.recent.iter().find(|old| old.path == entry.path).map_or(0, |old| old.revision) };
@@ -106,9 +112,28 @@ fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default
 pub(super) fn path_key(path: &Path) -> Result<String, String> { path_key_message(path).map_err(String::from) }
 
 fn path_key_message(path: &Path) -> Result<String, UiMessage> {
-    let path = path.to_str().ok_or(UiMessage::new("home.pathEncoding"))?;
+    // Path 的相等比较忽略尾分隔符；数据库键也必须使用相同形式，否则两条记录会共用 UI 标识。
+    // 只做组件规范化，不访问磁盘，也不折叠可能跨符号链接的父目录。
+    let normalized: PathBuf = path.components().collect();
+    let path = normalized.to_str().ok_or(UiMessage::new("home.pathEncoding"))?;
     if path.len() > PATH_LIMIT { return Err(UiMessage::new("home.pathTooLong")); }
     Ok(path.to_owned())
+}
+
+fn normalize_entries(connection: &Connection) -> Result<(), UiMessage> {
+    let entries = {
+        let mut query = connection.prepare("SELECT path,folder,opened FROM entries").map_err(|e| e.to_string())?;
+        query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?, row.get::<_, i64>(2)?)))
+            .map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
+    for (old, folder, opened) in entries {
+        let key = path_key_message(Path::new(&old))?;
+        if key == old { continue; }
+        connection.execute("DELETE FROM entries WHERE path=?1 AND folder=?2", params![old, folder]).map_err(|e| e.to_string())?;
+        connection.execute("INSERT INTO entries(path,folder,opened) VALUES (?1,?2,?3) ON CONFLICT(path,folder) DO UPDATE SET opened=MAX(opened,excluded.opened)",
+            params![key, folder, opened]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn connect() -> Result<Connection, UiMessage> {
@@ -124,7 +149,8 @@ fn connect() -> Result<Connection, UiMessage> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS entries (path TEXT NOT NULL, folder INTEGER NOT NULL, opened INTEGER NOT NULL, PRIMARY KEY(path, folder));
          CREATE TABLE IF NOT EXISTS thumbnails (path TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, png BLOB NOT NULL, touched INTEGER NOT NULL);
-         CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);"
+         CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
+         CREATE TABLE IF NOT EXISTS tree_order (parent TEXT PRIMARY KEY, paths TEXT NOT NULL);"
     ).map_err(|e| e.to_string())?;
     Ok(connection)
 }
@@ -181,7 +207,7 @@ fn apply(change: Change) -> Result<(Snapshot, Option<UiMessage>), UiMessage> {
     } else {None};
     let result = (|| -> Result<(), UiMessage> {
         match change {
-            Change::Refresh => {},
+            Change::Refresh => normalize_entries(&transaction)?,
             Change::Opened(path) => {
                 let key = path_key_message(&path)?;
                 transaction.execute("INSERT INTO entries(path,folder,opened) VALUES (?1,0,?2) ON CONFLICT(path,folder) DO UPDATE SET opened=excluded.opened", params![key, now() as i64]).map_err(|e| e.to_string())?;
@@ -203,7 +229,9 @@ fn apply(change: Change) -> Result<(Snapshot, Option<UiMessage>), UiMessage> {
                 transaction.execute("DELETE FROM entries WHERE path=?1 AND folder=?2", params![path_key(&path)?, folder]).map_err(|e| e.to_string())?;
             },
             Change::ClearRecent => { transaction.execute("DELETE FROM entries WHERE folder=0", []).map_err(|e| e.to_string())?; },
+            Change::Place { placement, path } => order::place(&transaction, placement, path)?,
             Change::Rename(paths) => {
+                order::rename(&transaction, &paths)?;
                 for folder in [false, true] {
                     let entries = read_entries(&transaction, folder)?;
                     for entry in entries {
@@ -222,7 +250,7 @@ fn apply(change: Change) -> Result<(Snapshot, Option<UiMessage>), UiMessage> {
     })();
     result?;
     transaction.commit().map_err(|e| e.to_string())?;
-    let snapshot = Snapshot { folders: read_entries(&connection, true)?, recent: read_entries(&connection, false)? };
+    let snapshot = Snapshot { folders: read_entries(&connection, true)?, recent: read_entries(&connection, false)?, order: Arc::new(order::read(&connection)?) };
     connection.execute_batch("PRAGMA incremental_vacuum(64);").map_err(|e| e.to_string())?;
     Ok((snapshot, warning))
 }

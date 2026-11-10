@@ -4,7 +4,7 @@ use crate::nomo_mark::{navigation::CursorUnit, session_window::WindowRequest};
 
 impl DocumentHost {
     pub(super) fn keyboard_boundary(&mut self, unit: CursorUnit, forward: bool, extend: bool, delete: bool, cx: &mut Context<Self>) {
-        if !self.ready_for_session_action(cx) { return; }
+        if (delete && self.editing_locked()) || !self.ready_for_session_action(cx) { return; }
         let before = self.control.read(cx).host.selection;
         if (forward && before.head_byte >= self.total_bytes) || (!forward && before.head_byte == 0) { return; }
         let revision = self.control.read(cx).host.parsed.identity.revision;

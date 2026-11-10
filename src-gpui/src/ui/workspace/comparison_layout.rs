@@ -5,6 +5,8 @@ use crate::nomo_mark::protocol::DocumentSelection;
 use std::collections::{BTreeMap, HashMap, HashSet};
 #[path = "comparison_legacy.rs"]
 mod legacy;
+#[path = "folder_workspace.rs"]
+mod folder;
 
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_DOCUMENTS: usize = 512;
@@ -13,7 +15,7 @@ const CLOSED_WINDOWS: usize = 16;
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(in crate::ui::workspace) struct SavedDocument {
     pub(in crate::ui::workspace) path: Option<PathBuf>,
-    pub(super) session: String,
+    pub(in crate::ui::workspace) session: String,
     pub(in crate::ui::workspace) mode: EditorMode,
     pub(in crate::ui::workspace) dirty: bool,
     #[serde(default)]
@@ -65,6 +67,7 @@ pub(super) struct LayoutState {
     after_load: Option<Box<dyn FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>)>>,
     anchor: Option<String>,
     pub(super) loading: Option<u64>,
+    folder_open: Option<folder::FolderOpen>,
 }
 impl Default for LayoutState {
     fn default() -> Self {
@@ -74,21 +77,22 @@ impl Default for LayoutState {
             .as_nanos() as u64;
         Self {
             id,
-            // 非 Windows 的普通窗口也记录布局，不依赖组合标签入口。
-            tracked: !cfg!(windows),
+            // 普通标签与组合标签使用同一份恢复记录。
+            tracked: true,
             flush: None,
             pending: Default::default(),
             target: None,
             after_load: None,
             anchor: None,
             loading: None,
+            folder_open: None,
         }
     }
 }
 impl Store {
     fn available(&self) -> Option<&SavedLayout> {
         self.book.windows.iter().rev().find(|s| {
-            (!s.items.is_empty() || (!cfg!(windows) && s.folder.is_some()))
+            (!s.items.is_empty() || s.folder.is_some())
                 && !self
                     .claims
                     .get(&s.id)
@@ -105,7 +109,8 @@ impl Store {
                 return Err(UiMessage::new("layout.documentLimit").arg("count", MAX_DOCUMENTS));
             }
             next.windows.retain(|s| s.id != layout.id);
-            if !layout.items.is_empty() || (!cfg!(windows) && layout.folder.is_some()) {
+            // 空目录记录也是有效状态，避免下次打开时回退到更旧的非空标签列表。
+            if !layout.items.is_empty() || layout.folder.is_some() {
                 next.windows.push(layout);
             }
         }
@@ -202,9 +207,11 @@ impl Workspace {
                         Ok(warning)
                     });
                     for handle in cx.windows().into_iter().filter_map(|handle|handle.downcast::<Workspace>()) {
-                        let _ = handle.update(cx, |workspace, _, cx| {
+                        let _ = handle.update(cx, |workspace, window, cx| {
                             if let Err(error) = &result {workspace.failure_notice=Some(ToolbarLocale::current(cx).app_format("layout.legacyFailed", &[("error", &error.render(ToolbarLocale::current(cx)))]).into());}
                             if let Ok(Some(warning)) = &result {workspace.failure_notice=Some(ToolbarLocale::current(cx).app_format("layout.legacyPartial", &[("error", warning)]).into());}
+                            workspace.continue_folder_open(window, cx);
+                            workspace.drain_open_requests(window, cx);
                             cx.notify();
                         });
                     }
@@ -263,6 +270,7 @@ impl Workspace {
     pub(in crate::ui::workspace) fn record_layout(&mut self, cx: &mut Context<Self>) {
         if !self.comparison.layout.tracked
             || self.closing_window
+            || self.folder_open_pending()
             || self.comparison.layout.flush.is_some()
         {
             return;
@@ -279,6 +287,7 @@ impl Workspace {
         self.comparison.layout.flush.take();
         if !self.comparison.layout.tracked
             || self.closing_window
+            || self.folder_open_pending()
             || self.comparison.layout.loading.is_some()
         {
             return;
@@ -296,7 +305,7 @@ impl Workspace {
         discard: bool,
         cx: &mut Context<Self>,
     ) {
-        if !self.closing_window || !self.comparison.layout.tracked {
+        if (!self.closing_window && !self.folder_open_pending()) || !self.comparison.layout.tracked {
             return;
         }
         let Some(store) = cx.try_global::<Store>() else {
@@ -321,6 +330,7 @@ impl Workspace {
         }
         if let Err(error) = Self::publish_layouts(vec![saved], cx) {
             self.failure_notice = Some(ToolbarLocale::current(cx).app_format("layout.saveFailed", &[("error", &error)]).into());
+            if self.folder_open_pending() { self.cancel_close(cx); }
             cx.notify();
         }
     }
@@ -340,17 +350,20 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(mut saved) = cx
+        let Some(saved) = cx
             .try_global::<Store>()
             .and_then(|store| store.available())
             .cloned()
         else {
             return;
         };
+        self.apply_saved_layout(saved, window, cx);
+    }
+    fn apply_saved_layout(&mut self, mut saved: SavedLayout, window: &mut Window, cx: &mut Context<Self>) {
         saved.normalize();
         let folder = saved.folder.as_ref().filter(|path| path.is_dir()).cloned();
-        if saved.documents.is_empty() && (cfg!(windows) || folder.is_none()) {
-            if !cfg!(windows) && saved.folder.is_some() {
+        if saved.documents.is_empty() && folder.is_none() {
+            if saved.folder.is_some() {
                 self.failure_notice = Some(ToolbarLocale::current(cx).app_text("layout.folderUnavailable").into());
                 cx.notify();
             }
@@ -376,12 +389,10 @@ impl Workspace {
         }
         self.home_visible = false;
         self.home.update(cx, |home, cx| home.set_active(false, cx));
-        self.resume_tree(cx);
+        window.focus(&self.focus, cx);
         self.comparison.items = items;
-        if !cfg!(windows) {
-            // 文件夹工作区也可再次恢复其他布局，原布局此时不再归当前窗口占用。
-            cx.global_mut::<Store>().claims.remove(&self.comparison.layout.id);
-        }
+        // 文件夹工作区也可再次恢复其他布局，原布局此时不再归当前窗口占用。
+        cx.global_mut::<Store>().claims.remove(&self.comparison.layout.id);
         self.comparison.layout.id = saved.id;
         self.comparison.layout.tracked = true;
         self.comparison.layout.pending = saved
@@ -391,8 +402,12 @@ impl Workspace {
             .collect();
         self.claim_layout(cx);
         if let Some(folder) = folder {
-            self.replace_tree(folder, cx);
-        } else if !cfg!(windows) && self.tree.is_some() {
+            if self.tree.as_ref().is_none_or(|tree| tree.root != folder) {
+                self.replace_tree(folder, cx);
+            } else {
+                self.resume_tree(cx);
+            }
+        } else if self.tree.is_some() {
             self.suspend_tree(cx);
             self.tree = None;
             self.tree_animation = None;
@@ -458,7 +473,29 @@ impl Workspace {
             }
         }
     }
-    pub(super) fn load_before(
+    pub(in crate::ui::workspace) fn unloaded_tabs(&self) -> impl Iterator<Item = (u64, &SavedDocument)> {
+        self.comparison.layout.pending.iter().map(|(&key, saved)| (key, saved))
+    }
+    pub(in crate::ui::workspace) fn remove_deleted_layout_members(
+        &mut self,
+        removed: impl Fn(&Path) -> bool,
+    ) -> bool {
+        let keys: Vec<_> = self.comparison.layout.pending.iter().filter_map(|(&key, saved)| {
+            (!saved.dirty && saved.path.as_deref().is_some_and(&removed)).then_some(key)
+        }).collect();
+        for key in &keys {
+            self.comparison.layout.pending.remove(key);
+            self.comparison.remove_member(*key);
+        }
+        let layout = &mut self.comparison.layout;
+        if layout.target.is_some_and(|(key, _, _)| keys.contains(&key)) {
+            layout.target = None;
+            layout.after_load = None;
+            layout.anchor = None;
+        }
+        !keys.is_empty()
+    }
+    pub(in crate::ui::workspace) fn load_before(
         &mut self,
         item: TabItem,
         window: &mut Window,
@@ -550,6 +587,7 @@ impl Workspace {
                 Err(e) => {
                     self.failure_notice = Some(e.into());
                     self.comparison.layout.target = None;
+                    if self.folder_open_pending() { self.cancel_close(cx); }
                     cx.notify();
                     return;
                 }
@@ -629,6 +667,7 @@ impl Workspace {
             self.comparison.layout.target = None;
             self.comparison.layout.after_load = None;
             self.comparison.batch.clear();
+            if self.folder_open_pending() { self.cancel_close(cx); }
             cx.notify();
             return;
         }

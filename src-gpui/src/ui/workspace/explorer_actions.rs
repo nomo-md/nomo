@@ -1,5 +1,6 @@
 //! 目录树菜单及文件操作。磁盘操作由用户触发，运行于后台，并保护打开的文档。
 use super::*;
+use crate::file_system::rename_no_replace;
 use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
 use std::io::Write;
 
@@ -25,6 +26,46 @@ pub(super) struct TreeEdit {
 }
 
 impl Workspace {
+    pub(super) fn place_tree_entry(&mut self, item: crate::ui::path_drag::PathDrag, placement: crate::ui::tree_drag::Placement, cx: &mut Context<Self>) {
+        if placement.parent.as_os_str().is_empty() || item.path.parent() == Some(&placement.parent) {
+            self.library.update(cx, |library, cx| library.change(LibraryChange::Place { placement, path: item.path }, cx));
+        } else {
+            self.move_tree_entry(item, placement.root.clone(), placement.parent.clone(), Some(placement), cx);
+        }
+    }
+
+    pub(super) fn move_tree_entry(&mut self, item: crate::ui::path_drag::PathDrag, root: PathBuf, destination: PathBuf, placement: Option<crate::ui::tree_drag::Placement>, cx: &mut Context<Self>) {
+        let source = item.path.clone();
+        let blocked = self.explorer.mutating.iter().any(|busy| source.starts_with(busy) || busy.starts_with(&source) || destination.starts_with(busy));
+        let Some(manager) = self.services.clone().filter(|_| !blocked) else {
+            let error = UiMessage::new(if blocked { "tree.busy" } else { "tree.sessionUnavailable" });
+            self.home.update(cx, |home, cx| home.move_finished(&source, &destination, Some(error.clone()), cx));
+            self.explorer.drag.end(self.explorer.reduce_motion);
+            self.notice = Some(error.render(ToolbarLocale::current(cx)).into()); cx.notify(); return;
+        };
+        self.explorer.mutating.insert(source.clone());
+        let target = destination.clone();
+        let task = cx.background_executor().spawn(async move { move_tree_path(&item, &root, &target, &manager) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            if let Ok(report) = &result { let _ = cx.update(|app| broadcast_tree_rename(app, &report.paths, report.warning.as_deref())); }
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.explorer.mutating.remove(&source);
+                if result.is_ok() {
+                    if let (Some(placement), Some(name)) = (placement, source.file_name()) {
+                        let path = destination.join(name);
+                        workspace.library.update(cx, |library, cx| library.change(LibraryChange::Place { placement, path }, cx));
+                    }
+                } else { workspace.explorer.drag.end(workspace.explorer.reduce_motion); }
+                let error = result.err();
+                if let Some(error) = &error { workspace.notice = Some(error.render(ToolbarLocale::current(cx)).into()); }
+                workspace.home.update(cx, |home, cx| home.move_finished(&source, &destination, error, cx));
+                workspace.refresh_tree(cx);
+                cx.notify();
+            });
+        }).detach();
+    }
+
     pub(super) fn tree_create_insertion(&self, rows: &[crate::ui::file_tree::Row]) -> Option<usize> {
         let edit = self.explorer.edit.as_ref()?;
         if matches!(edit.kind, EditKind::Rename) { return None; }
@@ -180,7 +221,12 @@ impl Workspace {
                 match result {
                     Ok(path) => {
                         workspace.refresh_tree(cx);
-                        if matches!(kind, EditKind::NewFile) { workspace.open_path(&path, window, cx); }
+                        if matches!(kind, EditKind::NewFile) {
+                            workspace.pending_tree_click.take();
+                            workspace.deferred_open = None;
+                            workspace.enqueue_open_request(OpenRequest { path: Some(path), newly_created: true, ..Default::default() }, cx);
+                            workspace.drain_open_requests(window, cx);
+                        }
                     }
                     Err(error) => workspace.notice = Some(error.render(ToolbarLocale::current(cx)).into()),
                 }
@@ -189,16 +235,7 @@ impl Workspace {
         }).detach();
     }
 
-    fn tree_path_open(&self, path: &Path, cx: &App) -> bool {
-        let resolved = self.tree.as_ref().and_then(|tree| tree.rows().iter().find(|row| row.entry.path == path)
-            .and_then(|row| row.entry.resolved_path.clone()));
-        let matches = |open: &Path| open == path || open.starts_with(path)
-            || resolved.as_deref().is_some_and(|resolved| open == resolved || open.starts_with(resolved));
-        self.tabs.iter().filter_map(|tab| tab.document.read(cx).path()).any(|open| matches(&open))
-            || self.opening.iter().filter_map(|opening| opening.path.as_deref()).any(matches)
-    }
-
-    fn tree_busy_paths(&self, path: &Path) -> Vec<PathBuf> {
+    pub(super) fn tree_busy_paths(&self, path: &Path) -> Vec<PathBuf> {
         let mut paths = vec![path.to_path_buf()];
         if let Some(resolved) = self.tree.as_ref().and_then(|tree| tree.rows().iter()
             .find(|row| row.entry.path == path).and_then(|row| row.entry.resolved_path.clone())) {
@@ -207,46 +244,27 @@ impl Workspace {
         paths
     }
 
-    fn confirm_tree_delete(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tree_path_open(&path, cx) {
-            self.notice = Some(ToolbarLocale::current(cx).app_text("tree.closeBeforeDelete").into()); cx.notify(); return;
-        }
-        let Some(root) = self.tree.as_ref().map(|tree| tree.root.clone()) else { return; };
-        let generation = self.explorer.generation();
-        let display_path = display_tree_path(&path);
-        let response = dialogs::confirm_delete(Path::new(&display_path), window, cx);
-        cx.spawn_in(window, async move |this, cx| {
-            if !response.await { return; }
-            let _ = this.update_in(cx, |workspace, window, cx| {
-                if workspace.explorer.generation() != generation { return; }
-                if workspace.tree_path_open(&path, cx) {
-                    workspace.notice = Some(ToolbarLocale::current(cx).app_text("tree.closeBeforeDelete").into()); cx.notify(); return;
-                }
-                let busy_paths = workspace.tree_busy_paths(&path);
-                workspace.explorer.mutating.extend(busy_paths.iter().cloned());
-                let manager = workspace.services.clone();
-                let task = cx.background_executor().spawn(async move {
-                    let manager = manager.ok_or_else(|| UiMessage::new("tree.checkUnavailable"))?;
-                    manager.with_unopened_path(&path, || Ok(delete_tree_path(&root, &path))).map_err(UiMessage::raw)?
-                });
-                cx.spawn_in(window, async move |this, cx| {
-                    let result = task.await;
-                    let _ = this.update_in(cx, |workspace, _, cx| {
-                        for path in &busy_paths { workspace.explorer.mutating.remove(path); }
-                        if workspace.explorer.generation() != generation { return; }
-                        if let Err(error) = result { workspace.notice = Some(error.render(ToolbarLocale::current(cx)).into()); }
-                        workspace.refresh_tree(cx);
-                        cx.notify();
-                    });
-                }).detach();
-            });
-        }).detach();
-    }
 }
 
 struct TreeRenameReport {
     paths: Vec<(PathBuf, PathBuf)>,
     warning: Option<String>,
+}
+
+fn move_tree_path(item: &crate::ui::path_drag::PathDrag, root: &Path, directory: &Path, manager: &MarkdownDocumentSessionManager) -> Result<TreeRenameReport, UiMessage> {
+    let source = checked_existing(&item.root, &item.path)?;
+    let parent = checked_parent(root, directory)?;
+    // 以解析后的绝对路径再次核验，目录别名不能绕过自身/子目录检查。
+    if source == parent || parent.starts_with(&source) { return Err(UiMessage::new("home.moveInsideSelf")); }
+    if source.parent() == Some(parent.as_path()) { return Err(UiMessage::new("home.moveSameFolder")); }
+    let name = source.file_name().ok_or_else(|| UiMessage::new("tree.invalidTarget"))?;
+    let destination = parent.join(name);
+    let outcome = manager.rename_path(&source, &destination, || rename_no_replace(&source, &destination).map_err(|error| error.to_string()))
+        .map_err(|error| UiMessage::raw(error).context("home.moveFailed"))?;
+    let logical = (item.path.clone(), directory.join(name));
+    let mut paths = vec![(source, destination)];
+    if paths[0] != logical { paths.push(logical); }
+    Ok(TreeRenameReport { paths, warning: outcome.warning })
 }
 
 fn rename_tree_path(root: &Path, path: &Path, name: &str, manager: &MarkdownDocumentSessionManager) -> Result<TreeRenameReport, UiMessage> {
@@ -275,11 +293,14 @@ fn broadcast_tree_rename(app: &mut App, paths: &[(PathBuf, PathBuf)], warning: O
             for opening in &mut workspace.opening {
                 if let Some(path) = &mut opening.path { remap_tree_path(path, paths); }
             }
-            if let Some((path, _, _, _)) = &mut workspace.deferred_open { remap_tree_path(path, paths); }
+            if let Some(path) = workspace.deferred_open.as_mut().and_then(|request| request.path.as_mut()) {
+                remap_tree_path(path, paths);
+            }
             for request in &mut workspace.open_requests.pending {
                 if let Some(path) = &mut request.path { remap_tree_path(path, paths); }
             }
             workspace.remap_saved_paths(|path|remap_tree_path(path,paths));
+            workspace.home.update(cx, |home, cx| home.paths_renamed(paths, cx));
             workspace.apply_tree_rename(paths, cx);
             workspace.record_layout(cx);
             if changed {
@@ -393,7 +414,7 @@ fn checked_parent(root: &Path, parent: &Path) -> Result<PathBuf, UiMessage> {
     Ok(parent)
 }
 
-fn checked_existing(root: &Path, path: &Path) -> Result<PathBuf, UiMessage> {
+pub(super) fn checked_existing(root: &Path, path: &Path) -> Result<PathBuf, UiMessage> {
     if path == root { return Err(UiMessage::new("tree.rootMutation")); }
     let parent = checked_parent(root, path.parent().ok_or(UiMessage::new("tree.noParent"))?)?;
     let name = path.file_name().ok_or(UiMessage::new("tree.invalidTarget"))?;
@@ -426,39 +447,4 @@ fn apply_tree_edit(root: &Path, path: &Path, kind: EditKind, name: &str) -> Resu
         }
     }
     Err(UiMessage::new("tree.tooManyNames"))
-}
-
-fn delete_tree_path(root: &Path, path: &Path) -> Result<(), UiMessage> {
-    let target = checked_existing(root, path)?;
-    let metadata = std::fs::symlink_metadata(&target).map_err(|error| UiMessage::new("tree.targetAccess").arg("error", error))?;
-    if metadata.is_dir() { std::fs::remove_dir_all(&target) } else { std::fs::remove_file(&target) }
-        .map_err(|error| UiMessage::new("tree.deleteFailed").arg("error", error))
-}
-
-#[cfg(target_os = "windows")]
-fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "kernel32")]
-    unsafe extern "system" { fn MoveFileW(existing: *const u16, new: *const u16) -> i32; }
-    let from: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let to: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
-    if unsafe { MoveFileW(from.as_ptr(), to.as_ptr()) } != 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
-}
-
-#[cfg(target_os = "linux")]
-fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    unsafe extern "C" { fn renameat2(oldfd: i32, old: *const i8, newfd: i32, new: *const i8, flags: u32) -> i32; }
-    let from = std::ffi::CString::new(source.as_os_str().as_bytes())?;
-    let to = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
-    if unsafe { renameat2(-100, from.as_ptr(), -100, to.as_ptr(), 1) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
-}
-
-#[cfg(target_os = "macos")]
-fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    unsafe extern "C" { fn renamex_np(old: *const i8, new: *const i8, flags: u32) -> i32; }
-    let from = std::ffi::CString::new(source.as_os_str().as_bytes())?;
-    let to = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
-    if unsafe { renamex_np(from.as_ptr(), to.as_ptr(), 4) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }

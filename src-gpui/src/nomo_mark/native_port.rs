@@ -46,6 +46,9 @@ impl NativeWindowPort {
             .status(&self.owner, &self.document_id)
             .map_err(convert_error)
     }
+    pub(crate) fn set_editing_locked(&self, locked: bool) -> Result<(), ControlError> {
+        self.manager.set_editing_locked(&self.owner, &self.document_id, locked).map_err(convert_error)
+    }
     pub fn read_window(
         &self,
         revision: u64,

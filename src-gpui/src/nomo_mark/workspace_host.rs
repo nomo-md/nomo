@@ -47,7 +47,7 @@ impl Focusable for DocumentHost {
 impl DocumentHost {
     pub(crate) fn workspace(
         port: NativeWindowPort,
-        adapter: WindowHostAdapter,
+        mut adapter: WindowHostAdapter,
         status: MarkdownStatus,
         mode: ViewMode,
         open_profile: Option<crate::open_profile::OpenProfile>,
@@ -57,6 +57,7 @@ impl DocumentHost {
             .path
             .as_ref()
             .and_then(|p| PathBuf::from(p).parent().map(PathBuf::from));
+        adapter.set_editing_locked(status.editing_locked);
         let control = cx.new(|cx| {
             let mut view = NomoMark::new(adapter, cx);
             view.base_dir = base_dir;
@@ -84,6 +85,7 @@ impl DocumentHost {
             hidden: false,
             close_prompt: false,
             saving: false,
+            deletion_pending: false,
             production: true,
             navigating: false,
             attachment_open: None,
@@ -117,6 +119,47 @@ impl DocumentHost {
     }
     pub(crate) fn status(&self) -> &MarkdownStatus {
         &self.metadata.status
+    }
+    pub(crate) fn editing_locked(&self) -> bool {
+        self.status().editing_locked || self.deletion_pending
+    }
+    pub(crate) fn set_editing_locked(&mut self, locked: bool, cx: &mut Context<Self>) -> Result<(), ControlError> {
+        if self.deletion_pending {
+            return Err(ControlError::Busy);
+        }
+        if self.editing_locked() == locked {
+            return Ok(());
+        }
+        if locked {
+            self.ready(cx)?;
+        }
+        self.port.set_editing_locked(locked)?;
+        self.metadata.status.editing_locked = locked;
+        self.update_editing_lock(cx);
+        Ok(())
+    }
+    pub(crate) fn set_deletion_pending(&mut self, pending: bool, cx: &mut Context<Self>) {
+        self.deletion_pending = pending;
+        self.update_editing_lock(cx);
+    }
+    fn update_editing_lock(&mut self, cx: &mut Context<Self>) {
+        let locked = self.editing_locked();
+        for pane in &self.panes {
+            for view in std::iter::once(&pane.control).chain(pane.viewport.mounts.iter().map(|mount| &mount.view)) {
+                view.update(cx, |view, cx| view.set_editing_locked(locked, cx));
+            }
+        }
+        if locked {
+            self.quick.cancel();
+            self.metadata.front_matter_entry = None;
+            if self.cancel_toc() {
+                cx.emit(DocumentEvent::TocSettled(None));
+            }
+        } else {
+            self.schedule_toc(300, false, cx);
+        }
+        cx.emit(DocumentEvent::Status);
+        cx.notify();
     }
     pub(crate) fn path(&self) -> Option<PathBuf> {
         self.status().path.as_ref().map(PathBuf::from)
@@ -159,7 +202,7 @@ impl DocumentHost {
         .unwrap_or_default()
     }
     pub(crate) fn ready(&self, cx: &App) -> Result<(), ControlError> {
-        if self.closed || self.saving || self.navigating || self.close_prompt {
+        if self.closed || self.saving || self.navigating || self.close_prompt || self.deletion_pending {
             return Err(ControlError::Busy);
         }
         for mount in self.panes.iter().flat_map(|pane|&pane.viewport.mounts) {
@@ -172,7 +215,7 @@ impl DocumentHost {
     }
     pub(crate) fn finish_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<bool, ControlError> {
         if self.closed { return Err(ControlError::Detached); }
-        if self.saving || self.navigating || self.close_prompt { return Ok(false); }
+        if self.saving || self.navigating || self.close_prompt || self.deletion_pending { return Ok(false); }
         if !self.control.update(cx, |view, cx| view.finish_input(window, cx))? { return Ok(false); }
         for mount in self.panes.iter().flat_map(|pane| &pane.viewport.mounts) {
             if mount.view != self.control && !mount.view.update(cx, |view, cx| view.finish_input(window, cx))? {
@@ -209,7 +252,9 @@ impl DocumentHost {
         cx: &mut Context<Self>,
     ) -> Result<(NativeWindowPort, crate::text_document::markdown_session::SnapshotHandle), ControlError> {
         self.ready(cx)?;
-        self.clean_empty_templates(cx)?;
+        if !self.editing_locked() {
+            self.clean_empty_templates(cx)?;
+        }
         let snapshot = self.port.capture_for_save(self.status().revision)?;
         self.saving = true;
         cx.notify();
@@ -429,6 +474,7 @@ impl DocumentHost {
         Ok((target,draft))
     }
     pub(crate) fn validate_target(&self,target:&EditTarget,cx:&App)->Result<(),ControlError> {
+        if self.editing_locked() { return Err(ControlError::ReadOnly); }
         self.ready(cx)?;
         let view=self.control.read(cx);
         if self.hidden || view.host.parsed.identity!=target.identity || view.host.selection!=target.selection || view.effective_mode()!=target.mode {return Err(ControlError::Stale);}

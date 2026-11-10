@@ -426,6 +426,7 @@ impl DocumentHost {
         .detach();
     }
     pub(crate) fn replace_current(&mut self, replacement: &str, cx: &mut Context<Self>) {
+        if self.editing_locked() { return; }
         let Some(index) = self.queries.search.current else {
             self.step_match(true, true, cx);
             return;
@@ -453,7 +454,7 @@ impl DocumentHost {
         );
     }
     pub(crate) fn replace_all(&mut self, replacement: String, cx: &mut Context<Self>) {
-        if self.queries.search.query.is_empty() || !self.ready_for_session_action(cx) {
+        if self.editing_locked() || self.queries.search.query.is_empty() || !self.ready_for_session_action(cx) {
             return;
         }
         let request = self.begin_session_action(cx);

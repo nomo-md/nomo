@@ -6,21 +6,21 @@
 |---|---|---|
 | 根构建、版本、锁文件 | `Cargo.toml`、`Cargo.lock` | 单成员 workspace；唯一产品版本；根 target |
 | 启动、菜单、平台打开事件 | `src-gpui/src/main.rs`、`open_instance.rs`、`window_placement.rs` | 默认 Workspace 与 feature 开发入口；首个主窗口恢复上次的位置、大小与最大化状态；系统打开路由、Windows 同数据目录／会话的有界实例消息转交，无参数再次启动在原进程新建窗口 |
-| 文档主页与最近记录 | `src-gpui/src/ui/home.rs`、`home/library.rs`、`home/thumbnail.rs` | 无文件启动进入主页；本地文件夹入口、最近列表、虚拟网格和有界页首缩略图；与编辑页共用外壳面板、侧栏宽度和主页导航行，不创建编辑会话 |
+| 文档主页与最近记录 | `src-gpui/src/ui/home.rs`、`home/browser.rs`、`home/navigation.rs`、`home/folder_card.rs`、`home/document_card.rs`、`home/library.rs`、`home/library_order.rs`、`home/thumbnail.rs` | 无文件启动进入主页；左侧文件夹／最近文档分组，右侧文件与文件夹卡片，点击目录直接打开工作区；路径规范化去重，有界封面快照，灰白档案套仅前页使用正文缩略图、背页绘制线条；纸页同向错层与低前套独立弹簧，卡片和排序浮层共用封面 |
 | 旧版记录兼容 | `src-gpui/src/legacy_records.rs`、`text_document/markdown_session/legacy.rs`、`ui/workspace/comparison_legacy.rs` | 只读旧配置和草稿；最近记录与标签一次性合并，草稿按需转为原生会话；原记录保留，处理标记防止重复恢复 |
 | 默认应用外壳 | `src-gpui/src/ui/workspace.rs`、`workspace/toolbar.rs`、`workspace_surface.rs` | 多标签、连体边框与阴影、文件树、模式、工具栏、搜索、自动保存 |
 | Windows 组合标签 | `src-gpui/src/ui/workspace/comparison.rs`、`comparison_ui.rs`、`comparison_close.rs`、`comparison_drag.rs`、`comparison_layout.rs` | 展示项与文档会话分离；双文档焦点、标签/成员拖放、批量关闭、跨窗归属移交及按需恢复 |
-| 普通工作区恢复 | `src-gpui/src/ui/workspace/comparison_layout.rs`、`workspace.rs` | macOS／Linux 记录普通标签顺序、活动文档、模式、选区、阅读位置及文件夹；组合记录展开为普通标签，沿用有界清单与按需恢复 |
+| 普通工作区恢复 | `src-gpui/src/ui/workspace/comparison_layout.rs`、`folder_workspace.rs`、`workspace.rs` | 三平台记录普通标签顺序、活动文档、模式、选区、阅读位置及文件夹；进入目录自动恢复该目录最新布局，切换前保存并沿用关闭确认；macOS／Linux 将组合记录展开，沿用有界清单与按需恢复 |
 | 编辑收尾与文档切换 | `src-gpui/src/ui/workspace/document_transition.rs`、`nomo_mark/workspace_host.rs`、`nomo_mark/object_ui.rs` | 组字和对象草稿收尾、确认后继续切换或关闭；单个待执行意图、临时订阅，无正文镜像或轮询 |
-| 浮动缩放与统计 | `src-gpui/src/ui/workspace/status.rs` | 原版右下角按钮、向上弹层、四种统计、阅读时间与缩放；复用会话统计和阅读锚点，不持有正文 |
+| 右下角控件 | `src-gpui/src/ui/workspace/status.rs` | 缩放、统计、格式检查和锁图标各自显隐，隐藏时清理对应弹层状态；切换编辑锁先收尾输入 |
 | Markdown 格式检查 | `src-gpui/src/text_document/markdown_lint/`、`markdown_session/lint.rs`、`nomo_mark/markdown_lint.rs`、`ui/workspace/markdown_lint.rs` | 固定修订的原生只读规则扫描；默认／宽松规则、注释作用域、按字节定位的有界诊断；活动文档调度、取消及超预算跳过，不修改正文 |
 | Markdown Mini 小窗 | `src-gpui/src/ui/workspace/mini.rs`、`ui/mini.rs`、`ui/mini/{native,bounds_motion}.rs`、`ui/mini/native/`、`nomo_mark/window_panes.rs` | Windows 共用进度收放；macOS 原生操作在 GPUI 更新借用外执行，X11 等待窗口管理器确认，Wayland 使用受限紧凑模式；复用原窗口、文档和阅读锚点，任务按代次失效 |
 | 打开耗时采样 | `src-gpui/src/open_profile.rs`、`ui/workspace.rs`、`nomo_mark/view.rs` | 显式启用；记录会话、首窗口、首帧和语义恢复，不记录正文或路径 |
 | 帧耗时采样 | `src-gpui/src/frame_profile.rs`、`ui/workspace.rs`、`scripts/gen-perf-doc.py` | `NOMO_FRAME_PROFILE` 显式启用；有界样本、帧耗时与按键上屏的中位数／p95，固定种子百万字样本 |
 | 原生自动化测试 | `test-lab/runner/`、`scripts/automation/run.mjs`、`src-gpui/src/automation.rs`、`ui/workspace/automation.rs`、`nomo_mark/automation.rs` | 独立 automation feature、隔离文件 RPC、正式编辑入口和有界诊断；固定语料、Windows 进程采样与 Release 报告，详见 `test-lab/README.md` |
 | 打开体验采样 | `test-lab/runner/opening.mjs`、`opening-capture.cs`、`opening-capture.ps1` | 显式 `opening` 命令；前台桌面像素、首屏资源及真实按键回显，短时有界采样与独立汇总，不影响普通产品构建 |
-| 文件树 | `src-gpui/src/ui/file_tree.rs`、`ui/workspace/explorer.rs`、`explorer_ui.rs`、`explorer_label.rs`、`explorer_actions.rs`、`explorer_search.rs` | 目录快照预算、后台按需刷新、虚拟滚动、名称省略、交互和键盘搜索；重命名同步现有文档会话 |
-| 标题栏和应用内菜单 | `src-gpui/src/ui/chrome.rs`、`ui/window_chrome.rs` | 轻量状态摘要、焦点恢复、窗口拖动与按钮；关闭交回 Workspace 确认 |
+| 文件树 | `src-gpui/src/ui/file_tree.rs`、`ui/path_drag.rs`、`ui/tree_drag.rs`、`ui/workspace/explorer.rs`、`explorer_ui.rs`、`explorer_label.rs`、`explorer_actions.rs`、`explorer_search.rs`、`explorer_delete.rs` | 目录快照预算、后台按需刷新、虚拟滚动、名称省略、交互和键盘搜索；主页／侧栏共用拖放预览、插入让位与整组落点，重命名与文件移动同步会话，删除协调跨窗标签与草稿 |
+| 标题栏和菜单 | `src-gpui/src/ui/chrome.rs`、`ui/chrome/view_menu.rs`、`ui/window_chrome.rs` | 应用内菜单和 macOS 系统菜单共用显示菜单分组；窗口拖动、按钮和菜单焦点恢复 |
 | NomoMark 正式文档宿主 | `src-gpui/src/nomo_mark/document_host.rs`、`workspace_host.rs`、`save_dialog.rs` | 每标签窗口生命周期、控件事件、正式错误恢复；保存框按当前目录和首个 H1 提供默认值，不持有全文 |
 | 文档元数据入口 | `src-gpui/src/nomo_mark/metadata_commands.rs`、`object_ui.rs` | 按需加载文首、已有属性原位编辑、缺少时通过主会话插入模板；复用窗口预算、取消与撤销历史 |
 | NomoMark 剪贴板 | `src-gpui/src/clipboard.rs`、`clipboard_rich.rs`、`clipboard_images.rs`、`clipboard_{native,macos,linux,x11}.rs`、`nomo_mark/clipboard_content.rs`、`nomo_mark/html_style.rs`、`session_actions.rs` | 三平台局部及跨窗口语义复制、纯文本／HTML 双格式、受限 HTML 粘贴及有界图片输入；成功写入后才删除原文，跨窗口输出限制 64 MiB；非 Windows 所有者按需创建并在退出时释放 |
@@ -39,7 +39,7 @@
 | 主题、动效与平台字体 | `src-gpui/src/theme.rs`、`theme_catalog.rs`、`resources/color-themes.json`、`src-gpui/src/ui/motion.rs` | 四套原版主题、有限用户主题目录及 JSON 导入／导出；同明暗配色与字体变更也失效可见区布局，图表配色进入共享缓存键 |
 | 配置与设置窗口 | `src-gpui/src/settings.rs`、`ui/settings_schema.rs`、`ui/settings_window.rs`、`ui/settings_pages.rs`、`ui/settings_fonts.rs` | 八个原版分区、主题导入／导出、从本机字体中搜索选用或恢复主题、图片策略；按原有配置原子保存 |
 | Windows 文件集成 | `src-gpui/src/windows_integration.rs`、`ui/settings_pages.rs`、`src-gpui/windows-shell-extension/`、`scripts/msix/`、`scripts/packaging/{open-with.nsh,msix/}` | NSIS／ZIP 的当前用户默认应用候选与经典右键菜单；MSIX 的原生 IExplorerCommand、新式菜单与包内启停标记；注册／卸载按副本或包身份核对 |
-| 自定义快捷键 | `src-gpui/src/ui/shortcuts.rs`、`ui/settings_shortcuts.rs`、`ui/mod.rs` | 15 项旧配置键（含 HTML／PDF 导出）、输入草稿与冲突校验；提交后替换有限应用键表并更新菜单提示，不累计旧绑定 |
+| 自定义快捷键 | `src-gpui/src/ui/shortcuts.rs`、`ui/settings_shortcuts.rs`、`ui/mod.rs` | 16 项配置键（含编辑锁、HTML／PDF 导出）、输入草稿与冲突校验；提交后替换有限应用键表并更新菜单提示，不累计旧绑定 |
 | UI 原件与图标 | `src-gpui/src/ui/components.rs`、`popup.rs`、`icon_assets.rs`、`text_field.rs` | 静态 SVG 内嵌、按钮、菜单、输入框；弹层按触发边界测量、翻转、限高和入场动画 |
 | 确认框与短提示 | `src-gpui/src/ui/dialogs.rs`、`dialogs/secondary.rs`、`toast.rs` | 保存、删除、外部变更、恢复、打开位置与关闭选择的旧版布局；焦点与短动效、单条有界 Toast，不接管系统文件选择器 |
 | 应用弹窗业务与更新 | `src-gpui/src/ui/workspace/application_dialogs.rs`、`open_requests.rs`、`recovery_ui.rs`、`ui/tray.rs`、`ui/updates.rs`、`ui/updates/{notice,installer,install_ui}.rs` | 有界打开队列、跨窗口归属和恢复列表；Windows／macOS／X11 托盘（原生 Wayland 暂不支持）、官方 Release、MSIX Store 入口、安装版下载校验与保存确认后的重启安装 |
@@ -62,7 +62,7 @@
 | 开发界面 | `src-gpui/src/nomo_mark/demo.rs`、`development_ui.rs` | feature 只控制开发入口和调试工具条 |
 | 文档导出 | `src-gpui/src/document_export.rs`、`document_export/{html,resources,remote,model,media,pdf,pdf_fonts,word}.rs`、`ui/workspace/export.rs` | 固定修订及单个可取消任务；HTTP(S) 图片有界下载并内嵌，HTML 流式输出，PDF 与 Word 逐张编码并复用图片，每处引用独立排版；PDF 嵌入字体分页、Word 原生 OOXML，原子发布前复核取消 |
 | 外部文件变更策略 | `src-gpui/src/ui/workspace/application_dialogs.rs`、`text_document/markdown_session/external.rs` | 干净文档按偏好自动重载／覆盖／忽略；本地修改和删除仍显式选择，忽略继续阻止普通保存，覆盖校验检测令牌；Mini 返回后处理延迟冲突 |
-| 文档会话与保存 | `src-gpui/src/text_document/mod.rs`、`markdown_session.rs`、`markdown_session/rename.rs`、`markdown_session/external.rs`、`markdown_session/recovery.rs`、`markdown_history.rs` | PieceTree、磁盘正文与历史、快照、保存及重命名事务；外部身份复核、进程租约和原会话按需恢复 |
+| 文档会话与保存 | `src-gpui/src/text_document/mod.rs`、`markdown_session.rs`、`markdown_session/rename.rs`、`markdown_session/external.rs`、`markdown_session/recovery.rs`、`markdown_history.rs` | PieceTree、磁盘正文与历史、快照、保存及重命名事务；会话编辑锁保护正文事务、历史、批量替换和章节移动；外部身份复核、进程租约和原会话按需恢复 |
 | 结构索引／搜索／统计 | `src-gpui/src/text_document/structure_index/`、`markdown_search/`、`writing_stats/` | 唯一结构索引、分页查询和有界统计；关闭时撤销索引归属，`structure_index/reclaim.rs` 分批回收派生页 |
 | 编码、文件写入、格式模板 | `src-gpui/src/models.rs`、`file_system.rs`、`markdown_templates.rs` | 编码定义、原子替换、显式模板来源 |
 | Emoji 加载 | `src-gpui/src/nomo_mark/native_emoji.rs`、`ui/emoji_picker.rs` | 按需加载；固定版本 JSON、哈希、虚拟列表和原有缓存预算 |

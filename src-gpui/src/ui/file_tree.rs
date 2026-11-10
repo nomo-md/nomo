@@ -46,6 +46,10 @@ pub struct DirectorySnapshot {
 }
 
 impl DirectorySnapshot {
+    pub(crate) fn into_entries(self) -> (Arc<[Arc<Entry>]>, usize) {
+        (self.entries, self.bytes)
+    }
+
     /// 对比目录快照在后台执行，避免大目录的逐项比较占用界面线程。
     pub fn compare_previous(&mut self, previous: Option<Arc<[Arc<Entry>]>>) {
         self.unchanged_from = previous.filter(|entries| entries.as_ref() == self.entries.as_ref());
@@ -67,6 +71,7 @@ pub struct FileTree {
     clock: u64,
     loading: HashSet<PathBuf>,
     rows: Arc<[Row]>,
+    order: Arc<super::home::library::TreeOrder>,
 }
 
 impl FileTree {
@@ -82,6 +87,7 @@ impl FileTree {
             clock: 0,
             loading: HashSet::new(),
             rows: Arc::from([]),
+            order: Arc::default(),
         }
     }
 
@@ -94,6 +100,12 @@ impl FileTree {
 
     pub fn rows(&self) -> Arc<[Row]> {
         self.rows.clone()
+    }
+
+    pub(crate) fn set_order(&mut self, order: Arc<super::home::library::TreeOrder>) {
+        if Arc::ptr_eq(&order, &self.order) { return; }
+        self.order = order;
+        self.rebuild();
     }
 
     pub fn cached_entries(&self, path: &Path) -> Option<Arc<[Arc<Entry>]>> {
@@ -284,7 +296,13 @@ impl FileTree {
 
     fn walk(&self, dir: &Path, depth: usize, rows: &mut Vec<Row>) {
         let Some(children) = self.children.get(dir) else { return; };
-        for entry in children.entries.iter() {
+        let mut ordered;
+        let entries = if self.order.0.contains_key(dir) {
+            ordered = children.entries.to_vec();
+            self.order.sort(dir, &mut ordered, |entry| &entry.path);
+            ordered.as_slice()
+        } else { children.entries.as_ref() };
+        for entry in entries {
             let expanded = entry.is_dir && self.expanded.contains(&entry.path);
             rows.push(Row {
                 depth,
@@ -387,7 +405,7 @@ fn has_visible_children(root: &Path, dir: &Path, rules: &IgnoreRules, cancel: &A
     Ok(false)
 }
 
-fn supported_document(path: &Path) -> bool {
+pub(super) fn supported_document(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str())
         .is_some_and(|ext| DOCUMENT_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
 }

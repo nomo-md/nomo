@@ -19,6 +19,8 @@ impl Drop for TreeScan {
 
 #[derive(Default)]
 pub(super) struct ExplorerState {
+    pub(super) drag: crate::ui::tree_drag::TreeDrag,
+    pub(super) drag_rows: Option<Arc<[crate::ui::file_tree::Row]>>,
     generation: u64,
     scan: Option<TreeScan>,
     queue: VecDeque<PathBuf>,
@@ -49,25 +51,27 @@ pub(super) struct ExplorerState {
     pub(super) search_task: Option<Task<()>>,
     pub(super) mutating: HashSet<PathBuf>,
     pub(super) sidebar_width: Option<f32>,
+    pub(super) sidebar_temporarily_visible: bool,
     pub(super) reduce_motion: bool,
     pub(super) resizing: bool,
-    pub(super) sidebar_target: Option<bool>,
-    pub(super) sidebar_motion: Option<(Instant, usize, f32, f32, Duration)>,
-    pub(super) sidebar_motion_id: usize,
-    pub(super) sidebar_motion_task: Option<Task<()>>,
 }
 
 impl ExplorerState {
     pub(super) fn generation(&self) -> u64 { self.generation }
+
+    pub(super) fn sidebar_visible(&self, settings: &Settings) -> bool {
+        self.sidebar_temporarily_visible || settings.show_sidebar
+    }
 }
 
 impl Workspace {
     pub(super) fn suspend_tree(&mut self, _: &mut Context<Self>) {
+        self.explorer.drag = Default::default();
+        self.explorer.drag_rows = None;
         if let Some(scan) = &self.explorer.scan { scan.cancel.store(true, Ordering::Release); }
         self.explorer.queue.clear();
         self.explorer.scan_again.clear();
         self.explorer.refresh_task.take();
-        self.explorer.sidebar_motion_task.take();
         self.explorer.scroll_hide_task.take();
         self.explorer.search_task.take();
         self.explorer.menu = None;
@@ -80,6 +84,8 @@ impl Workspace {
     }
 
     pub(super) fn replace_tree(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.explorer.drag = Default::default();
+        self.explorer.drag_rows = None;
         self.explorer.generation = self.explorer.generation.wrapping_add(1);
         // 旧扫描即使尚未从系统调用返回，也只允许它和新请求串行，避免连续切换根目录时积累后台任务。
         if let Some(scan) = &self.explorer.scan { scan.cancel.store(true, Ordering::Release); }
@@ -94,6 +100,7 @@ impl Workspace {
         self.explorer.scroll_dragging = false;
         self.tree_scroll.0.borrow().base_handle.set_offset(gpui::point(px(0.0), px(0.0)));
         self.tree = Some(FileTree::new(root.clone()));
+        if let Some(tree) = &mut self.tree { tree.set_order(self.library.read(cx).snapshot.order.clone()); }
         self.tree_animation = None;
         self.sync_tree_selection(false, cx);
         self.queue_tree_scan(root, false, cx);
@@ -184,7 +191,9 @@ impl Workspace {
             loop {
                 cx.background_executor().timer(Duration::from_secs(5)).await;
                 if this.update(cx, |workspace, cx| {
-                    if !workspace.home_visible && workspace.tree.is_some() && cx.global::<Settings>().show_sidebar {
+                    if !workspace.home_visible && workspace.tree.is_some()
+                        && workspace.explorer.sidebar_visible(cx.global::<Settings>())
+                    {
                         workspace.refresh_tree(cx);
                     }
                 }).is_err() { break; }
@@ -246,7 +255,7 @@ impl Workspace {
                         }
                     }
                 }
-                if failed { workspace.explorer.failed.insert(path.clone()); }
+                if failed { workspace.explorer.failed.insert(path.clone()); workspace.explorer.drag.end(workspace.explorer.reduce_motion); }
                 else { workspace.explorer.failed.remove(&path); }
                 let again = workspace.explorer.scan_again.remove(&path);
                 let needed = workspace.tree.as_ref().map(|tree| {

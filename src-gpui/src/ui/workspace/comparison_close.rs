@@ -36,6 +36,7 @@ impl Workspace {
                 return;
             }
         }
+        self.finish_folder_open(window, cx);
     }
     pub(in crate::ui::workspace) fn close_pair(
         &mut self,
@@ -200,6 +201,7 @@ impl Workspace {
         self.popover = None;
         self.record_layout(cx);
         if !self.closing_window
+            && !self.folder_open_pending()
             && self.comparison.batch.is_empty()
             && let Some(item) = next.and_then(|key| self.comparison.item(key))
             && self.load_saved_item(item, window, cx)

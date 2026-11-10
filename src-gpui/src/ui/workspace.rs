@@ -14,7 +14,7 @@ use crate::nomo_mark::{link_edit::LinkDraft, protocol::ControlError};
 use crate::ui::editor_popovers::{EditorPopover, EditorPopoverEvent, EditorPopoverKind};
 use crate::ui::text_field::{FieldEvent, TextField};
 use crate::ui::toolbar_i18n::ToolbarLocale;
-use crate::ui::chrome::{Chrome, ChromeState, ChromeEvent, ChromeCapability, ChromeCommand};
+use crate::ui::chrome::{Chrome, ChromeState, ChromeEvent, ChromeCapability, ChromeCommand, ViewMenuState};
 use crate::ui::workspace_surface::{TAB_RAIL_HEIGHT, WorkspaceSurface};
 use crate::ui::motion::{self, MotionPreference, ScalarMotion};
 use crate::ui::{dialogs::{self, SaveChoice}, toast::Toast};
@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 
 mod explorer;
 mod explorer_actions;
+mod explorer_delete;
 mod explorer_ui;
 mod explorer_search;
 mod outline;
@@ -57,7 +58,8 @@ actions!(
     workspace,
     [
         NewFile, NewWindow, OpenFile, OpenFolder, Save, SaveAs, ExportHtml, ExportPdf, ExportWord, CloseTab, NextTab, PrevTab, Find, FindReplace, ToggleFind, ToggleReplace, FindNext,
-        FindPrev, ToggleSource, ModeSemantic, ModeSource, ModeSplit, ToggleOutline, ToggleSidebar, ToggleToolbar,
+        FindPrev, ToggleSource, ModeSemantic, ModeSource, ModeSplit, ToggleEditLock, ToggleOutline, ToggleSidebar, ToggleToolbar,
+        ResetOutlinePosition, ToggleSplitGuide, ToggleCodeLineNumbers, ToggleZoomControl, ToggleWritingStats, ToggleLintIndicator, ToggleEditLockButton,
         ToggleTheme, FollowSystemTheme, ToggleTypography, Underline, Highlight, ZoomIn, ZoomOut, ZoomReset, Bold, Italic, Strike, InlineCode, Link,
         Heading1, Heading2, Heading3, Heading4, Heading5, Heading6, ClearFormatting, Paragraph, Quote, BulletList, OrderedList, TaskList, CodeBlock, Table,
         MathBlock, BlockComment, EditFrontMatter, Rule, PromoteHeading, DemoteHeading, OpenSettings, ShowHome, RecoverDocuments, ToggleMini, Quit
@@ -99,6 +101,7 @@ struct OpeningDocument {
 const TREE_ROW_HEIGHT: f32 = 30.0;
 const TREE_SELECTION_DURATION: Duration = Duration::from_millis(180);
 const TREE_CHEVRON_DURATION: Duration = Duration::from_millis(200);
+const PAGE_TITLE_FADE: Duration = Duration::from_millis(120);
 
 #[derive(Clone, PartialEq, Eq)]
 struct TreeSelection {
@@ -214,6 +217,9 @@ struct PendingPopover {
 pub struct Workspace {
     focus: FocusHandle,
     home_visible: bool,
+    rendered_home_visible: bool,
+    sidebar_motion: Option<(motion::Spring<1>, Instant)>,
+    page_title_started: Option<Instant>,
     link_modifier: bool,
     home: Entity<Home>,
     library: Entity<Library>,
@@ -235,7 +241,7 @@ pub struct Workspace {
     export_job: Option<export::ExportJob>,
     pending_document_transition: Option<document_transition::PendingDocumentTransition>,
     pending_tree_click: Option<Task<()>>,
-    deferred_open: Option<(PathBuf, bool, Option<String>, u64)>,
+    deferred_open: Option<OpenRequest>,
     tree_animation: Option<TreeChevronAnimation>,
     tree_animation_id: usize,
     tree_selection: Option<TreeSelection>,
@@ -304,16 +310,23 @@ impl Workspace {
         let surface = WorkspaceSurface::default();
         let home = cx.new(|cx| Home::new(library.clone(), home_visible, cx));
         let home_subscription = cx.subscribe_in(&home, window, |workspace, _, event, window, cx| match event {
-            HomeEvent::Open(path) => workspace.open_path(path, window, cx),
+            HomeEvent::Open(path) => {
+                let root = (!path.is_dir()).then(|| workspace.home.read(cx).root_for_file(path)).flatten();
+                if let Some(root) = root.filter(|root| workspace.tree.as_ref().is_none_or(|tree| &tree.root != root)) { workspace.replace_tree(root, cx); }
+                workspace.open_path(path, window, cx);
+            },
             HomeEvent::Restore => workspace.restore_last_layout(window,cx),
             HomeEvent::NewFile => workspace.new_file(window, cx),
             HomeEvent::OpenFile => workspace.prompt_open(false, window, cx),
             HomeEvent::OpenFolder => workspace.prompt_open(true, window, cx),
             HomeEvent::AddFolder => workspace.prompt_home_folder(window, cx),
             HomeEvent::Resume => workspace.activate(workspace.active, window, cx),
+            HomeEvent::Place { item, placement } => workspace.place_tree_entry(item.clone(), placement.clone(), cx),
         });
         let mut last_library_error = None;
         let library_subscription = cx.observe_in(&library, window, move |workspace, library, window, cx| {
+            if let Some(tree) = &mut workspace.tree { tree.set_order(library.read(cx).snapshot.order.clone()); }
+            if workspace.explorer.drag.committing && !library.read(cx).is_busy() && (workspace.explorer.drag.order_only() || library.read(cx).error.is_some()) { workspace.explorer.drag.end(workspace.explorer.reduce_motion); }
             let error = library.read(cx).error.as_ref();
             let error_key = error.map(|error| {
                 let mut hash = DefaultHasher::new();
@@ -380,6 +393,9 @@ impl Workspace {
         let mut workspace = Self {
             focus: cx.focus_handle(),
             home_visible, home, library, link_modifier: false,
+            rendered_home_visible: home_visible,
+            sidebar_motion: None,
+            page_title_started: None,
             _home_subscription: home_subscription,
             _library_subscription: library_subscription,
             chrome,
@@ -460,6 +476,7 @@ impl Workspace {
             tab.hidden_hover.retime(reduced, Duration::from_millis(120));
         }
         if reduced {
+            self.page_title_started = None;
             self.tree_animation = None;
             self.tree_selection_animation = None;
             self.explorer.scroll_animation = None;
@@ -499,6 +516,7 @@ impl Workspace {
 
     pub(crate) fn show_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.closing_window || window.has_active_prompt() { return; }
+        if self.folder_open_pending() { self.cancel_close(cx); }
         self.next_open_intent();
         self.open_requests.pending.clear();
         self.pending_tree_click.take();
@@ -521,6 +539,7 @@ impl Workspace {
         self.close_status(cx);
         self.outline_ui.clear_document();
         self.home_visible = true;
+        self.explorer.sidebar_temporarily_visible = false;
         self.suspend_tree(cx);
         self.surface.clear();
         self.home.update(cx, |home, cx| home.set_active(true, cx));
@@ -549,7 +568,9 @@ impl Workspace {
         if self.waiting_library_close { self.waiting_library_close=false; self.cancel_close(cx); }
         self.pending_tree_click.take();
         self.deferred_open=None;
-        self.enqueue_open(Some(path.to_path_buf()), false, None, true, cx);
+        // 主页选目录表示在当前窗口切换，继续沿用打开队列和未保存内容确认。
+        let choose_window = !self.home_visible || !path.is_dir();
+        self.enqueue_open(Some(path.to_path_buf()), false, None, choose_window, cx);
         self.drain_open_requests(window, cx);
     }
 
@@ -576,36 +597,32 @@ impl Workspace {
         self.drain_open_requests(window, cx);
     }
 
-    fn open_path_now(&mut self,path:&Path,preview:bool,anchor:Option<String>,generation:u64,window:&mut Window,cx:&mut Context<Self>) {
+    fn open_path_now(&mut self, mut request: OpenRequest, window: &mut Window, cx: &mut Context<Self>) {
         if !self.leave_mini(window,cx) {return;}
+        let Some(path) = request.path.take() else { return; };
+        let generation = request.generation;
         if self.explorer.mutating.iter().any(|busy| path.starts_with(busy)) {self.notice=Some(ToolbarLocale::current(cx).app_text("workspace.fileBusy").into());cx.notify();return;}
-        if path.is_dir() {
+        let metadata = path.metadata().ok();
+        if request.document_only && metadata.as_ref().is_some_and(|metadata| !metadata.is_file()) {
+            let locale = ToolbarLocale::current(cx);
+            let message = locale.app_format("workspace.openFailed", &[("error", locale.app_text("preview.notFile"))]);
+            self.failure_notice = Some(message.into());
+            cx.notify();
+            return;
+        }
+        if metadata.is_some_and(|metadata| metadata.is_dir()) {
             self.cancel_preview_opens(None);
             let root=path.canonicalize().unwrap_or_else(|_|path.to_path_buf());
-            if generation==self.open_requests.generation {
-                if self.home_visible && !self.tabs.is_empty() {
-                    let document=self.tabs[self.active].document.clone();
-                    let retry=root.clone();
-                    if !self.prepare_document_transition(&document,false,window,cx,move |workspace,window,cx|workspace.open_path_now(&retry,false,None,generation,window,cx)) {return;}
-                    self.activate_after_open(self.active,generation,AfterOpen::default(),window,cx);
-                    if self.home_visible {return;}
-                }
-                self.home_visible = false;
-                self.home.update(cx, |home, cx| home.set_active(false, cx));
-            }
-            self.library.update(cx, |library, cx| library.change(LibraryChange::AddFolder(root.clone()), cx));
-            Settings::set(cx, "sidebarHidden", serde_json::json!(false));
-            self.replace_tree(root,cx);
-            self.record_layout(cx);
-            cx.notify();
+            self.open_folder_workspace(root, window, cx);
             return;
         }
         let path=path.canonicalize().unwrap_or_else(|_|path.to_path_buf());
         if self.explorer.mutating.iter().any(|busy| path.starts_with(busy)) {self.notice=Some(ToolbarLocale::current(cx).app_text("workspace.fileBusy").into());cx.notify();return;}
+        let anchor = request.anchor.take();
         if let Some(key)=self.saved_path_key(&path) {
             self.open_saved_member(key,anchor,window,cx); return;
         }
-        let preview=preview && cx.global::<Settings>().bool("filePreviewEnabled");
+        let preview=request.preview && cx.global::<Settings>().bool("filePreviewEnabled");
         self.cancel_preview_opens(Some(&path));
         if let Some(index)=self.tabs.iter().position(|tab|tab.document.read(cx).path().as_ref()==Some(&path)) {
             if !preview {self.tabs[index].preview=false;}
@@ -620,10 +637,11 @@ impl Workspace {
         }
         // 同一路径的过期请求必须先释放会话，才能重新打开。
         if self.opening.iter().any(|opening|opening.path.as_ref()==Some(&path)) {
-            self.deferred_open=Some((path,preview,anchor,generation));
+            self.deferred_open=Some(OpenRequest { path: Some(path), preview, anchor, ..request });
             return;
         }
-        self.open_document_from(Some(path),preview,anchor,application_dialogs::OpenSource::File,generation,window,cx);
+        let source = if request.newly_created { application_dialogs::OpenSource::NewFile } else { application_dialogs::OpenSource::File };
+        self.open_document_from(Some(path),preview,anchor,source,generation,window,cx);
     }
 
     fn open_tree_file(&mut self,path:PathBuf,click_count:usize,window:&mut Window,cx:&mut Context<Self>) {
@@ -764,7 +782,22 @@ impl Workspace {
                 match result {
                     Ok((port,loaded))=> {
                         let mode=match &source {application_dialogs::OpenSource::Layout(_,_)=>layout_doc.as_ref().map(|doc|doc.mode).unwrap_or(EditorMode::Semantic),application_dialogs::OpenSource::Reload(previous,_)|application_dialogs::OpenSource::DiskRecovery(_,Some(previous),_)|application_dialogs::OpenSource::Recovery(_,false,Some(previous),_)=>workspace.tabs.iter().find(|tab|tab.document==*previous).map(|tab|tab.mode).unwrap_or(cx.global::<Settings>().default_mode),_=>cx.global::<Settings>().default_mode};
-                        let status=match port.status(){Ok(status)=>status,Err(e)=>{workspace.notice=Some(e.to_string().into());return false;}};
+                        let mut status=match port.status(){Ok(status)=>status,Err(e)=>{workspace.notice=Some(e.to_string().into());return false;}};
+                        let lock_on_open = match &source {
+                            application_dialogs::OpenSource::Reload(previous, _)
+                            | application_dialogs::OpenSource::DiskRecovery(_, Some(previous), _)
+                            | application_dialogs::OpenSource::Recovery(_, false, Some(previous), _) => previous.read(cx).editing_locked(),
+                            application_dialogs::OpenSource::NewFile => false,
+                            _ => cx.global::<Settings>().bool("openMarkdownReadOnly")
+                                && status.path.as_deref().map(Path::new).is_some_and(comparison::markdown_path),
+                        };
+                        if lock_on_open && !status.editing_locked {
+                            if let Err(error) = port.set_editing_locked(true) {
+                                workspace.failure_notice = Some(error.to_string().into());
+                                return false;
+                            }
+                            status.editing_locked = true;
+                        }
                         let adapter=match crate::nomo_mark::host::WindowHostAdapter::new(loaded.input,format!("workspace-window-{id}"),0,loaded.context) {
                             Ok(adapter)=>adapter,Err(e)=>{workspace.notice=Some(e.to_string().into());return false;}
                         };
@@ -852,14 +885,16 @@ impl Workspace {
                     completed_path=workspace.opening[index].path.clone().or(completed_path);
                     workspace.opening.remove(index);
                 }
-                let retry=completed_path.as_ref().is_some_and(|completed|workspace.deferred_open.as_ref().is_some_and(|(path,_,_,_)|path==completed));
+                let retry = completed_path.as_ref().is_some_and(|completed| {
+                    workspace.deferred_open.as_ref().and_then(|request| request.path.as_ref()) == Some(completed)
+                });
                 if let Some(error)=cleanup_error {
                     if retry {workspace.deferred_open=None;}
                     workspace.notice=Some(ToolbarLocale::current(cx).app_format("workspace.sessionCleanupFailed", &[("error", &error.to_string())]).into());
                     cx.notify();
                 } else if retry {
-                    if let Some((path,preview,anchor,generation))=workspace.deferred_open.take() {
-                        workspace.open_path_now(&path,preview,anchor,generation,window,cx);
+                    if let Some(request)=workspace.deferred_open.take() {
+                        workspace.open_path_now(request,window,cx);
                     }
                 }
                 workspace.finish_recovery_attempt(&source,recovery_finished,cx);
@@ -1026,22 +1061,31 @@ impl Workspace {
         }).detach();
     }
     fn remove_tab(&mut self,document:&Entity<DocumentHost>,discard:bool,window:&mut Window,cx:&mut Context<Self>) {
-        let Some(index)=self.tabs.iter().position(|tab|tab.document==*document) else{return;};
+        if !self.tabs.iter().any(|tab|tab.document==*document) {return;}
         self.cancel_export_for(document);
         if let Err(e)=document.update(cx,|host,cx|host.close_document(discard,cx)) {self.notice=Some(e.to_string().into());self.cancel_close(cx);cx.notify();return;}
+        let previous=self.tabs.get(self.active).map(|tab|tab.key);
+        if let Some(position)=self.remove_closed_tab(document,discard,cx) {
+            self.finish_tab_removal(previous,position,window,cx);
+        }
+    }
+    fn remove_closed_tab(&mut self,document:&Entity<DocumentHost>,discard:bool,cx:&mut Context<Self>) -> Option<usize> {
+        let index=self.tabs.iter().position(|tab|tab.document==*document)?;
         application_dialogs::clear_external_after_save(self,document,cx);
         self.forget_document_transition(document);
         if self.popover.as_ref().and_then(|p|p.document.upgrade()).as_ref()==Some(document) {self.popover=None;}
         self.pending_saves.retain(|pending| &pending.document != document);
-        let old_active=self.tabs.get(self.active).map(|tab|tab.key);
         let pos=self.comparison.position(self.tabs[index].key).unwrap_or(0);
         let key=self.tabs.remove(index).key;
         self.note_closed_layout(key,document,discard,cx);
         self.comparison.remove_member(key);
-        let next=old_active.filter(|active|*active!=key).or_else(||self.comparison.items.get(pos.min(self.comparison.items.len().saturating_sub(1))).map(|item|item.focused()));
+        Some(pos)
+    }
+    fn finish_tab_removal(&mut self,previous:Option<u64>,pos:usize,window:&mut Window,cx:&mut Context<Self>) {
+        let next=previous.filter(|key|self.tab_index(*key).is_some()).or_else(||self.comparison.items.get(pos.min(self.comparison.items.len().saturating_sub(1))).map(|item|item.focused()));
         self.active=next.and_then(|key|self.tab_index(key)).unwrap_or(0);
         self.record_layout(cx);
-        if let Some(item)=next.and_then(|key|self.comparison.item(key)) && !self.closing_window && self.comparison.batch.is_empty() && self.load_saved_item(item,window,cx) {return;}
+        if let Some(item)=next.and_then(|key|self.comparison.item(key)) && !self.closing_window && !self.folder_open_pending() && self.comparison.batch.is_empty() && self.load_saved_item(item,window,cx) {return;}
         self.after_tabs_removed(window,cx);
     }
     fn after_tabs_removed(&mut self,window:&mut Window,cx:&mut Context<Self>) {
@@ -1060,7 +1104,7 @@ impl Workspace {
                 window.focus(&self.focus,cx);
             }
         }
-        else {if !self.home_visible || self.closing_window {self.activate(self.active,window,cx);}if self.closing_window {self.close_tab(self.active,window,cx);}}
+        else if !self.folder_open_pending() {if !self.home_visible || self.closing_window {self.activate(self.active,window,cx);}if self.closing_window {self.close_tab(self.active,window,cx);}}
         if !self.closing_window {self.next_batch_close(window,cx);}
         cx.notify();
     }
@@ -1071,6 +1115,7 @@ impl Workspace {
 
     pub(crate) fn request_close_window(&mut self,window:&mut Window,cx:&mut Context<Self>)->bool {
         if window.has_active_prompt() {return false;}
+        if self.folder_open_pending() {self.cancel_close(cx);}
         if self.closing_window && !self.tabs.is_empty() {return false;}
         if let Some(document)=self.document() {
             if !self.prepare_document_transition(&document, true, window, cx, |workspace, window, cx| {
@@ -1092,7 +1137,7 @@ impl Workspace {
         if !self.closing_window {self.flush_layout(cx);self.closing_window=true;self.close_tab(self.active,window,cx);}
         false
     }
-    fn cancel_close(&mut self,cx:&mut Context<Self>){self.comparison.closing=None;self.comparison.batch.clear();self.closing_window=false;self.application_dialogs.close_approved=false;self.record_layout(cx);crate::cancel_quit(cx);}
+    fn cancel_close(&mut self,cx:&mut Context<Self>){self.cancel_folder_open();self.comparison.closing=None;self.comparison.batch.clear();self.closing_window=false;self.application_dialogs.close_approved=false;self.record_layout(cx);crate::cancel_quit(cx);}
     #[cfg(windows)]
     pub(crate) fn can_quit_to_install(&mut self, window:&mut Window,cx:&mut Context<Self>) -> bool {
         if window.has_active_prompt() || self.closing_window || self.application_dialogs.busy || !self.opening.is_empty()
@@ -1117,9 +1162,14 @@ impl Workspace {
     }
     fn prompt_open(&mut self,directories:bool,window:&mut Window,cx:&mut Context<Self>) {
         if !self.leave_mini(window,cx) {return;}
+        // 捕获发起选择器时的入口，异步返回后不再按页面状态重新决定窗口策略。
+        let choose_window = !directories || !self.home_visible;
         let response=cx.prompt_for_paths(PathPromptOptions {files:!directories,directories,multiple:!directories,prompt:Some(ToolbarLocale::current(cx).app_text("menu.openFile").into())});
         cx.spawn_in(window,async move |this,cx| {
-            if let Ok(Ok(Some(paths)))=response.await {let _=this.update_in(cx,|workspace,window,cx| {workspace.open_paths(paths,window,cx);});}
+            if let Ok(Ok(Some(paths)))=response.await {let _=this.update_in(cx,|workspace,window,cx| {
+                let requests = paths.into_iter().map(|path| OpenRequest { path: Some(path), choose_window, ..Default::default() });
+                workspace.open_batch(requests, window, cx);
+            });}
         }).detach();
     }
     fn request_manual_save(&mut self, document: &Entity<DocumentHost>, save_as: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1203,6 +1253,7 @@ impl Workspace {
     // ---- 搜索 ----
 
     fn toggle_search(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if replace && self.document().is_some_and(|document| document.read(cx).editing_locked()) { return; }
         if self.search.as_ref().is_some_and(|search| search.show_replace == replace) {
             self.close_search(window, cx);
         } else {
@@ -1213,6 +1264,7 @@ impl Workspace {
     pub(crate) fn open_search(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.popover=None;
         let Some(buffer) = self.document() else { return };
+        let replace = replace && !buffer.read(cx).editing_locked();
         let selected = buffer.read(cx).selected_text(cx);
         let was_open = self.search.is_some();
         if self.search.is_none() {
@@ -1291,6 +1343,7 @@ impl Workspace {
     fn with_document(&mut self, window: &mut Window, cx: &mut Context<Self>, update: impl FnOnce(&mut DocumentHost, &mut Context<DocumentHost>)) {
         let Some(tab) = self.tab() else { return };
         let buffer = tab.document.clone();
+        if buffer.read(cx).editing_locked() { return; }
         let primary = tab.document.clone();
         buffer.update(cx, update);
         window.focus(&primary.focus_handle(cx), cx);
@@ -1426,7 +1479,7 @@ impl Workspace {
             ChromeEvent::Command(ChromeCommand::Diagram(kind))=>{let template=toolbar::diagram_template(*kind, &cx.global::<Settings>().string("defaultDiagramType"));self.with_document(window,cx,|host,cx|host.command(crate::nomo_mark::commands::EditIntent::InsertDiagram(template.into()),cx));},
             ChromeEvent::LinkPicker=>self.open_editor_popover(EditorPopoverKind::Link,window,cx),
             ChromeEvent::TablePicker=>self.open_editor_popover(EditorPopoverKind::Table,window,cx),
-            ChromeEvent::ResetOutlinePosition=>self.reset_outline_position(cx),
+            ChromeEvent::ToggleSidebar => self.toggle_sidebar(window, cx),
             ChromeEvent::ToggleMini=>self.toggle_mini(window,cx),
             ChromeEvent::SoftwareUpdate=>crate::ui::updates::action(window,cx),
             ChromeEvent::Unavailable(_)=>{self.notice=Some(ToolbarLocale::current(cx).app_text("workspace.unavailable").into());cx.notify();},
@@ -1494,7 +1547,7 @@ impl Workspace {
             PopupPlacement::BelowRight, menu, reduced)).with_priority(5).into_any_element())
     }
 
-    fn render_tabs(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_tabs(&mut self, theme: &Theme, page_title_opacity: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let rows=self.tab_rows(cx);
         let tab_count=rows.len();
         let reduced = self.explorer.reduce_motion;
@@ -1522,8 +1575,10 @@ impl Workspace {
                 let hover = tab.hover.value();
                 let close_hover = tab.close_hover.value();
                 let active_color = tab.active_color.value();
-                let tab_text = motion::color(motion::color(theme.muted, theme.fg, hover), theme.heading, active_color);
-                let tab_icon = motion::color(theme.muted, theme.accent, active_color);
+                // 新标签已有独立入场，回到已打开标签时才叠加页头过渡。
+                let title_opacity = if active && !animate { page_title_opacity } else { 1.0 };
+                let tab_text = motion::color(motion::color(theme.muted, theme.fg, hover), theme.heading, active_color).opacity(title_opacity);
+                let tab_icon = motion::color(theme.muted, theme.accent, active_color).opacity(title_opacity);
                 let dirty_indicator = dirty.then(|| {
                     let dot = div().size(px(6.0)).flex_none().rounded_full().bg(theme.accent);
                     let duration = Duration::from_millis(if reduced { 80 } else { 120 });
@@ -1676,6 +1731,57 @@ impl Workspace {
                 .items_center().justify_center().child(action))
     }
 
+    fn toggle_split_guide(&mut self, cx: &mut Context<Self>) {
+        self.split_guide_visible = !self.split_guide_visible;
+        cx.notify();
+    }
+
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.home_visible {
+            Settings::toggle(cx, "homeSidebarHidden");
+            return;
+        }
+        let sidebar_focused = self.explorer.search_field.as_ref()
+            .is_some_and(|field| field.focus_handle(cx).is_focused(window))
+            || self.explorer.edit.as_ref().is_some_and(|edit| edit.field.focus_handle(cx).is_focused(window));
+        if sidebar_focused && self.explorer.sidebar_visible(cx.global::<Settings>()) {
+            // 收起会移除文件树的输入框，快捷键仍需有窗口内的焦点。
+            let focus = self.document().map(|doc| doc.focus_handle(cx)).unwrap_or_else(|| self.focus.clone());
+            window.focus(&focus, cx);
+        }
+        let was_temporarily_visible = std::mem::take(&mut self.explorer.sidebar_temporarily_visible);
+        if was_temporarily_visible && !cx.global::<Settings>().show_sidebar {
+            // 用户收起临时展开的文件树时，配置已经是收起。
+            cx.notify();
+        } else {
+            Settings::toggle(cx, "sidebarHidden");
+        }
+    }
+
+    fn sidebar_frame(&mut self, visible: bool, full_width: f32, window: &Window) -> motion::SidebarFrame {
+        let now = Instant::now();
+        let target = if visible { 1.0 } else { 0.0 };
+        let (spring, last) = self.sidebar_motion.get_or_insert_with(|| {
+            (motion::Spring::new([target], 420.0, 31.0), now)
+        });
+        let elapsed = now.saturating_duration_since(std::mem::replace(last, now));
+        let reduced = self.explorer.reduce_motion;
+        if spring.target != [target] {
+            // 以最后绘制的位置反向，取消旧方向的速度和剩余进度。
+            spring.target = [target];
+            spring.v = [0.0];
+        } else if !reduced && spring.running() {
+            spring.step(elapsed.as_secs_f32());
+        }
+        if reduced || (!visible && spring.p[0] <= 0.0) {
+            spring.snap();
+        }
+        if spring.running() {
+            window.request_animation_frame();
+        }
+        motion::SidebarFrame { full_width, progress: spring.p[0], target_visible: visible }
+    }
+
     fn toggle_toolbar(&mut self, cx: &mut Context<Self>) {
         if cx.global::<Settings>().show_toolbar { self.popover = None; self.toolbar_popup = None; self.width_dragging = false; }
         Settings::toggle(cx, "toolbarHidden");
@@ -1712,7 +1818,8 @@ impl Workspace {
         let whole_word = search.whole_word;
         let backwards = search.backwards;
         let wrap_around = search.wrap_around;
-        let show_replace = search.show_replace;
+        let editable = !buffer.read(cx).editing_locked();
+        let show_replace = editable && search.show_replace;
         let available_width = self.outline_ui.bounds.get().map_or(900.0, |bounds| f32::from(bounds.size.width));
         let panel_width = (available_width - 24.0).clamp(240.0, 400.0);
         let panel_right = if available_width >= 700.0 { 272.0 } else { 12.0 };
@@ -1753,12 +1860,12 @@ impl Workspace {
                         })))
                         .child(small_icon_button("prev", IconName::ArrowUp, false, theme).tooltip(tooltip(format!("{} ⇧⏎", locale.text("previous")))).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.step_match(false, window, cx))))
                         .child(small_icon_button("next", IconName::ArrowDown, false, theme).tooltip(tooltip(format!("{} ⏎", locale.text("next")))).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.step_match(true, window, cx))))
-                        .child(small_icon_button("toggle-replace", IconName::Replace, show_replace, theme).tooltip(tooltip(locale.tooltip("replace", if cfg!(target_os = "macos") { "⌘⌥F" } else { "Ctrl+H" }))).on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
+                        .when(editable, |row| row.child(small_icon_button("toggle-replace", IconName::Replace, show_replace, theme).tooltip(tooltip(locale.tooltip("replace", if cfg!(target_os = "macos") { "⌘⌥F" } else { "Ctrl+H" }))).on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
                             if let Some(search) = &mut w.search {
                                 search.show_replace = !search.show_replace;
                             }
                             cx.notify();
-                        })))
+                        }))))
                         .child(small_icon_button("close-search", IconName::Close, false, theme).tooltip(tooltip(format!("{} Esc", locale.text("close")))).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.close_search(window, cx)))),
                 )
                 .children(replace_row)
@@ -1773,7 +1880,7 @@ impl Workspace {
         )
     }
 
-    fn render_empty(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_empty(&mut self, theme: &Theme, title_opacity: f32, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
@@ -1782,7 +1889,8 @@ impl Workspace {
             .justify_center()
             .gap(px(10.0))
             .child(div().size(px(44.0)).rounded(px(10.0)).bg(theme.hover).flex().items_center().justify_center().child(icon(IconName::FileText, 20.0, theme.accent_strong)))
-            .child(div().text_size(px(17.0)).font_weight(FontWeight::BOLD).text_color(theme.heading).child(ToolbarLocale::current(cx).app_text("workspace.emptyTitle")))
+            .child(div().text_size(px(17.0)).font_weight(FontWeight::BOLD).text_color(theme.heading).opacity(title_opacity)
+                .child(ToolbarLocale::current(cx).app_text("workspace.emptyTitle")))
             .child(div().text_size(px(13.0)).text_color(theme.muted).child(ToolbarLocale::current(cx).app_text("workspace.emptyDescription")))
             .children(self.last_notice.clone().map(|notice|div().max_w(px(560.0)).text_size(px(13.0)).text_color(theme.fg).child(notice)))
             .child(
@@ -1836,6 +1944,24 @@ impl Render for Workspace {
             }
         }
         let reduced = self.explorer.reduce_motion;
+        // 页面已经切换才开始淡入；不保留旧视图，也不参与打开、焦点或正文绘制。
+        if self.rendered_home_visible != self.home_visible {
+            self.rendered_home_visible = self.home_visible;
+            self.page_title_started = (!reduced).then(Instant::now);
+            // 切页按当前显隐和完整宽度绘制，不续播上一页的侧栏收放。
+            self.sidebar_motion = None;
+        }
+        let mut page_title_opacity = 1.0;
+        if let Some(started) = self.page_title_started {
+            let elapsed = started.elapsed();
+            if elapsed >= PAGE_TITLE_FADE || reduced {
+                self.page_title_started = None;
+            } else {
+                let progress = elapsed.as_secs_f32() / PAGE_TITLE_FADE.as_secs_f32();
+                page_title_opacity = 0.65 + 0.35 * motion::ease(progress);
+                window.request_animation_frame();
+            }
+        }
         let active_item=self.tabs.get(self.active).and_then(|tab|self.comparison.item(tab.key));
         for tab in &mut self.tabs {
             tab.active_color.set(active_item.is_some_and(|item|item.contains(tab.key)), reduced, Duration::from_millis(150));
@@ -1859,6 +1985,22 @@ impl Render for Workspace {
         }
         let outline_visible = self.outline_visible(cx);
         let status=self.document().map(|document|document.read(cx).status().clone());
+        let sidebar_visible = if self.home_visible {
+            settings.show_home_sidebar
+        } else {
+            self.explorer.sidebar_visible(&settings)
+        };
+        let mut view_menu = ViewMenuState::from_settings(&settings);
+        view_menu.sidebar_visible = sidebar_visible;
+        view_menu.mode = mode;
+        view_menu.editing_locked = status.as_ref().is_some_and(|status| status.editing_locked);
+        view_menu.split_available = self.active_pair().is_none();
+        view_menu.outline_visible = outline_visible;
+        view_menu.split_guide = (mode == Some(EditorMode::Split) && !mini).then_some(self.split_guide_visible);
+        #[cfg(target_os = "macos")]
+        if cx.try_global::<crate::LastActiveWorkspace>().is_some_and(|active| active.0 == window.window_handle()) {
+            view_menu.sync_native(cx);
+        }
         // 编辑页始终保留标签栏，单个文档也通过标签显示名称与修改状态。
         let show_tabs = !self.home_visible && shell_visible;
         self.surface.set_rail_hidden(!show_tabs);
@@ -1866,31 +2008,44 @@ impl Render for Workspace {
             path: entry.path.clone(), label: home::entry_name(&entry.path), folder: false, missing: false,
         }).collect();
         self.chrome.update(cx,|chrome,cx|chrome.set_state(ChromeState {
-            has_document:status.is_some(), can_undo:status.as_ref().is_some_and(|s|s.can_undo),
-            can_redo:status.as_ref().is_some_and(|s|s.can_redo),mode:mode.unwrap_or(EditorMode::Semantic),
-            sidebar_visible:settings.show_sidebar, toolbar_visible:settings.show_toolbar,
-            outline_visible,split_available:self.active_pair().is_none(),
-            toolbar_shortcut: crate::ui::shortcuts::current("toggle-toolbar", cx).into(),
+            view_menu,
+            can_undo:status.as_ref().is_some_and(|s|s.can_undo && !s.editing_locked),
+            can_redo:status.as_ref().is_some_and(|s|s.can_redo && !s.editing_locked),
             recent, update:crate::ui::updates::chrome_state(cx),
-            capabilities:vec![ChromeCapability::Recent,ChromeCapability::NewWindow,ChromeCapability::HeadingLevels,ChromeCapability::HeadingAdjustment,ChromeCapability::ClearFormatting,ChromeCapability::LinkPicker,ChromeCapability::TablePicker,ChromeCapability::MathInline,ChromeCapability::Callout,ChromeCapability::Details,ChromeCapability::InlineComment,ChromeCapability::BlockComment,ChromeCapability::FrontMatter,ChromeCapability::Diagrams,ChromeCapability::Footnote,ChromeCapability::Toc,ChromeCapability::UnavailableNotice,ChromeCapability::ResetOutlinePosition]
+            capabilities:vec![ChromeCapability::Recent,ChromeCapability::NewWindow,ChromeCapability::HeadingLevels,ChromeCapability::HeadingAdjustment,ChromeCapability::ClearFormatting,ChromeCapability::LinkPicker,ChromeCapability::TablePicker,ChromeCapability::MathInline,ChromeCapability::Callout,ChromeCapability::Details,ChromeCapability::InlineComment,ChromeCapability::BlockComment,ChromeCapability::FrontMatter,ChromeCapability::Diagrams,ChromeCapability::Footnote,ChromeCapability::Toc,ChromeCapability::UnavailableNotice]
                 .into_iter().chain([ChromeCapability::SoftwareUpdate]).chain([ChromeCapability::ExportHtml, ChromeCapability::ExportPdf, ChromeCapability::ExportWord].into_iter().filter(|_| self.export_job.is_none())).chain((self.active_pair().is_none() && status.is_some() && crate::ui::mini::unavailable_reason(window).is_none()).then_some(ChromeCapability::Mini)).collect(),
             ..Default::default()
         },cx));
         let chrome = shell_visible.then(|| mini::shell_row(self.chrome.clone().into_any_element(), px(crate::ui::chrome::TITLEBAR_HEIGHT), shell_visibility));
         let tabs = show_tabs.then(|| {
-            let tabs = self.render_tabs(&theme, cx).into_any_element();
+            let tabs = self.render_tabs(&theme, page_title_opacity, cx).into_any_element();
             mini::shell_row(tabs, px(TAB_RAIL_HEIGHT), shell_visibility)
         });
-        let sidebar = if self.home_visible || !shell_visible { None } else { self.render_sidebar_animated(settings.show_sidebar, &theme, window, cx) };
+        let viewport_width = f32::from(window.viewport_size().width);
+        let default_sidebar_width = if viewport_width < home::COMPACT_WINDOW_WIDTH { 208.0 } else { 250.0 };
+        let sidebar_width = self.explorer.sidebar_width.unwrap_or(default_sidebar_width).min((viewport_width - 420.0).max(180.0));
+        let sidebar_frame = if mini {
+            motion::SidebarFrame::default()
+        } else {
+            self.sidebar_frame(sidebar_visible, sidebar_width, window)
+        };
+        let sidebar = if self.home_visible || !shell_visible {
+            None
+        } else {
+            self.render_workspace_sidebar(sidebar_frame, &theme, window, cx)
+        };
         let main: AnyElement = if self.home_visible {
             let count = self.tabs.len();
             let offer_restore = count==0 && self.has_saved_layout(cx);
-            let sidebar_width = self.explorer.sidebar_width.unwrap_or(250.0)
-                .min((f32::from(window.viewport_size().width) - 420.0).max(180.0));
-            self.home.update(cx, |home, _| { home.restore_layout = offer_restore; home.open_tabs = count; home.sidebar_width = sidebar_width; });
+            self.home.update(cx, |home, _| {
+                home.restore_layout = offer_restore;
+                home.open_tabs = count;
+                home.sidebar_frame = sidebar_frame;
+                home.title_opacity = page_title_opacity;
+            });
             self.home.clone().into_any_element()
         } else { match mode {
-            None => self.render_empty(&theme, cx).into_any_element(),
+            None => self.render_empty(&theme, page_title_opacity, cx).into_any_element(),
             Some(mode) => {
                 let toolbar = if !shell_visible { None } else { self.render_toolbar_animated(settings.show_toolbar, &theme, mode, window, cx) };
                 let tab = self.tab().expect("active tab");
@@ -1960,6 +2115,9 @@ impl Render for Workspace {
             .bg(theme.rail_bg)
             .text_color(theme.fg)
             .font_family(ui_font)
+            .on_drop(|paths: &gpui::ExternalPaths, window, cx| {
+                Self::open_dropped_documents(paths, window, cx);
+            })
             .capture_key_down(|_, _, _| crate::frame_profile::input())
             .on_modifiers_changed(cx.listener(|workspace, event: &gpui::ModifiersChangedEvent, window, _| {
                 let held = event.modifiers.control || event.modifiers.platform;
@@ -2015,12 +2173,24 @@ impl Render for Workspace {
                 let next = if w.tab().map(|tab| tab.mode) == Some(EditorMode::Source) { EditorMode::Semantic } else { EditorMode::Source };
                 w.set_mode(next, window, cx);
             }))
-            .on_action(cx.listener(|w, _: &ModeSemantic, window, cx| w.set_mode(EditorMode::Semantic, window, cx)))
-            .on_action(cx.listener(|w, _: &ModeSource, window, cx| w.set_mode(EditorMode::Source, window, cx)))
-            .on_action(cx.listener(|w, _: &ModeSplit, window, cx| w.set_mode(EditorMode::Split, window, cx)))
-            .on_action(cx.listener(|w, _: &ToggleOutline, _, cx| w.toggle_outline(cx)))
-            .on_action(cx.listener(|_, _: &ToggleSidebar, _, cx| Settings::toggle(cx, "sidebarHidden")))
+            .when(mode.is_some(), |root| root
+                .on_action(cx.listener(|w, _: &ModeSemantic, window, cx| w.set_mode(EditorMode::Semantic, window, cx)))
+                .on_action(cx.listener(|w, _: &ModeSource, window, cx| w.set_mode(EditorMode::Source, window, cx)))
+                .on_action(cx.listener(|w, _: &ToggleEditLock, window, cx| w.toggle_editing_lock(window, cx)))
+                .on_action(cx.listener(|w, _: &ToggleOutline, _, cx| w.toggle_outline(cx))))
+            .when(mode.is_some() && view_menu.split_available, |root| root
+                .on_action(cx.listener(|w, _: &ModeSplit, window, cx| w.set_mode(EditorMode::Split, window, cx))))
+            .when(view_menu.split_guide.is_some(), |root| root
+                .on_action(cx.listener(|w, _: &ToggleSplitGuide, _, cx| w.toggle_split_guide(cx))))
+            .on_action(cx.listener(|w, _: &ToggleSidebar, window, cx| w.toggle_sidebar(window, cx)))
             .on_action(cx.listener(|w, _: &ToggleToolbar, _, cx| w.toggle_toolbar(cx)))
+            .on_action(cx.listener(|w, _: &ResetOutlinePosition, _, cx| w.reset_outline_position(cx)))
+            .on_action(cx.listener(|_, _: &ToggleCodeLineNumbers, _, cx| Settings::toggle(cx, "codeBlockLineNumbersVisible")))
+            .on_action(cx.listener(|_, _: &ToggleZoomControl, _, cx| Settings::toggle(cx, "zoomControlVisible")))
+            .on_action(cx.listener(|_, _: &ToggleWritingStats, _, cx| Settings::toggle(cx, "writingStatsVisible")))
+            .when(settings.markdown_lint_enabled, |root| root
+                .on_action(cx.listener(|_, _: &ToggleLintIndicator, _, cx| Settings::toggle(cx, "markdownLintIndicatorVisible"))))
+            .on_action(cx.listener(|_, _: &ToggleEditLockButton, _, cx| Settings::toggle(cx, "editLockButtonVisible")))
             .on_action(cx.listener(|_, _: &ToggleTheme, _, cx| Theme::toggle(cx)))
             .on_action(cx.listener(|_, _: &FollowSystemTheme, _, cx| Settings::set(cx, "themeMode", serde_json::json!("system"))))
             .on_action(cx.listener(|w, _: &Underline, window, cx| w.with_document(window, cx, |b, cx| b.wrap_selection("<u>", "</u>", cx))))

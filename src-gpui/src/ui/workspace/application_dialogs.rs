@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 #[derive(Clone)]
-pub(super) enum OpenSource { File, Layout(u64,Option<RecoveryCandidate>), Reload(Entity<DocumentHost>,u64), Recovery(RecoveryCandidate,bool,Option<Entity<DocumentHost>>,u64), DiskRecovery(RecoveryCandidate,Option<Entity<DocumentHost>>,u64) }
+pub(super) enum OpenSource { File, NewFile, Layout(u64,Option<RecoveryCandidate>), Reload(Entity<DocumentHost>,u64), Recovery(RecoveryCandidate,bool,Option<Entity<DocumentHost>>,u64), DiskRecovery(RecoveryCandidate,Option<Entity<DocumentHost>>,u64) }
 #[derive(Default)]
 pub(super) struct ApplicationDialogs {
     pub close_approved: bool,
@@ -96,8 +96,9 @@ impl Workspace {
                 cx.background_executor().timer(Duration::from_millis(1200)).await;
                 if this.update_in(cx,|workspace,window,cx| {
                     if workspace.application_dialogs.busy || window.has_active_prompt() || workspace.closing_window || workspace.comparison.closing.is_some() || !workspace.opening.is_empty() {return;}
+                    workspace.continue_folder_open(window, cx);
                     workspace.drain_open_requests(window,cx);
-                    if workspace.application_dialogs.busy || window.has_active_prompt() || !workspace.opening.is_empty() || workspace.pending_document_transition.is_some() {return;}
+                    if workspace.application_dialogs.busy || window.has_active_prompt() || !workspace.opening.is_empty() || workspace.pending_document_transition.is_some() || workspace.folder_open_pending() {return;}
                     if workspace.offer_document_recovery(window,cx) {return;}
                     if crate::ui::updates::present_pending(window,cx){return;}
                     if window.is_window_active() {workspace.check_external_change(window,cx);}
@@ -111,6 +112,7 @@ impl Workspace {
         let Some(path)=request.path.take() else {self.open_request_here(request,window,cx);return;};
         let path=path.canonicalize().unwrap_or(path);
         request.path=Some(path.clone());
+        if path.is_dir() && self.reuse_open_folder(&request, window, cx) {return;}
         if self.reuse_open_document(&request,window,cx) {return;}
         let current=window.window_handle();
         let mut directory_windows=Vec::new();

@@ -1,6 +1,65 @@
 //! 外壳动效共用的系统偏好与短时插值，不持有文档或视图。
-use gpui::{Global, Hsla, Rgba, Styled};
+use gpui::{Div, Global, Hsla, ParentElement, Rgba, Styled, div, px};
 use std::time::{Duration, Instant};
+
+/// 拖拽和纸片保留速度，只改变目标；四个子步限制掉帧后的积分误差。
+/// 参数与积分方式参考 Quiet.md；MIT 声明见 assets/licenses/LICENSE-Rendering。
+#[derive(Clone, Copy)]
+pub(crate) struct Spring<const N: usize> {
+    pub p: [f32; N],
+    pub v: [f32; N],
+    pub target: [f32; N],
+    stiffness: f32,
+    damping: f32,
+    precision: (f32, f32),
+}
+
+impl<const N: usize> Spring<N> {
+    pub fn new(p: [f32; N], stiffness: f32, damping: f32) -> Self {
+        Self { p, v: [0.0; N], target: p, stiffness, damping, precision: (0.002, 0.02) }
+    }
+
+    pub fn layout(p: [f32; N]) -> Self {
+        Self { precision: (0.05, 0.1), ..Self::new(p, 420.0, 31.0) }
+    }
+
+    pub fn snap(&mut self) { self.p = self.target; self.v = [0.0; N]; }
+    pub fn running(&self) -> bool { self.p != self.target || self.v != [0.0; N] }
+
+    pub fn step(&mut self, dt: f32) -> bool {
+        let step = dt.clamp(0.0, 0.032) / 4.0;
+        for i in 0..N {
+            for _ in 0..4 {
+                self.v[i] += (self.stiffness * (self.target[i] - self.p[i]) - self.damping * self.v[i]) * step;
+                self.p[i] += self.v[i] * step;
+            }
+            if (self.target[i] - self.p[i]).abs() < self.precision.0 && self.v[i].abs() < self.precision.1 {
+                self.p[i] = self.target[i]; self.v[i] = 0.0;
+            }
+        }
+        self.running()
+    }
+}
+
+/// 两页侧栏使用相同的裁剪几何。回弹只移动栏内内容，避免网格跨过已到达的宽度阈值。
+#[derive(Clone, Copy, Default)]
+pub(super) struct SidebarFrame {
+    pub full_width: f32,
+    pub progress: f32,
+    pub target_visible: bool,
+}
+
+impl SidebarFrame {
+    pub fn occupied_width(self) -> f32 {
+        self.full_width * self.progress.clamp(0.0, 1.0)
+    }
+
+    pub fn clip(self, panel: Div) -> Div {
+        div().relative().w(px(self.occupied_width())).h_full().flex_none().overflow_hidden()
+            .child(panel.absolute().top_0().left(px(self.full_width * (self.progress - 1.0)))
+                .w(px(self.full_width)).h_full())
+    }
+}
 
 #[derive(Default)]
 pub struct MotionPreference {

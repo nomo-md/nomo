@@ -577,7 +577,8 @@ impl DocumentHost {
             let context=WindowContext::Resolved(view.host.parsed.context.clone());
             static NEXT_WINDOW:AtomicU64=AtomicU64::new(1);
             let window_id=format!("split-{}-{}",identity.window_id,NEXT_WINDOW.fetch_add(1,Ordering::Relaxed));
-            let adapter=WindowHostAdapter::new(input,window_id,0,context)?;
+            let mut adapter=WindowHostAdapter::new(input,window_id,0,context)?;
+            adapter.set_editing_locked(self.editing_locked());
             let base_dir=view.base_dir.clone();
             let selected=self.control.read(cx).host.selection;
             let control=cx.new(|cx| {let mut view=NomoMark::new(adapter,cx);view.mode=other_mode;view.base_dir=base_dir;view.workspace_hosted=self.embedded;view.windowed_navigation=self.production;view.host.set_readonly(true);view.host.selection=selected;view});
@@ -610,8 +611,9 @@ impl DocumentHost {
             self.panes.push(pane);
             self.update_pane_cost(1,cx);
             // 最多提前创建两个原本可见的邻窗，受既有共享预算约束；屏外预取仍交给调度器。
-            for (adapter,base_dir,bytes) in neighbors {
+            for (mut adapter,base_dir,bytes) in neighbors {
                 if !self.panes[1].viewport.budget.reserve(super::super::resident_budget::Cost {views:1,source:bytes,layout:0},false) {break;}
+                adapter.set_editing_locked(self.editing_locked());
                 let view=cx.new(|cx| {let mut view=NomoMark::new(adapter,cx);view.mode=other_mode;view.base_dir=base_dir;view.workspace_hosted=self.embedded;view.windowed_navigation=self.production;view.host.set_readonly(true);view.host.selection=selected;view});
                 let subscription=cx.subscribe(&view,Self::event);
                 self.panes[1].viewport.mounts.push(viewport_ui::Mounted {view,_subscription:subscription,height:32.0});

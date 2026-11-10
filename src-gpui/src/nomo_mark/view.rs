@@ -177,6 +177,24 @@ impl NomoMark {
             horizontal_drag: None,
         }
     }
+    pub(super) fn set_editing_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
+        if self.host.editing_locked() == locked {
+            return;
+        }
+        self.host.set_editing_locked(locked);
+        if locked {
+            self.context_menu = None;
+            self.context_form = None;
+            self.code_language = None;
+            self.block_menu_open = false;
+            self.table_size_picker = false;
+            self.dismiss_quick_insert(cx);
+            self.slash_range = None;
+            self.menu_open = false;
+            self.emoji_mode = false;
+        }
+        cx.notify();
+    }
     pub fn set_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) -> Result<(), ControlError> {
         if self.host.interaction.composing || self.host.interaction.draft {
             return Err(ControlError::Busy);
@@ -431,6 +449,7 @@ impl NomoMark {
         }
     }
     pub fn command(&mut self, intent: EditIntent, cx: &mut Context<Self>) {
+        if self.host.editing_locked() { return; }
         self.dismiss_quick_insert(cx);
         let enter_math = matches!(intent, EditIntent::InsertMathBlock) && self.effective_mode() == ViewMode::Semantic;
         let range = self.host.selection.range();
@@ -852,6 +871,7 @@ impl NomoMark {
         self.upstream_caret = end.then_some(self.host.selection.head_byte);
     }
     fn copy(&mut self, cut: bool, cx: &mut Context<Self>) {
+        if cut && self.host.editing_locked() { return; }
         if let Some(payload) = self.copy_cells(cx.global::<Settings>().copy_markdown_syntax) {
             match payload.map_err(|e| e.to_string()).and_then(|p| crate::clipboard::write_rich(&p.text, &p.html, cx)) {
                 Ok(()) if cut => self.command(EditIntent::Replace(String::new()), cx),
@@ -887,6 +907,7 @@ impl NomoMark {
         }
     }
     fn paste(&mut self, plain: bool, cx: &mut Context<Self>) {
+        if self.host.editing_locked() { return; }
         let in_code = self.host.parsed.nodes.iter().any(|node| node.kind == "code" && node.source.contains(&self.local_cursor()));
         if !plain && !self.auxiliary_input && !in_code {
             match crate::clipboard::read_images(cx) {
@@ -1121,7 +1142,9 @@ impl NomoMark {
                             cx.notify();
                             return;
                         }
-                        self.begin_object(range, super::widgets::ObjectKind::Html, window, cx);
+                        if !self.host.editing_locked() {
+                            self.begin_object(range, super::widgets::ObjectKind::Html, window, cx);
+                        }
                         return;
                     }
                     DisplayItem::TocLink { x: ix, y: iy, w, h, target, .. }
@@ -1199,6 +1222,7 @@ impl NomoMark {
                         checked,
                         source,
                     } if x >= *ix && x <= ix + size && y >= *iy && y <= iy + size => {
+                        if self.host.editing_locked() { return; }
                         let base = self.host.parsed.identity.from_byte;
                         let from = base + *source as u64 + 1;
                         let text = if *checked { " " } else { "x" }.to_owned();
@@ -1258,7 +1282,7 @@ impl NomoMark {
             return;
         };
         if event.click_count == 1 && !event.modifiers.shift && self.enter_block_at(at, false, window, cx) { return; }
-        if event.click_count == 2 && self.effective_mode() == ViewMode::Semantic
+        if event.click_count == 2 && !self.host.editing_locked() && self.effective_mode() == ViewMode::Semantic
             && !self.host.parsed.context.reference_pending(&(at..at))
         {
             if let Some((range, kind)) = super::table_inline::atom_at(&self.host.parsed, at).and_then(|run| {
@@ -2175,6 +2199,7 @@ impl NomoMark {
         mark: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.host.editing_locked() { return; }
         if !mark && text == " " && range.is_none() && !self.keyboard_protected() && self.external_composition.is_none()
             && self.effective_mode() == ViewMode::Semantic && !self.auxiliary_input
         {
@@ -2527,6 +2552,10 @@ impl Render for NomoMark {
             .on_action(cx.listener(|v, _: &editor::Cut, _, cx| v.copy(true, cx)))
             .on_action(cx.listener(|v, _: &editor::Paste, _, cx| v.paste(false, cx)))
             .on_drop(cx.listener(|v, paths: &gpui::ExternalPaths, window, cx| {
+                // GPUI 在回调前已取走拖放载荷，文档不能靠冒泡交给工作区。
+                if crate::ui::workspace::Workspace::open_dropped_documents(paths, window, cx) {
+                    return;
+                }
                 if v.auxiliary_input { cx.propagate(); return; }
                 let inputs: Vec<_> = paths.0.iter().filter(|p| crate::image_import::supported(p)).cloned()
                     .take(crate::image_import::MAX_BATCH_FILES + 1)

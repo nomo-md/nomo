@@ -311,6 +311,7 @@ impl Workspace {
         self.outline_ui.panel_bounds.set(None);
         let document = self.document()?;
         let document_id = document.read(cx).status().document_id.clone();
+        let editable = !document.read(cx).editing_locked();
         if self.outline_ui.document_id.as_ref() != Some(&document_id) {
             self.outline_ui.document_id = Some(document_id);
             self.outline_ui.selected = 0;
@@ -489,7 +490,8 @@ impl Workspace {
                         let row = div().id(("outline-row", index)).relative().top(px(offset)).w_full().h(px(OUTLINE_ROW_CONTENT_HEIGHT))
                             .pl(px((heading.level.saturating_sub(1)) as f32 * 16.0))
                             .flex().items_center().gap(px(7.0)).rounded(px(4.0)).overflow_hidden()
-                            .cursor(outline_drag_cursor(false))
+                            .when(editable, |row| row.cursor(outline_drag_cursor(false)))
+                            .when(!editable, |row| row.cursor_pointer())
                             .text_size(px(14.0)).text_color(color).opacity(opacity)
                             .when(active_weight > 0.0, |el| el.bg(theme.accent.opacity(0.07 * active_weight)))
                             .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
@@ -510,7 +512,10 @@ impl Workspace {
                                 if !workspace.outline_ui.showing { return; }
                                 workspace.outline_ui.keyboard_focus_visible = false;
                                 window.focus(&workspace.outline_ui.focus, cx);
-                                if workspace.document().is_none_or(|doc| doc.read(cx).status().revision != revision) { return; }
+                                if workspace.document().is_none_or(|doc| {
+                                    let host = doc.read(cx);
+                                    host.editing_locked() || host.status().revision != revision
+                                }) { return; }
                                 workspace.outline_ui.drag_generation += 1;
                                 workspace.outline_ui.section_drag = Some(SectionDrag { start:event.position, pointer:event.position, source:drag_heading.clone(), target:None,
                                     placement:crate::text_document::markdown_session::OutlinePlacement::Before, revision, moving:false, valid:false, generation:workspace.outline_ui.drag_generation });

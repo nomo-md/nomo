@@ -13,7 +13,15 @@ pub(crate) use secondary::{SecondaryDialog, SecondaryKind, SecondaryAction, Tone
 #[derive(Clone, Copy)]
 pub(crate) enum SaveChoice { Save, Discard, Cancel }
 
-enum DialogKind { Unsaved(UiMessage), Delete(SharedString), Message, Secondary(SecondaryDialog) }
+#[derive(Clone, Copy)]
+pub(crate) enum DeleteChoice { Delete, SaveCopies, Cancel }
+
+enum DialogKind {
+    Unsaved(UiMessage),
+    Delete { path: SharedString, dirty: Vec<String> },
+    Message,
+    Secondary(SecondaryDialog),
+}
 
 #[derive(Default)]
 struct NextPrompt(Option<DialogKind>);
@@ -49,19 +57,54 @@ pub(crate) fn confirm_save(title: UiMessage, window: &mut Window, cx: &mut App)
     }
 }
 
-pub(crate) fn confirm_delete(path: &Path, window: &mut Window, cx: &mut App)
-    -> impl Future<Output = bool> + use<>
+pub(crate) fn confirm_delete(path: &Path, dirty: Vec<String>, window: &mut Window, cx: &mut App)
+    -> impl Future<Output = DeleteChoice> + use<>
 {
+    let has_dirty = !dirty.is_empty();
     let response = if window.has_active_prompt() { None } else {
         let locale = ToolbarLocale::current(cx);
-        let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
-        let message = locale.text("dialog_delete_message").replace("{name}", &name);
-        cx.global_mut::<NextPrompt>().0 = Some(DialogKind::Delete(path.display().to_string().into()));
-        Some(window.prompt(PromptLevel::Warning, locale.text("dialog_delete_title"), Some(&message), &[
-            PromptButton::ok(locale.text("dialog_delete")), PromptButton::cancel(locale.text("cancel")),
-        ], cx))
+        let message = delete_message(path, &dirty, locale);
+        let mut actions = vec![PromptButton::ok(locale.text(if has_dirty {
+            "dialog_delete_discard"
+        } else { "dialog_delete" }))];
+        if has_dirty { actions.push(PromptButton::new(locale.text("dialog_delete_save_copies"))); }
+        actions.push(PromptButton::cancel(locale.text("cancel")));
+        cx.global_mut::<NextPrompt>().0 = Some(DialogKind::Delete {
+            path: path.display().to_string().into(), dirty,
+        });
+        Some(window.prompt(PromptLevel::Warning, locale.text("dialog_delete_title"), Some(&message), &actions, cx))
     };
-    async move { match response { Some(response) => response.await.ok() == Some(0), None => false } }
+    async move {
+        match response {
+            Some(response) => match response.await {
+                Ok(0) => DeleteChoice::Delete,
+                Ok(1) if has_dirty => DeleteChoice::SaveCopies,
+                _ => DeleteChoice::Cancel,
+            },
+            None => DeleteChoice::Cancel,
+        }
+    }
+}
+
+fn delete_message(path: &Path, dirty: &[String], locale: ToolbarLocale) -> String {
+    let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+    let mut message = locale.text("dialog_delete_message").replace("{name}", &name);
+    if !dirty.is_empty() {
+        const VISIBLE_NAMES: usize = 6;
+        let count = dirty.len().to_string();
+        message.push_str("\n\n");
+        message.push_str(&locale.text("dialog_delete_dirty").replace("{count}", &count));
+        for name in dirty.iter().take(VISIBLE_NAMES) {
+            message.push_str("\n");
+            message.push_str(name);
+        }
+        if dirty.len() > VISIBLE_NAMES {
+            let remaining = (dirty.len() - VISIBLE_NAMES).to_string();
+            message.push_str("\n");
+            message.push_str(&locale.text("dialog_delete_more").replace("{count}", &remaining));
+        }
+    }
+    message
 }
 
 struct Confirmation {
@@ -84,7 +127,11 @@ struct Confirmation {
 impl Confirmation {
     fn new(kind: DialogKind, level: PromptLevel, title: &str, message: Option<&str>, actions: &[PromptButton], cx: &mut Context<Self>) -> Self {
         let release_notes=match &kind {DialogKind::Secondary(dialog)=>dialog.notes.as_deref().map(secondary::parse_notes).unwrap_or_default(),_=>Vec::new()};
-        let keyboard_choice=matches!(&kind,DialogKind::Secondary(dialog) if matches!(dialog.kind,SecondaryKind::Update|SecondaryKind::UpdateSuccess)).then_some(actions.len());
+        let keyboard_choice = match &kind {
+            DialogKind::Secondary(dialog) if matches!(dialog.kind, SecondaryKind::Update | SecondaryKind::UpdateSuccess) => Some(actions.len()),
+            DialogKind::Delete { dirty, .. } if !dirty.is_empty() => actions.iter().position(PromptButton::is_cancel),
+            _ => None,
+        };
         Self { kind, level, title: title.to_owned().into(), message: message.map(|text| text.to_owned().into()),
             actions: actions.to_vec(), focus: cx.focus_handle(), keyboard_choice,
             hover: vec![motion::ScalarMotion::default(); actions.len()],
@@ -120,7 +167,7 @@ impl Confirmation {
                 "tab" | "left" | "right" | "up" | "down" => {
                     let mut order: Vec<_> = (0..self.actions.len()).collect();
                     if let DialogKind::Secondary(dialog)=&self.kind {order=self.secondary_controls(dialog);}
-                    if matches!(self.kind, DialogKind::Delete(_)) { order.reverse(); }
+                    if matches!(self.kind, DialogKind::Delete { .. }) { order.reverse(); }
                     if !order.is_empty() {
                         let backwards = event.keystroke.modifiers.shift || matches!(event.keystroke.key.as_str(), "left" | "up");
                         let current = self.keyboard_choice.and_then(|choice| order.iter().position(|&index| index == choice));
@@ -152,15 +199,16 @@ impl Confirmation {
             (DialogKind::Unsaved(_), 0) => locale.text("dialog_save").into(),
             (DialogKind::Unsaved(_), 1) => locale.text("dialog_discard").into(),
             (DialogKind::Unsaved(_), _) => locale.text("cancel").into(),
-            (DialogKind::Delete(_), 0) => locale.text("dialog_delete").into(),
-            (DialogKind::Delete(_), _) => locale.text("cancel").into(),
+            (DialogKind::Delete { dirty, .. }, 0) => locale.text(if dirty.is_empty() { "dialog_delete" } else { "dialog_delete_discard" }).into(),
+            (DialogKind::Delete { dirty, .. }, 1) if !dirty.is_empty() => locale.text("dialog_delete_save_copies").into(),
+            (DialogKind::Delete { .. }, _) => locale.text("cancel").into(),
             _ => self.actions[index].label().clone(),
         };
         let cancel = self.actions[index].is_cancel();
         let unsaved = matches!(self.kind, DialogKind::Unsaved(_));
-        let delete = matches!(self.kind, DialogKind::Delete(_));
-        let destructive = !cancel && ((unsaved && index == 1) || delete || matches!(self.level, PromptLevel::Critical));
-        let save = unsaved && index == 0;
+        let delete = matches!(self.kind, DialogKind::Delete { .. });
+        let destructive = !cancel && ((unsaved && index == 1) || (delete && index == 0) || matches!(self.level, PromptLevel::Critical));
+        let save = (unsaved && index == 0) || (delete && index == 1 && !cancel);
         let color = if destructive { if delete || matches!(self.level, PromptLevel::Critical) { theme.danger } else { theme.warning } } else if save { theme.accent_strong } else { theme.fg };
         let foreground = if destructive { rgb(0xffffff).into() } else { color };
         let background = if destructive { color } else if save { motion::color(theme.surface, theme.accent, 0.1) }
@@ -209,7 +257,7 @@ impl Render for Confirmation {
         let theme = Theme::ui(cx);
         let reduced = reduced_motion(cx);
         let unsaved = matches!(self.kind, DialogKind::Unsaved(_));
-        let delete = matches!(self.kind, DialogKind::Delete(_));
+        let delete = matches!(self.kind, DialogKind::Delete { .. });
         let viewport = window.viewport_size();
         let inset = window.client_inset().unwrap_or(px(0.0));
         let available_width = (viewport.width - inset * 2.0 - px(32.0)).max(px(0.0));
@@ -235,16 +283,12 @@ impl Render for Confirmation {
                 if unsaved { 18.0 } else { 20.0 }, accent));
         let title_text: SharedString = match &self.kind {
             DialogKind::Unsaved(title) => title.render(locale).into(),
-            DialogKind::Delete(_) => locale.text("dialog_delete_title").into(),
+            DialogKind::Delete { .. } => locale.text("dialog_delete_title").into(),
             _ => self.title.clone(),
         };
         let message: Option<SharedString> = match &self.kind {
             DialogKind::Unsaved(_) => Some(locale.text("dialog_unsaved_message").into()),
-            DialogKind::Delete(path) => {
-                let path = Path::new(path.as_ref());
-                let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
-                Some(locale.text("dialog_delete_message").replace("{name}", &name).into())
-            }
+            DialogKind::Delete { path, dirty } => Some(delete_message(Path::new(path.as_ref()), dirty, locale).into()),
             _ => self.message.clone(),
         };
         let title = div().text_color(theme.heading).text_size(px(if unsaved { 15.0 } else { 14.5 }))
@@ -274,7 +318,7 @@ impl Render for Confirmation {
                     .border_b_1().border_color(if delete { motion::color(theme.border, theme.danger, 0.25) } else { theme.border })
                     .child(badge).child(div().min_w(px(0.0)).flex_1().child(title)))
                 .child(div().flex_none().px(px(20.0)).py(px(16.0)).children(description)
-                    .when_some(match &self.kind { DialogKind::Delete(path) => Some(path.clone()), _ => None }, |el, path| {
+                    .when_some(match &self.kind { DialogKind::Delete { path, .. } => Some(path.clone()), _ => None }, |el, path| {
                         el.child(div().mt(px(8.0)).px(px(10.0)).py(px(8.0)).rounded(px(4.0)).bg(theme.surface)
                             .border_1().border_color(theme.border).text_color(theme.muted).text_size(px(12.0))
                             .font_family(crate::theme::font_for(crate::theme::Family::Mono, false, false).family).child(path))

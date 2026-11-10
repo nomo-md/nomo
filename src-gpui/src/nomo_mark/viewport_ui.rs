@@ -506,6 +506,7 @@ impl DocumentHost {
                 match result {
                     Ok(mut adapter)=> {
                         adapter.set_readonly(true);
+                        adapter.set_editing_locked(host.editing_locked());
                         let mode=host.panes[pane].mode;
                         let base_dir=host.panes[pane].control.read(cx).base_dir.clone();
                         let embedded=host.embedded;

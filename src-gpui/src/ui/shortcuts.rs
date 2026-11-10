@@ -19,6 +19,7 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     Shortcut { id: "export-pdf", label: "shortcuts.exportPdf", default: "Ctrl+Shift+P", action: || Box::new(action::ExportPdf) },
     Shortcut { id: "save-file", label: "shortcuts.save", default: "Ctrl+S", action: || Box::new(action::Save) },
     Shortcut { id: "toggle-source", label: "shortcuts.toggleSource", default: "Ctrl+E", action: || Box::new(action::ToggleSource) },
+    Shortcut { id: "toggle-edit-lock", label: "menu.toggleEditLock", default: "Ctrl+Shift+R", action: || Box::new(action::ToggleEditLock) },
     Shortcut { id: "toggle-theme", label: "shortcuts.toggleTheme", default: "Ctrl+Shift+L", action: || Box::new(action::ToggleTheme) },
     Shortcut { id: "toggle-focus", label: "shortcuts.toggleSidebar", default: "Ctrl+Shift+F", action: || Box::new(action::ToggleSidebar) },
     Shortcut { id: "toggle-toolbar", label: "shortcuts.toggleToolbar", default: "Ctrl+Shift+B", action: || Box::new(action::ToggleToolbar) },

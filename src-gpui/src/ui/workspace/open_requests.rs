@@ -4,12 +4,14 @@ use std::collections::VecDeque;
 
 const MAX_PENDING_OPENS: usize = 64;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(super) struct OpenRequest {
     pub path: Option<PathBuf>,
     pub preview: bool,
     pub anchor: Option<String>,
     pub choose_window: bool,
+    pub newly_created: bool,
+    pub document_only: bool,
     pub generation: u64,
 }
 
@@ -33,34 +35,80 @@ impl Workspace {
     }
 
     pub fn open_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let requests = paths.into_iter().map(|path| OpenRequest {
+            path: Some(path),
+            choose_window: true,
+            ..Default::default()
+        });
+        self.open_batch(requests, window, cx);
+    }
+
+    pub(crate) fn open_dropped_documents(
+        paths: &gpui::ExternalPaths,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let Some(workspace) = window.root::<Self>().flatten() else { return false; };
+        let documents: Vec<_> = paths.paths().iter()
+            .filter(|path| path.is_absolute() && crate::ui::file_tree::supported_document(path))
+            .take(MAX_PENDING_OPENS + 1)
+            .cloned()
+            .collect();
+        if documents.is_empty() { return false; }
+
+        // 编辑器也处理外部落点，打开前先释放其事件回调的可变借用。
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let requests = documents.into_iter().map(|path| OpenRequest {
+                    path: Some(path),
+                    document_only: true,
+                    ..Default::default()
+                });
+                workspace.open_batch(requests, window, cx);
+            });
+        });
+        true
+    }
+
+    pub(super) fn open_batch(
+        &mut self,
+        requests: impl IntoIterator<Item = OpenRequest>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.pending_tree_click.take();
         self.deferred_open = None;
-        for path in paths {
-            self.enqueue_open(Some(path), false, None, true, cx);
+        for request in requests {
+            self.enqueue_open_request(request, cx);
         }
         self.drain_open_requests(window, cx);
     }
 
     pub(super) fn enqueue_open(&mut self, path: Option<PathBuf>, preview: bool, anchor: Option<String>, choose_window: bool, cx: &mut Context<Self>) {
+        self.enqueue_open_request(OpenRequest { path, preview, anchor, choose_window, ..Default::default() }, cx);
+    }
+
+    pub(super) fn enqueue_open_request(&mut self, mut request: OpenRequest, cx: &mut Context<Self>) {
         if self.open_requests.pending.len() >= MAX_PENDING_OPENS
-            || path.as_ref().is_some_and(|path| path.as_os_str().len() > 32 * 1024)
-            || anchor.as_ref().is_some_and(|anchor| anchor.len() > 8192)
+            || request.path.as_ref().is_some_and(|path| path.as_os_str().len() > 32 * 1024)
+            || request.anchor.as_ref().is_some_and(|anchor| anchor.len() > 8192)
         {
             self.failure_notice = Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text("open.queueFull").into());
             cx.notify();
             return;
         }
         if self.waiting_library_close { self.waiting_library_close = false; self.cancel_close(cx); }
-        self.cancel_preview_opens(path.as_deref());
+        self.cancel_preview_opens(request.path.as_deref());
         // 连续单击预览可合并；显式多选、新建和固定打开都必须保留。
         self.open_requests.pending.retain(|request| !request.preview);
-        let generation = self.next_open_intent();
-        self.open_requests.pending.push_back(OpenRequest { path, preview, anchor, choose_window, generation });
+        request.generation = self.next_open_intent();
+        self.open_requests.pending.push_back(request);
     }
 
     pub(super) fn drain_open_requests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.opening.is_empty() || self.pending_document_transition.is_some()
             || self.application_dialogs.busy || window.has_active_prompt() || self.closing_window
+            || self.folder_open_pending()
         { return; }
         while !self.open_requests.pending.is_empty() {
             if let Some(document)=self.document() {
@@ -72,13 +120,13 @@ impl Workspace {
             let request=self.open_requests.pending.pop_front().expect("pending open");
             self.route_open_request(request, window, cx);
             if !self.opening.is_empty() || self.pending_document_transition.is_some()
-                || self.application_dialogs.busy || window.has_active_prompt() { break; }
+                || self.application_dialogs.busy || window.has_active_prompt() || self.folder_open_pending() { break; }
         }
     }
 
     pub(super) fn open_request_here(&mut self, request: OpenRequest, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(path) = request.path {
-            self.open_path_now(&path, request.preview, request.anchor, request.generation, window, cx);
+        if request.path.is_some() {
+            self.open_path_now(request, window, cx);
         } else {
             self.open_document_from(None, false, None, application_dialogs::OpenSource::File, request.generation, window, cx);
         }
@@ -107,7 +155,7 @@ impl Workspace {
                     opening.preview &= request.preview;
                     if request.anchor.is_some() { opening.anchor = request.anchor; }
                 } else {
-                    target.enqueue_open(request.path,request.preview,request.anchor,false,cx);
+                    target.enqueue_open_request(OpenRequest { choose_window: false, ..request }, cx);
                 }
                 target.reveal_window(target_window, cx);
                 true

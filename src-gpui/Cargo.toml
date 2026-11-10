@@ -85,7 +85,7 @@ arboard = { version = "=3.6.1", default-features = false }
 objc2 = "=0.6.5"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSGeometry", "NSObject", "NSString", "NSData", "objc2-core-foundation"] }
 # 托盘复用 AppKit 状态栏和菜单；不引入额外托盘库或应用事件循环。
-objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSWorkspace", "NSAccessibility", "NSWindow", "NSView", "NSScreen", "NSButton", "NSControl", "NSApplication", "NSResponder", "NSImage", "NSMenu", "NSMenuItem", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "objc2-core-foundation"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSWorkspace", "NSAccessibility", "NSWindow", "NSView", "NSScreen", "NSButton", "NSControl", "NSCell", "NSApplication", "NSResponder", "NSImage", "NSMenu", "NSMenuItem", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "objc2-core-foundation"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "=3.6.1", default-features = false, features = ["wayland-data-control"] }

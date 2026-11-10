@@ -197,6 +197,10 @@ fn main() {
             // 结束本轮关闭通知后再联动设置窗口，让它也完整走过关闭与释放回调。
             cx.defer(ui::settings_window::close_if_orphaned);
             ui::updates::prune_closed_windows(cx);
+            #[cfg(target_os = "macos")]
+            if !cx.windows().iter().any(|window| window.downcast::<Workspace>().is_some()) {
+                ui::chrome::ViewMenuState::from_settings(cx.global::<settings::Settings>()).sync_native(cx);
+            }
             finish_quit(cx);
         }).detach();
         cx.on_action(|_: &workspace::OpenSettings, cx| ui::settings_window::open(cx));
@@ -327,6 +331,8 @@ fn set_menus(cx: &mut App) {
                 MenuItem::action(locale.app_text("menu.findReplace"), FindReplace),
                 MenuItem::action(locale.app_text("menu.findNext"), FindNext),
                 MenuItem::action(locale.app_text("menu.findPrev"), FindPrev),
+                MenuItem::separator(),
+                ui::chrome::native_edit_lock_item(cx),
             ],
         },
         Menu { disabled: false,
@@ -356,24 +362,6 @@ fn set_menus(cx: &mut App) {
                 MenuItem::action(locale.app_text("menu.rule"), Rule),
             ],
         },
-        Menu { disabled: false,
-            name: locale.app_text("menu.view").into(),
-            items: vec![
-                MenuItem::action(locale.app_text("menu.modeSemantic"), ModeSemantic),
-                MenuItem::action(locale.app_text("menu.modeSource"), ModeSource),
-                MenuItem::action(locale.app_text("menu.modeSplit"), ModeSplit),
-                MenuItem::separator(),
-                MenuItem::action(locale.app_text("menu.toggleOutline"), ToggleOutline),
-                MenuItem::action(locale.app_text("menu.toggleSidebar"), ToggleSidebar),
-                MenuItem::action(locale.app_text("menu.toggleToolbar"), ToggleToolbar),
-                MenuItem::action(locale.app_text("menu.toggleTypography"), ToggleTypography),
-                MenuItem::action(locale.app_text("menu.toggleTheme"), ToggleTheme),
-                MenuItem::action(locale.app_text("menu.followSystemTheme"), FollowSystemTheme),
-                MenuItem::separator(),
-                MenuItem::action(locale.app_text("menu.zoomIn"), ZoomIn),
-                MenuItem::action(locale.app_text("menu.zoomOut"), ZoomOut),
-                MenuItem::action(locale.app_text("menu.zoomReset"), ZoomReset),
-            ],
-        },
+        ui::chrome::native_view_menu(cx),
     ]);
 }

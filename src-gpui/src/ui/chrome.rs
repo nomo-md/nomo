@@ -25,7 +25,7 @@ pub enum ChromeCapability {
     NewWindow, Recent, ExportHtml, ExportPdf, ExportWord, TablePicker, LinkPicker,
     HeadingLevels, HeadingAdjustment, MathInline, Callout, Details, BlockComment,
     InlineComment, Diagrams, Footnote, Toc, FrontMatter, ClearFormatting,
-    ResetOutlinePosition, Mini, SoftwareUpdate, UnavailableNotice,
+    Mini, SoftwareUpdate, UnavailableNotice,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,7 +54,7 @@ pub enum ChromeEvent {
     LinkPicker,
     FrontMatter,
     Command(ChromeCommand),
-    ResetOutlinePosition,
+    ToggleSidebar,
     ToggleMini,
     SoftwareUpdate,
     Unavailable(UnavailableFeature),
@@ -76,17 +76,10 @@ pub enum ChromeUpdateState { Available, Downloading(u8), Downloaded }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChromeState {
-    pub has_document: bool,
+    pub(crate) view_menu: ViewMenuState,
     pub can_undo: bool,
     pub can_redo: bool,
-    pub mode: EditorMode,
-    pub sidebar_visible: bool,
-    pub toolbar_visible: bool,
-    pub outline_visible: bool,
-    pub large_document: bool,
-    pub split_available: bool,
     pub word_export_busy: bool,
-    pub toolbar_shortcut: SharedString,
     pub recent: Vec<ChromeRecentEntry>,
     /// 单文档隐藏标签栏时在标题栏居中显示的文档名与未保存标记；显示标签栏或在主页时为 None。
     pub document_title: Option<(SharedString, bool)>,
@@ -97,22 +90,21 @@ pub struct ChromeState {
 impl Default for ChromeState {
     fn default() -> Self {
         Self {
-            has_document: false, can_undo: false, can_redo: false, mode: EditorMode::Semantic,
-            sidebar_visible: true, toolbar_visible: true, outline_visible: false,
-            large_document: false, split_available: true, word_export_busy: false,
-            toolbar_shortcut: "".into(), recent: Vec::new(), document_title: None, capabilities: Vec::new(), update: None,
+            view_menu: ViewMenuState::default(), can_undo: false, can_redo: false, word_export_busy: false,
+            recent: Vec::new(), document_title: None, capabilities: Vec::new(), update: None,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Menu { File, Edit, Paragraph, Format, View, Recent, Export, Heading, Diagram, Window }
+enum Menu { File, Edit, Paragraph, Format, View, ViewText, ViewCorner, ViewAppearance, Recent, Export, Heading, Diagram, Window }
 
 impl Menu {
     fn label(self, locale: ToolbarLocale) -> &'static str {
         match self {
             Self::File => locale.app_text("menu.file"), Self::Edit => locale.app_text("menu.edit"), Self::Paragraph => locale.app_text("chrome.paragraph"),
-            Self::Format => locale.app_text("menu.format"), Self::View => locale.app_text("chrome.view"), Self::Recent => locale.app_text("chrome.openRecent"),
+            Self::Format => locale.app_text("menu.format"), Self::View => locale.app_text("menu.view"), Self::Recent => locale.app_text("chrome.openRecent"),
+            Self::ViewText => locale.app_text("menu.viewText"), Self::ViewCorner => locale.app_text("menu.viewCorner"), Self::ViewAppearance => locale.app_text("menu.viewAppearance"),
             Self::Export => locale.app_text("chrome.export"), Self::Heading => locale.app_text("chrome.quickInsertHeading"), Self::Diagram => locale.app_text("chrome.diagram"),
             Self::Window => locale.app_text("chrome.window"),
         }
@@ -134,7 +126,7 @@ struct MenuItem {
     shortcut: SharedString,
     action: MenuAction,
     enabled: bool,
-    checked: bool,
+    checked: Option<bool>,
     separator: bool,
     icon: Option<IconName>,
     remove_recent: Option<PathBuf>,
@@ -142,14 +134,17 @@ struct MenuItem {
 
 impl MenuItem {
     fn new(label: impl Into<SharedString>, shortcut: impl Into<SharedString>, action: MenuAction, enabled: bool) -> Self {
-        Self { label: label.into(), shortcut: shortcut.into(), action, enabled, checked: false, separator: false, icon: None, remove_recent: None }
+        Self { label: label.into(), shortcut: shortcut.into(), action, enabled, checked: None, separator: false, icon: None, remove_recent: None }
     }
     fn separator() -> Self {
         Self { separator: true, ..Self::new("", "", MenuAction::None, false) }
     }
     fn submenu(menu: Menu, locale: ToolbarLocale) -> Self { Self::new(menu.label(locale), "", MenuAction::Submenu(menu), true) }
-    fn checked(mut self, checked: bool) -> Self { self.checked = checked; self }
+    fn checked(mut self, checked: bool) -> Self { self.checked = Some(checked); self }
 }
+
+mod view_menu;
+pub(crate) use view_menu::{ViewMenuState, native_edit_lock_item, native_view_menu};
 
 pub struct Chrome {
     focus: FocusHandle,
@@ -191,7 +186,7 @@ impl Chrome {
     fn capable(&self, capability: ChromeCapability) -> bool { self.state.capabilities.contains(&capability) }
 
     fn event_item(&self, label: &'static str, shortcut: &'static str, event: ChromeEvent, capability: ChromeCapability, needs_document: bool) -> MenuItem {
-        MenuItem::new(label, shortcut, MenuAction::Emit(event), self.capable(capability) && (!needs_document || self.state.has_document))
+        MenuItem::new(label, shortcut, MenuAction::Emit(event), self.capable(capability) && (!needs_document || self.state.view_menu.mode.is_some()))
     }
 
     fn items(&self, menu: Menu, maximized: bool, cx: &App) -> Vec<MenuItem> {
@@ -200,7 +195,7 @@ impl Chrome {
         use ChromeEvent as E;
         use MenuAction as A;
         let locale = ToolbarLocale::current(cx);
-        let doc = self.state.has_document;
+        let doc = self.state.view_menu.mode.is_some();
         let separator = MenuItem::separator;
         let action = |label: &'static str, shortcut: &'static str, action: fn() -> Box<dyn Action>, enabled: bool| MenuItem::new(label, shortcut, A::Dispatch(action), enabled);
         let event = |label, shortcut, value, capability, document| self.event_item(label, shortcut, value, capability, document);
@@ -222,6 +217,8 @@ impl Chrome {
             Menu::Edit => vec![
                 action(locale.app_text("menu.undo"), "Ctrl + Z", || Box::new(editor::Undo), doc && self.state.can_undo),
                 action(locale.app_text("menu.redo"), "Ctrl + Y", || Box::new(editor::Redo), doc && self.state.can_redo),
+                separator(),
+                self.state.view_menu.edit_lock_item(locale),
             ],
             Menu::Paragraph => vec![
                 MenuItem::submenu(Menu::Heading, locale),
@@ -231,7 +228,7 @@ impl Chrome {
                 event(locale.app_text("menu.table"), "Ctrl + Shift + T", E::TablePicker, C::TablePicker, true),
                 action(locale.app_text("menu.codeBlock"), "Ctrl + Shift + K", || Box::new(action::CodeBlock), doc),
                 action(locale.app_text("chrome.mathBlock"), "Ctrl + Shift + M", || Box::new(action::MathBlock), doc),
-                MenuItem::new(locale.app_text("chrome.mathInline"), "", A::Emit(E::Command(Cmd::MathInline)), doc && self.capable(C::MathInline) && self.state.mode != EditorMode::Source), separator(),
+                MenuItem::new(locale.app_text("chrome.mathInline"), "", A::Emit(E::Command(Cmd::MathInline)), doc && self.capable(C::MathInline) && self.state.view_menu.mode != Some(EditorMode::Source)), separator(),
                 action(locale.app_text("menu.quote"), "Ctrl + Shift + Q", || Box::new(action::Quote), doc),
                 event(locale.app_text("chrome.quickInsertCallout"), "Ctrl + Shift + A", E::Command(Cmd::Callout), C::Callout, true),
                 event(locale.app_text("chrome.details"), "", E::Command(Cmd::Details), C::Details, true),
@@ -260,16 +257,7 @@ impl Chrome {
                 event(locale.app_text("chrome.imageMenu"), "", E::Unavailable(UnavailableFeature::Image), C::UnavailableNotice, true), separator(),
                 event(locale.app_text("shortcuts.clear"), r"Ctrl + \", E::Command(Cmd::ClearFormatting), C::ClearFormatting, true),
             ],
-            Menu::View => vec![
-                action(locale.app_text("settings.editorMode.choice.semantic"), "", || Box::new(action::ModeSemantic), doc && !self.state.large_document).checked(self.state.mode == EditorMode::Semantic),
-                action(locale.app_text("menu.modeSource"), "Ctrl + E", || Box::new(action::ModeSource), doc).checked(self.state.mode == EditorMode::Source),
-                action(locale.app_text("settings.editorMode.choice.split"), "", || Box::new(action::ModeSplit), doc && !self.state.large_document && self.state.split_available).checked(self.state.mode == EditorMode::Split),
-                action(if self.state.outline_visible { locale.app_text("chrome.hideOutline") } else { locale.app_text("settings.outlineVisible.label") }, "", || Box::new(action::ToggleOutline), doc),
-                event(locale.app_text("outline.resetPosition"), "", E::ResetOutlinePosition, C::ResetOutlinePosition, false),
-                MenuItem::new(if self.state.toolbar_visible { locale.app_text("chrome.hideToolbar") } else { locale.app_text("chrome.showToolbar") }, self.state.toolbar_shortcut.clone(), A::Dispatch(|| Box::new(action::ToggleToolbar)), true),
-                action(locale.app_text("chrome.switchTheme"), "Ctrl + Shift + L", || Box::new(action::ToggleTheme), true),
-                action(locale.app_text("shortcuts.toggleSidebar"), "Ctrl + Shift + F", || Box::new(action::ToggleSidebar), true),
-            ],
+            Menu::View | Menu::ViewText | Menu::ViewCorner | Menu::ViewAppearance => self.state.view_menu.items(menu, locale),
             Menu::Heading => vec![
                 action(locale.app_text("menu.heading1"), "Ctrl + 1", || Box::new(action::Heading1), doc),
                 action(locale.app_text("menu.heading2"), "Ctrl + 2", || Box::new(action::Heading2), doc),
@@ -311,6 +299,9 @@ impl Chrome {
             ],
         };
         for entry in &mut entries {
+            if self.state.view_menu.editing_locked && matches!(menu, Menu::Paragraph | Menu::Format | Menu::Heading | Menu::Diagram) {
+                entry.enabled = false;
+            }
             let command: Option<Box<dyn Action>> = match &entry.action {
                 A::Dispatch(action) => {
                     let command = action();
@@ -406,6 +397,7 @@ impl Chrome {
         let compact = window.viewport_size().height <= px(700.0);
         let selected = if nested { self.subselected } else { self.selected };
         let entries = self.items(menu, window.is_maximized(), cx);
+        let check_gutter = entries.iter().any(|entry| entry.checked.is_some());
         let mut rows = Vec::with_capacity(entries.len());
         for (index, entry) in entries.into_iter().enumerate() {
             if entry.separator {
@@ -435,7 +427,10 @@ impl Chrome {
                     }
                 }));
             if let Some(name) = entry.icon { row = row.child(icon(name, 14.0, color)); }
-            if entry.checked { row = row.child(icon(IconName::Check, 12.0, color)); }
+            if check_gutter {
+                row = row.child(div().size(px(12.0)).flex_none()
+                    .children((entry.checked == Some(true)).then(|| icon(IconName::Check, 12.0, color))));
+            }
             row = row.child(div().flex_1().min_w(px(0.0)).child(entry.label))
                 .when(!entry.shortcut.is_empty(), |el| el.child(div().flex_none().ml(px(16.0)).text_size(px(12.0)).text_color(if highlighted && enabled { theme.on_accent } else { theme.muted }).child(entry.shortcut)));
             if submenu.is_some() { row = row.child(icon(IconName::ChevronRight, 10.0, color)); }
@@ -506,8 +501,8 @@ impl Render for Chrome {
                 })));
         }
         root = root.child(self.icon_button("chrome-sidebar", IconName::PanelLeft, &theme)
-                .tooltip(tooltip(if self.state.sidebar_visible { locale.app_text("chrome.hideExplorer") } else { locale.app_text("chrome.showExplorer") }))
-                .on_click(cx.listener(|this, _, window, cx| { this.dismiss(window, cx); window.dispatch_action(Box::new(action::ToggleSidebar), cx); })));
+                .tooltip(tooltip(if self.state.view_menu.sidebar_visible { locale.app_text("chrome.hideSidebar") } else { locale.app_text("chrome.showSidebar") }))
+                .on_click(cx.listener(|this, _, window, cx| { this.dismiss(window, cx); cx.emit(ChromeEvent::ToggleSidebar); })));
         if !cfg!(target_os = "macos") {
             root = root.child(div().text_size(px(14.0)).font_weight(FontWeight(650.0)).opacity(0.9).mr(px(6.0)).child("Nomo"));
             let mut nav = div().flex().items_center().gap(px(1.0)).flex_none();
@@ -554,7 +549,7 @@ impl Render for Chrome {
                     .child(match update { ChromeUpdateState::Available => "●".to_owned(), ChromeUpdateState::Downloading(percent) => percent.min(100).to_string(), ChromeUpdateState::Downloaded => "✓".to_owned() }))
                 .on_click(cx.listener(move |this, _, window, cx| { if enabled { this.dismiss(window, cx); cx.emit(ChromeEvent::SoftwareUpdate); } })));
         }
-        if self.state.has_document {
+        if self.state.view_menu.mode.is_some() {
             let mini_enabled = self.capable(ChromeCapability::Mini);
             right = right.child(self.basic_button("chrome-mini", &theme).child(icon(IconName::PictureInPicture2, 15.0, theme.fg))
                 .when(!mini_enabled, |el| el.opacity(0.45)).tooltip(tooltip(if mini_enabled { "Markdown Mini (Ctrl+Alt+M)" } else { super::mini::unavailable_reason_key(window).map(|key| locale.app_text(key)).unwrap_or(locale.app_text("chrome.miniBusy")) }))

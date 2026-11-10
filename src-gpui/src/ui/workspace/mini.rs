@@ -197,7 +197,7 @@ impl Workspace {
         self.close_status(cx);
         self.outline_ui.suspend_for_mini();
         self.suspend_tree(cx);
-        self.explorer.sidebar_motion = None;
+        self.sidebar_motion = None;
         let mut title = self.mini_title(cx).expect("active Mini document");
         title.pin = native.pin_state();
         if let Some(notice) = native.take_notice(ToolbarLocale::current(cx)) { self.notice = Some(notice.into()); }

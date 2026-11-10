@@ -373,7 +373,7 @@ impl DocumentHost {
         .detach();
     }
     pub(super) fn session_history(&mut self, redo: bool, cx: &mut Context<Self>) {
-        if !self.ready_for_session_action(cx) {
+        if self.editing_locked() || !self.ready_for_session_action(cx) {
             return;
         }
         let view=self.control.read(cx);
@@ -439,7 +439,7 @@ impl DocumentHost {
         intent: EditIntent,
         cx: &mut Context<Self>,
     ) {
-        if !self.ready_for_session_action(cx) {
+        if self.editing_locked() || !self.ready_for_session_action(cx) {
             return;
         }
         if selection.range().is_empty() && matches!(intent, EditIntent::Backspace | EditIntent::Delete) {
@@ -555,7 +555,7 @@ impl DocumentHost {
         cut: bool,
         cx: &mut Context<Self>,
     ) {
-        if !self.ready_for_session_action(cx) {
+        if (cut && self.editing_locked()) || !self.ready_for_session_action(cx) {
             return;
         }
         let revision = self.control.read(cx).host.parsed.identity.revision;

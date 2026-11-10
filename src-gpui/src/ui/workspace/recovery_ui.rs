@@ -41,6 +41,12 @@ impl Workspace {
                 let catalog=cx.global_mut::<RecoveryCatalog>();
                 catalog.loading=false;
                 match result {Ok((candidates,warning))=>{catalog.candidates=candidates;catalog.warning=warning;},Err(error)=>catalog.error=Some(error.to_string())}
+                for handle in cx.windows().into_iter().filter_map(|handle| handle.downcast::<Workspace>()) {
+                    let _ = handle.update(cx, |workspace, window, cx| {
+                        workspace.continue_folder_open(window, cx);
+                        workspace.drain_open_requests(window, cx);
+                    });
+                }
             });
         }).detach();
     }
@@ -184,6 +190,10 @@ impl Workspace {
         let catalog=cx.global_mut::<RecoveryCatalog>();
         catalog.busy.retain(|_,owner|owner.upgrade().is_some());
         if let Some(manager)=&self.services {for candidate in &mut catalog.candidates {manager.refresh_recovery_location(candidate);}}
+    }
+
+    pub(super) fn recovery_catalog_loading(&self, cx: &App) -> bool {
+        cx.try_global::<RecoveryCatalog>().is_some_and(|catalog| catalog.loading)
     }
 
     pub(super) fn layout_recovery_candidate(&self,id:&str,cx:&App)->Result<Option<RecoveryCandidate>,String> {

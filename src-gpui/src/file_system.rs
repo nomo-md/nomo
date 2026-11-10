@@ -19,6 +19,22 @@ pub(crate) fn write_file_atomically_checked(
     write: impl FnOnce(&mut std::fs::File) -> Result<(), String>,
     before_replace: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
+    write_atomically(path, write, before_replace, replace_file)
+}
+
+pub(crate) fn write_new_file_atomically_with(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> Result<(), String>,
+) -> Result<(), String> {
+    write_atomically(path, write, || Ok(()), rename_no_replace)
+}
+
+fn write_atomically(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> Result<(), String>,
+    before_replace: impl FnOnce() -> Result<(), String>,
+    publish: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     let parent = path
         .parent()
         .filter(|value| !value.as_os_str().is_empty())
@@ -47,7 +63,7 @@ pub(crate) fn write_file_atomically_checked(
         let _ = fs::remove_file(&temp_path);
         return Err(error);
     }
-    if let Err(error) = replace_file(&temp_path, path) {
+    if let Err(error) = publish(&temp_path, path) {
         let _ = fs::remove_file(&temp_path);
         return Err(format!("保存文件失败：{error}"));
     }
@@ -108,3 +124,31 @@ fn sync_parent_dir(parent: &Path) {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn sync_parent_dir(_parent: &Path) {}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" { fn MoveFileW(existing: *const u16, new: *const u16) -> i32; }
+    let from: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+    if unsafe { MoveFileW(from.as_ptr(), to.as_ptr()) } != 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" { fn renameat2(oldfd: i32, old: *const i8, newfd: i32, new: *const i8, flags: u32) -> i32; }
+    let from = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+    let to = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
+    if unsafe { renameat2(-100, from.as_ptr(), -100, to.as_ptr(), 1) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" { fn renamex_np(old: *const i8, new: *const i8, flags: u32) -> i32; }
+    let from = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+    let to = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
+    if unsafe { renamex_np(from.as_ptr(), to.as_ptr(), 4) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}

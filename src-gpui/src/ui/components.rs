@@ -22,6 +22,8 @@ pub enum IconName {
     Download,
     Upload,
     Clock3,
+    Lock,
+    LockOpen,
     Save,
     Trash2,
     Smile,
@@ -108,6 +110,8 @@ impl IconName {
             IconName::Download => "icons/download.svg",
             IconName::Upload => "icons/upload.svg",
             IconName::Clock3 => "icons/clock-3.svg",
+            IconName::Lock => "icons/lock.svg",
+            IconName::LockOpen => "icons/lock-open.svg",
             IconName::Home => "icons/house.svg",
             IconName::AlertTriangle => "icons/alert-triangle.svg",
             IconName::Save => "icons/save.svg",
@@ -410,6 +414,8 @@ pub fn status_slider(id: impl Into<ElementId>, fraction: f32, dragging: bool, wi
     slider_with_thumb(id.into(), fraction, dragging, width, theme, on_change, SliderThumb::Status(hover.clamp(0.0, 1.0)))
 }
 
+pub(super) const STATUS_SLIDER_THUMB_RADIUS: f32 = 7.0;
+
 #[derive(Clone, Copy)]
 enum SliderThumb { Hollow, Solid, Status(f32) }
 
@@ -419,7 +425,7 @@ fn slider_with_thumb(id: ElementId, fraction: f32, dragging: bool, width: f32, t
     let status = matches!(thumb, SliderThumb::Status(_));
     let hover = match thumb { SliderThumb::Status(hover) => hover, _ => 0.0 };
     let (track, fill_color, knob, border) = (theme.border, if status { theme.border } else { theme.accent }, if solid { theme.accent } else { theme.surface }, theme.accent);
-    let radius = if status { 7.0 } else if solid { 7.5 } else { 8.0 };
+    let radius = if status { STATUS_SLIDER_THUMB_RADIUS } else if solid { 7.5 } else { 8.0 };
     let track_height = if solid { 8.0 } else { 4.0 };
     div().id(id).w(px(width)).h(px(if solid { 24.0 } else { 20.0 })).flex_none().cursor_pointer().child(
         gpui::canvas(
