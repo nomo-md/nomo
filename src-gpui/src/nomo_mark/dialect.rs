@@ -109,12 +109,13 @@ pub fn events(
         }
     };
     let projected = nomo_syntax::project_comment_paragraphs(&source[from..], options);
+    let math = nomo_syntax::project_math_setext(&projected, options);
     let parser =
-        Parser::new_with_broken_link_callback(&projected, options, Some(&mut resolve));
+        Parser::new_with_broken_link_callback(math.as_ref(), options, Some(&mut resolve));
     let mut skip: Option<Range<usize>> = None;
     for (mut event, range) in parser.into_offset_iter() {
         let range = from + range.start..from + range.end;
-        event = nomo_syntax::restore_inline_comment(source, event, &range);
+        event = nomo_syntax::restore_inline_comment(source, math.restore(event), &range);
         if skip
             .as_ref()
             .is_some_and(|skip| skip.start <= range.start && range.start < skip.end)
@@ -240,7 +241,8 @@ fn project_empty_list_items(source: &str, options: Options, document_start: bool
         from += line.len();
     }
     if candidates.is_empty() { return (source.into(), Vec::new()); }
-    let mut containers = Parser::new_ext(source, options).into_offset_iter().filter_map(|(event, range)| match event {
+    let math = nomo_syntax::project_math_setext(source, options);
+    let mut containers = Parser::new_ext(math.as_ref(), options).into_offset_iter().filter_map(|(event, range)| match event {
         Event::Start(Tag::Item) => Some((true, range)),
         Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock) => Some((false, range)),
         _ => None,
@@ -283,7 +285,8 @@ fn parser_definitions(
     options: Options,
 ) -> Vec<(String, super::protocol::ReferenceTarget)> {
     let projected = nomo_syntax::project_comment_paragraphs(source, options);
-    let parser = Parser::new_ext(&projected, options);
+    let math = nomo_syntax::project_math_setext(&projected, options);
+    let parser = Parser::new_ext(math.as_ref(), options);
     parser
         .reference_definitions()
         .iter()
@@ -358,3 +361,4 @@ mod tests {
         );
     }
 }
+

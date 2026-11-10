@@ -2,6 +2,168 @@
 use pulldown_cmark::{Event, Options, Parser, Tag};
 use std::{borrow::Cow, collections::BTreeMap, ops::Range};
 
+/// Only neutralize Setext underlines which the parser confirms belong to $$ math.
+/// The projection is byte-for-byte aligned with source and lives for one parse.
+pub struct MathProjection<'a> {
+    source: Cow<'a, str>,
+    marker: Option<char>,
+}
+
+impl AsRef<str> for MathProjection<'_> {
+    fn as_ref(&self) -> &str { &self.source }
+}
+
+impl MathProjection<'_> {
+    pub fn restore<'a>(&self, event: Event<'a>) -> Event<'a> {
+        match (self.marker, event) {
+            (Some(marker), Event::DisplayMath(tex)) if tex.contains(marker) => {
+                Event::DisplayMath(tex.replace(marker, "=").into())
+            }
+            (_, event) => event,
+        }
+    }
+}
+
+pub fn project_math_setext(source: &str, options: Options) -> MathProjection<'_> {
+    let unchanged = || MathProjection { source: Cow::Borrowed(source), marker: None };
+    if !options.contains(Options::ENABLE_MATH) || !source.contains("$$") {
+        return unchanged();
+    }
+    // Common formulas have no standalone '=' line: avoid another parser pass.
+    if !source.lines().any(|line| {
+        let line = line.trim_end_matches([' ', '\t']);
+        let count = line.bytes().rev().take_while(|ch| *ch == b'=').count();
+        count > 0 && line[..line.len() - count].bytes()
+            .all(|ch| matches!(ch, b' ' | b'\t' | b'>'))
+    }) { return unchanged(); }
+    // A one-byte sentinel preserves offsets, including in quotes and list items.
+    // Never choose a byte already present in the user's document.
+    let Some(marker) = (1u8..=8).map(char::from).find(|ch| !source.contains(*ch)) else {
+        return unchanged();
+    };
+    let mut underlines = Vec::new();
+    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
+        if !matches!(event, Event::Start(Tag::Heading { level: pulldown_cmark::HeadingLevel::H1, .. })) {
+            continue;
+        }
+        let raw = source[range.clone()].trim_end_matches(['\r', '\n']);
+        let end = range.start + raw.trim_end_matches([' ', '\t']).len();
+        let count = source[..end].bytes().rev().take_while(|ch| *ch == b'=').count();
+        if count == 0 { continue; }
+        let start = end - count;
+        let line = source[..start].rfind(['\r', '\n']).map_or(0, |at| at + 1);
+        // ATX headings ending with '=' are not Setext underlines.
+        if source[line..start].bytes().all(|ch| matches!(ch, b' ' | b'\t' | b'>')) {
+            underlines.push(start..end);
+        }
+    }
+    if underlines.is_empty() { return unchanged(); }
+    let mut projected = source.as_bytes().to_vec();
+    for range in &underlines { projected[range.clone()].fill(marker as u8); }
+    // Replacing ASCII with ASCII preserves UTF-8 and every original byte offset.
+    let mut projected = String::from_utf8(projected).expect("ASCII-only math projection");
+    let math: Vec<_> = Parser::new_ext(&projected, options).into_offset_iter()
+        .filter_map(|(event, range)| matches!(event, Event::DisplayMath(_)).then_some(range))
+        .collect();
+    let mut kept = false;
+    let mut index = 0;
+    for range in underlines {
+        while math.get(index).is_some_and(|span| span.end <= range.start) { index += 1; }
+        if math.get(index).is_some_and(|span| span.start <= range.start && range.end <= span.end) {
+            kept = true;
+        } else {
+            // Ordinary and unclosed headings retain their exact original syntax.
+            projected.replace_range(range.clone(), &source[range]);
+        }
+    }
+    if !kept { return unchanged(); }
+    MathProjection { source: Cow::Owned(projected), marker: Some(marker) }
+}
+
+#[cfg(test)]
+mod math_setext_tests {
+    use super::*;
+    use pulldown_cmark::TagEnd;
+
+    fn parse(source: &str) -> Vec<(Event<'static>, Range<usize>)> {
+        let projected = project_math_setext(source, Options::ENABLE_MATH);
+        assert_eq!(projected.as_ref().len(), source.len());
+        Parser::new_ext(projected.as_ref(), Options::ENABLE_MATH).into_offset_iter()
+            .map(|(event, range)| (projected.restore(event).into_static(), range)).collect()
+    }
+
+    #[test]
+    fn restores_formula_and_source_offsets() {
+        let source = "$$\np_{\\theta,v}(z_v\\mid K,H,z_{<v})\n=\n\\frac{a}{b}\n$$\n";
+        let events = parse(source);
+        let math: Vec<_> = events.iter().filter_map(|(event, range)| match event {
+            Event::DisplayMath(tex) => Some((tex.as_ref(), range.clone())),
+            _ => None,
+        }).collect();
+        assert_eq!(math, vec![(&source[2..source.len() - 3], 0..source.len() - 1)]);
+        assert!(!events.iter().any(|(event, _)| matches!(event, Event::Start(Tag::Heading { .. }))));
+    }
+
+    #[test]
+    fn preserves_headings_code_and_unclosed_math() {
+        for source in [
+            "标题\n===\n\n$$x$$\n", "# 标题 =\n\n$$x$$\n",
+            "\u{60}\u{60}\u{60}\n$$\nx\n=\ny\n$$\n\u{60}\u{60}\u{60}\n", "    $$\n    x\n    =\n    y\n    $$\n",
+            "$$\nx\n=\ny\n", "\u{60}$$ x\u{60} 标题\n=\n",
+            "<pre>\n$$\nx\n=\ny\n$$\n</pre>\n",
+            "\\$\\$\nx\n=\ny\n$$\n",
+        ] {
+            let original: Vec<_> = Parser::new_ext(source, Options::ENABLE_MATH).into_offset_iter()
+                .map(|(event, range)| (event.into_static(), range)).collect();
+            assert_eq!(parse(source), original, "{source:?}");
+        }
+    }
+
+    #[test]
+    fn supports_containers_multiple_equals_and_crlf() {
+        for source in [
+            "$$\nx\n=\ny\n=\nz\n$$\n",
+            "$$\r\n中文 x\r\n=== \t\r\ny\r\n$$\r\n",
+            "> $$\n> x\n> =\n> y\n> $$\n",
+            "- $$\n  x\n  =\n  y\n  $$\n",
+            "$$\nx\n=\ny\n$$\n\n标题\n===\n",
+        ] {
+            let events = parse(source);
+            let math: Vec<_> = events.iter().filter_map(|(event, _)| match event {
+                Event::DisplayMath(tex) => Some(tex.as_ref()), _ => None,
+            }).collect();
+            assert_eq!(math.len(), 1, "{source:?}");
+            assert!(math[0].contains('='), "{source:?}");
+            assert!(!math[0].chars().any(|ch| (1..=8).contains(&(ch as u32))));
+            let starts = events.iter().filter(|(e, _)| matches!(e, Event::Start(_))).count();
+            let ends = events.iter().filter(|(e, _)| matches!(e, Event::End(_))).count();
+            assert_eq!(starts, ends);
+        }
+    }
+
+    #[test]
+    fn preserves_user_control_characters_and_disabled_math() {
+        let source = "\u{1}\n\n$$\nx\n=\ny\n$$\n";
+        let events = parse(source);
+        assert!(events.iter().any(|(e, _)| matches!(e, Event::Text(t) if t.contains('\u{1}'))));
+        assert!(events.iter().any(|(e, _)| matches!(e, Event::DisplayMath(t) if t.contains("\n=\n"))));
+        let projected = project_math_setext(source, Options::empty());
+        assert!(matches!(projected.source, Cow::Borrowed(_)));
+        assert_eq!(projected.as_ref(), source);
+        let occupied = format!("{}\n{source}", (1u8..=8).map(char::from).collect::<String>());
+        assert_eq!(project_math_setext(&occupied, Options::ENABLE_MATH).as_ref(), occupied);
+    }
+
+    #[test]
+    fn ordinary_input_borrows_source() {
+        for source in ["# Heading\ntext\n", "$$\nx = y\n$$\n", "title\n=\n\n$$x$$"] {
+            assert!(matches!(project_math_setext(source, Options::ENABLE_MATH).source, Cow::Borrowed(_)));
+        }
+        assert!(parse("title\n=\n").iter().any(|(e, _)| matches!(e, Event::End(TagEnd::Heading(_)))));
+    }
+}
+
+
 /// 单行注释后还有正文时按段落解析，独立注释、目录标记和代码保持原有语义。
 pub fn project_comment_paragraphs(source: &str, options: Options) -> Cow<'_, str> {
     let mut projected = Cow::Borrowed(source);
@@ -438,3 +600,4 @@ pub fn html_code(source: &str, start: usize) -> Option<(usize, String)> {
         html_escape::decode_html_entities(&source[tag.end..to]).into_owned(),
     ))
 }
+
