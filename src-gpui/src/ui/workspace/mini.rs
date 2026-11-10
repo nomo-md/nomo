@@ -4,6 +4,7 @@ use crate::ui::mini::{MiniBar, MiniEvent, MiniFrame, MiniGeometry, MiniPin, Mini
 
 pub(super) struct MiniState {
     session: Option<MiniSession>,
+    pub(super) main_window_placement: Option<WindowPlacement>,
     geometry: Option<MiniGeometry>,
     pinned: bool,
     frame_pending: bool,
@@ -76,7 +77,7 @@ impl MiniSession {
 }
 
 impl Default for MiniState {
-    fn default() -> Self { Self { session: None, geometry: None, pinned: true, frame_pending: false,
+    fn default() -> Self { Self { session: None, main_window_placement: None, geometry: None, pinned: true, frame_pending: false,
         restoring: None, #[cfg(target_os = "linux")] confirmation_task: None,
         #[cfg(target_os = "macos")] native_task: None,
         #[cfg(target_os = "macos")] native_task_epoch: 0 } }
@@ -84,6 +85,7 @@ impl Default for MiniState {
 
 impl MiniState {
     pub(super) fn active(&self) -> bool { self.session.is_some() }
+    pub(super) fn has_native_bounds(&self) -> bool { self.active() || self.restoring.is_some() }
     pub(super) fn shell_frame(&self) -> Option<ShellFrame> {
         let session = self.session.as_ref()?;
         Some(ShellFrame {
@@ -160,6 +162,7 @@ impl Workspace {
         let main_paper = self.outline_ui.bounds.get().filter(|bounds| !bounds.is_empty())
             .unwrap_or_else(|| gpui::Bounds::new(gpui::Point::default(), main_viewport));
         let animate = !cx.global::<MotionPreference>().reduced;
+        self.mini.main_window_placement = self.window_placement(window, cx);
         let mut native = match MiniWindow::enter(window, self.mini.geometry, self.mini.pinned, animate) {
             Ok(native) => native,
             Err(error) => {

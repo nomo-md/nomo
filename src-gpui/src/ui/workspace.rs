@@ -19,6 +19,7 @@ use crate::ui::workspace_surface::{TAB_RAIL_HEIGHT, WorkspaceSurface};
 use crate::ui::motion::{self, MotionPreference, ScalarMotion};
 use crate::ui::{dialogs::{self, SaveChoice}, toast::Toast};
 use crate::ui::popup::{popup, PopupAnchor, PopupPlacement};
+use crate::window_placement::WindowPlacement;
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight,
     InteractiveElement, IntoElement, MouseButton, ParentElement, PathPromptOptions, Render, ScrollHandle, ScrollStrategy,
@@ -222,6 +223,8 @@ pub struct Workspace {
     _chrome_subscription: Subscription,
     _motion_activation: Subscription,
     _motion_observer: Subscription,
+    normal_window_bounds: gpui::Bounds<gpui::Pixels>,
+    _window_bounds_observer: Option<Subscription>,
     #[cfg(target_os = "linux")]
     motion_query: Option<Task<()>>,
     services: Option<MarkdownDocumentSessionManager>,
@@ -289,7 +292,12 @@ impl Focusable for Workspace {
 }
 
 impl Workspace {
-    pub fn new(paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        paths: Vec<PathBuf>,
+        normal_window_bounds: gpui::Bounds<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let home_visible = paths.is_empty();
         let library = home::library::shared(cx);
         // 编辑页独占连体标签轮廓；主页使用平面左右分栏。
@@ -319,7 +327,10 @@ impl Workspace {
             last_library_error = error_key;
             if workspace.waiting_library_close && !library.read(cx).is_busy() {
                 workspace.waiting_library_close = false;
-                if workspace.tabs.is_empty() && workspace.opening.is_empty() { window.remove_window(); }
+                if workspace.tabs.is_empty() && workspace.opening.is_empty() {
+                    crate::save_closing_workspace_placement(workspace, window, cx);
+                    window.remove_window();
+                }
             }
             cx.notify();
         });
@@ -335,8 +346,26 @@ impl Workspace {
         window.on_window_should_close(cx,move |window,cx| this.update(cx,|workspace,cx| workspace.request_close_window(window,cx)).unwrap_or(true));
         let chrome=cx.new(Chrome::new);
         let chrome_subscription=cx.subscribe_in(&chrome,window,|workspace,_,event,window,cx|workspace.chrome_event(event,window,cx));
+        let window_bounds_observer = (!cfg!(windows)).then(|| {
+            let workspace = cx.weak_entity();
+            // Mini 会在借用 Workspace 时同步尺寸通知。由 Chrome 接收，等当前更新结束再记录。
+            chrome.update(cx, |_, cx| cx.observe_window_bounds(window, move |_, window, cx| {
+                let gpui::WindowBounds::Windowed(bounds) = window.window_bounds() else { return; };
+                if window.is_maximized() { return; }
+                let workspace = workspace.clone();
+                cx.defer(move |cx| {
+                    let _ = workspace.update(cx, |workspace, _| {
+                        if !workspace.mini.has_native_bounds() { workspace.normal_window_bounds = bounds; }
+                    });
+                });
+            }))
+        });
+        if window.is_window_active() { cx.set_global(crate::LastActiveWorkspace(window.window_handle())); }
         let motion_activation = cx.observe_window_activation(window, |workspace, window, cx| {
             if window.is_window_active() {
+                cx.set_global(crate::LastActiveWorkspace(window.window_handle()));
+                #[cfg(target_os = "macos")]
+                cx.notify();
                 workspace.refresh_system_motion(cx);
                 if let Some(document)=workspace.document(){let _=document.update(cx,|host,cx|host.set_active(true,cx));}
                 if workspace.home_visible { workspace.home.update(cx, |home, cx| home.refresh(cx)); }
@@ -357,6 +386,8 @@ impl Workspace {
             _chrome_subscription: chrome_subscription,
             _motion_activation: motion_activation,
             _motion_observer: motion_observer,
+            normal_window_bounds,
+            _window_bounds_observer: window_bounds_observer,
             #[cfg(target_os = "linux")]
             motion_query: None,
             services: service.ok(),
@@ -1033,6 +1064,11 @@ impl Workspace {
         if !self.closing_window {self.next_batch_close(window,cx);}
         cx.notify();
     }
+    pub(crate) fn window_placement(&self, window: &Window, cx: &App) -> Option<WindowPlacement> {
+        if self.mini.has_native_bounds() { return self.mini.main_window_placement; }
+        WindowPlacement::capture(window, self.normal_window_bounds, cx)
+    }
+
     pub(crate) fn request_close_window(&mut self,window:&mut Window,cx:&mut Context<Self>)->bool {
         if window.has_active_prompt() {return false;}
         if self.closing_window && !self.tabs.is_empty() {return false;}
@@ -1050,6 +1086,7 @@ impl Workspace {
                 self.waiting_library_close=true;
                 self.notice=Some(ToolbarLocale::current(cx).app_text("workspace.savingHome").into());cx.notify();return false;
             }
+            crate::save_closing_workspace_placement(self, window, cx);
             return true;
         }
         if !self.closing_window {self.flush_layout(cx);self.closing_window=true;self.close_tab(self.active,window,cx);}

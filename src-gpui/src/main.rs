@@ -31,6 +31,7 @@ mod settings;
 mod legacy_records;
 mod theme;
 mod ui;
+mod window_placement;
 
 #[allow(dead_code)] // 仅接入现有会话 API，其余原版服务保留原实现。
 mod text_document;
@@ -55,11 +56,21 @@ mod async_runtime {
 use gpui::{App, AppContext, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, point, px, size};
 use std::path::PathBuf;
 use ui::workspace::{self, Workspace};
+use window_placement::WindowPlacement;
 
 #[derive(Clone, Copy)]
 enum QuitReason { Normal, #[cfg(windows)] Install }
-struct QuitRequested(Option<QuitReason>);
+#[derive(Clone, Copy)]
+struct PendingQuit {
+    reason: QuitReason,
+    preferred_window: Option<gpui::AnyWindowHandle>,
+    placement: Option<WindowPlacement>,
+}
+struct QuitRequested(Option<PendingQuit>);
 impl gpui::Global for QuitRequested {}
+struct LastActiveWorkspace(gpui::AnyWindowHandle);
+impl gpui::Global for LastActiveWorkspace {}
+
 pub(crate) fn cancel_quit(cx:&mut App){cx.set_global(QuitRequested(None));}
 pub(crate) fn quit_workspaces(cx:&mut App){
     request_quit(QuitReason::Normal,cx);
@@ -71,8 +82,19 @@ pub(crate) fn quit_to_install(cx:&mut App){
     }
     request_quit(QuitReason::Install,cx);
 }
+fn preferred_workspace(cx: &App) -> Option<gpui::WindowHandle<Workspace>> {
+    let windows = cx.windows();
+    let last_active = cx.try_global::<LastActiveWorkspace>().map(|last| last.0);
+    cx.active_window().into_iter().chain(last_active)
+        .filter(|handle| windows.contains(handle))
+        .find_map(|handle| handle.downcast::<Workspace>())
+        .or_else(|| windows.into_iter().find_map(|handle| handle.downcast::<Workspace>()))
+}
+
 fn request_quit(reason: QuitReason,cx:&mut App){
-    cx.set_global(QuitRequested(Some(reason)));
+    // 批量关闭会改变焦点。先选定窗口，确认关闭时再读取它的最终位置。
+    let preferred_window = preferred_workspace(cx).map(gpui::AnyWindowHandle::from);
+    cx.set_global(QuitRequested(Some(PendingQuit { reason, preferred_window, placement: None })));
     for handle in cx.windows().into_iter().filter_map(|window|window.downcast::<Workspace>()) {
         if cx.global::<QuitRequested>().0.is_none() { break; }
         let _=handle.update(cx,|workspace,window,cx|{if workspace.request_quit(window,cx){window.remove_window();}});
@@ -80,9 +102,10 @@ fn request_quit(reason: QuitReason,cx:&mut App){
     finish_quit(cx);
 }
 fn finish_quit(cx:&mut App){
-    let Some(_reason)=cx.try_global::<QuitRequested>().and_then(|request| request.0) else{return;};
+    let Some(PendingQuit { reason: _reason, placement, .. }) = cx.try_global::<QuitRequested>().and_then(|request| request.0) else { return; };
     if cx.windows().iter().any(|window|window.downcast::<Workspace>().is_some()){return;}
     cancel_quit(cx);
+    if let Some(placement) = placement { placement.save(); }
     #[cfg(windows)]
     if matches!(_reason, QuitReason::Install) && let Err(error)=ui::updates::launch_after_close(cx) {
         match try_open_workspace(Vec::new(),cx) {
@@ -93,6 +116,19 @@ fn finish_quit(cx:&mut App){
     }
     for handle in cx.windows(){let _=handle.update(cx,|_,window,_|window.remove_window());}
     cx.quit();
+}
+
+fn save_closing_workspace_placement(workspace: &Workspace, window: &gpui::Window, cx: &mut App) {
+    let handle = window.window_handle();
+    let last_window = !cx.windows().iter().any(|other| *other != handle && other.downcast::<Workspace>().is_some());
+    if let Some(mut request) = cx.try_global::<QuitRequested>().and_then(|request| request.0) {
+        if request.preferred_window == Some(handle) || (request.placement.is_none() && last_window) {
+            request.placement = workspace.window_placement(window, cx);
+            cx.set_global(QuitRequested(Some(request)));
+        }
+    } else if last_window && let Some(placement) = workspace.window_placement(window, cx) {
+        placement.save();
+    }
 }
 
 fn main() {
@@ -176,6 +212,15 @@ fn main() {
             cx.activate(true);return;
         }
 
+        // 系统直接请求退出时仍可读取当前窗口。应用内退出已在关闭路径保存。
+        cx.on_app_quit(|cx| {
+            if let Some(handle) = preferred_workspace(cx)
+                && let Ok(Some(placement)) = handle.update(cx, |workspace, window, cx| workspace.window_placement(window, cx))
+            {
+                placement.save();
+            }
+            std::future::ready(())
+        }).detach();
         let mut paths = paths;
         paths.append(&mut open_state.borrow_mut().1);
         open_workspace(paths, cx);
@@ -222,10 +267,16 @@ fn open_workspace(paths: Vec<PathBuf>, cx: &mut App) {
     try_open_workspace(paths,cx).expect("打开窗口失败");
 }
 fn try_open_workspace(paths: Vec<PathBuf>, cx: &mut App) -> Result<gpui::WindowHandle<Workspace>,String> {
-    let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
+    let first_workspace = !cx.windows().iter().any(|window| window.downcast::<Workspace>().is_some());
+    let placement = if first_workspace { WindowPlacement::restore(cx) } else { None };
+    let (window_bounds, display_id) = placement.map_or_else(
+        || (WindowBounds::Windowed(Bounds::centered(None, size(px(1280.0), px(820.0)), cx)), None),
+        |(bounds, display)| (bounds, Some(display)),
+    );
     let options = WindowOptions {
         app_id: Some("com.nomo.desktop".into()),
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_bounds: Some(window_bounds),
+        display_id,
         titlebar: Some(TitlebarOptions { title: Some("Nomo".into()), appears_transparent: true, traffic_light_position: Some(point(px(14.0), px(13.0))) }),
         window_min_size: Some(size(px(640.0), px(420.0))),
         ..Default::default()
@@ -234,7 +285,7 @@ fn try_open_workspace(paths: Vec<PathBuf>, cx: &mut App) -> Result<gpui::WindowH
         theme::Theme::apply(window.appearance(), cx);
         // 跟随系统深浅色：外观变化时重新应用主题（手动指定模式时 apply 会忽略外观）。
         window.observe_window_appearance(|window, cx| theme::Theme::apply(window.appearance(), cx)).detach();
-        cx.new(|cx| Workspace::new(paths, window, cx))
+        cx.new(|cx| Workspace::new(paths, window_bounds.get_bounds(), window, cx))
     })
     .map_err(|error|error.to_string())
 }
