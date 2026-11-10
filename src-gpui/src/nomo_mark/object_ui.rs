@@ -1085,8 +1085,20 @@ impl NomoMark {
         let scale = self.preview_scale(window, cx);
         let mut contents = div().absolute().inset_0().overflow_hidden().flex().items_center().justify_center();
         if let Some((image, (width, height))) = loaded {
+            let preview = if let Some(path) = path.clone() {
+                gpui::canvas(|_, _, _| (), move |bounds, _, window, cx| {
+                    if bounds.intersect(&window.content_mask().bounds).is_empty() { return; }
+                    let store = cx.global::<ImageStore>();
+                    if let Some(image) = store.frame_image(&path, window, cx) {
+                        let _ = window.paint_image(bounds, bounds, gpui::Corners::default(), image, 0, false);
+                        crate::nomo_mark::paint::paint_image_notice(store, &path, bounds, cx.global::<Theme>(), window);
+                    }
+                }).w(px(width * scale)).h(px(height * scale)).into_any_element()
+            } else {
+                gpui::img(image).w(px(width * scale)).h(px(height * scale)).into_any_element()
+            };
             contents = contents.child(div().relative().left(object.image_offset.x).top(object.image_offset.y)
-                .child(gpui::img(image).w(px(width * scale)).h(px(height * scale))));
+                .child(preview));
         } else {
             let embed_failure = object.preview_key.and_then(|key| cx.global::<EmbedStore>().state(key)).and_then(|state| match state {
                 crate::embeds::EmbedState::Failed(message) => Some(message), _ => None });

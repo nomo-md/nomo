@@ -2066,6 +2066,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif-dispose"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8286d15964fdb9c181187f910412c964f62ce91306d890fd93e36b3c909e0de2"
+dependencies = [
+ "gif",
+ "imgref",
+ "rgb",
+]
+
+[[package]]
 name = "gimli"
 version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3862,6 +3873,8 @@ dependencies = [
  "base64 0.22.1",
  "embed-resource",
  "encoding_rs",
+ "gif",
+ "gif-dispose",
  "gpui-pre",
  "gpui-pre-platform",
  "gpui-pre-windows",

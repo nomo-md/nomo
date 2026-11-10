@@ -35,6 +35,9 @@ serde_json = "1"
 url = "=2.5.8"
 # gpui 已经传递依赖 image 0.25，这里直接使用同一版本解码本地图片。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+# GIF 流式解码复用现有 gif 版本，合成库处理透明帧及 disposal，不缓存整段位图。
+gif = { version = "=0.14.2", default-features = false, features = ["std"] }
+gif-dispose = "=6.0.0"
 # 公式：纯 Rust 的 TeX 数学排版（STIX Two Math），输出字形已转为路径的 SVG。
 latex-rust = "=3.0.1"
 # 按需加载原生跨行语法；Oniguruma 避免首次编译多语言正则时的大量内存与延迟。

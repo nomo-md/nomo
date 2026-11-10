@@ -12,6 +12,22 @@ use std::{borrow::Cow, cmp::Reverse, ops::Range};
 
 struct LinkSpan<'a> { source: Range<usize>, target: Cow<'a, str> }
 
+/// 静态降级仍保留图片尺寸，提示叠在图内，不让资源状态变化挤动正文。
+pub(super) fn paint_image_notice(store: &ImageStore, path: &std::path::Path, bounds: Bounds<Pixels>, theme: &Theme, window: &mut Window) {
+    let Some(message) = store.notice(path) else { return; };
+    let width = f32::from(bounds.size.width) - 12.0;
+    if width < 24.0 || bounds.size.height < px(18.0) { return; }
+    let spec = crate::layout::ParaSpec::plain(message.into(), crate::layout::InlineStyle { color: crate::layout::ColorRole::Muted, ..Default::default() },
+        crate::theme::Family::Text, 11.0, 15.0, crate::layout::Wrap::Greedy);
+    let label = crate::layout::layout_text(&spec, width, window);
+    let height = px(label.height() + 8.0).min(bounds.size.height);
+    let badge = Bounds::new(point(bounds.left(), bounds.bottom() - height), size(bounds.size.width, height));
+    window.with_content_mask(Some(gpui::ContentMask { bounds: badge }), |window| {
+        paint_box(badge, theme.surface.opacity(0.94), 4.0, None, window);
+        label.paint(badge.origin + point(px(6.0), px(4.0)), 0.0..f32::from(height), theme, window);
+    });
+}
+
 fn footnote_target(id: &str) -> String { format!("#fn-{}", id.replace('%', "%25")) }
 
 fn link_spans(parsed: &super::parse::ParsedWindow) -> Vec<LinkSpan<'_>> {
@@ -384,8 +400,9 @@ fn paint_layer(
                             Bounds::new(origin + point(px(x + ox), px(y + oy)), size(px(w), px(h)));
                         let mask = window.content_mask().bounds;
                         if bounds.right() <= mask.left() || bounds.left() >= mask.right() { continue; }
-                        let frame = if let crate::layout::InlineAsset::Image(path) = key { store.frame(path, window, cx) } else { 0 };
-                        let _ = window.paint_image(bounds, bounds, Corners::default(), image, frame, false);
+                        let image = if let crate::layout::InlineAsset::Image(path) = key { store.frame_image(path, window, cx).unwrap_or(image) } else { image };
+                        let _ = window.paint_image(bounds, bounds, Corners::default(), image, 0, false);
+                        if let crate::layout::InlineAsset::Image(path) = key { paint_image_notice(store, path, bounds, theme, window); }
                     }
                 }
             }
@@ -414,8 +431,9 @@ fn paint_layer(
                     Some(image) => {
                         let mask = window.content_mask().bounds;
                         if bounds.right() <= mask.left() || bounds.left() >= mask.right() { continue; }
-                        let frame = store.frame(path, window, cx);
-                        let _ = window.paint_image(bounds, bounds, Corners::all(px(6.0)), image, frame, false);
+                        let image = store.frame_image(path, window, cx).unwrap_or(image);
+                        let _ = window.paint_image(bounds, bounds, Corners::all(px(6.0)), image, 0, false);
+                        paint_image_notice(store, path, bounds, theme, window);
                     }
                     None => paint_box(bounds, theme.code_bg, 6.0, None, window),
                 }

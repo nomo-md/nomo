@@ -5,12 +5,16 @@
 //! 语义视图把 generation 纳入含图片块的布局缓存键，从而在尺寸就绪后重排。
 
 use gpui::{App, Global, RenderImage};
-use image::{AnimationDecoder, Frame, ImageDecoder, imageops::FilterType};
-use std::cell::Cell;
+use image::{Frame, ImageDecoder, imageops::FilterType};
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+mod animation;
+mod gif;
 
 /// 解码宽度上限：2× 视网膜屏下约 1200 逻辑像素，足够正文宽度使用。
 const MAX_DECODE_WIDTH: u32 = 2400;
@@ -20,7 +24,6 @@ pub(crate) const MAX_INPUT_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) const MAX_INPUT_PIXELS: u64 = 16 * 1024 * 1024;
 pub(crate) const MAX_DECODE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_BITMAP_PIXELS: u64 = 4 * 1024 * 1024;
-const MAX_ANIMATION_FRAMES: usize = 256;
 const MAX_ANIMATION_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_SVG_BYTES: usize = 2 * 1024 * 1024;
 const MAX_DECODERS: usize = 2;
@@ -30,7 +33,7 @@ const MAX_METADATA_BYTES: usize = 512 * 1024;
 // 路径元数据淘汰后仍记住近期失败，避免同一屏大量坏图片随每次完成重新排队。
 const MAX_FAILURES: usize = 2048;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Failure { Budget, Read, Decode }
 impl Failure {
     fn message(self) -> &'static str {
@@ -38,12 +41,20 @@ impl Failure {
     }
 }
 type Decoded = (Arc<RenderImage>, u32, u32, usize);
+struct Loaded {
+    bitmap: Decoded,
+    stream: Option<gif::GifStream>,
+    notice: Option<Failure>,
+}
+impl From<Decoded> for Loaded {
+    fn from(bitmap: Decoded) -> Self { Self { bitmap, stream: None, notice: None } }
+}
 
 enum Entry {
     Queued,
     Loading(u64),
     /// `used` 用 Cell 记录访问时钟，使绘制阶段只需共享借用即可更新 LRU 顺序。
-    Ready { image: Arc<RenderImage>, width: u32, height: u32, bytes: usize, used: Cell<u64>, version: u64, started: std::time::Instant },
+    Ready { image: Arc<RenderImage>, width: u32, height: u32, bytes: usize, used: Cell<u64>, version: u64, notice: Option<Failure> },
     Failed { reason: Failure, used: Cell<u64>, version: u64 },
 }
 
@@ -56,6 +67,11 @@ pub struct ImageStore {
     queued: VecDeque<PathBuf>,
     running: usize,
     next_request: u64,
+    animations: HashMap<PathBuf, animation::Playback>,
+    animation_bytes: Arc<AtomicUsize>,
+    animation_queue: RefCell<VecDeque<(PathBuf, u64)>>,
+    animation_scheduled: Cell<bool>,
+    retired_animations: Vec<Arc<RenderImage>>,
     failures: HashMap<u64, (Failure, u64)>,
     failure_order: VecDeque<(u64, u64)>,
     pub generation: u64,
@@ -67,9 +83,11 @@ impl ImageStore {
     #[cfg(feature = "automation")]
     pub(crate) fn automation_state(&self) -> serde_json::Value {
         serde_json::json!({"entries":self.entries.len(),"decodedBytes":self.bytes,"metadataBytes":self.metadata_bytes,
+            "animationReservedBytes":self.animation_bytes.load(Ordering::Relaxed),"animations":self.animations.len(),
             "pending":self.running+self.queued.len(),"failed":self.entries.values().filter(|e|matches!(e,Entry::Failed{..})).count(),
-            "scope":"process cache; requested resources only"})
+            "scope":"process CPU cache; decodedBytes is static/poster bitmaps; animationReservedBytes includes bounded working sets and compressed sources; excludes GPU"})
     }
+    fn cache_bytes(&self) -> usize { self.bytes + self.animation_bytes.load(Ordering::Relaxed) }
     fn metadata_cost(path: &Path) -> usize { (path.as_os_str().len() + 256).saturating_mul(4) }
     fn path_key(path: &Path) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -124,16 +142,22 @@ impl ImageStore {
         }
     }
 
-    /// 只有实际绘制到视口的动画才请求下一帧；无后台计时器，淘汰即释放全部帧。
-    pub fn frame(&self, path: &Path, window: &mut gpui::Window, cx: &App) -> usize {
-        let Some(Entry::Ready { image, started, .. }) = self.entries.get(path) else { return 0; };
-        if image.frame_count() < 2 || crate::ui::popup::reduced_motion(cx) { return 0; }
-        let delay = |index| { let (n, d) = image.delay(index).numer_denom_ms(); (u64::from(n) / u64::from(d.max(1))).max(20) };
-        let total: u64 = (0..image.frame_count()).map(delay).sum();
-        let mut elapsed = (started.elapsed().as_millis() % u128::from(total)) as u64;
-        window.request_animation_frame();
-        for index in 0..image.frame_count() { let ms = delay(index); if elapsed < ms { return index; } elapsed -= ms; }
-        0
+    /// 仅实际可见绘制调用；尺寸／复制等查询继续使用 image() 的静态首帧。
+    pub fn frame_image(&self, path: &Path, window: &gpui::Window, cx: &App) -> Option<Arc<RenderImage>> {
+        let poster = self.image(path)?;
+        let Some(Entry::Ready { version, .. }) = self.entries.get(path) else { return None; };
+        Some(match self.animations.get(path) {
+            Some(playback) => playback.image(self, path, *version, &poster, window, cx),
+            None => poster,
+        })
+    }
+
+    pub fn notice(&self, path: &Path) -> Option<&'static str> {
+        match self.entries.get(path) {
+            Some(Entry::Ready { notice: Some(Failure::Budget), .. }) => Some("动画超出预算，已显示静态预览"),
+            Some(Entry::Ready { notice: Some(_), .. }) => Some("动画后续帧无法解码，已显示静态预览"),
+            _ => None,
+        }
     }
 
     pub fn is_pending_or_known(&self, path: &Path) -> bool {
@@ -142,6 +166,11 @@ impl ImageStore {
 
     fn remove(&mut self, path: &Path) -> Option<Entry> {
         let entry = self.entries.remove(path)?;
+        if let Some(playback) = self.animations.remove(path) {
+            let current = playback.current();
+            if !matches!(&entry, Entry::Ready { image, .. } if Arc::ptr_eq(image, &current)) { self.retired_animations.push(current); }
+        }
+        self.animation_queue.get_mut().retain(|(key, _)| key != path);
         self.metadata_bytes = self.metadata_bytes.saturating_sub(Self::metadata_cost(path));
         if let Entry::Ready { bytes, .. } = &entry { self.bytes -= bytes; }
         Some(entry)
@@ -157,6 +186,23 @@ impl ImageStore {
         self.queued.retain(|path| matches!(self.entries.get(path), Some(Entry::Queued)));
         if self.entries.is_empty() { self.failures.clear(); self.failure_order.clear(); }
         self.generation = self.generation.wrapping_add(1);
+        retired.append(&mut self.retired_animations);
+        retired
+    }
+    fn complete_loaded(&mut self, path: PathBuf, request: u64, loaded: Result<Loaded, Failure>) -> Vec<Arc<RenderImage>> {
+        if !matches!(self.entries.get(&path), Some(Entry::Loading(current)) if *current == request) { return Vec::new(); }
+        let loaded = match loaded { Ok(loaded) => loaded, Err(error) => return self.complete(path, request, Err(error)) };
+        let mut retired = self.complete(path.clone(), request, Ok(loaded.bitmap));
+        if let Some(Entry::Ready { image, notice, .. }) = self.entries.get_mut(&path) {
+            *notice = loaded.notice;
+            if let Some(stream) = loaded.stream {
+                self.animations.insert(path, animation::Playback::new(stream, image.clone(), self.animation_bytes.clone()));
+            }
+        }
+        while self.cache_bytes() > MAX_CACHE_BYTES {
+            if !self.evict_oldest(&mut retired) { break; }
+        }
+        retired.append(&mut self.retired_animations);
         retired
     }
     fn complete(&mut self, path: PathBuf, request: u64, decoded: Result<Decoded, Failure>) -> Vec<Arc<RenderImage>> {
@@ -177,7 +223,7 @@ impl ImageStore {
         true
     }
     fn enqueue(&mut self, path: PathBuf, retired: &mut Vec<Arc<RenderImage>>) {
-        if self.is_pending_or_known(&path) || self.queued.len() >= MAX_QUEUED { return; }
+        if self.is_pending_or_known(&path) || self.queued.len() + self.animation_queue.borrow().len() >= MAX_QUEUED { return; }
         let cost = Self::metadata_cost(&path);
         if cost > MAX_METADATA_BYTES { return; }
         while self.entries.len() >= MAX_ENTRIES || self.metadata_bytes + cost > MAX_METADATA_BYTES {
@@ -201,8 +247,8 @@ impl ImageStore {
             Some((image, width, height, bytes)) => {
                 self.failures.remove(&Self::path_key(&path));
                 self.bytes += bytes;
-                self.entries.insert(path, Entry::Ready { image, width, height, bytes, used: Cell::new(self.clock.get()), version: self.generation, started: std::time::Instant::now() });
-                while self.bytes > MAX_CACHE_BYTES {
+                self.entries.insert(path, Entry::Ready { image, width, height, bytes, used: Cell::new(self.clock.get()), version: self.generation, notice: None });
+                while self.cache_bytes() > MAX_CACHE_BYTES {
                     if !self.evict_oldest(&mut retired) { break; }
                 }
             }
@@ -214,6 +260,7 @@ impl ImageStore {
         while self.entries.len() > MAX_ENTRIES || self.metadata_bytes > MAX_METADATA_BYTES {
             if !self.evict_oldest(&mut retired) { break; }
         }
+        retired.append(&mut self.retired_animations);
         retired
     }
 }
@@ -224,6 +271,7 @@ pub fn request(paths: Vec<PathBuf>, cx: &mut App) {
     for path in paths {
         cx.global_mut::<ImageStore>().enqueue(path, &mut retired);
     }
+    retired.append(&mut cx.global_mut::<ImageStore>().retired_animations);
     for image in retired { cx.drop_image(image, None); }
     start_pending(cx);
 }
@@ -232,7 +280,10 @@ fn start_pending(cx: &mut App) {
     loop {
         let store = cx.global_mut::<ImageStore>();
         if store.running >= MAX_DECODERS { break; }
-        let Some(path) = store.queued.pop_front() else { break; };
+        let Some(path) = store.queued.pop_front() else {
+            if animation::start_pending(cx) { continue; }
+            break;
+        };
         store.next_request = store.next_request.wrapping_add(1);
         let request = store.next_request;
         store.entries.insert(path.clone(), Entry::Loading(request));
@@ -244,7 +295,7 @@ fn start_pending(cx: &mut App) {
             cx.update(|cx| {
                 let store = cx.global_mut::<ImageStore>();
                 store.running -= 1;
-                let retired = store.complete(path, request, decoded);
+                let retired = store.complete_loaded(path, request, decoded);
                 // 此处在 App 任务中，所有窗口都在 App 内，可完整移除纹理。
                 for image in retired { cx.drop_image(image, None); }
                 start_pending(cx);
@@ -281,7 +332,7 @@ async fn download(source: &str) -> Result<Vec<u8>, Failure> {
     Ok(bytes)
 }
 
-fn decode(path: &Path) -> Result<Decoded, Failure> {
+fn decode(path: &Path) -> Result<Loaded, Failure> {
     let source = path.to_string_lossy();
     let encoded = if source.starts_with("http://") || source.starts_with("https://") {
         tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| Failure::Read)?
@@ -298,7 +349,7 @@ fn decode(path: &Path) -> Result<Decoded, Failure> {
         return decode_gif(encoded);
     }
     if std::str::from_utf8(&encoded).is_ok_and(|text| text.trim_start_matches('\u{feff}').trim_start().starts_with('<')) {
-        return decode_svg(&encoded);
+        return decode_svg(&encoded).map(Loaded::from);
     }
     let mut reader = image::ImageReader::new(Cursor::new(encoded)).with_guessed_format().map_err(|_| Failure::Decode)?;
     let mut limits = image::Limits::default();
@@ -321,33 +372,13 @@ fn decode(path: &Path) -> Result<Decoded, Failure> {
     }
     let bytes = buffer.len();
     let render = RenderImage::new(vec![Frame::new(buffer)]);
-    Ok((Arc::new(render), width, height, bytes))
+    Ok((Arc::new(render), width, height, bytes).into())
 }
 
-fn decode_gif(encoded: Vec<u8>) -> Result<Decoded, Failure> {
-    let error = |error| if matches!(error, image::ImageError::Limits(_)) { Failure::Budget } else { Failure::Decode };
-    let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(encoded)).map_err(error)?;
-    let (width, height) = decoder.dimensions();
-    let pixels = u64::from(width) * u64::from(height);
-    if pixels == 0 || pixels > MAX_INPUT_PIXELS || width > 32_768 || height > 32_768 { return Err(Failure::Budget); }
-    let mut limits = image::Limits::default(); limits.max_alloc = Some(MAX_DECODE_BYTES);
-    limits.max_image_width = Some(32_768); limits.max_image_height = Some(32_768);
-    decoder.set_limits(limits).map_err(|_| Failure::Budget)?;
-    let scale = (MAX_DECODE_WIDTH as f64 / width.max(height) as f64).min((MAX_BITMAP_PIXELS as f64 / pixels as f64).sqrt()).min(1.0);
-    let (w, h) = ((width as f64 * scale).max(1.0) as u32, (height as f64 * scale).max(1.0) as u32);
-    let mut frames = Vec::new(); let mut bytes = 0usize;
-    for frame in decoder.into_frames() {
-        if frames.len() >= MAX_ANIMATION_FRAMES || bytes.saturating_add(w as usize * h as usize * 4) > MAX_ANIMATION_BYTES { return Err(Failure::Budget); }
-        let frame = frame.map_err(error)?;
-        let delay = frame.delay();
-        let mut buffer = frame.into_buffer();
-        if buffer.dimensions() != (w, h) { buffer = image::imageops::resize(&buffer, w, h, FilterType::Triangle); }
-        for pixel in buffer.chunks_exact_mut(4) { pixel.swap(0, 2); }
-        bytes += buffer.len();
-        frames.push(Frame::from_parts(buffer, 0, 0, delay));
-    }
-    if frames.is_empty() { return Err(Failure::Decode); }
-    Ok((Arc::new(RenderImage::new(frames)), width, height, bytes))
+fn decode_gif(encoded: Vec<u8>) -> Result<Loaded, Failure> {
+    let gif = gif::decode(encoded)?;
+    let bytes = gif.first.buffer().len();
+    Ok(Loaded { bitmap: (Arc::new(RenderImage::new(vec![gif.first])), gif.width, gif.height, bytes), stream: gif.stream, notice: gif.notice })
 }
 
 fn svg_tree(encoded: &[u8]) -> Result<resvg::usvg::Tree, Failure> {
