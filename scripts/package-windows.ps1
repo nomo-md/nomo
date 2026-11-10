@@ -91,7 +91,7 @@ try {
     $installer = Join-Path $output "Nomo_${version}_x64-setup.exe"
     $icon = Join-Path $root 'src-gpui/assets/app/icon.ico'
     $numericVersion = ($version -split '[-+]')[0] + '.0'
-    & $compiler '/V3' "/DVERSION=$version" "/DNUMERICVERSION=$numericVersion" "/DPAYLOAD=$app" "/DOUTPUT=$installer" "/DAPPICON=$icon" (Join-Path $PSScriptRoot 'packaging/windows.nsi')
+    & $compiler '/V3' '/INPUTCHARSET' 'UTF8' "/DVERSION=$version" "/DNUMERICVERSION=$numericVersion" "/DPAYLOAD=$app" "/DOUTPUT=$installer" "/DAPPICON=$icon" (Join-Path $PSScriptRoot 'packaging/windows.nsi')
     if ($LASTEXITCODE -ne 0) { throw 'NSIS packaging failed' }
     Compress-Archive -LiteralPath $app -DestinationPath (Join-Path $output "Nomo_${version}_x64.zip") -Force
     Write-Output "Windows packages: $output"
