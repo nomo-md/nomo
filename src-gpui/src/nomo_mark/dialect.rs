@@ -310,6 +310,45 @@ fn parser_definitions(
 mod tests {
     use super::*;
     #[test]
+    fn standalone_equal_formula_renders_through_editor_pipeline() {
+        let formula = "$$\np_{\\theta,v}(z_v\\mid K,H,z_{<v})\n=\n\\frac{p_{0,v}(z_v\\mid z_{<v},K)\\exp f_\\theta(z_v;K,H,z_{<v})}{\\sum_{z\\in\\mathcal F_v}p_{0,v}(z\\mid z_{<v},K)\\exp f_\\theta(z;K,H,z_{<v})}\n$$\n";
+        let quote = formula.lines().map(|line| format!("> {line}\n")).collect::<String>();
+        let list = format!("- {}", formula.replace('\n', "\n  ").trim_end());
+        for source in [
+            formula.to_owned(), formula.replace('\n', "\r\n"), quote, list,
+            format!("<details>\n<summary>Formula</summary>\n\n{formula}\n</details>\n"),
+            format!("Real heading\n===\n\n{formula}\n"),
+        ] {
+            let parsed = crate::nomo_mark::parse::fixture(&source);
+            assert_eq!(&*parsed.source, source);
+            let math: Vec<_> = parsed.events.iter().filter_map(|(event, range)| match event {
+                Event::DisplayMath(tex) => Some((tex.as_ref(), range)), _ => None,
+            }).collect();
+            assert_eq!(math.len(), 1, "{source:?}");
+            assert!(math[0].0.contains('='));
+            assert!(source[math[0].1.clone()].starts_with("$$"));
+            assert!(source[math[0].1.clone()].ends_with("$$"));
+            let (svg, depth) = crate::embeds::math_svg(math[0].0, true, [0, 0, 0])
+                .expect("parsed formula must render through the native TeX engine");
+            assert!(depth.is_finite());
+            let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+            let size = tree.size().to_int_size();
+            let mut pixels = resvg::tiny_skia::Pixmap::new(size.width() * 3, size.height() * 3).unwrap();
+            pixels.fill(resvg::tiny_skia::Color::WHITE);
+            resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(3.0, 3.0), &mut pixels.as_mut());
+            assert!(pixels.pixels().iter().any(|pixel| pixel.alpha() != 0 && pixel.red() < 250));
+            if source == formula {
+                if let Some(out) = std::env::var_os("NOMO_EMBED_DUMP") {
+                    let out = std::path::PathBuf::from(out);
+                    std::fs::create_dir_all(&out).unwrap();
+                    pixels.save_png(out.join("standalone-equals.png")).unwrap();
+                }
+            }
+        }
+    }
+
+
+    #[test]
     fn nested_details_use_original_boundaries_without_changing_source() {
         let mut text = "**中文**\r\n".to_owned();
         for _ in 0..12 {
@@ -361,4 +400,3 @@ mod tests {
         );
     }
 }
-

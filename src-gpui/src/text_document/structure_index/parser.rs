@@ -862,4 +862,3 @@ mod tests {
         assert_eq!(normalize_label("  ẞ\tX "), normalize_label("ss x"));
     }
 }
-

@@ -600,4 +600,3 @@ pub fn html_code(source: &str, start: usize) -> Option<(usize, String)> {
         html_escape::decode_html_entities(&source[tag.end..to]).into_owned(),
     ))
 }
-
