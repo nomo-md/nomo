@@ -810,6 +810,18 @@ impl DocumentHost {
         if event.modifiers.shift || event.modifiers.control || event.modifiers.platform || event.modifiers.alt
             || !self.paper_input_ready(pane, cx)
         { return; }
+        let active = &self.control.read(cx).host;
+        if event.button == gpui::MouseButton::Left
+            && active.parsed.source.is_empty()
+            && active.projected_document_length(self.total_bytes) == 0
+        {
+            let view = self.panes[pane].control.clone();
+            if self.promote(&view, cx) {
+                view.update(cx, |view, cx| view.focus_empty_document(window, cx));
+            }
+            return;
+        }
+
         let viewport = &self.panes[pane].viewport;
         let candidate = viewport.mounts.iter().find_map(|mount| {
             let view = mount.view.read(cx);

@@ -1575,6 +1575,21 @@ impl NomoMark {
             self.preferred_x = None;
         }
     }
+    pub(super) fn focus_empty_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.host.presentation != Presentation::Editable
+            || self.host.interaction.protected()
+            || self.host.parsed.identity.from_byte != 0
+            || !self.host.parsed.source.is_empty()
+        {
+            return;
+        }
+
+        window.focus(&self.focus, cx);
+        // 纸面点击继续冒泡时，阻止外层工作区的默认聚焦覆盖编辑器焦点。
+        window.prevent_default();
+        self.select(DocumentSelection::caret(0), cx);
+        self.preferred_x = None;
+    }
     /// 当前父容器已采用控件的实际布局高度时返回，用于宿主结束滚动定位。
     pub(crate) fn measured_height(&self) -> Option<f32> {
         if self.layout_key.as_ref()?.0.identity != self.host.parsed.identity { return None; }
