@@ -1627,7 +1627,6 @@ impl Workspace {
                         .when(tab.preview, |el| el.italic().opacity(0.85)).child(title))
                     .children(Self::drop_marker(highlight,item,index,tab_count,theme))
                     .when(cfg!(windows), |el| el
-                        .tooltip(tooltip(row.tooltip.clone()))
                         .on_mouse_down(MouseButton::Right,cx.listener(move |w,e:&gpui::MouseDownEvent,win,cx| w.open_tab_context(item,e.position,win,cx)))
                         .on_mouse_down(MouseButton::Left,cx.listener(move |w,e:&gpui::MouseDownEvent,win,cx| w.arm_tab_drag(item,None,e.position,win,cx))))
                     .children(dirty_indicator)

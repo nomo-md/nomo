@@ -1,6 +1,7 @@
 pub mod chrome;
 pub mod components;
 pub(crate) mod dialogs;
+pub(crate) mod file_manager;
 pub mod editor_popovers;
 pub mod emoji_picker;
 pub mod file_tree;

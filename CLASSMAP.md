@@ -38,6 +38,7 @@
 | 公式字体回退 | `src-gpui/src/math_fallback.rs`、`vendor/latex-rust/NOMO-PATCH.md` | 固定版 TeX 引擎扩展缺字接口，系统字体度量及轮廓参与正常排版；缓存只活到单次公式完成，复用现有位图缓存 |
 | 主题、动效与平台字体 | `src-gpui/src/theme.rs`、`theme_catalog.rs`、`resources/color-themes.json`、`src-gpui/src/ui/motion.rs` | 四套原版主题、有限用户主题目录及 JSON 导入／导出；同明暗配色与字体变更也失效可见区布局，图表配色进入共享缓存键 |
 | 配置与设置窗口 | `src-gpui/src/settings.rs`、`ui/settings_schema.rs`、`ui/settings_window.rs`、`ui/settings_pages.rs`、`ui/settings_fonts.rs` | 八个原版分区、主题导入／导出、从本机字体中搜索选用或恢复主题、图片策略；按原有配置原子保存 |
+| 文件管理器定位 | `src-gpui/src/ui/file_manager.rs` | 文件树、文档标签和本地图片共用定位入口。Windows 在后台线程解析路径并选中条目，失败时通过界面提示 |
 | Windows 文件集成 | `src-gpui/src/windows_integration.rs`、`ui/settings_pages.rs`、`src-gpui/windows-shell-extension/`、`scripts/msix/`、`scripts/packaging/{open-with.nsh,msix/}` | NSIS／ZIP 的当前用户默认应用候选与经典右键菜单；MSIX 的原生 IExplorerCommand、新式菜单与包内启停标记；注册／卸载按副本或包身份核对 |
 | 自定义快捷键 | `src-gpui/src/ui/shortcuts.rs`、`ui/settings_shortcuts.rs`、`ui/mod.rs` | 16 项配置键（含编辑锁、HTML／PDF 导出）、输入草稿与冲突校验；提交后替换有限应用键表并更新菜单提示，不累计旧绑定 |
 | UI 原件与图标 | `src-gpui/src/ui/components.rs`、`popup.rs`、`icon_assets.rs`、`text_field.rs` | 静态 SVG 内嵌、按钮、菜单、输入框；弹层按触发边界测量、翻转、限高和入场动画 |

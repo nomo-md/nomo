@@ -137,12 +137,19 @@ impl Workspace {
             TreeAction::Open => self.open_path_with_preview(&path, true, window, cx),
             TreeAction::Pin => self.open_path_with_preview(&path, false, window, cx),
             TreeAction::CopyPath => cx.write_to_clipboard(gpui::ClipboardItem::new_string(display_tree_path(&path))),
-            TreeAction::Reveal => cx.reveal_path(&path),
+            TreeAction::Reveal => Self::reveal_in_file_manager(path, cx),
             TreeAction::Delete => self.confirm_tree_delete(path, window, cx),
             TreeAction::CopyFile => {
                 if let Err(error) = copy_file_to_clipboard(&path, cx) { self.notice = Some(error.render(ToolbarLocale::current(cx)).into()); cx.notify(); }
             },
         }
+    }
+
+    pub(super) fn reveal_in_file_manager(path: PathBuf, cx: &mut Context<Self>) {
+        crate::ui::file_manager::reveal(path, cx, |workspace, message, cx| {
+            workspace.failure_notice = Some(message.into());
+            cx.notify();
+        });
     }
 
     fn start_tree_edit(&mut self, kind: EditKind, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -330,9 +337,19 @@ pub(super) fn display_tree_path(path: &Path) -> String {
     let value = path.to_string_lossy();
     #[cfg(target_os = "windows")]
     {
-        if let Some(rest) = value.strip_prefix(r"\\?\UNC\") { return format!(r"\\{rest}"); }
-        if let Some(rest) = value.strip_prefix(r"\\?\") { return rest.to_string(); }
+        use std::path::{Component, Prefix};
+
+        let mut value = value.replace('/', "\\");
+        if let Some(Component::Prefix(prefix)) = Path::new(&value).components().next() {
+            match prefix.kind() {
+                Prefix::VerbatimDisk(_) => value.replace_range(..r"\\?\".len(), ""),
+                Prefix::VerbatimUNC(..) => value.replace_range(..r"\\?\UNC\".len(), r"\\"),
+                _ => {}
+            }
+        }
+        value
     }
+    #[cfg(not(target_os = "windows"))]
     value.into_owned()
 }
 

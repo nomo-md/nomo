@@ -38,7 +38,6 @@ pub(in crate::ui::workspace) struct TabRow {
     pub item: TabItem,
     pub tab: Option<usize>,
     pub title: String,
-    pub tooltip: String,
     pub dirty: bool,
 }
 
@@ -55,29 +54,14 @@ impl Workspace {
             .iter()
             .map(|&item| {
                 let mut titles = Vec::new();
-                let mut paths = Vec::new();
                 let mut dirty = false;
                 for key in item.keys() {
                     if let Some(&index) = indices.get(&key) {
                         let doc = self.tabs[index].document.read(cx);
-                        let title = doc.display_title(cx);
-                        paths.push(
-                            doc.path()
-                                .map(|path| path.display().to_string())
-                                .unwrap_or_else(|| title.clone()),
-                        );
-                        titles.push(title);
+                        titles.push(doc.display_title(cx));
                         dirty |= doc.is_dirty(cx);
                     } else if let Some(saved) = self.comparison.layout.pending.get(&key) {
-                        let title = saved.display_title(cx);
-                        paths.push(
-                            saved
-                                .path
-                                .as_ref()
-                                .map(|p| p.display().to_string())
-                                .unwrap_or_else(|| title.clone()),
-                        );
-                        titles.push(title);
+                        titles.push(saved.display_title(cx));
                         dirty |= saved.dirty;
                     }
                 }
@@ -85,7 +69,6 @@ impl Workspace {
                     item,
                     tab: indices.get(&item.first()).copied(),
                     title: titles.join("｜"),
-                    tooltip: paths.join("\n"),
                     dirty,
                 }
             })
@@ -490,7 +473,7 @@ impl Workspace {
             Choice::Path(key, reveal) => {
                 if let Some(path) = self.host_for(key).and_then(|doc| doc.read(cx).path()) {
                     if reveal {
-                        cx.reveal_path(&path);
+                        Self::reveal_in_file_manager(path, cx);
                     } else {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                             super::explorer_actions::display_tree_path(&path),

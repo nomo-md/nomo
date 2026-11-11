@@ -82,7 +82,11 @@ impl NomoMark {
             }
             MenuAction::ImageLocation => {
                 if properties.src.starts_with("http://") || properties.src.starts_with("https://") { cx.open_url(&properties.src); }
-                else if let Some(path) = resolved { cx.reveal_path(&path); }
+                else if let Some(path) = resolved {
+                    crate::ui::file_manager::reveal(path, cx, |_, message, cx| {
+                        cx.emit(ControlEvent::Failure(message));
+                    });
+                }
                 else { self.error(ControlError::Unsupported("无法解析图片路径；请先保存文档".into()), cx); }
             }
             MenuAction::ImagePath => self.context_copy_text(&resolved.map_or(properties.src, |path| path.to_string_lossy().into_owned()), cx),
