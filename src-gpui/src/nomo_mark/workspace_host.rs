@@ -1,5 +1,6 @@
 //! 正式页面的文档宿主接口。正文和历史只在会话中，UI 只持有状态与有界窗口。
 use super::*;
+use crate::settings::Settings;
 use crate::text_document::markdown_session::MarkdownStatus;
 use crate::ui::toolbar_i18n::ToolbarLocale;
 use gpui::{App, EventEmitter, FocusHandle};
@@ -337,7 +338,7 @@ impl DocumentHost {
         self.accepts_workspace_focus=focused;
         self.focus_pending=false;
         if !focused {
-            self.set_outline_enabled(false, 0, cx);
+            self.set_outline_enabled(false, cx.global::<Settings>().outline_level, cx);
             self.outline_layout=OutlineLayout::CENTERED;
         }
     }

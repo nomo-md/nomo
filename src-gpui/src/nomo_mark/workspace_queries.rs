@@ -113,8 +113,9 @@ impl DocumentHost {
         self.queries.search.serial += 1;
         self.cancel_stats();
         self.cancel_toc_when_hidden();
-        // 非活动标签释放分页和任务，只保留六个统计数值与其修订，不持有正文。
-        self.close_outline(cx);
+        // 隐藏时取消任务，保留有界标题分页和折叠状态；关闭会话才释放投影。
+        if self.closed { self.close_outline(cx); }
+        else { self.set_outline_enabled(false, cx.global::<crate::settings::Settings>().outline_level, cx); }
         self.queries.search.matches.clear();
         self.queries.search.request.cancel();
         if let Some(id) = self.queries.search.task_id.take() {

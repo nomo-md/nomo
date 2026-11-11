@@ -187,23 +187,44 @@ impl DocumentHost {
             has_collapsed: s.has_collapsed, has_expandable: s.has_expandable }
     }
     pub(crate) fn set_outline_enabled(&mut self, enabled: bool, level: u8, cx: &mut Context<Self>) {
+        let level = level.clamp(1, 6);
         let changed = self.queries.outline_state.enabled != enabled;
-        let level_changed = self.queries.outline_state.default_level != level;
+        let level_changed = self.queries.outline_state.default_level != 0 && self.queries.outline_state.default_level != level;
         self.queries.outline_state.enabled = enabled;
-        self.queries.outline_state.default_level = level.clamp(1, 6);
+        self.queries.outline_state.default_level = level;
+        if level_changed { self.queries.outline_state.reset_level = true; }
         if !enabled {
-            if changed { self.close_outline(cx); }
-        } else if !self.hidden && !self.queries.outline_state.pending && (changed || (self.queries.outline_state.identity.is_none() && self.queries.outline_state.error.is_none())) {
-            self.refresh_outline(cx);
-        } else if level_changed {
-            if self.queries.outline_state.pending { self.queries.outline_state.reset_level = true; }
-            else if self.queries.outline_state.view_id.is_some() { self.set_outline_level(level, cx); }
+            if changed { self.suspend_outline(cx); }
+            return;
         }
+        if self.hidden || self.closed || self.mini_layout || self.queries.outline_state.pending { return; }
+        if changed || (self.queries.outline_state.identity.is_none() && self.queries.outline_state.error.is_none()) {
+            self.schedule_outline_refresh(true, cx);
+        }
+        // 复用同修订缓存时不会走刷新回调，仍需应用隐藏期间变更的默认层级。
+        if self.queries.outline_state.reset_level && !self.queries.outline_state.pending
+            && self.queries.outline_state.identity.as_ref().is_some_and(|id| id.revision == self.status().revision) {
+            self.queries.outline_state.reset_level = false;
+            self.set_outline_level(level, cx);
+        }
+    }
+
+    fn suspend_outline(&mut self, cx: &mut Context<Self>) {
+        self.cancel_outline_navigation(cx);
+        let state = &mut self.queries.outline_state;
+        // 在途查询可能已经修改磁盘折叠投影；重新显示时必须核对，不能只看正文修订。
+        if state.pending || state.error.is_some() { state.requested_revision = None; }
+        state.request.cancel(); state.request = Default::default(); state.serial += 1;
+        state.navigation_request.cancel(); state.navigation_request = Default::default();
+        state.refresh_task = None; state.dirty_since = None;
+        state.active_serial += 1; state.active_task = None; state.anchor = None;
+        state.pending = false; state.error = None;
+        // 隐藏只停任务，保留原有页数/字节预算内的标题和滚动位置；关闭文档才释放。
     }
     pub(crate) fn retry_outline(&mut self, cx: &mut Context<Self>) {
         self.queries.outline_state.error = None;
         self.queries.outline_state.requested_revision = None;
-        self.refresh_outline(cx);
+        self.schedule_outline_refresh(true, cx);
     }
     pub(crate) fn take_outline_scroll(&mut self) -> Option<usize> { self.queries.outline_state.restore_scroll.take() }
     pub(super) fn suspend_outline_for_mini(&mut self, active: bool, cx: &mut Context<Self>) {
@@ -217,7 +238,7 @@ impl DocumentHost {
             state.refresh_task = None; state.pending = false;
             state.active_serial += 1; state.active_task = None; state.anchor = None;
         } else if state.enabled && (state.identity.is_none() || state.requested_revision != Some(revision)) {
-            self.refresh_outline(cx);
+            self.schedule_outline_refresh(true, cx);
         }
     }
     pub(super) fn close_outline(&mut self, cx: &mut Context<Self>) {
@@ -234,6 +255,9 @@ impl DocumentHost {
         }
     }
     pub(super) fn refresh_outline(&mut self, cx: &mut Context<Self>) {
+        self.schedule_outline_refresh(false, cx);
+    }
+    fn schedule_outline_refresh(&mut self, immediate: bool, cx: &mut Context<Self>) {
         if self.hidden || self.closed || self.mini_layout || !self.queries.outline_state.enabled { return; }
         let revision = self.status().revision;
         if self.queries.outline_state.requested_revision == Some(revision) { return; }
@@ -243,9 +267,15 @@ impl DocumentHost {
         state.navigation_request.cancel(); state.refresh_task = None;
         state.active_serial += 1; state.anchor = None; state.error = None; state.active_task = None;
         state.pending = true;
-        // 旧投影继续显示；只有首次加载才等待首屏引用完成。
-        if waiting && state.identity.is_none() { state.requested_revision = None; return; }
+        // 主动打开不等待无关的首屏引用，也不走输入防抖；查询仍在后台按需执行。
+        if !immediate && waiting && state.identity.is_none() { state.requested_revision = None; return; }
         state.requested_revision = Some(revision);
+        if immediate || state.identity.is_none() {
+            state.dirty_since = None;
+            self.load_outline_refresh(cx);
+            cx.notify();
+            return;
+        }
         let serial = state.serial;
         let dirty = *state.dirty_since.get_or_insert_with(Instant::now);
         let delay = Duration::from_millis(300).min(Duration::from_millis(900).saturating_sub(dirty.elapsed()));
