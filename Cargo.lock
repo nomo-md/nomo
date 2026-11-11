@@ -3866,7 +3866,7 @@ dependencies = [
 
 [[package]]
 name = "nomo-gpui"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "arboard",
  "ashpd 0.11.1",

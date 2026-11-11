@@ -8,7 +8,7 @@ resolver = "3"
 latex-rust = { path = "vendor/latex-rust" }
 
 [workspace.package]
-version = "0.7.0"
+version = "0.7.1"
 
 [profile.release]
 debug = 1
