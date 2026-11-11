@@ -296,8 +296,22 @@ impl DocumentHost {
                         else { crate::nomo_mark::commands::apply(parsed,selection,EditIntent::Replace(text))? };
                     if !inline && request.target.edit.is_semantic() {quick_insert::continue_after_block(parsed,&mut result)?;}
                     host.control.update(cx,|view,cx|view.apply_host_edit(result,cx))?;
-                    let message=format!("已插入 {} 张图片，{} 张失败{}",batch.images.len(),batch.failed,if batch.errors.is_empty(){String::new()}else{format!("：{}",batch.errors.join("；"))});
-                    host.message=message.clone();cx.emit(DocumentEvent::Notice(message));Ok(())
+                    if batch.failed > 0 {
+                        let details = if batch.errors.is_empty() {
+                            String::new()
+                        } else {
+                            format!("：{}", batch.errors.join("；"))
+                        };
+                        let message = format!(
+                            "已插入 {} 张图片，{} 张失败{}",
+                            batch.images.len(),
+                            batch.failed,
+                            details,
+                        );
+                        host.message = message.clone();
+                        cx.emit(DocumentEvent::Notice(message));
+                    }
+                    Ok(())
                 });
                 host.quick.cancel();
                 if let Err(error)=result{host.report(error,cx);}
