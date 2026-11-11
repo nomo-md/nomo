@@ -188,7 +188,8 @@ fn spans(source: &str, document_start: bool) -> Vec<Span> {
     let mut depth = 0usize;
     let mut roots = vec![];
     let projected = syntax::project_comment_paragraphs(source, options());
-    for (event, range) in Parser::new_ext(&projected, options()).into_offset_iter() {
+    let math = syntax::project_math_setext(&projected, options());
+    for (event, range) in Parser::new_ext(math.as_ref(), options()).into_offset_iter() {
         match event {
             Event::Start(tag) => {
                 if depth == 0 {
@@ -283,7 +284,8 @@ fn spans(source: &str, document_start: bool) -> Vec<Span> {
             }
         }
         if original_kind == "paragraph_open" && tail.trim_start().starts_with("$$") {
-            let events: Vec<_> = Parser::new_ext(&source[*from..end], options()).collect();
+            let math = syntax::project_math_setext(&source[*from..end], options());
+            let events: Vec<_> = Parser::new_ext(math.as_ref(), options()).collect();
             if events
                 .iter()
                 .any(|event| matches!(event, Event::DisplayMath(_)))
@@ -304,7 +306,8 @@ fn spans(source: &str, document_start: bool) -> Vec<Span> {
 
 fn prepare_scripts(source: &str) -> String {
     // 代码内部的定界符没有格式语义；在原文上处理脚本，防止解码后的转义符再次生效。
-    let protected: Vec<_> = Parser::new_ext(source, options())
+    let math = syntax::project_math_setext(source, options());
+    let protected: Vec<_> = Parser::new_ext(math.as_ref(), options())
         .into_offset_iter()
         .filter_map(|(event, range)| match event {
             Event::Code(_) | Event::InlineMath(_) | Event::DisplayMath(_) => Some(range),
@@ -379,7 +382,9 @@ pub fn heading_title(source: &str) -> String {
     let mut text = String::new();
     let mut skip = 0usize;
     let mut image_end = None;
-    for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
+    let math = syntax::project_math_setext(source, options());
+    for (event, range) in Parser::new_ext(math.as_ref(), options()).into_offset_iter() {
+        let event = math.restore(event);
         if range.start < skip {
             continue;
         }
@@ -526,7 +531,8 @@ fn metadata(source: &str, span: &Span, revision: u64, depth: usize) -> Block {
         return block;
     }
     let projected = syntax::project_comment_paragraphs(part, options());
-    let parser = Parser::new_ext(&projected, options());
+    let math = syntax::project_math_setext(&projected, options());
+    let parser = Parser::new_ext(math.as_ref(), options());
     for (label, definition) in parser.reference_definitions().iter() {
         block.definitions.insert(
             normalize_label(label),
@@ -539,7 +545,7 @@ fn metadata(source: &str, span: &Span, revision: u64, depth: usize) -> Block {
     let mut text_ranges = vec![];
     let mut skip_until = 0;
     for (event, range) in parser.into_offset_iter() {
-        let event = syntax::restore_inline_comment(part, event, &range);
+        let event = syntax::restore_inline_comment(part, math.restore(event), &range);
         if range.start < skip_until {
             continue;
         }
@@ -746,7 +752,8 @@ pub fn bullet_list_cutoff(source: &str) -> usize {
     let mut depth = 0usize;
     let mut cut = 0;
     let projected = syntax::project_comment_paragraphs(source, options());
-    for (event, range) in Parser::new_ext(&projected, options()).into_offset_iter() {
+    let math = syntax::project_math_setext(&projected, options());
+    for (event, range) in Parser::new_ext(math.as_ref(), options()).into_offset_iter() {
         match event {
             Event::Start(tag) => {
                 if depth == 1 && tag == Tag::Item {
@@ -796,6 +803,41 @@ impl HeadingIds {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn standalone_equal_stays_in_one_math_block() {
+        let source = "$$\np_{\\theta,v}(z_v\\mid K,H,z_{<v})\n=\n\\frac{a}{b}\n$$\n";
+        for source in [source.to_owned(), source.replace('\n', "\r")] {
+            let blocks = parse_fragment(&source, 0, true).unwrap();
+            assert_eq!(blocks.len(), 1);
+            assert_eq!(blocks[0].kind, "math_display");
+            assert_eq!(blocks[0].enhancements.block_math, 1);
+            assert!(blocks[0].headings.is_empty());
+            assert_eq!(blocks[0].from_byte, 0);
+            assert_eq!(blocks[0].to_byte, source.len() as u64);
+        }
+    }
+
+    #[test]
+    fn math_does_not_create_outline_titles_or_internal_window_boundaries() {
+        let source = "标题\n===\n\n$$\nx\n=\ny\n$$\n\n末段\n";
+        let blocks = parse_fragment(source, 0, true).unwrap();
+        assert_eq!(blocks.iter().flat_map(|block| &block.headings).count(), 1);
+        assert_eq!(blocks.iter().map(|block| block.enhancements.block_math).sum::<usize>(), 1);
+        let math = blocks.iter().find(|block| block.kind == "math_display").unwrap();
+        let cut = stable_cutoff(source, true);
+        assert!(cut <= math.from_byte as usize || cut >= math.to_byte as usize);
+    }
+
+    #[test]
+    fn container_math_keeps_its_enhancement_and_original_range() {
+        for source in ["> $$\n> x\n> =\n> y\n> $$\n", "- $$\n  x\n  =\n  y\n  $$\n"] {
+            let blocks = parse_fragment(source, 0, true).unwrap();
+            assert_eq!(blocks.len(), 1);
+            assert_eq!(blocks[0].enhancements.block_math, 1, "{source:?}");
+            assert!(blocks[0].headings.is_empty());
+            assert_eq!(blocks[0].to_byte, source.len() as u64);
+        }
+    }
     #[test]
     fn unresolved_references_and_footnotes_are_dependencies_without_code_false_targets() {
         let blocks = parse_fragment(

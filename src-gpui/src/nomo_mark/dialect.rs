@@ -94,13 +94,20 @@ pub fn events(
         result.push((Event::Html(source[..end].to_owned().into()), range.clone()));
         result.push((Event::End(TagEnd::HtmlBlock), range));
     }
+    let pending_target = |link_type| {
+        context.pending_references
+            && matches!(
+                link_type,
+                pulldown_cmark::LinkType::Reference | pulldown_cmark::LinkType::Collapsed
+            )
+    };
     let keys = RefCell::new(BTreeSet::new());
     let mut resolve = |link: pulldown_cmark::BrokenLink<'_>| {
         let key = normalize_reference_label(&link.reference);
         keys.borrow_mut().insert(key.clone());
         if let Some(target) = context.references.get(&key) {
             Some((target.destination.clone().into(), target.title.clone().into()))
-        } else if context.pending_references && matches!(link.link_type, pulldown_cmark::LinkType::Reference | pulldown_cmark::LinkType::Collapsed) {
+        } else if pending_target(link.link_type) {
             // 让解析器保留标签及其行内格式。空地址只承载事件，交互以独立待定范围为准。
             Some(("".into(), "".into()))
         } else {
@@ -109,12 +116,17 @@ pub fn events(
         }
     };
     let projected = nomo_syntax::project_comment_paragraphs(&source[from..], options);
+    let math =
+        nomo_syntax::project_math_setext_with_links(&projected, options, |label, link_type| {
+            pending_target(link_type)
+                || context.references.contains_key(&normalize_reference_label(label))
+        });
     let parser =
-        Parser::new_with_broken_link_callback(&projected, options, Some(&mut resolve));
+        Parser::new_with_broken_link_callback(math.as_ref(), options, Some(&mut resolve));
     let mut skip: Option<Range<usize>> = None;
     for (mut event, range) in parser.into_offset_iter() {
         let range = from + range.start..from + range.end;
-        event = nomo_syntax::restore_inline_comment(source, event, &range);
+        event = nomo_syntax::restore_inline_comment(source, math.restore(event), &range);
         if skip
             .as_ref()
             .is_some_and(|skip| skip.start <= range.start && range.start < skip.end)
@@ -240,7 +252,8 @@ fn project_empty_list_items(source: &str, options: Options, document_start: bool
         from += line.len();
     }
     if candidates.is_empty() { return (source.into(), Vec::new()); }
-    let mut containers = Parser::new_ext(source, options).into_offset_iter().filter_map(|(event, range)| match event {
+    let math = nomo_syntax::project_math_setext(source, options);
+    let mut containers = Parser::new_ext(math.as_ref(), options).into_offset_iter().filter_map(|(event, range)| match event {
         Event::Start(Tag::Item) => Some((true, range)),
         Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock) => Some((false, range)),
         _ => None,
@@ -283,7 +296,8 @@ fn parser_definitions(
     options: Options,
 ) -> Vec<(String, super::protocol::ReferenceTarget)> {
     let projected = nomo_syntax::project_comment_paragraphs(source, options);
-    let parser = Parser::new_ext(&projected, options);
+    let math = nomo_syntax::project_math_setext(&projected, options);
+    let parser = Parser::new_ext(math.as_ref(), options);
     parser
         .reference_definitions()
         .iter()
@@ -306,6 +320,69 @@ fn parser_definitions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn standalone_equal_formula_renders_through_editor_pipeline() {
+        let formula = "$$\np_{\\theta,v}(z_v\\mid K,H,z_{<v})\n=\n\\frac{p_{0,v}(z_v\\mid z_{<v},K)\\exp f_\\theta(z_v;K,H,z_{<v})}{\\sum_{z\\in\\mathcal F_v}p_{0,v}(z\\mid z_{<v},K)\\exp f_\\theta(z;K,H,z_{<v})}\n$$\n";
+        let quote = formula.lines().map(|line| format!("> {line}\n")).collect::<String>();
+        let list = format!("- {}", formula.replace('\n', "\n  ").trim_end());
+        for source in [
+            formula.to_owned(), formula.replace('\n', "\r\n"), formula.replace('\n', "\r"), quote, list,
+            format!("<details>\n<summary>Formula</summary>\n\n{formula}\n</details>\n"),
+            format!("Real heading\n===\n\n{formula}\n"),
+        ] {
+            let parsed = crate::nomo_mark::parse::fixture(&source);
+            assert_eq!(&*parsed.source, source);
+            let math: Vec<_> = parsed.events.iter().filter_map(|(event, range)| match event {
+                Event::DisplayMath(tex) => Some((tex.as_ref(), range)), _ => None,
+            }).collect();
+            assert_eq!(math.len(), 1, "{source:?}");
+            assert!(math[0].0.contains('='));
+            assert!(source[math[0].1.clone()].starts_with("$$"));
+            assert!(source[math[0].1.clone()].ends_with("$$"));
+            let (svg, depth) = crate::embeds::math_svg(math[0].0, true, [0, 0, 0])
+                .expect("parsed formula must render through the native TeX engine");
+            assert!(depth.is_finite());
+            let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+            let size = tree.size().to_int_size();
+            let mut pixels = resvg::tiny_skia::Pixmap::new(size.width() * 3, size.height() * 3).unwrap();
+            pixels.fill(resvg::tiny_skia::Color::WHITE);
+            resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(3.0, 3.0), &mut pixels.as_mut());
+            assert!(pixels.pixels().iter().any(|pixel| pixel.alpha() != 0 && pixel.red() < 250));
+            if source == formula {
+                if let Some(out) = std::env::var_os("NOMO_EMBED_DUMP") {
+                    let out = std::path::PathBuf::from(out);
+                    std::fs::create_dir_all(&out).unwrap();
+                    pixels.save_png(out.join("standalone-equals.png")).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn math_projection_preserves_heading_inside_pending_reference_label() {
+        let source = "[text][$$\nx\n=\ny\n$$]\n";
+        let context = ParseContext {
+            pending_references: true,
+            ..Default::default()
+        };
+        let mut reference_keys = BTreeSet::new();
+        let parsed = events(
+            source,
+            0,
+            true,
+            Options::ENABLE_MATH,
+            &context,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut reference_keys,
+        );
+        assert!(parsed.iter().any(|(event, range)| {
+            matches!(event, Event::Start(Tag::Heading { .. }))
+                && source[range.clone()].trim_end().ends_with('=')
+        }));
+        assert!(reference_keys.iter().all(|key| !key.chars().any(char::is_control)));
+    }
+
     #[test]
     fn nested_details_use_original_boundaries_without_changing_source() {
         let mut text = "**中文**\r\n".to_owned();
