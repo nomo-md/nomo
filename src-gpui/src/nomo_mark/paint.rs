@@ -229,7 +229,7 @@ fn paint_layer(
     };
     for item in &layout.items {
         if !matches!(item, DisplayItem::Text { .. } | DisplayItem::Horizontal { .. } | DisplayItem::CodeBody { .. })
-            && matches!(item, DisplayItem::Rect { .. }) != background { continue; }
+            && matches!(item, DisplayItem::Rect { .. } | DisplayItem::Image { path: None, .. }) != background { continue; }
         match item {
             DisplayItem::CalloutHeader { x, y, size: side, kind, role, .. } => {
                 let path = match kind {
@@ -428,6 +428,10 @@ fn paint_layer(
                     continue;
                 }
                 let bounds = Bounds::new(origin + point(px(*x), px(*y)), size(px(*w), px(*h)));
+                let Some(path) = path else {
+                    paint_box(bounds, theme.code_bg, 8.0, Some((theme.code_border, 1.0)), window);
+                    continue;
+                };
                 match store.image(path) {
                     Some(image) => {
                         let mask = window.content_mask().bounds;

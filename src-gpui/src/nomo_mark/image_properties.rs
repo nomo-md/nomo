@@ -1,6 +1,37 @@
 //! 图片属性的局部往返。未修改时返回原字节；标题/表格保持单行 Markdown 属性写法。
-use super::{nomo_syntax::html_tag, protocol::ControlError};
+use super::{nomo_syntax::{HtmlTag, html_tag}, protocol::ControlError};
 use pulldown_cmark::{Event, Parser, Tag};
+use std::ops::Range;
+
+/// 块级 HTML 图片的光标和删除共用实际标签范围，行尾换行及周围 HTML 留在原位。
+pub(crate) fn html_image_tag(source: &str, range: Range<usize>) -> Option<(Range<usize>, HtmlTag)> {
+    let offset = source.get(range.clone())?.as_bytes().windows(4)
+        .position(|bytes| bytes.eq_ignore_ascii_case(b"<img"))?;
+    let start = range.start + offset;
+    let tag = html_tag(source, start)?;
+    (tag.name == "img" && !tag.closing && tag.end <= range.end && tag.attrs.contains_key("src"))
+        .then(|| (start..tag.end, tag))
+}
+
+/// 返回紧随 Markdown 图片的属性长度及值，供可见边界和原子删除共用。
+pub(crate) fn markdown_attributes(tail: &str) -> Option<(usize, &str, &str)> {
+    let attributes = tail.trim_start_matches([' ', '\t']);
+    let (body, _) = attributes.strip_prefix('{')?.split_once('}')?;
+    if body.contains(['\r', '\n']) { return None; }
+    let mut width = "";
+    let mut align = "";
+    for attribute in body.split_whitespace() {
+        let (key, value) = attribute.split_once('=')?;
+        let value = value.strip_prefix('"').and_then(|value| value.strip_suffix('"')).unwrap_or(value);
+        match key {
+            "width" if ImageWidth::parse(value).is_some() => width = value,
+            "align" if matches!(value, "left" | "center" | "right") => align = value,
+            _ => return None,
+        }
+    }
+    if width.is_empty() && align.is_empty() { return None; }
+    Some((tail.len() - attributes.len() + body.len() + 2, width, align))
+}
 
 #[derive(Clone,Copy,Debug)]
 pub enum ImageWidth {Pixels(f32),Percent(f32)}

@@ -9,8 +9,8 @@ use crate::embeds::{EmbedKind, EmbedState};
 use crate::layout::{ColorRole, InlineAsset, InlineObject, InlineStyle, OBJECT_CHAR, ParaSpec, TextLayout, Wrap, layout_text};
 use crate::theme::{Family, Metrics};
 use crate::nomo_mark::parse::ParsedWindow;
-use crate::nomo_mark::image_properties::ImageWidth;
-use gpui::Window;
+use crate::nomo_mark::image_properties::{self, ImageWidth};
+use gpui::{Bounds, Pixels, Point, Window, point, px, size};
 use pulldown_cmark::{Alignment, BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -66,7 +66,7 @@ pub enum DisplayItem {
     Horizontal {x:f32,y:f32,w:f32,h:f32,content_width:f32,source:Range<usize>,offset:std::cell::Cell<f32>,layout:Box<BlockLayout>},
     Text { x: f32, y: f32, layout: Rc<TextLayout>, map: Vec<MapSeg> },
     Rect { x: f32, y: f32, w: f32, h: f32, paint: Paint, radius: f32, border: Option<Paint> },
-    Image { x: f32, y: f32, w: f32, h: f32, path: PathBuf, source:Range<usize> },
+    Image { x: f32, y: f32, w: f32, h: f32, path: Option<PathBuf>, source: Range<usize> },
     Checkbox { x: f32, y: f32, size: f32, checked: bool, source: usize },
     /// 代码块右上角的复制按钮；`text` 为代码正文。
     CopyButton { x: f32, y: f32, size: f32, text: Rc<str> },
@@ -162,6 +162,41 @@ impl BlockLayout {
         }
         cells
     }
+    /// 从本帧可见的位图矩形命中图片，宽表格内沿用自己的滚动裁切。
+    pub(crate) fn find_visible_image(
+        &self,
+        origin: Point<Pixels>,
+        clip: Bounds<Pixels>,
+        accepts: &mut impl FnMut(&Range<usize>, Bounds<Pixels>) -> bool,
+    ) -> Option<(Range<usize>, Bounds<Pixels>)> {
+        let clipped = |x, y, w, h| Bounds::new(origin + point(px(x), px(y)), size(px(w), px(h))).intersect(&clip);
+        let vertical = f32::from(clip.top() - origin.y)..f32::from(clip.bottom() - origin.y);
+        self.items.iter().find_map(|item| match item {
+            DisplayItem::Image { x, y, w, h, path: Some(_), source } => {
+                let bounds = clipped(*x, *y, *w, *h);
+                (!bounds.is_empty() && accepts(source, bounds)).then(|| (source.clone(), bounds))
+            }
+            DisplayItem::Horizontal { x, y, w, h, offset, layout, .. } => {
+                let viewport = clipped(*x, *y, *w, (h - 8.0).max(0.0));
+                if viewport.is_empty() { return None; }
+                layout.find_visible_image(origin + point(px(x - offset.get()), px(*y)), viewport, accepts)
+            }
+            DisplayItem::Text { x, y, layout, map }
+                if *y < vertical.end && y + layout.height() > vertical.start =>
+            {
+                layout.object_rects_with_offsets((vertical.start - y)..(vertical.end - y))
+                    .find_map(|(at, asset, ox, oy, w, h)| {
+                        if !matches!(asset, InlineAsset::Image(_)) { return None; }
+                        let segment = map.iter().find(|segment| segment.text.contains(&at))?;
+                        let source = segment.source..segment.source_end;
+                        let bounds = clipped(x + ox, y + oy, w, h);
+                        (!bounds.is_empty() && accepts(&source, bounds)).then_some((source, bounds))
+                    })
+            }
+            _ => None,
+        })
+    }
+
     pub fn object_source_at(&self, x: f32, y: f32) -> Option<usize> {
         self.items.iter().find_map(|item| match item {
             DisplayItem::Horizontal { x: ix, y: iy, w, h, offset, layout, .. }
@@ -223,7 +258,19 @@ impl BlockLayout {
                     let last = map.iter().map(|segment| segment.source_end).max().unwrap_or(first);
                     if at < first { if forward { accept(first); } continue; }
                     if at > last { if !forward { accept(last); } continue; }
-                    let Some(segment) = map.iter().min_by_key(|segment| at.abs_diff(at.clamp(segment.source, segment.source_end))) else { continue; };
+                    let crosses_atom = |segment: &MapSeg| !segment.exact && if forward {
+                        segment.source <= at && at < segment.source_end
+                    } else {
+                        segment.source < at && at <= segment.source_end
+                    };
+                    let Some(segment) = map.iter().min_by_key(|segment| {
+                        (at.abs_diff(at.clamp(segment.source, segment.source_end)), !crosses_atom(segment))
+                    }) else { continue; };
+                    if crosses_atom(segment) {
+                        // 图片标签等替代文字共用原子范围，只能跨过整个对象。
+                        accept(if forward { segment.source_end } else { segment.source });
+                        continue;
+                    }
                     let offset = segment.mapping().to_display(at, at > segment.source && !segment.exact);
                     let next = crate::nomo_mark::navigation::boundary(&layout.text, offset, unit, forward);
                     if next != offset { if let Some(next) = map_to_source(map, next) { accept(next); } }
@@ -240,11 +287,16 @@ impl BlockLayout {
     pub fn line_boundary_with_affinity(&self, at: usize, end: bool, upstream: bool) -> Option<usize> {
         let mut best = None;
         let mut distance = usize::MAX;
+        let mut image_boundary = None;
         for item in &self.items {
             match item {
                 DisplayItem::CodeBody { source, body, .. } if source.contains(&at) => return body.code.line_boundary(at, end),
                 DisplayItem::Horizontal { source, layout, .. } if source.start <= at && at <= source.end => return layout.line_boundary_with_affinity(at, end, upstream),
-                DisplayItem::Image { source, .. } if source.start <= at && at <= source.end => return Some(if end { source.end } else { source.start }),
+                DisplayItem::Image { source, .. } if source.start <= at && at <= source.end => {
+                    let boundary = if end { source.end } else { source.start };
+                    if at < source.end || upstream { return Some(boundary); }
+                    image_boundary = Some(boundary);
+                }
                 DisplayItem::Text { layout, map, .. } => {
                     for segment in map {
                         let delta = at.abs_diff(at.clamp(segment.source, segment.source_end));
@@ -258,7 +310,7 @@ impl BlockLayout {
                 _ => {}
             }
         }
-        best
+        if distance == 0 { best } else { image_boundary.or(best) }
     }
     pub fn remember_text(&self, reuse: &mut crate::layout::TextLayoutReuse) {
         for item in &self.items {
@@ -305,8 +357,15 @@ impl BlockLayout {
                 if !best.is_some_and(|(current,_)|current<=distance){if let Some(source)=layout.source_at((x-ix).clamp(0.0,*w)+offset.get(),(y-iy).clamp(0.0,*h)){best=Some((distance,source));}}
                 continue;
             }
-            if let DisplayItem::Image{x:ix,y:iy,w,h,source,..}=item{
-                if x>=*ix&&x<=ix+w&&y>=*iy&&y<=iy+h{return Some(source.start);}continue;
+            if let DisplayItem::Image { x: ix, y: iy, w, h, source, .. } = item {
+                if y >= *iy && y <= iy + h {
+                    let distance = (0.0, (ix - x).max(x - (ix + w)).max(0.0));
+                    if best.is_none_or(|(current, _)| distance < current) {
+                        let edge = if x < ix + w / 2.0 { source.start } else { source.end };
+                        best = Some((distance, edge));
+                    }
+                }
+                continue;
             }
             if let DisplayItem::Embed { x: ix, y: iy, w, h, source, .. } = item {
                 if x >= *ix && x <= ix + w && y >= *iy && y <= iy + h {
@@ -395,6 +454,7 @@ impl BlockLayout {
     pub fn caret_at_with_affinity(&self, source: usize, upstream: bool) -> Option<(f32,f32,f32)> {
         let mut best = None;
         let mut distance = usize::MAX;
+        let mut image_end = None;
         for item in &self.items {
             if let DisplayItem::CodeBody { x, y, source: range, body, .. } = item {
                 if range.contains(&source) {
@@ -408,8 +468,15 @@ impl BlockLayout {
             if let DisplayItem::Horizontal{x,y,source:range,offset,layout,..}=item{
                 if range.start<=source&&source<=range.end{if let Some((sx,sy,h))=layout.caret_at_with_affinity(source,upstream){return Some((x+sx-offset.get(),y+sy,h));}}continue;
             }
-            if let DisplayItem::Image{x,y,w,h,source:range,..}=item{
-                if range.start<=source&&source<=range.end{return Some((if source==range.start{*x}else{x+w},*y,*h));}continue;
+            if let DisplayItem::Image { x, y, w, h, source: range, .. } = item {
+                if range.start <= source && source <= range.end {
+                    let caret_x = if source == range.start { *x } else { x + w };
+                    let caret = (caret_x, *y, *h);
+                    if source < range.end || upstream { return Some(caret); }
+                    // 文末虚拟续写行可能与图片右缘共用同一字节。
+                    image_end = Some(caret);
+                }
+                continue;
             }
             let DisplayItem::Text { x,y,layout,map } = item else { continue };
             for segment in map {
@@ -423,7 +490,7 @@ impl BlockLayout {
                 distance = delta;
             }
         }
-        best
+        if distance == 0 { best } else { image_end.or(best) }
     }
 }
 
@@ -713,21 +780,6 @@ fn html_attr(html: &str, name: &str) -> Option<String> {
 
 use crate::nomo_mark::html_style::HtmlStyle;
 
-/// 识别紧随图片的属性块 `{align=center width=360}`（Web 版图片属性写法）。
-fn parse_image_attrs(text: &str) -> Option<(Option<String>, Option<ImageWidth>)> {
-    let inner = text.trim().strip_prefix('{')?.strip_suffix('}')?;
-    let mut align = None;
-    let mut width = None;
-    for part in inner.split_whitespace() {
-        match part.split_once('=')? {
-            ("align", value) => align = Some(value.trim_matches('"').to_string()),
-            ("width", value) => width = ImageWidth::parse(value.trim_matches('"')),
-            _ => return None,
-        }
-    }
-    (align.is_some() || width.is_some()).then_some((align, width))
-}
-
 fn strip_tags(html: &str) -> String {
     let mut output = String::with_capacity(html.len());
     let mut inside = false;
@@ -846,8 +898,11 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
         builder.front_matter(0..source.len());
         return builder.finish(context.is_some_and(|context| context.has_following_block));
     }
+    use crate::nomo_mark::table_inline;
     let mut events = events.peekable();
+    let mut image_attributes = None;
     while let Some((event, range)) = events.next() {
+        let Some((event, range)) = table_inline::after_atom(source, event, range, &image_attributes) else { continue; };
         if let Some((edited, height)) = env.object_edit.as_ref().filter(|(edited, _)| range.start == edited.start && range.end >= edited.end) {
             builder.flush_paragraph(); builder.apply_gap();
             builder.items.push(DisplayItem::BlockControls { x: builder.indent, y: builder.y, w: builder.width - builder.indent,
@@ -970,26 +1025,31 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                 Tag::Superscript => builder.inline.sup += 1,
                 Tag::Subscript => builder.inline.sub += 1,
                 Tag::Link { .. } => builder.inline.link += 1,
-                Tag::Image { dest_url, .. } => {
-                    let mut alt = String::new();
-                    for (event, _) in events.by_ref() {
-                        match event {
-                            Event::Text(text) | Event::Code(text) => alt.push_str(&text),
-                            Event::End(TagEnd::Image) => break,
-                            _ => {}
-                        }
-                    }
-                    if !context.is_some_and(|context| context.reference_target_pending(&range)) {
-                        builder.images.push(PendingImage { url: dest_url.to_string(), alt: alt.clone(), align: None, width: None, source:range.clone() });
-                    }
+                Tag::Image { dest_url, title, .. } => {
+                    let pending = context.is_some_and(|context| context.reference_target_pending(&range));
+                    let (image, image_source) = table_inline::image(source, &mut events, &dest_url, &title, range.clone());
+                    image_attributes = (range.end < image_source.end).then_some(range.end..image_source.end);
+
+                    let label = if image.alt.is_empty() { &image.src } else { &image.alt };
                     let style = InlineStyle { color: ColorRole::Link, ..Default::default() };
-                    builder.para.push(&format!("［图片：{}］", if alt.is_empty() { dest_url.as_ref() } else { alt.as_str() }), style, Some((range.start, false)));
+                    builder.para.push(&format!("［图片：{label}］"), style, Some((image_source.start, false)));
+                    if let Some(map) = builder.para.map.last_mut() { map.source_end = image_source.end; }
+
+                    if !pending {
+                        builder.images.push(PendingImage {
+                            url: image.src,
+                            alt: image.alt,
+                            align: (!image.align.is_empty()).then_some(image.align),
+                            width: ImageWidth::parse(&image.width),
+                            source: image_source,
+                        });
+                    }
                 }
                 Tag::HtmlBlock => {
                     let raw = &source[range.clone()];
                     if builder.controlled && ((range.start == 0 && env.source_base == 0 && crate::nomo_mark::nomo_syntax::front_matter_end(raw).is_some())
                         || (raw.trim().starts_with("<!--") && raw.trim().ends_with("-->") && raw.contains('\n') && !raw.trim_start().starts_with("<!-- toc -->"))) {
-                        builder.html_line(raw, range.start, None);
+                        builder.html_line(raw, range.clone(), None);
                         while let Some((event, _)) = events.next() { if matches!(event, Event::End(TagEnd::HtmlBlock)) { break; } }
                         continue;
                     }
@@ -1052,14 +1112,6 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
             },
             Event::Text(text) => {
                 if builder.controlled && text.is_empty() && range.is_empty() { builder.empty_anchor(range.start); }
-                // 图片后紧跟的属性块不显示，只用于尺寸与对齐。
-                if let Some(image) = builder.images.last_mut() {
-                    if let Some((align, width)) = parse_image_attrs(&text) {
-                        image.align = align.or(image.align.take());
-                        image.width = width.or(image.width);
-                        continue;
-                    }
-                }
                 builder.image_only &= text.trim().is_empty();
                 let exact = text.len() == range.len() && source.get(range.clone()) == Some(text.as_ref());
                 let mut style = builder.inline.style(&builder.base);
@@ -1113,7 +1165,10 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                 }
                 }
             },
-            Event::Html(html) => builder.html_line(&html, range.start, html_fragments.iter().find(|fragment| fragment.source.start == range.start)),
+            Event::Html(html) => {
+                let fragment = html_fragments.iter().find(|fragment| fragment.source.start == range.start);
+                builder.html_line(&html, range, fragment);
+            }
             Event::FootnoteReference(label) => {
                 builder.image_only = false;
                 let style = InlineStyle { color: ColorRole::Link, shift: 1, footnote: true, ..builder.base.clone() };
@@ -1292,6 +1347,7 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
                 if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
                     if pending {
                         cell.push(&atom.display_text(), inline.style(&InlineStyle::default()), Some((range.start, false)));
+                        if let Some(map) = cell.map.last_mut() { map.source_end = range.end; }
                     } else {
                         push_table_atom(cell, &atom, range.clone(), inline.style(&InlineStyle::default()), env, window);
                     }
@@ -1776,7 +1832,8 @@ impl Builder<'_> {
     }
 
     /// HTML 块的一行：折叠块标签只保留标题行，`<img>` 渲染为图片，其余按原样弱化显示。
-    fn html_line(&mut self, html: &str, source: usize, fragment: Option<&crate::nomo_mark::html_table::HtmlFragment>) {
+    fn html_line(&mut self, html: &str, source_range: Range<usize>, fragment: Option<&crate::nomo_mark::html_table::HtmlFragment>) {
+        let source = source_range.start;
         let line = html.trim_end_matches('\n');
         let trimmed = line.trim();
         let lower = trimmed.to_ascii_lowercase();
@@ -1874,15 +1931,15 @@ impl Builder<'_> {
             self.gap(self.env.metrics.paragraph_gap() * 0.5);
             return;
         }
-        if let Some(at) = lower.find("<img") {
-            if let Some(src) = html_attr(&trimmed[at..], "src") {
-                self.flush_paragraph();
-                let alt = html_attr(&trimmed[at..], "alt").unwrap_or_default();
-                let width = html_attr(&trimmed[at..], "width").and_then(|value| ImageWidth::parse(&value));
-                let align = html_attr(trimmed, "align").or_else(|| self.html_align.clone());
-                self.image_with(&src, &alt, width, align.as_deref(),source..source+html.len());
-                return;
-            }
+        if let Some((image, tag)) = image_properties::html_image_tag(self.source, source_range) {
+            self.flush_paragraph();
+            let attr = |name: &str| tag.attrs.get(name).map(|value| html_escape::decode_html_entities(value));
+            let src = attr("src").unwrap_or_default();
+            let alt = attr("alt").unwrap_or_default();
+            let width = attr("width").and_then(|value| ImageWidth::parse(&value));
+            let align = html_attr(trimmed, "align").or_else(|| self.html_align.clone());
+            self.image_with(&src, &alt, width, align.as_deref(), image);
+            return;
         }
         if trimmed.is_empty() {
             return;
@@ -1911,7 +1968,7 @@ impl Builder<'_> {
                     Some("right") => free,
                     _ => 0.0,
                 };
-                self.items.push(DisplayItem::Image { x: self.indent + offset, y: self.y, w: display_w, h: display_h, path,source });
+                self.items.push(DisplayItem::Image { x: self.indent + offset, y: self.y, w: display_w, h: display_h, path: Some(path), source });
                 self.y += display_h;
             }
             (path, _) => {
@@ -1920,12 +1977,10 @@ impl Builder<'_> {
                     None => format!("远程图片未加载：{url}"),
                 };
                 let h = 64.0 * metrics.zoom;
-                self.items.push(DisplayItem::Rect { x: self.indent, y: self.y, w: available, h, paint: Paint::CodeBg, radius: 8.0, border: Some(Paint::CodeBorder) });
+                self.items.push(DisplayItem::Image { x: self.indent, y: self.y, w: available, h, path: None, source });
                 let spec = ParaSpec::plain(note, InlineStyle { color: ColorRole::Muted, ..Default::default() }, Family::Text, metrics.body_size() * 0.85, h, Wrap::Greedy);
                 let layout = self.env.layout(&spec, available - 24.0, self.window);
-                let length=layout.text.len();
-                self.items.push(DisplayItem::Text { x: self.indent + 12.0, y: self.y, layout,
-                    map:vec![MapSeg{text:0..length,source:source.start,source_end:source.end,exact:false}] });
+                self.items.push(DisplayItem::Text { x: self.indent + 12.0, y: self.y, layout, map: Vec::new() });
                 self.y += h;
             }
         }

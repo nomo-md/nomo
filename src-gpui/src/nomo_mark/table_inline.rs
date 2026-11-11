@@ -1,5 +1,5 @@
 //! 两种表格共用的行内对象边界与图片属性；只访问当前窗口的事件和源码。
-use super::{html_table::{self, InlineAtom, InlineRun}, image_properties::ImageProperties, parse::ParsedWindow};
+use super::{html_table::{self, InlineAtom, InlineRun}, image_properties::{self, ImageProperties}, parse::ParsedWindow};
 use pulldown_cmark::{Event, Tag, TagEnd};
 use std::ops::Range;
 
@@ -52,7 +52,7 @@ pub(crate) fn markdown_input(source: &str, start: usize, text: &str) -> String {
 /// 退格／删除使用完整对象和换行范围；源码模式不走此路径。
 pub(crate) fn atomic_range_at(parsed: &ParsedWindow, at: usize) -> Option<Range<usize>> {
     if let Some(run) = atom_at(parsed, at) { return Some(run.source); }
-    for (index, (event, range)) in parsed.events.iter().enumerate() {
+    for (event, range) in &parsed.events {
         if range.start > at { continue; }
         match event {
             Event::InlineMath(_) if range.contains(&at) => return Some(range.clone()),
@@ -63,14 +63,17 @@ pub(crate) fn atomic_range_at(parsed: &ParsedWindow, at: usize) -> Option<Range<
             {
                 return Some(range.clone());
             }
-            Event::Start(Tag::Image { dest_url, title, .. }) => {
-                let (_, source) = image(&parsed.source, &mut parsed.events[index + 1..].iter().cloned(), dest_url, title, range.clone());
-                if source.contains(&at) { return Some(source); }
+            Event::Start(Tag::Image { .. }) => {
+                let attributes = image_properties::markdown_attributes(&parsed.source[range.end..]);
+                let end = range.end + attributes.map_or(0, |(length, _, _)| length);
+                if at < end { return Some(range.start..end); }
             }
-            Event::Html(_) | Event::InlineHtml(_) => {
-                if let Some(run) = html_table::atom_at(&parsed.source, range.start)
-                    .filter(|run| matches!(run.atom, Some(InlineAtom::Image { .. })) && run.source.contains(&at))
-                { return Some(run.source); }
+            Event::Html(_) | Event::InlineHtml(_) if range.contains(&at) => {
+                if let Some((image, _)) = image_properties::html_image_tag(&parsed.source, range.clone())
+                    .filter(|(image, _)| image.contains(&at))
+                {
+                    return Some(image);
+                }
             }
             _ => {}
         }
@@ -111,21 +114,10 @@ pub(crate) fn image<'a>(source: &str, events: &mut impl Iterator<Item = (Event<'
             _ => {}
         }
     }
-    if let Some(attributes) = source.get(range.end..).and_then(|tail| tail.strip_prefix('{')).and_then(|tail| tail.split_once('}').map(|(attributes, _)| attributes)) {
-        let mut width = String::new();
-        let mut align = String::new();
-        let valid = attributes.split_whitespace().all(|attribute| {
-            match attribute.split_once('=') {
-                Some(("width", value)) if value.trim_end_matches("px").parse::<f32>().is_ok_and(|number| number.is_finite() && number > 0.0) => { width = value.into(); true }
-                Some(("align", value)) if matches!(value, "left" | "center" | "right") => { align = value.into(); true }
-                _ => false,
-            }
-        });
-        if valid && !attributes.is_empty() {
-            properties.width = width;
-            properties.align = align;
-            range.end += attributes.len() + 2;
-        }
+    if let Some((length, width, align)) = image_properties::markdown_attributes(&source[range.end..]) {
+        properties.width = width.into();
+        properties.align = align.into();
+        range.end += length;
     }
     (properties, range)
 }

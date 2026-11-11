@@ -63,14 +63,22 @@ pub fn apply_semantic(
             return Err(ControlError::Unsupported("请在源码模式调整 HTML 标题级别。".into()));
         }
     }
-    if let Some(result) = super::editing_rules::semantic(parsed, selection, &intent) {
+    let deleting = range.is_empty() && matches!(&intent, EditIntent::Backspace | EditIntent::Delete);
+    let backward = matches!(&intent, EditIntent::Backspace);
+    let at = if backward { range.start.checked_sub(1) } else { Some(range.start) };
+    let atom = if deleting {
+        at.and_then(|at| super::table_inline::atomic_range_at(parsed, at)).or_else(|| {
+            if backward { super::editing_rules::image_before_empty_paragraph(parsed, range.start) } else { None }
+        })
+    } else {
+        None
+    };
+    // 先删除紧邻的对象，文末续写段落的保护规则不能拦截图片退格。
+    if atom.is_none() && let Some(result) = super::editing_rules::semantic(parsed, selection, &intent) {
         return Ok(result);
     }
-    if range.is_empty() && matches!(&intent, EditIntent::Backspace | EditIntent::Delete) {
-        let backward = matches!(&intent, EditIntent::Backspace);
-        let at = if backward { range.start.checked_sub(1) } else { Some(range.start) };
-        let source = at.and_then(|at| super::table_inline::atomic_range_at(parsed, at)
-            .or_else(|| super::comments::at(parsed, at).map(|(range, _)| range)))
+    if deleting {
+        let source = atom.or_else(|| at.and_then(|at| super::comments::at(parsed, at).map(|(range, _)| range)))
             .or_else(|| super::link_display::deletion(parsed, range.start, backward));
         if let Some(source) = source {
             return Ok(EditResult { template_update: None, edits: vec![SourceEdit {

@@ -60,6 +60,7 @@ impl ResourceDependencies {
         for path in &other.images { self.image(path); }
         for key in &other.embeds { self.embed(*key); }
     }
+    pub(super) fn has_images(&self) -> bool { self.overflow || !self.images.is_empty() }
     pub(super) fn keeps_image(&self, path: &Path) -> bool { self.overflow || self.images.contains(path) }
     pub(super) fn keeps_embed(&self, key: u64) -> bool { self.overflow || self.embeds.contains(&key) }
     pub fn generation(&self, images: &ImageStore, embeds: &EmbedStore) -> u64 {

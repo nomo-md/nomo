@@ -48,6 +48,8 @@ mod context_menu;
 mod context_menu_ui;
 #[path = "context_image.rs"]
 mod context_image;
+#[path = "image_controls.rs"]
+mod image_controls;
 #[path = "code_ui.rs"]
 mod code_ui;
 
@@ -64,6 +66,7 @@ pub struct NomoMark {
     front_matter_delete: Option<(u64, u64)>,
     context_menu: Option<context_menu::ContextMenu>,
     context_form: Option<context_image::ImageForm>,
+    image_width_hover: Option<image_controls::ImageWidthHover>,
     pub(crate) context_history: (bool, bool),
     cell_selection: Option<table_clipboard::CellSelection>,
     table_drag_anchor: Option<(usize, usize, usize)>,
@@ -132,6 +135,7 @@ impl NomoMark {
             front_matter_delete: None,
             context_menu: None,
             context_form: None,
+            image_width_hover: None,
             context_history: (false, false),
             cell_selection: None,
             table_drag_anchor: None,
@@ -298,6 +302,7 @@ impl NomoMark {
         Ok(())
     }
     pub fn hide(&mut self, cx: &mut Context<Self>) -> Result<(), ControlError> {
+        self.image_width_hover = None;
         self.code_language = None;
         self.code_copy = None;
         self.context_menu = None;
@@ -331,6 +336,7 @@ impl NomoMark {
             .prepare_detach(self.host.pending_count(), self.host.presentation)
     }
     pub fn detach(&mut self, discard: bool, cx: &mut Context<Self>) -> Result<(), ControlError> {
+        self.image_width_hover = None;
         self.code_language = None;
         self.code_copy = None;
         self.context_menu = None;
@@ -382,6 +388,7 @@ impl NomoMark {
         if self.layout.is_none() && height.is_finite() && height>=1.0 { self.height=height; }
     }
     fn invalidate(&mut self) {
+        self.image_width_hover = None;
         self.layout_key = None;
         self.last_geometry = None;
     }
@@ -1657,9 +1664,13 @@ impl NomoMark {
             }
         }
         let (x, y, h) = self.visual_caret_at(local)?;
+        let width = f32::from(bounds.size.width);
+        let caret_width = 1.5;
+        // 满宽图片的右缘和正文裁切边界重合，保留一整条可见光标。
+        let x = if (width - x).abs() < caret_width { (width - caret_width).max(0.0) } else { x };
         Some((
             self.host.parsed.identity.clone(),
-            Bounds::new(bounds.origin + point(px(x), px(y)), size(px(1.5), px(h))),
+            Bounds::new(bounds.origin + point(px(x), px(y)), size(px(caret_width), px(h))),
         ))
     }
     /// 弹层使用当前可见窗口几何，不能以整段内容顶部为锚点。
@@ -2676,6 +2687,7 @@ impl Render for NomoMark {
             .children(self.code_language_controls(cx))
             .children(self.code_header_controls(cx))
             .children(self.comment_controls(cx))
+            .children(self.image_width_controls(cx))
             .children(self.context_menu_overlay(window, cx))
             .children(self.context_image_form(window, cx))
             .children(self.object_panel(window, cx))

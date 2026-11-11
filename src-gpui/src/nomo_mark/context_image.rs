@@ -1,7 +1,7 @@
 //! 图片右键的局部属性浮层和显式复制；关闭浮层即释放输入控件与订阅。
 use super::*;
 use super::{context_menu::MenuAction, context_menu_ui::{panel, positioned}};
-use crate::nomo_mark::image_properties::{ImageProperties, ImageWidth};
+use crate::nomo_mark::image_properties::{ImageProperties, ImageWidth, markdown_attributes};
 use crate::ui::{text_field::{TextField, FieldEvent}, toolbar_i18n::ToolbarLocale};
 
 pub(super) struct ImageForm {
@@ -55,6 +55,45 @@ impl NomoMark {
             else { properties.write(raw, inline || html_cell, commands::line_ending(&self.host.parsed.source, range.start)) };
         match result { Ok(text) => self.context_replace(range, text, cx), Err(error) => self.error(error, cx) }
     }
+    /// 只改 Markdown 图片的属性后缀，保留原链接写法、替代文字和引用定义。
+    fn markdown_image_width(&self, range: &Range<usize>) -> Option<(usize, &str, &str)> {
+        let parsed = &self.host.parsed;
+        let (_, image) = parsed.events.iter().find(|(event, image)| {
+            image.start == range.start && image.end <= range.end
+                && matches!(event, pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { .. }))
+        })?;
+        let suffix = parsed.source.get(image.end..range.end)?;
+        if suffix.is_empty() { return Some((image.end, "", "")); }
+        let (length, width, align) = markdown_attributes(suffix)?;
+        (length == suffix.len()).then_some((image.end, width, align))
+    }
+
+    pub(super) fn image_width_value(&self, range: &Range<usize>) -> Option<Option<ImageWidth>> {
+        if let Some((_, width, _)) = self.markdown_image_width(range) {
+            return Some(ImageWidth::parse(width));
+        }
+        let properties = self.context_image_properties(range)?;
+        Some(ImageWidth::parse(&properties.width))
+    }
+
+    pub(super) fn apply_image_width_preset(&mut self, range: Range<usize>, percent: u8, cx: &mut Context<Self>) {
+        let width = format!("{percent}%");
+        if let Some((end, current, align)) = self.markdown_image_width(&range) {
+            if matches!(ImageWidth::parse(current), Some(ImageWidth::Percent(value)) if value == f32::from(percent)) { return; }
+            let attributes = if align.is_empty() {
+                format!("{{width={width}}}")
+            } else {
+                format!("{{width={width} align={align}}}")
+            };
+            self.context_replace(end..range.end, attributes, cx);
+            return;
+        }
+        if let Some(mut properties) = self.context_image_properties(&range) {
+            properties.width = width;
+            self.context_write_image(range, properties, cx);
+        }
+    }
+
     pub(super) fn context_image_action(&mut self, action: MenuAction, range: Range<usize>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut properties) = self.context_image_properties(&range) else { self.error(ControlError::InvalidRange, cx); return; };
         let resolved = crate::images::resolve_source(&properties.src, self.base_dir.as_deref());

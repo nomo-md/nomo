@@ -25,7 +25,23 @@ pub(super) fn trailing_prefix(parsed: &ParsedWindow) -> Option<String> {
         || matches!(event, Event::Start(Tag::CodeBlock(_)))
         || (matches!(event, Event::Start(Tag::Paragraph)) && {
             let raw = source[range.clone()].trim();
-            (raw.starts_with("![") || raw.starts_with("<img")) && super::image_properties::ImageProperties::read(raw).is_some()
+            if raw.starts_with("![") {
+                let mut end = range.start;
+                for node in parsed.nodes.iter().filter(|node| node.kind == "image"
+                    && range.start <= node.source.start && node.source.end <= range.end)
+                {
+                    if node.source.start < end { continue; }
+                    if !source[end..node.source.start].trim().is_empty() { return None; }
+                    let suffix = &source[node.source.end..range.end];
+                    let attributes = super::image_properties::markdown_attributes(suffix);
+                    end = node.source.end + attributes.map_or(0, |(length, _, _)| length);
+                }
+                end > range.start && source[end..range.end].trim().is_empty()
+            } else {
+                super::image_properties::html_image_tag(source, range.clone()).is_some_and(|(image, _)| {
+                    source[range.start..image.start].trim().is_empty() && source[image.end..range.end].trim().is_empty()
+                })
+            }
         });
     if !special { return None; }
     // CommonMark 会把独占一行的 <font>/<span> 开标签也解析成 HtmlBlock。
@@ -41,6 +57,39 @@ pub(super) fn trailing_prefix(parsed: &ParsedWindow) -> Option<String> {
     let tail = &source[source.trim_end_matches(['\r', '\n']).len()..];
     Some(commands::line_ending(source, source.len()).repeat(2usize.saturating_sub(tail.bytes().filter(|b| *b == b'\n').count())))
 }
+/// 空续写段落与紧邻的独立图片之间至多隔着一组段落分隔符。
+pub(super) fn image_before_empty_paragraph(parsed: &ParsedWindow, at: usize) -> Option<Range<usize>> {
+    let source = &*parsed.source;
+    if parsed.blank_paragraphs.binary_search(&at).is_err()
+        && (at != source.len() || parsed.context.has_following_block)
+    {
+        return None;
+    }
+    let before = source[..at].trim_end_matches([' ', '\t', '\r', '\n']);
+    let end = before.len();
+    if !before.ends_with([')', ']', '}', '>'])
+        || source[end..at].bytes().filter(|byte| *byte == b'\n').take(3).count() > 2
+    {
+        return None;
+    }
+    if end < at
+        && let Some(image) = super::table_inline::atomic_range_at(parsed, end - 1)
+        && image.end == end
+        && source[commands::line_start(source, image.start)..image.start].trim().is_empty()
+    {
+        let markup = &source[image.clone()];
+        if markup.starts_with("![") || markup.as_bytes().get(..4).is_some_and(|tag| tag.eq_ignore_ascii_case(b"<img")) {
+            return Some(image);
+        }
+    }
+
+    // 对齐的 HTML 图片落在段落标签内，空续写行位于结束标签之外。
+    let fragment = parsed.html_fragments.iter().find(|fragment| fragment.source.end == end && fragment.label == "<p>")?;
+    let [cell] = fragment.cells.as_slice() else { return None; };
+    let [run] = cell.runs.as_slice() else { return None; };
+    matches!(run.atom, Some(super::html_table::InlineAtom::Image { .. })).then(|| run.source.clone())
+}
+
 fn completed_html_block(source: &str) -> bool {
     let raw = source.trim();
     if raw.starts_with("<!--") { return raw.ends_with("-->"); }

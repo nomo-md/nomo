@@ -50,7 +50,7 @@
 | NomoMark 解析与编辑命令 | `src-gpui/src/nomo_mark/parse.rs`、`dialect.rs`、`commands.rs`、`editing_rules.rs`、`inline_commands.rs`、`list_commands.rs` | 语义结构、原文坐标、尾部输入落点、Details／标题键盘规则和局部补丁 |
 | NomoMark 视图与对象 | `src-gpui/src/nomo_mark/view.rs`、`composition.rs`、`source_view.rs`、`paint.rs`、`object_ui.rs`、`table.rs`、`html_table.rs`、`table_inline.rs` | 键鼠、IME、跨窗口临时组字、两种表格共用对象边界、图像与对象交互 |
 | 表格交互与结构控件 | `src-gpui/src/nomo_mark/table_insert.rs`、`table_controls.rs`、`table_clipboard.rs`、`node_controls.rs` | 工具栏与快捷菜单共用容器内插表；基于实际单元格几何的行列按钮、尺寸选择、矩形选区；标题、代码语言、Callout、Details、脚注及卡片控件；不创建第二套编辑模型 |
-| 编辑区右键菜单 | `src-gpui/src/nomo_mark/context_menu.rs`、`context_menu_ui.rs`、`context_image.rs` | 按正文、选区、链接及对象生成原版菜单；鼠标锚定、二级菜单与键盘导航；目标身份检查、局部事务和按需图片属性输入 |
+| 编辑区右键菜单与图片控件 | `src-gpui/src/nomo_mark/context_menu.rs`、`context_menu_ui.rs`、`context_image.rs`、`image_controls.rs` | 按正文、选区、链接及对象生成菜单。图片悬浮宽度按钮复用可见位图几何、局部属性事务和撤销历史 |
 | 正文左侧选段 | `src-gpui/src/nomo_mark/window_panes.rs`、`viewport_ui.rs`、`view.rs` | 语义模式复用当前可见片段几何和选区事件，悬停短竖线命中非空顶层段落或标题，点击切换到目标片段并选中整段 |
 | 链接编辑与导航 | `src-gpui/src/nomo_mark/link_edit.rs`、`link_selection.rs`、`link_display.rs`、`link_target.rs`、`document_host.rs`、`src-gpui/src/ui/workspace.rs` | 局部链接弹层、按选区拆分／合并链接、可读地址与源码映射、本地 Markdown 标签／锚点导航、白名单附件后台预检及系统打开，正文仍按窗口加载 |
 | 脚注悬停预览 | `src-gpui/src/nomo_mark/footnote_preview.rs`、`workspace_queries.rs` | 共享结构索引定位，最多读取 8 KiB／显示 360 字；提示关闭、文档隐藏和后续悬停取消旧请求 |
