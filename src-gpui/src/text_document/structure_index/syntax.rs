@@ -1,5 +1,5 @@
 //! Nomo 扩展的原文边界；临时解析投影保持字节长度，事件始终映射到原文。
-use pulldown_cmark::{Event, Options, Parser, Tag};
+use pulldown_cmark::{BrokenLink, Event, LinkType, Options, Parser, Tag};
 use std::{borrow::Cow, collections::BTreeMap, ops::Range};
 
 /// Only neutralize Setext underlines which the parser confirms belong to $$ math.
@@ -25,12 +25,20 @@ impl MathProjection<'_> {
 }
 
 pub fn project_math_setext(source: &str, options: Options) -> MathProjection<'_> {
+    project_math_setext_with_links(source, options, |_, _| false)
+}
+
+pub fn project_math_setext_with_links<'a>(
+    source: &'a str,
+    options: Options,
+    resolves_link: impl Fn(&str, LinkType) -> bool,
+) -> MathProjection<'a> {
     let unchanged = || MathProjection { source: Cow::Borrowed(source), marker: None };
     if !options.contains(Options::ENABLE_MATH) || !source.contains("$$") {
         return unchanged();
     }
     // Common formulas have no standalone '=' line: avoid another parser pass.
-    if !source.lines().any(|line| {
+    if !source.split(['\r', '\n']).any(|line| {
         let line = line.trim_end_matches([' ', '\t']);
         let count = line.bytes().rev().take_while(|ch| *ch == b'=').count();
         count > 0 && line[..line.len() - count].bytes()
@@ -62,21 +70,45 @@ pub fn project_math_setext(source: &str, options: Options) -> MathProjection<'_>
     for range in &underlines { projected[range.clone()].fill(marker as u8); }
     // Replacing ASCII with ASCII preserves UTF-8 and every original byte offset.
     let mut projected = String::from_utf8(projected).expect("ASCII-only math projection");
-    let math: Vec<_> = Parser::new_ext(&projected, options).into_offset_iter()
-        .filter_map(|(event, range)| matches!(event, Event::DisplayMath(_)).then_some(range))
-        .collect();
-    let mut kept = false;
-    let mut index = 0;
-    for range in underlines {
-        while math.get(index).is_some_and(|span| span.end <= range.start) { index += 1; }
-        if math.get(index).is_some_and(|span| span.start <= range.start && range.end <= span.end) {
-            kept = true;
-        } else {
-            // Ordinary and unclosed headings retain their exact original syntax.
+    let mut rejected = Vec::new();
+    loop {
+        {
+            // 链接解析会消费引用标签中的定界符，公式校验必须沿用调用方的链接解析条件。
+            let parser = Parser::new_with_broken_link_callback(
+                &projected,
+                options,
+                Some(|link: BrokenLink<'_>| {
+                    resolves_link(&link.reference, link.link_type).then_some(("".into(), "".into()))
+                }),
+            );
+            let mut math = parser
+                .into_offset_iter()
+                .filter_map(|(event, range)| matches!(event, Event::DisplayMath(_)).then_some(range))
+                .peekable();
+            underlines.retain(|range| {
+                while math.peek().is_some_and(|span| span.end <= range.start) {
+                    math.next();
+                }
+                let inside_math = math
+                    .peek()
+                    .is_some_and(|span| span.start <= range.start && range.end <= span.end);
+                if !inside_math {
+                    rejected.push(range.clone());
+                }
+                inside_math
+            });
+        }
+        if underlines.is_empty() {
+            return unchanged();
+        }
+        if rejected.is_empty() {
+            break;
+        }
+        // 恢复标题可能改变容器边界。每轮只撤回替换，直到最终投影中的标记都属于公式。
+        for range in rejected.drain(..) {
             projected.replace_range(range.clone(), &source[range]);
         }
     }
-    if !kept { return unchanged(); }
     MathProjection { source: Cow::Owned(projected), marker: Some(marker) }
 }
 
@@ -94,14 +126,46 @@ mod math_setext_tests {
 
     #[test]
     fn restores_formula_and_source_offsets() {
-        let source = "$$\np_{\\theta,v}(z_v\\mid K,H,z_{<v})\n=\n\\frac{a}{b}\n$$\n";
-        let events = parse(source);
-        let math: Vec<_> = events.iter().filter_map(|(event, range)| match event {
-            Event::DisplayMath(tex) => Some((tex.as_ref(), range.clone())),
-            _ => None,
-        }).collect();
-        assert_eq!(math, vec![(&source[2..source.len() - 3], 0..source.len() - 1)]);
-        assert!(!events.iter().any(|(event, _)| matches!(event, Event::Start(Tag::Heading { .. }))));
+        for newline in ["\n", "\r\n", "\r"] {
+            let source = ["$$", "p_{\\theta,v}(z_v\\mid K,H,z_{<v})", "=", "\\frac{a}{b}", "$$", ""]
+                .join(newline);
+            let events = parse(&source);
+            let math: Vec<_> = events
+                .iter()
+                .filter_map(|(event, range)| match event {
+                    Event::DisplayMath(tex) => Some((tex.as_ref(), range.clone())),
+                    _ => None,
+                })
+                .collect();
+            let end = source.len() - newline.len();
+            assert_eq!(math, vec![(&source[2..end - 2], 0..end)], "{source:?}");
+            assert!(!events.iter().any(|(event, _)| matches!(event, Event::Start(Tag::Heading { .. }))));
+        }
+    }
+
+    #[test]
+    fn restoring_headings_does_not_move_math_across_quote_boundaries() {
+        let formula = "$$\nx\n=\ny\n$$";
+        let quotes = "> A\n> =\n$$\n> B\n> =\n> $$\n";
+        let source = format!("{formula}\n\n{quotes}");
+        let quotes_start = formula.len() + 2;
+        let original: Vec<_> = Parser::new_ext(&source, Options::ENABLE_MATH)
+            .into_offset_iter()
+            .filter(|(_, range)| range.start >= quotes_start)
+            .map(|(event, range)| (event.into_static(), range))
+            .collect();
+        let events = parse(&source);
+        let quote_events = events.partition_point(|(_, range)| range.start < quotes_start);
+        assert_eq!(events[quote_events..], original);
+
+        let math: Vec<_> = events
+            .iter()
+            .filter_map(|(event, range)| match event {
+                Event::DisplayMath(tex) => Some((tex.as_ref(), range.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(math, vec![("\nx\n=\ny\n", 0..formula.len())]);
     }
 
     #[test]

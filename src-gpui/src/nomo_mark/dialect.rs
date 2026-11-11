@@ -94,13 +94,20 @@ pub fn events(
         result.push((Event::Html(source[..end].to_owned().into()), range.clone()));
         result.push((Event::End(TagEnd::HtmlBlock), range));
     }
+    let pending_target = |link_type| {
+        context.pending_references
+            && matches!(
+                link_type,
+                pulldown_cmark::LinkType::Reference | pulldown_cmark::LinkType::Collapsed
+            )
+    };
     let keys = RefCell::new(BTreeSet::new());
     let mut resolve = |link: pulldown_cmark::BrokenLink<'_>| {
         let key = normalize_reference_label(&link.reference);
         keys.borrow_mut().insert(key.clone());
         if let Some(target) = context.references.get(&key) {
             Some((target.destination.clone().into(), target.title.clone().into()))
-        } else if context.pending_references && matches!(link.link_type, pulldown_cmark::LinkType::Reference | pulldown_cmark::LinkType::Collapsed) {
+        } else if pending_target(link.link_type) {
             // 让解析器保留标签及其行内格式。空地址只承载事件，交互以独立待定范围为准。
             Some(("".into(), "".into()))
         } else {
@@ -109,7 +116,11 @@ pub fn events(
         }
     };
     let projected = nomo_syntax::project_comment_paragraphs(&source[from..], options);
-    let math = nomo_syntax::project_math_setext(&projected, options);
+    let math =
+        nomo_syntax::project_math_setext_with_links(&projected, options, |label, link_type| {
+            pending_target(link_type)
+                || context.references.contains_key(&normalize_reference_label(label))
+        });
     let parser =
         Parser::new_with_broken_link_callback(math.as_ref(), options, Some(&mut resolve));
     let mut skip: Option<Range<usize>> = None;
@@ -315,7 +326,7 @@ mod tests {
         let quote = formula.lines().map(|line| format!("> {line}\n")).collect::<String>();
         let list = format!("- {}", formula.replace('\n', "\n  ").trim_end());
         for source in [
-            formula.to_owned(), formula.replace('\n', "\r\n"), quote, list,
+            formula.to_owned(), formula.replace('\n', "\r\n"), formula.replace('\n', "\r"), quote, list,
             format!("<details>\n<summary>Formula</summary>\n\n{formula}\n</details>\n"),
             format!("Real heading\n===\n\n{formula}\n"),
         ] {
@@ -347,6 +358,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn math_projection_preserves_heading_inside_pending_reference_label() {
+        let source = "[text][$$\nx\n=\ny\n$$]\n";
+        let context = ParseContext {
+            pending_references: true,
+            ..Default::default()
+        };
+        let mut reference_keys = BTreeSet::new();
+        let parsed = events(
+            source,
+            0,
+            true,
+            Options::ENABLE_MATH,
+            &context,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut reference_keys,
+        );
+        assert!(parsed.iter().any(|(event, range)| {
+            matches!(event, Event::Start(Tag::Heading { .. }))
+                && source[range.clone()].trim_end().ends_with('=')
+        }));
+        assert!(reference_keys.iter().all(|key| !key.chars().any(char::is_control)));
+    }
 
     #[test]
     fn nested_details_use_original_boundaries_without_changing_source() {

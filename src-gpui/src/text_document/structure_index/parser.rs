@@ -781,13 +781,15 @@ mod tests {
     #[test]
     fn standalone_equal_stays_in_one_math_block() {
         let source = "$$\np_{\\theta,v}(z_v\\mid K,H,z_{<v})\n=\n\\frac{a}{b}\n$$\n";
-        let blocks = parse_fragment(source, 0, true).unwrap();
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].kind, "math_display");
-        assert_eq!(blocks[0].enhancements.block_math, 1);
-        assert!(blocks[0].headings.is_empty());
-        assert_eq!(blocks[0].from_byte, 0);
-        assert_eq!(blocks[0].to_byte, source.len() as u64);
+        for source in [source.to_owned(), source.replace('\n', "\r")] {
+            let blocks = parse_fragment(&source, 0, true).unwrap();
+            assert_eq!(blocks.len(), 1);
+            assert_eq!(blocks[0].kind, "math_display");
+            assert_eq!(blocks[0].enhancements.block_math, 1);
+            assert!(blocks[0].headings.is_empty());
+            assert_eq!(blocks[0].from_byte, 0);
+            assert_eq!(blocks[0].to_byte, source.len() as u64);
+        }
     }
 
     #[test]
