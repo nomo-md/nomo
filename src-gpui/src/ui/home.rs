@@ -7,7 +7,7 @@ pub(crate) mod folder_card;
 pub(crate) mod document_card;
 
 use crate::{theme::Theme, ui::components::{ButtonKind, IconName, button, icon, small_icon_button, tooltip}};
-use crate::ui::{motion, popup::reduced_motion};
+use crate::ui::{motion, popup::reduced_motion, workspace_surface::TAB_RAIL_HEIGHT};
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, ParentElement, Render, RenderImage, SharedString, Styled, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list};
 use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
 use library::{Change, Entry, Library, Snapshot};
@@ -487,9 +487,11 @@ impl Render for Home {
             let mut sidebar_theme = theme.clone();
             sidebar_theme.hover = gpui::rgba(0x80808014).into();
             let list = self.sidebar(self.sidebar_frame.full_width - 16.0, &sidebar_theme, cx);
-            let panel = div().px(px(8.0)).py(px(10.0)).flex().flex_col().gap(px(6.0))
-                .child(nav_home_row(true, &theme, cx))
-                .child(div().id("home-sidebar-list-region").w_full().flex_1().min_h(px(0.0)).overflow_hidden().child(list));
+            let panel = div().flex().flex_col()
+                .child(div().w_full().h(px(TAB_RAIL_HEIGHT)).flex_none().px(px(8.0)).flex().items_center()
+                    .child(nav_home_row(true, &theme, cx)))
+                .child(div().id("home-sidebar-list-region").w_full().flex_1().min_h(px(0.0)).px(px(8.0)).pt(px(6.0)).pb(px(10.0))
+                    .overflow_hidden().child(list));
             self.sidebar_frame.clip(panel)
         });
         let library = self.library.read(cx);

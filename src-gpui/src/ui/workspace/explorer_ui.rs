@@ -55,7 +55,7 @@ impl Workspace {
         let home = crate::ui::home::nav_home_row(false, theme, cx)
             .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| workspace.show_home(window, cx)));
         div().w(px(width)).h_full().min_h(px(0.0)).flex_none().flex().flex_col().bg(theme.rail_bg)
-            .child(div().w_full().flex_none().px(px(8.0)).pt(px(10.0)).pb(px(6.0)).child(home))
+            .child(div().w_full().h(px(TAB_RAIL_HEIGHT)).flex_none().px(px(8.0)).flex().items_center().child(home))
             .child(div().w_full().flex_1().min_h(px(0.0)).child(tree))
     }
 
