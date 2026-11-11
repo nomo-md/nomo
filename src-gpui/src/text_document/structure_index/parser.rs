@@ -188,7 +188,7 @@ fn spans(source: &str, document_start: bool) -> Vec<Span> {
     let mut depth = 0usize;
     let mut roots = vec![];
     let projected = syntax::project_comment_paragraphs(source, options());
-    let math = syntax::project_math_setext(&projected, options());
+    let math = syntax::project_math(&projected, options());
     for (event, range) in Parser::new_ext(math.as_ref(), options()).into_offset_iter() {
         match event {
             Event::Start(tag) => {
@@ -283,8 +283,8 @@ fn spans(source: &str, document_start: bool) -> Vec<Span> {
                 span.kind = "callout_open".into();
             }
         }
-        if original_kind == "paragraph_open" && tail.trim_start().starts_with("$$") {
-            let math = syntax::project_math_setext(&source[*from..end], options());
+        if original_kind == "paragraph_open" && (tail.trim_start().starts_with("$$") || tail.trim_start().starts_with(r"\[")) {
+            let math = syntax::project_math(&source[*from..end], options());
             let events: Vec<_> = Parser::new_ext(math.as_ref(), options()).collect();
             if events
                 .iter()
@@ -306,7 +306,7 @@ fn spans(source: &str, document_start: bool) -> Vec<Span> {
 
 fn prepare_scripts(source: &str) -> String {
     // 代码内部的定界符没有格式语义；在原文上处理脚本，防止解码后的转义符再次生效。
-    let math = syntax::project_math_setext(source, options());
+    let math = syntax::project_math(source, options());
     let protected: Vec<_> = Parser::new_ext(math.as_ref(), options())
         .into_offset_iter()
         .filter_map(|(event, range)| match event {
@@ -382,7 +382,7 @@ pub fn heading_title(source: &str) -> String {
     let mut text = String::new();
     let mut skip = 0usize;
     let mut image_end = None;
-    let math = syntax::project_math_setext(source, options());
+    let math = syntax::project_math(source, options());
     for (event, range) in Parser::new_ext(math.as_ref(), options()).into_offset_iter() {
         let event = math.restore(event);
         if range.start < skip {
@@ -531,7 +531,7 @@ fn metadata(source: &str, span: &Span, revision: u64, depth: usize) -> Block {
         return block;
     }
     let projected = syntax::project_comment_paragraphs(part, options());
-    let math = syntax::project_math_setext(&projected, options());
+    let math = syntax::project_math(&projected, options());
     let parser = Parser::new_ext(math.as_ref(), options());
     for (label, definition) in parser.reference_definitions().iter() {
         block.definitions.insert(
@@ -752,7 +752,7 @@ pub fn bullet_list_cutoff(source: &str) -> usize {
     let mut depth = 0usize;
     let mut cut = 0;
     let projected = syntax::project_comment_paragraphs(source, options());
-    let math = syntax::project_math_setext(&projected, options());
+    let math = syntax::project_math(&projected, options());
     for (event, range) in Parser::new_ext(math.as_ref(), options()).into_offset_iter() {
         match event {
             Event::Start(tag) => {
@@ -803,6 +803,20 @@ impl HeadingIds {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn latex_delimiters_share_editor_and_index_boundaries() {
+        let source = "中文 \\(x_1\\)。\n\n\\[\nx\n=\ny\n\\]\n\n末段\n";
+        let blocks = parse_fragment(source, 0, true).unwrap();
+        assert_eq!(blocks.iter().map(|block| block.enhancements.inline_math).sum::<usize>(), 1);
+        assert_eq!(blocks.iter().map(|block| block.enhancements.block_math).sum::<usize>(), 1);
+        assert!(blocks.iter().all(|block| block.headings.is_empty()));
+        let math = blocks.iter().find(|block| block.kind == "math_display").unwrap();
+        let raw = &source[math.from_byte as usize..math.to_byte as usize];
+        assert_eq!(raw.trim(), "\\[\nx\n=\ny\n\\]");
+        let cut = stable_cutoff(source, true);
+        assert!(cut <= math.from_byte as usize || cut >= math.to_byte as usize);
+    }
+
     #[test]
     fn standalone_equal_stays_in_one_math_block() {
         let source = "$$\np_{\\theta,v}(z_v\\mid K,H,z_{<v})\n=\n\\frac{a}{b}\n$$\n";

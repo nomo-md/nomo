@@ -147,7 +147,11 @@ fn serialize_destination(href:&str)->String {
 }
 fn escape_label(text:&str)->String {
     let mut result=String::new();
-    for c in text.chars() {if c=='&' {result.push_str("&amp;");continue;}if "\\`*_{}[]<>~^".contains(c) {result.push('\\');}result.push(c);}
+    for c in text.chars() {
+        if c=='&' {result.push_str("&amp;");continue;}
+        if matches!(c, '[' | ']') {result.push_str(&format!("&#{};", c as u32));continue;}
+        if "\\`*_{}<>~^".contains(c) {result.push('\\');}result.push(c);
+    }
     result
 }
 fn escape_table_pipes(text:&str)->String {
@@ -158,6 +162,30 @@ fn escape_table_pipes(text:&str)->String {
         slashes=if ch=='\\' {slashes+1}else{0};
     }
     result
+}
+
+#[cfg(test)]
+mod math_delimiter_tests {
+    use super::*;
+
+    #[test]
+    fn link_labels_keep_literal_brackets_after_insert_and_edit() {
+        let label = "[x] (y)";
+        let parsed = crate::nomo_mark::parse::fixture("");
+        let inserted = crate::nomo_mark::commands::apply(&parsed,
+            DocumentSelection::caret(100),
+            crate::nomo_mark::commands::EditIntent::Link { label: label.into(), target: "target".into() },
+        ).unwrap();
+        for source in [inserted.edits[0].inserted_text.clone(), format!("[{}](target)", escape_label(label))] {
+            let parsed = crate::nomo_mark::parse::fixture(&source);
+            assert!(parsed.events.iter().any(|(event, _)| matches!(event, Event::Start(Tag::Link { dest_url, .. }) if dest_url.as_ref() == "target")));
+            assert!(!parsed.events.iter().any(|(event, _)| matches!(event, Event::InlineMath(_) | Event::DisplayMath(_))));
+            let text: String = parsed.events.iter().filter_map(|(event, _)| match event {
+                Event::Text(text) => Some(text.as_ref()), _ => None,
+            }).collect();
+            assert_eq!(text, label);
+        }
+    }
 }
 pub(super) fn label_end(raw:&str)->Option<usize> {
     if !raw.starts_with('[') { return None; }

@@ -57,8 +57,9 @@ impl BlockFrame {
                 (first + 1, end, Some((marker, count)))
             }
             ObjectKind::BlockMath => {
-                let start = text.find("$$")? + 2;
-                let end = text.rfind("$$")?;
+                let (open, close) = if text.trim_start().starts_with(r"\[") { (r"\[", r"\]") } else { ("$$", "$$") };
+                let start = text.find(open)? + 2;
+                let end = text.rfind(close)?;
                 if end < start { return None; }
                 let body = &text[start..end];
                 let leading = if body.starts_with("\r\n") { 2 } else { usize::from(body.starts_with('\n')) };
@@ -66,8 +67,12 @@ impl BlockFrame {
                 (start + leading, end.saturating_sub(trailing).max(start + leading), None)
             }
             ObjectKind::InlineMath => {
-                if !text.starts_with('$') || !text.ends_with('$') || text.len() < 2 { return None; }
-                (1, text.len() - 1, None)
+                if text.starts_with(r"\(") && text.ends_with(r"\)") && text.len() >= 4 {
+                    (2, text.len() - 2, None)
+                } else {
+                    if !text.starts_with('$') || !text.ends_with('$') || text.len() < 2 { return None; }
+                    (1, text.len() - 1, None)
+                }
             }
             ObjectKind::BlockComment => {
                 let start = text.find("<!--")? + 4;
@@ -110,7 +115,7 @@ impl BlockFrame {
             if suffix.starts_with("\r\n") { suffix.drain(..2); }
             else if suffix.starts_with('\n') { suffix.remove(0); }
         }
-        if self.marker.is_none() && prefix.ends_with('\n') && !body.is_empty() && !body.ends_with('\n') && suffix.starts_with("$$") {
+        if self.marker.is_none() && prefix.ends_with('\n') && !body.is_empty() && !body.ends_with('\n') && (suffix.starts_with("$$") || suffix.starts_with(r"\]")) {
             suffix.insert_str(0, if prefix.ends_with("\r\n") { "\r\n" } else { "\n" });
         }
         if let Some((marker, count)) = self.marker {
@@ -128,8 +133,11 @@ impl BlockFrame {
                     suffix.replace_range(start..start + length, &fence);
                 }
             }
-        } else if self.kind == ObjectKind::BlockMath && body.contains("$$") {
-            return Err(ControlError::Unsupported("公式内容不能包含块围栏".into()));
+        } else if self.kind == ObjectKind::BlockMath {
+            let close = if suffix.trim_end().ends_with(r"\]") { r"\]" } else { "$$" };
+            if body.match_indices(close).any(|(at, _)| close == "$$"
+                || body[..at].bytes().rev().take_while(|byte| *byte == b'\\').count() % 2 == 0)
+            { return Err(ControlError::Unsupported("公式内容不能包含块围栏".into())); }
         }
         if self.kind == ObjectKind::BlockComment && body.contains("-->") {
             return Err(ControlError::Unsupported("注释内容不能包含 -->".into()));
@@ -142,6 +150,12 @@ impl BlockFrame {
         }
         if self.kind == ObjectKind::InlineMath {
             if body.trim().is_empty() || body.contains(['\r', '\n']) { return Err(ControlError::Unsupported("请输入非空单行公式".into())); }
+            if prefix == r"\(" {
+                if body.match_indices(r"\)").any(|(at, _)| body[..at].bytes().rev().take_while(|byte| *byte == b'\\').count() % 2 == 0) {
+                    return Err(ControlError::Unsupported("公式内容不能包含结束定界符".into()));
+                }
+                return Ok(format!("{prefix}{body}{suffix}"));
+            }
             let mut tex = String::new(); let mut slashes = 0;
             for ch in body.chars() {
                 if ch == '$' && slashes % 2 == 0 { tex.push('\\'); }
@@ -214,6 +228,27 @@ impl ObjectDraft {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn latex_math_edits_preserve_delimiters_and_line_endings() {
+        for newline in ["\n", "\r\n"] {
+            let source = format!("\\[{newline}x{newline}\\]");
+            let (frame, body) = BlockFrame::split(&source, ObjectKind::BlockMath).unwrap();
+            assert_eq!(body, "x");
+            assert_eq!(frame.join(&body).unwrap(), source);
+            assert_eq!(frame.join("y").unwrap(), format!("\\[{newline}y{newline}\\]"));
+            assert_eq!(frame.join("").unwrap(), format!("\\[{newline}\\]"));
+            assert!(frame.join(r"x\]y").is_err());
+        }
+        let source = r"\(x+\text{$5}\)";
+        let (frame, body) = BlockFrame::split(source, ObjectKind::InlineMath).unwrap();
+        assert_eq!(body, r"x+\text{$5}");
+        assert_eq!(frame.body_start(), 2);
+        assert_eq!(frame.join(&body).unwrap(), source);
+        assert_eq!(frame.join(r"y+\text{$5}").unwrap(), r"\(y+\text{$5}\)");
+        assert!(frame.join(r"x\)y").is_err());
+        assert_eq!(frame.join(r"x\\)y").unwrap(), r"\(x\\)y\)");
+    }
+
     #[test]
     fn object_draft_cancel_is_noop_and_stale_confirm_is_rejected() {
         let mut parsed = crate::nomo_mark::parse::fixture("$x$ untouched\r\n");

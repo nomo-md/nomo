@@ -883,8 +883,8 @@ pub fn apply(
         EditIntent::Link { label, target } => {
             let label = label
                 .replace('\\', "\\\\")
-                .replace('[', "\\[")
-                .replace(']', "\\]");
+                .replace('[', "&#91;")
+                .replace(']', "&#93;");
             let target = target
                 .replace('\\', "\\\\")
                 .replace('(', "\\(")
