@@ -92,6 +92,7 @@ impl Workspace {
             .or_else(|| self.explorer.search_keyboard_nav.then(|| self.explorer.search_focused.clone()).flatten());
         let search_query = self.explorer.search_query.clone();
         let count = drag_layout.len(rows.len() + 1) + usize::from(insert_index.is_some());
+        let row_hover = gpui::rgba(0x80808014);
         let theme = theme.clone();
         let list = uniform_list("file-tree", count, {
             let theme = theme.clone();
@@ -111,8 +112,8 @@ impl Workspace {
                         let target = path.as_deref().is_some_and(|path| workspace.explorer.drag.is_target(path));
                         let mut root = div().id("tree-root").relative().top(px(-4.0)).mx(px(8.0)).w_full().h(px(28.0))
                             .pl(px(12.0)).pr(px(4.0)).flex().items_center().gap(px(6.0))
-                            .rounded(px(4.0)).text_size(px(15.0)).text_color(theme.fg)
-                            .font_weight(FontWeight::SEMIBOLD).when(!target, |el| el.hover(|style| style.bg(theme.hover)))
+                            .rounded(px(4.0)).cursor_pointer().text_size(px(15.0)).text_color(theme.fg)
+                            .font_weight(FontWeight::SEMIBOLD).when(!target, |el| el.hover(|style| style.bg(row_hover)))
                             .when(search_path.as_ref() == path.as_ref() && search_path.is_some(), |el| el.bg(theme.sidebar_active))
                             .when(target, |el| el.bg(theme.sidebar_active).rounded(px(9.0)))
                             .child(div().w(px(16.0)).flex_none().child(chevron))
@@ -176,9 +177,17 @@ impl Workspace {
                     let expanded = row.expanded;
                     let can_expand = row.entry.has_children || expanded;
                     let chevron = is_dir.then(|| {
-                        let indicator = if row.entry.has_children || expanded { Some(tree_chevron(expanded, Some(&path), tree_animation.as_ref(), theme.muted)) }
-                            else { None };
-                        div().w(px(16.0)).flex_none().children(indicator).into_any_element()
+                        let folder = path.clone();
+                        // 保留固定的点击区域，覆盖收起后箭头消失的情况。
+                        div().id("tree-chevron").w(px(16.0)).h_full().flex_none().flex().items_center()
+                            .when(can_expand, |el| el.child(tree_chevron(expanded, Some(&path), tree_animation.as_ref(), theme.muted)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |workspace, _, window, cx| {
+                                cx.stop_propagation();
+                                workspace.focus_tree_search(Some(folder.clone()), window, cx);
+                                if can_expand { workspace.toggle_tree_folder(&folder, cx); }
+                            }))
+                            .into_any_element()
                     });
                     let kind = if is_dir { IconName::FolderOpen } else { IconName::FileText };
                     let target = workspace.explorer.drag.is_target(&path);
@@ -207,7 +216,7 @@ impl Workspace {
                         .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
                         .when((active || search_path.as_ref() == Some(&path)) && !target, |el| el.bg(theme.sidebar_active))
                         .when(target, |el| el.child(div().absolute().left(px(row.depth as f32 * 12.0 + 3.0)).right(px(3.0)).top_0().bottom_0().rounded(px(9.0)).bg(theme.sidebar_active)))
-                        .when(!target, |el| el.hover(|style| style.bg(gpui::rgba(0x80808014))))
+                        .when(!target, |el| el.hover(|style| style.bg(row_hover)))
                         .children(chevron).child(file_icon)
                         .child(label)
                         .children(controls)
