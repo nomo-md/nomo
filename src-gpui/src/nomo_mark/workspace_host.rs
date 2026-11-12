@@ -243,7 +243,6 @@ impl DocumentHost {
             self.schedule_metadata(cx);
             self.schedule_toc(300, false, cx);
         } else {
-            self.outline_layout = self.outline_layout.with_manual_open(false);
             self.cancel_queries(cx);
         }
         Ok(())
@@ -339,7 +338,6 @@ impl DocumentHost {
         self.focus_pending=false;
         if !focused {
             self.set_outline_enabled(false, cx.global::<Settings>().outline_level, cx);
-            self.outline_layout=OutlineLayout::CENTERED;
         }
     }
     pub(crate) fn is_visible(&self) -> bool { !self.hidden && !self.closed }

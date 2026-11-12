@@ -142,6 +142,7 @@ pub const CATEGORIES: &[Category] = &[
         title: "settings.category.statistics", icon: IconName::ChartColumn,
         page: Page::Groups(&[group("settings.group.statistics", &[
             item("outlineVisible", "settings.outlineVisible.label", "settings.outlineVisible.description", Control::Toggle, Support::Full),
+            item("documentNavigationLayout", "settings.documentNavigationLayout.label", "settings.documentNavigationLayout.description", Control::Choice(&[("right-outline", "settings.documentNavigationLayout.choice.right-outline"), ("left-tabs", "settings.documentNavigationLayout.choice.left-tabs"), ("left-split", "settings.documentNavigationLayout.choice.left-split")]), Support::Full),
             item("writingStatsVisible", "settings.writingStatsVisible.label", "settings.writingStatsVisible.description", Control::Toggle, Support::Full),
             item("writingStatsMetric", "settings.writingStatsMetric.label", "settings.writingStatsMetric.description", Control::Choice(&[("lines", "settings.writingStatsMetric.choice.lines"), ("words", "settings.writingStatsMetric.choice.words"), ("visibleChars", "settings.writingStatsMetric.choice.visibleChars"), ("chars", "settings.writingStatsMetric.choice.chars")]), Support::Full),
             item("readingTimeVisible", "settings.readingTimeVisible.label", "settings.readingTimeVisible.description", Control::Toggle, Support::Full),

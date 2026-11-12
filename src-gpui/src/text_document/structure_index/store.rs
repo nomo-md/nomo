@@ -97,6 +97,12 @@ pub enum Query {
         view_id: String,
         level: u8,
     },
+    #[serde(skip_deserializing)]
+    SetOutlineRootFoldable {
+        view_id: String,
+        foldable: bool,
+        serial: u64,
+    },
     CloseOutline {
         view_id: String,
     },
@@ -637,6 +643,7 @@ impl Store {
             | Query::OutlineView { .. }
             | Query::SetOutlineFold { .. }
             | Query::SetOutlineLevel { .. }
+            | Query::SetOutlineRootFoldable { .. }
             | Query::CloseOutline { .. }) => self.outline_query(identity, query, response)?,
             Query::Progress => {}
             Query::HeadingAtByte { byte } => {

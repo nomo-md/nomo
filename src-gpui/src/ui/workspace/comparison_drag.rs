@@ -767,6 +767,7 @@ impl Workspace {
                         active_color: Default::default(),
                         hidden_hover: Default::default(),
                         autosave: None,
+                        outline_scroll: UniformListScrollHandle::new(),
                         _subscriptions: subscriptions,
                     });
                     if saved.dirty {

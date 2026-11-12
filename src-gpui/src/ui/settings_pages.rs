@@ -74,6 +74,45 @@ fn preview_variant(variant: &crate::theme::catalog::Variant) -> Div {
 }
 
 impl SettingsWindow {
+    pub(super) fn render_navigation_layout(&self, options: &[(&'static str, &'static str)], current: &str, width: f32, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let locale = ToolbarLocale::current(cx);
+        let options = options.iter().map(|&(value, label)| {
+            let selected = value == current;
+            let ink = if selected { theme.accent } else { theme.muted };
+            let lines = || div().size_full().flex().flex_col().justify_center().gap(px(4.0)).px(px(5.0))
+                .children([1.0, 0.7, 0.85].into_iter().map(|width| div().w(gpui::relative(width)).h(px(2.0)).rounded_full().bg(ink.opacity(0.5))));
+            let rail = div().w(px(34.0)).h_full().flex_none().flex().flex_col().bg(ink.opacity(0.07)).border_r_1().border_color(theme.border)
+                .when(value == "left-tabs", |el| el.child(div().h(px(10.0)).flex_none().flex().gap(px(2.0)).p(px(2.0))
+                    .child(div().flex_1().h_full().rounded(px(1.0)).bg(ink.opacity(0.6)))
+                    .child(div().flex_1().h_full().rounded(px(1.0)).bg(ink.opacity(0.15)))))
+                .child(div().flex_1().min_h_0().child(lines()))
+                .when(value == "left-split", |el| el.child(div().flex_1().min_h_0().border_t_1().border_color(theme.border).child(lines())));
+            let preview = div().relative().w_full().h(px(64.0)).flex_none().flex().overflow_hidden().rounded(px(4.0)).border_1().border_color(theme.border).bg(theme.surface)
+                .child(rail)
+                .child(div().flex_1().min_w_0().h_full().px(px(8.0)).py(px(14.0)).flex().flex_col().gap(px(5.0))
+                    .children([0.65, 1.0, 0.85, 0.95].into_iter().map(|width| div().w(gpui::relative(width)).h(px(2.0)).rounded_full().bg(theme.muted.opacity(0.25)))))
+                .when(value == "right-outline", |el| el.child(
+                    div().absolute().right(px(7.0)).top(px(13.0)).w(px(32.0)).h(px(33.0))
+                        .rounded(px(4.0)).border_1().border_color(theme.border).bg(theme.surface)
+                        .shadow(vec![gpui::BoxShadow { inset: false, color: theme.workspace_shadow_near,
+                            offset: gpui::point(px(0.0), px(2.0)), blur_radius: px(4.0), spread_radius: px(0.0),
+                        }]).child(lines())));
+            div().id(eid("documentNavigationLayout", value)).flex_1().min_w_0().p(px(10.0)).flex().flex_col().gap(px(9.0))
+                .rounded(px(8.0)).border_1().border_color(if selected { theme.accent } else { theme.border })
+                .bg(if selected { theme.accent.opacity(0.06) } else { theme.surface }).cursor_pointer()
+                .hover(|style| style.border_color(theme.accent.opacity(0.65)))
+                .tooltip(tooltip(locale.app_text(label)))
+                .child(preview)
+                .child(div().w_full().flex().items_center().justify_center().gap(px(5.0)).text_size(px(12.0))
+                    .text_color(if selected { theme.accent } else { theme.fg }).font_weight(FontWeight::MEDIUM)
+                    .child(div().flex_none().opacity(if selected { 1.0 } else { 0.0 }).child(icon(IconName::Check, 12.0, ink)))
+                    .child(div().min_w_0().truncate().child(locale.app_text(label))))
+                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| Settings::set(cx, "documentNavigationLayout", json!(value))))
+                .into_any_element()
+        }).collect::<Vec<_>>();
+        div().w(px(width)).flex().gap(px(10.0)).children(options).into_any_element()
+    }
+
     #[cfg(windows)]
     pub(super) fn render_shell_action(&self, key: &'static str, label: &'static str, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         use crate::windows_integration::{self, ShellAction};

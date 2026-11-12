@@ -205,7 +205,7 @@ impl SettingsWindow {
         let locale = ToolbarLocale::current(cx);
         let settings = cx.global::<Settings>().clone();
         let key = item.key;
-        let width = control_width(viewport);
+        let width = if key == "documentNavigationLayout" { content_width(viewport) } else { control_width(viewport) };
         let enabled = !matches!(item.support, Support::None(_))
             && (key != "quickInsertTrigger" || settings.bool("quickInsertEnabled"))
             && (key != "markdownLintRuleSet" || settings.bool("markdownLintEnabled"));
@@ -224,6 +224,9 @@ impl SettingsWindow {
                     .when(enabled, |el| el.on_click(cx.listener(move |_, _: &ClickEvent, _, cx| Settings::set(cx, key, json!(!on)))))
                     .when(!enabled, |el| el.opacity(0.55).cursor(gpui::CursorStyle::OperationNotAllowed))
                     .into_any_element()
+            }
+            Control::Choice(options) if key == "documentNavigationLayout" => {
+                self.render_navigation_layout(options, value.as_str().unwrap_or_default(), width, theme, cx)
             }
             Control::Choice(options) if options.len() <= 4 => {
                 let current = value.as_str().unwrap_or_default();
@@ -359,7 +362,7 @@ impl SettingsWindow {
         if matches!(item.control, Control::ThemePicker) { return self.render_theme_picker(theme, viewport, cx); }
         if matches!(item.control, Control::Shortcuts) { return self.render_shortcuts(theme, viewport, cx); }
         let locale = ToolbarLocale::current(cx);
-        let compact = f32::from(viewport.width) <= COMPACT_WIDTH;
+        let compact = f32::from(viewport.width) <= COMPACT_WIDTH || item.key == "documentNavigationLayout";
         let note = match &item.support {
             Support::Full => None,
             Support::Partial(reason) | Support::None(reason) => Some(locale.app_text(reason)),
@@ -382,7 +385,7 @@ impl SettingsWindow {
                     .line_height(gpui::relative(1.45)).text_color(theme.muted).child(description)))
                 .children(error.map(|error| div().text_size(px(13.0)).line_height(gpui::relative(1.45))
                     .text_color(gpui::rgb(0xd14343)).child(error))))
-            .child(div().w(px(control_width(viewport))).flex_none().flex().justify_end().child(control)).into_any_element()
+            .child(div().w(px(if compact { content_width(viewport) } else { control_width(viewport) })).flex_none().flex().justify_end().child(control)).into_any_element()
     }
 
     fn render_groups(&mut self, groups: &'static [crate::ui::settings_schema::Group], theme: &Theme, viewport: gpui::Size<gpui::Pixels>, cx: &mut Context<Self>) -> Vec<AnyElement> {

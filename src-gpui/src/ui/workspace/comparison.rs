@@ -147,7 +147,7 @@ impl Workspace {
     pub(super) fn tab_index(&self, key: u64) -> Option<usize> {
         self.tabs.iter().position(|tab| tab.key == key)
     }
-    fn host_for(&self, key: u64) -> Option<Entity<DocumentHost>> {
+    pub(super) fn host_for(&self, key: u64) -> Option<Entity<DocumentHost>> {
         self.tab_index(key)
             .map(|index| self.tabs[index].document.clone())
     }

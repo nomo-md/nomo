@@ -18,11 +18,14 @@ impl TreeLabel {
         let text = if text.chars().any(char::is_control) {
             text.chars().map(|ch| if ch.is_control() { ' ' } else { ch }).collect()
         } else { text };
-        let lowered = text.to_lowercase();
-        let matched = if !query.is_empty() && lowered.len() == text.len() {
-            lowered.find(query).map(|start| start..start + query.len())
+        let matched = if query.is_empty() {
+            None
+        } else {
+            let lowered = text.to_lowercase();
+            (lowered.len() == text.len()).then(|| lowered.find(query)).flatten()
+                .map(|start| start..start + query.len())
                 .filter(|range| text.is_char_boundary(range.start) && text.is_char_boundary(range.end))
-        } else { None };
+        };
         Self { text: text.into(), matched, highlight }
     }
 }

@@ -15,17 +15,9 @@ impl Workspace {
             }
         });
         let blur = cx.on_blur(&focus, window, |workspace, _, cx| workspace.clear_tree_search(cx));
-        let focus_subscription = cx.on_focus(&focus, window, |workspace, _, cx| {
-            if workspace.explorer.search_focused.is_none() {
-                workspace.explorer.search_focused = workspace.tree.as_ref().map(|tree| tree.root.clone());
-            }
-            workspace.explorer.search_keyboard_nav = true;
-            cx.notify();
-        });
         self.explorer.search_field = Some(field);
         self.explorer.search_subscription = Some(subscription);
         self.explorer.search_blur = Some(blur);
-        self.explorer.search_focus = Some(focus_subscription);
     }
 
     pub(super) fn focus_tree_search(&mut self, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
@@ -107,9 +99,8 @@ impl Workspace {
             "left" | "right" if self.explorer.search_query.is_empty() => {
                 if let Some(path) = self.explorer.search_focused.clone() {
                     let state = self.tree.as_ref().and_then(|tree| {
-                        if tree.root == path { Some((true, tree.root_expanded())) }
-                        else { tree.rows().iter().find(|row| row.entry.path == path && row.entry.is_dir)
-                            .map(|row| (row.entry.has_children || row.expanded, row.expanded)) }
+                        tree.rows().iter().find(|row| row.entry.path == path && row.entry.is_dir)
+                            .map(|row| (row.entry.has_children || row.expanded, row.expanded))
                     });
                     if let Some((true, expanded)) = state {
                         if (event.keystroke.key == "right" && !expanded) || (event.keystroke.key == "left" && expanded) {
@@ -154,7 +145,11 @@ impl Workspace {
         let path = if self.explorer.search_query.is_empty() { self.explorer.search_focused.clone() }
             else { self.explorer.search_matches.get(self.explorer.search_index).and_then(|index| self.tree.as_ref()?.rows().get(*index).map(|row| row.entry.path.clone())) };
         let Some(path) = path else { return; };
-        let directory = self.tree.as_ref().is_some_and(|tree| tree.root == path || tree.rows().iter().any(|row| row.entry.path == path && row.entry.is_dir));
+        if self.tree.as_ref().is_some_and(|tree| tree.root == path) {
+            self.clear_tree_search(cx);
+            return;
+        }
+        let directory = self.tree.as_ref().is_some_and(|tree| tree.rows().iter().any(|row| row.entry.path == path && row.entry.is_dir));
         self.clear_tree_search(cx);
         if directory { self.toggle_tree_folder(&path, cx); }
         else { self.open_path_with_preview(&path, true, window, cx); }

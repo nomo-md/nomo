@@ -44,7 +44,8 @@ CREATE VIEW projected_slugs AS
  ON s.generation=m.source_generation AND s.byte>=m.source_from AND s.byte<m.source_to;
 CREATE TABLE outline_views(view_id TEXT PRIMARY KEY,document TEXT NOT NULL,default_level INTEGER NOT NULL,
   generation INTEGER NOT NULL,view_generation INTEGER NOT NULL,scan_byte INTEGER NOT NULL DEFAULT 0,
-  visible_count INTEGER NOT NULL DEFAULT 0,complete INTEGER NOT NULL DEFAULT 0);
+  visible_count INTEGER NOT NULL DEFAULT 0,complete INTEGER NOT NULL DEFAULT 0,
+  fold_root INTEGER NOT NULL DEFAULT 1,fold_policy_serial INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE outline_folds(view_id TEXT NOT NULL,heading_id TEXT NOT NULL,collapsed INTEGER NOT NULL,
   PRIMARY KEY(view_id,heading_id));
 CREATE TABLE outline_rows(view_id TEXT NOT NULL,position INTEGER NOT NULL,byte INTEGER NOT NULL,

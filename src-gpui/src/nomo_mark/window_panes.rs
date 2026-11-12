@@ -373,7 +373,9 @@ impl DocumentHost {
     }
 
     fn outline_column_shift(&self, settings: &Settings) -> f32 {
-        if settings.show_outline && let OutlineLayout::Visible { shift_fraction } = self.outline_layout { shift_fraction } else { 0.0 }
+        if self.accepts_workspace_focus && settings.show_outline
+            && settings.document_navigation_layout == crate::settings::DocumentNavigationLayout::RightOutline
+            && let OutlineLayout::Visible { shift_fraction } = self.outline_layout { shift_fraction } else { 0.0 }
     }
 
     pub(crate) fn set_mini_paper_frame(&mut self, frame: Option<(gpui::Pixels, f32)>, cx: &mut Context<Self>) {
@@ -1041,6 +1043,8 @@ impl DocumentHost {
     pub(crate) fn outline_can_show(&self) -> bool { self.outline_layout != OutlineLayout::Hidden }
 
     pub(crate) fn update_outline_layout(&mut self, width: f32, percent: f32, cx: &mut Context<Self>) {
+        // 左栏大纲不占正文留白，也不受右侧浮层的空间阈值控制。
+        if cx.global::<Settings>().document_navigation_layout != crate::settings::DocumentNavigationLayout::RightOutline { return; }
         let previous = if cx.global::<Settings>().show_outline { self.outline_layout } else { self.outline_layout.with_manual_open(false) };
         let layout = previous.for_area(width, percent, self.panes.len() == 2);
         if layout != self.outline_layout {

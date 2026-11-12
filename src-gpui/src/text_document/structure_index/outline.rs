@@ -67,7 +67,7 @@ impl Store {
         let tx = db.unchecked_transaction().map_err(sql)?;
         db.execute("UPDATE outline_rows AS r SET byte=(SELECT r.byte+json_extract(m.value,'$.byteDelta') FROM json_each(?2) m WHERE r.byte>=json_extract(m.value,'$.fromByte') AND r.byte<json_extract(m.value,'$.toByte') LIMIT 1) WHERE r.view_id=?1", params![view, mappings]).map_err(sql)?;
         let last: Option<(u64, u8, bool)> = db.query_row(
-            "SELECT h.byte,h.level,COALESCE(f.collapsed,h.level>=v.default_level) FROM outline_rows r JOIN outline_views v ON v.view_id=r.view_id JOIN raw_headings h ON h.generation=?2 AND h.byte=r.byte LEFT JOIN outline_folds f ON f.view_id=r.view_id AND f.heading_id=h.block_id||':'||h.heading_index WHERE r.view_id=?1 ORDER BY r.position DESC LIMIT 1",
+            "SELECT h.byte,h.level,(v.fold_root OR h.level>1) AND COALESCE(f.collapsed,h.level>=v.default_level) FROM outline_rows r JOIN outline_views v ON v.view_id=r.view_id JOIN raw_headings h ON h.generation=?2 AND h.byte=r.byte LEFT JOIN outline_folds f ON f.view_id=r.view_id AND f.heading_id=h.block_id||':'||h.heading_index WHERE r.view_id=?1 ORDER BY r.position DESC LIMIT 1",
             params![view, generation], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional().map_err(sql)?;
         let scan = match last {
             Some((byte, level, true)) => db.query_row("SELECT COALESCE(MIN(byte),?4) FROM raw_headings WHERE generation=?1 AND byte>?2 AND level<=?3", params![generation,byte,level,total], |row| row.get::<_,u64>(0)).map_err(sql)?.max(byte + 1),
@@ -101,6 +101,7 @@ impl Store {
             Query::OutlineView { view_id, .. }
             | Query::SetOutlineFold { view_id, .. }
             | Query::SetOutlineLevel { view_id, .. }
+            | Query::SetOutlineRootFoldable { view_id, .. }
             | Query::CloseOutline { view_id } => view_id,
             _ => unreachable!(),
         };
@@ -140,6 +141,22 @@ impl Store {
                 .map_err(sql)?;
                 self.reset_outline(&view_id, generation)?;
             }
+            Query::SetOutlineRootFoldable { view_id, foldable, serial } => {
+                // 取消可能晚于后台任务取得查询锁，旧布局的请求不能覆盖新布局。
+                let tx = db.unchecked_transaction().map_err(sql)?;
+                let previous: Option<bool> = tx.query_row(
+                    "SELECT fold_root FROM outline_views WHERE view_id=?1 AND fold_policy_serial<?2",
+                    params![view_id, serial], |row| row.get(0),
+                ).optional().map_err(sql)?;
+                if let Some(previous) = previous {
+                    tx.execute(
+                        "UPDATE outline_views SET fold_root=?2,fold_policy_serial=?3 WHERE view_id=?1",
+                        params![view_id, foldable, serial],
+                    ).map_err(sql)?;
+                    if previous != foldable { self.reset_outline(&view_id, generation)?; }
+                }
+                tx.commit().map_err(sql)?;
+            }
             Query::CloseOutline { view_id } => {
                 for table in ["outline_rows", "outline_folds", "outline_views"] {
                     db.execute(&format!("DELETE FROM {table} WHERE view_id=?1"), [&view_id])
@@ -161,7 +178,7 @@ impl Store {
                 if current != generation && !self.advance_outline(&view_id, current, generation, response.total_bytes)? {
                     self.reset_outline(&view_id, generation)?;
                 }
-                let (epoch,mut scan,mut count,mut complete,level):(u64,u64,u64,bool,u8)=db.query_row("SELECT view_generation,scan_byte,visible_count,complete,default_level FROM outline_views WHERE view_id=?1",[&view_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(sql)?;
+                let (epoch,mut scan,mut count,mut complete,level,fold_root):(u64,u64,u64,bool,u8,bool)=db.query_row("SELECT view_generation,scan_byte,visible_count,complete,default_level,fold_root FROM outline_views WHERE view_id=?1",[&view_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).map_err(sql)?;
                 if view_generation.is_some_and(|expected| expected != epoch) {
                     return Err(TextDocumentError::new(
                         "outline-cursor-expired",
@@ -173,7 +190,7 @@ impl Store {
                 if !complete && response.state == "ready" {
                     let tx = db.unchecked_transaction().map_err(sql)?;
                     for _ in 0..PAGE_ITEMS {
-                        let next:Option<(u64,u8,bool)>=db.query_row("SELECT h.byte,h.level,COALESCE(f.collapsed,h.level>=?4) FROM raw_headings h LEFT JOIN outline_folds f ON f.view_id=?3 AND f.heading_id=h.block_id||':'||h.heading_index WHERE h.generation=?1 AND h.byte>=?2 ORDER BY h.byte LIMIT 1",params![generation,scan,view_id,level],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(sql)?;
+                        let next:Option<(u64,u8,bool)>=db.query_row("SELECT h.byte,h.level,(?5 OR h.level>1) AND COALESCE(f.collapsed,h.level>=?4) FROM raw_headings h LEFT JOIN outline_folds f ON f.view_id=?3 AND f.heading_id=h.block_id||':'||h.heading_index WHERE h.generation=?1 AND h.byte>=?2 ORDER BY h.byte LIMIT 1",params![generation,scan,view_id,level,fold_root],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(sql)?;
                         let Some((byte, heading_level, collapsed)) = next else {
                             complete = true;
                             break;
@@ -195,8 +212,8 @@ impl Store {
                     tx.commit().map_err(sql)?;
                 }
                 // 是否有子项只取紧随其后的标题级别，避免对整篇标题逐项展开章节视图。
-                let mut statement=db.prepare("SELECT r.position,h.block_id,h.heading_index,h.level,h.title,h.slug,h.byte,h.line,COALESCE(f.collapsed,h.level>=?4),(SELECT MAX(p.byte) FROM raw_headings p WHERE p.generation=h.generation AND p.byte<h.byte AND p.level<h.level),COALESCE((SELECT n.level>h.level FROM raw_headings n WHERE n.generation=h.generation AND n.byte>h.byte ORDER BY n.byte LIMIT 1),0),COALESCE((SELECT MIN(n.byte) FROM raw_headings n WHERE n.generation=h.generation AND n.byte>h.byte AND n.level<=h.level),?5) FROM outline_rows r JOIN projected_headings h ON h.generation=?1 AND h.byte=r.byte LEFT JOIN outline_folds f ON f.view_id=r.view_id AND f.heading_id=h.block_id||':'||h.heading_index WHERE r.view_id=?2 AND r.position>=?3 ORDER BY r.position LIMIT 256").map_err(sql)?;
-                let mapped=statement.query_map(params![generation,view_id,from_index,level,response.total_bytes],|r|Ok(json!({"position":r.get::<_,u64>(0)?,"blockId":r.get::<_,String>(1)?,"blockHeadingIndex":r.get::<_,u64>(2)?,"level":r.get::<_,u8>(3)?,"title":r.get::<_,String>(4)?,"id":r.get::<_,String>(5)?,"byte":r.get::<_,u64>(6)?,"line":r.get::<_,u64>(7)?,"collapsed":r.get::<_,bool>(8)?,"parentByte":r.get::<_,Option<u64>>(9)?,"hasChildren":r.get::<_,bool>(10)?,"toByte":r.get::<_,u64>(11)?}))).map_err(sql)?;
+                let mut statement=db.prepare("SELECT r.position,h.block_id,h.heading_index,h.level,h.title,h.slug,h.byte,h.line,(?6 OR h.level>1) AND COALESCE(f.collapsed,h.level>=?4),(SELECT MAX(p.byte) FROM raw_headings p WHERE p.generation=h.generation AND p.byte<h.byte AND p.level<h.level),COALESCE((SELECT n.level>h.level FROM raw_headings n WHERE n.generation=h.generation AND n.byte>h.byte ORDER BY n.byte LIMIT 1),0),COALESCE((SELECT MIN(n.byte) FROM raw_headings n WHERE n.generation=h.generation AND n.byte>h.byte AND n.level<=h.level),?5) FROM outline_rows r JOIN projected_headings h ON h.generation=?1 AND h.byte=r.byte LEFT JOIN outline_folds f ON f.view_id=r.view_id AND f.heading_id=h.block_id||':'||h.heading_index WHERE r.view_id=?2 AND r.position>=?3 ORDER BY r.position LIMIT 256").map_err(sql)?;
+                let mapped=statement.query_map(params![generation,view_id,from_index,level,response.total_bytes,fold_root],|r|Ok(json!({"position":r.get::<_,u64>(0)?,"blockId":r.get::<_,String>(1)?,"blockHeadingIndex":r.get::<_,u64>(2)?,"level":r.get::<_,u8>(3)?,"title":r.get::<_,String>(4)?,"id":r.get::<_,String>(5)?,"byte":r.get::<_,u64>(6)?,"line":r.get::<_,u64>(7)?,"collapsed":r.get::<_,bool>(8)?,"parentByte":r.get::<_,Option<u64>>(9)?,"hasChildren":r.get::<_,bool>(10)?,"toByte":r.get::<_,u64>(11)?}))).map_err(sql)?;
                 let mut rows = vec![];
                 let mut bytes = 4096;
                 for row in mapped {
@@ -211,8 +228,8 @@ impl Store {
                     bytes += size;
                     rows.push(row);
                 }
-                let has_collapsed: Option<bool> = if from_index == 0 { Some(db.query_row("SELECT EXISTS(SELECT 1 FROM raw_headings h LEFT JOIN outline_folds f ON f.view_id=?2 AND f.heading_id=h.block_id||':'||h.heading_index WHERE h.generation=?1 AND COALESCE(f.collapsed,h.level>=?3) AND COALESCE((SELECT n.level>h.level FROM raw_headings n WHERE n.generation=h.generation AND n.byte>h.byte ORDER BY n.byte LIMIT 1),0))",params![generation,view_id,level],|r|r.get(0)).map_err(sql)?) } else { None };
-                let has_expandable: Option<bool> = if from_index == 0 { Some(db.query_row("SELECT EXISTS(SELECT 1 FROM raw_headings h WHERE h.generation=?1 AND COALESCE((SELECT n.level>h.level FROM raw_headings n WHERE n.generation=h.generation AND n.byte>h.byte ORDER BY n.byte LIMIT 1),0))",[generation],|r|r.get(0)).map_err(sql)?) } else { None };
+                let has_collapsed: Option<bool> = if from_index == 0 { Some(db.query_row("SELECT EXISTS(SELECT 1 FROM raw_headings h LEFT JOIN outline_folds f ON f.view_id=?2 AND f.heading_id=h.block_id||':'||h.heading_index WHERE h.generation=?1 AND (?4 OR h.level>1) AND COALESCE(f.collapsed,h.level>=?3) AND COALESCE((SELECT n.level>h.level FROM raw_headings n WHERE n.generation=h.generation AND n.byte>h.byte ORDER BY n.byte LIMIT 1),0))",params![generation,view_id,level,fold_root],|r|r.get(0)).map_err(sql)?) } else { None };
+                let has_expandable: Option<bool> = if from_index == 0 { Some(db.query_row("SELECT EXISTS(SELECT 1 FROM raw_headings h WHERE h.generation=?1 AND (?2 OR h.level>1) AND COALESCE((SELECT n.level>h.level FROM raw_headings n WHERE n.generation=h.generation AND n.byte>h.byte ORDER BY n.byte LIMIT 1),0))",params![generation,fold_root],|r|r.get(0)).map_err(sql)?) } else { None };
                 response.items.push(json!({"viewId":view_id,"viewGeneration":epoch,"visibleCount":count,"projectionComplete":complete,"fromIndex":from_index,"hasCollapsed":has_collapsed,"hasExpandable":has_expandable,"rows":rows}));
             }
             _ => unreachable!(),

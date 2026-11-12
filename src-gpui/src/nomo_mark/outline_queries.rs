@@ -1,5 +1,6 @@
 //! 窗口大纲的有界分页投影。正文和折叠树仍由文档会话及结构索引持有。
 use super::*;
+use crate::settings::{DocumentNavigationLayout, Settings};
 use crate::text_document::{StructureIdentity, StructureQuery};
 use crate::nomo_mark::session_window::structure_error;
 use std::{collections::VecDeque, rc::Rc, time::{Duration, Instant}};
@@ -70,6 +71,8 @@ impl OutlineSnapshot {
 #[derive(Default)]
 pub(super) struct OutlineState {
     enabled: bool,
+    docked: bool,
+    fold_policy_dirty: bool,
     default_level: u8,
     reset_level: bool,
     identity: Option<StructureIdentity>,
@@ -197,8 +200,18 @@ impl DocumentHost {
             if changed { self.suspend_outline(cx); }
             return;
         }
+        let docked = cx.global::<Settings>().document_navigation_layout != DocumentNavigationLayout::RightOutline;
+        let layout_changed = self.queries.outline_state.docked != docked;
+        if layout_changed {
+            self.suspend_outline(cx);
+            let state = &mut self.queries.outline_state;
+            state.docked = docked;
+            state.fold_policy_dirty = true;
+            state.requested_revision = None;
+            state.active_byte = None;
+        }
         if self.hidden || self.closed || self.mini_layout || self.queries.outline_state.pending { return; }
-        if changed || (self.queries.outline_state.identity.is_none() && self.queries.outline_state.error.is_none()) {
+        if changed || layout_changed || (self.queries.outline_state.identity.is_none() && self.queries.outline_state.error.is_none()) {
             self.schedule_outline_refresh(true, cx);
         }
         // 复用同修订缓存时不会走刷新回调，仍需应用隐藏期间变更的默认层级。
@@ -293,6 +306,8 @@ impl DocumentHost {
         let state = &self.queries.outline_state;
         let request = state.request.clone(); let serial = state.serial;
         let old_view = state.view_id.clone(); let level = state.default_level;
+        let docked = state.docked;
+        let apply_fold_policy = state.fold_policy_dirty || (docked && old_view.is_none());
         let from = state.visible_from;
         let anchor = state.pages.iter().find_map(|page| from.checked_sub(page.from).and_then(|i| page.rows.get(i)))
             .map(|row| (row.key(), row.byte));
@@ -309,7 +324,18 @@ impl DocumentHost {
                     let response = worker_port.manager.query_structure(&worker_port.owner, identity.clone(), StructureQuery::OpenOutline { default_level: level }).map_err(structure_error)?;
                     response.items.first().and_then(|item| item["viewId"].as_str()).ok_or_else(|| query_error("大纲视图缺少身份"))?.to_owned()
                 };
-                let result = (|| { request.check()?; let (page, incomplete) = read_refresh_page(&worker_port, &identity, &view, from, anchor, &request)?; request.check()?; Ok::<_, ControlError>((identity, page, incomplete)) })();
+                let result = (|| {
+                    request.check()?;
+                    if apply_fold_policy {
+                        worker_port.manager.query_structure(&worker_port.owner, identity.clone(), StructureQuery::SetOutlineRootFoldable {
+                            view_id: view.clone(), foldable: !docked, serial,
+                        }).map_err(structure_error)?;
+                        request.check()?;
+                    }
+                    let (page, incomplete) = read_refresh_page(&worker_port, &identity, &view, from, anchor, &request)?;
+                    request.check()?;
+                    Ok::<_, ControlError>((identity, page, incomplete))
+                })();
                 if result.is_err() && created { let _ = worker_port.manager.close_structure_outline(&worker_port.owner, &worker_port.document_id, &view); }
                 result.map(|value| (value, created))
             });
@@ -331,6 +357,7 @@ impl DocumentHost {
                         match state.replace_page(page) {
                             Ok(()) => {
                                 state.identity = Some(identity); state.incomplete = incomplete;
+                                state.fold_policy_dirty = false;
                                 state.active_byte = active; state.anchor = None; state.dirty_since = None;
                                 if restored != from { state.restore_scroll = Some(restored); }
                             }
@@ -374,6 +401,7 @@ impl DocumentHost {
         }).detach();
     }
     pub(crate) fn set_outline_fold(&mut self, heading: &OutlineHeading, cx: &mut Context<Self>) {
+        if self.queries.outline_state.docked && heading.level == 1 { return; }
         self.mutate_outline(StructureQuery::SetOutlineFold { view_id: self.queries.outline_state.view_id.clone().unwrap_or_default(), heading_id: heading.key(), collapsed: !heading.collapsed }, cx);
     }
     pub(crate) fn navigate_outline_entry(&mut self, heading: &OutlineHeading, revision: u64, cx: &mut Context<Self>) {
@@ -486,7 +514,7 @@ impl DocumentHost {
     pub(super) fn update_outline_anchor(&mut self, byte: u64, cx: &mut Context<Self>) {
         let revision = self.status().revision;
         let s = &mut self.queries.outline_state;
-        if !s.enabled || self.mini_layout || s.anchor == Some(byte) { return; }
+        if !s.enabled || s.docked || self.mini_layout || s.anchor == Some(byte) { return; }
         let Some(identity) = s.identity.clone() else { return; };
         if identity.revision != revision { return; }
         s.anchor = Some(byte); s.active_serial += 1; let serial = s.active_serial;

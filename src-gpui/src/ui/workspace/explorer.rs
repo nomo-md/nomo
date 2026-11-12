@@ -40,7 +40,6 @@ pub(super) struct ExplorerState {
     pub(super) search_field: Option<Entity<TextField>>,
     pub(super) search_subscription: Option<Subscription>,
     pub(super) search_blur: Option<Subscription>,
-    pub(super) search_focus: Option<Subscription>,
     pub(super) search_query: String,
     pub(super) search_matches: Vec<usize>,
     pub(super) search_index: usize,
@@ -74,6 +73,11 @@ impl Workspace {
         self.explorer.refresh_task.take();
         self.explorer.scroll_hide_task.take();
         self.explorer.search_task.take();
+        self.explorer.search_revision = self.explorer.search_revision.wrapping_add(1);
+        self.explorer.scroll_dragging = false;
+        self.explorer.scroll_animation = None;
+        self.explorer.scroll_visible = false;
+        self.explorer.hovered = None;
         self.explorer.menu = None;
         self.explorer.edit = None;
         if let Some(tree) = &mut self.tree { tree.cancel_all_loads(); }
@@ -186,13 +190,13 @@ impl Workspace {
     }
 
     fn ensure_tree_refresh_task(&mut self, cx: &mut Context<Self>) {
+        if !self.tree_panel_visible(cx.global::<Settings>()) { return; }
         if self.explorer.refresh_task.is_some() { return; }
         self.explorer.refresh_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(5)).await;
                 if this.update(cx, |workspace, cx| {
-                    if !workspace.home_visible && workspace.tree.is_some()
-                        && workspace.explorer.sidebar_visible(cx.global::<Settings>())
+                    if workspace.tree.is_some() && workspace.tree_panel_visible(cx.global::<Settings>())
                     {
                         workspace.refresh_tree(cx);
                     }
@@ -202,7 +206,7 @@ impl Workspace {
     }
 
     fn start_next_tree_scan(&mut self, cx: &mut Context<Self>) {
-        if self.home_visible { return; }
+        if !self.tree_panel_visible(cx.global::<Settings>()) { return; }
         if self.explorer.scan.is_some() { return; }
         let Some(tree) = &mut self.tree else {
             self.explorer.queue.clear();
@@ -231,6 +235,7 @@ impl Workspace {
                 if workspace.explorer.scan.as_ref().is_none_or(|scan| scan.path != path) {
                     return;
                 }
+                let cancelled = workspace.explorer.scan.as_ref().is_some_and(|scan| scan.cancel.load(Ordering::Acquire));
                 workspace.explorer.scan = None;
                 if workspace.explorer.generation != generation {
                     workspace.start_next_tree_scan(cx);
@@ -240,7 +245,7 @@ impl Workspace {
                 let before = workspace.tree.as_ref().map(FileTree::rows);
                 let mut failed = false;
                 if let Some(tree) = &mut workspace.tree {
-                    match result {
+                    match if cancelled { Err(ScanError::Cancelled) } else { result } {
                         Ok(snapshot) => {
                             if let Err(error) = tree.complete_load_message(&path, snapshot) {
                                 failed = true;

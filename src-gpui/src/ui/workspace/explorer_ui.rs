@@ -1,9 +1,7 @@
 //! 虚拟目录列表及其滚动条；根目录与普通行共享同一滚动范围。
 use super::*;
+use super::explorer_label::TreeLabel;
 use crate::ui::toolbar_i18n::ToolbarLocale;
-#[path = "explorer_label.rs"]
-mod label;
-use label::TreeLabel;
 use crate::ui::path_drag::{PathDrag, PathDragPreview};
 use crate::ui::tree_drag;
 
@@ -33,7 +31,7 @@ impl Workspace {
     ) -> Option<AnyElement> {
         if let Some(mini_frame) = self.mini.shell_frame() {
             if mini_frame.sidebar_width <= px(0.0) { return None; }
-            let sidebar = self.render_explorer_sidebar(f32::from(mini_frame.sidebar_width), theme, cx);
+            let sidebar = self.render_navigation_sidebar(f32::from(mini_frame.sidebar_width), theme, window, cx);
             return Some(div().relative().h_full().w(mini_frame.sidebar_width * mini_frame.visibility).flex_none().overflow_hidden()
                 .child(div().relative().h_full().w(mini_frame.sidebar_width).left(px(-12.0 * (1.0 - mini_frame.visibility)))
                     .opacity(mini_frame.visibility).child(sidebar))
@@ -41,30 +39,23 @@ impl Workspace {
         }
         if frame.occupied_width() <= 0.0 { return None; }
         if self.explorer.drag.running() { window.request_animation_frame(); }
-        let sidebar = self.render_explorer_sidebar(frame.full_width, theme, cx);
+        let sidebar = self.render_navigation_sidebar(frame.full_width, theme, window, cx);
         Some(frame.clip(sidebar).into_any_element())
     }
 
-    /// 文件栏 = 与主页相同的“主页”导航头 + 文件树视口；导航头不进入虚拟列表，滚动条和拖宽仍以列表边界计算。
-    fn render_explorer_sidebar(&mut self, width: f32, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_explorer_tree(&mut self, width: f32, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         if let Some(edit) = &self.explorer.edit {
             let label = ToolbarLocale::current(cx).app_text("tree.name");
             edit.field.update(cx, |field, cx| field.set_placeholder(label, cx));
         }
-        let tree = self.render_explorer_tree(width, theme, cx);
-        let home = crate::ui::home::nav_home_row(false, theme, cx)
-            .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| workspace.show_home(window, cx)));
-        div().w(px(width)).h_full().min_h(px(0.0)).flex_none().flex().flex_col().bg(theme.rail_bg)
-            .child(div().w_full().h(px(TAB_RAIL_HEIGHT)).flex_none().px(px(8.0)).flex().items_center().child(home))
-            .child(div().w_full().flex_1().min_h(px(0.0)).child(tree))
-    }
-
-    fn render_explorer_tree(&mut self, width: f32, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         if self.explorer.drag.active() && !self.explorer.drag.committing && !cx.has_active_drag() { self.explorer.drag.release(self.explorer.reduce_motion); }
-        let (root_name, root_path, root_expanded, root_loading, rows) = match &self.tree {
-            Some(tree) => (tree.root_name(), Some(tree.root.clone()), tree.root_expanded(), tree.loading(&tree.root), tree.rows()),
+        let (root_name, root_path, root_loading, rows) = match &self.tree {
+            Some(tree) => (tree.root_name(), Some(tree.root.clone()), tree.loading(&tree.root), tree.rows()),
             None => return div().id("tree-viewport").relative().w(px(width)).h_full().min_h(px(0.0)).flex_none()
-                .bg(theme.rail_bg).into_any_element(),
+                .bg(theme.rail_bg).p(px(10.0))
+                .child(button("navigation-open-folder", ToolbarLocale::current(cx).app_text("home.openFolder"), Some(IconName::FolderOpen), ButtonKind::Ghost, theme)
+                    .on_click(cx.listener(|workspace, _, window, cx| workspace.prompt_open(true, window, cx))))
+                .into_any_element(),
         };
         let active_path = self.tab().and_then(|tab| tab.document.read(cx).path());
         let revision = std::sync::Arc::as_ptr(&rows) as *const () as usize;
@@ -92,7 +83,7 @@ impl Workspace {
             .or_else(|| self.explorer.search_keyboard_nav.then(|| self.explorer.search_focused.clone()).flatten());
         let search_query = self.explorer.search_query.clone();
         let count = drag_layout.len(rows.len() + 1) + usize::from(insert_index.is_some());
-        let row_hover = gpui::rgba(0x80808014);
+        let row_hover = gpui::rgba(TREE_ROW_HOVER);
         let theme = theme.clone();
         let list = uniform_list("file-tree", count, {
             let theme = theme.clone();
@@ -102,23 +93,16 @@ impl Workspace {
                     if index == 0 {
                         let path = root_path.clone();
                         let hover_path = path.clone();
-                        let root_hover = path.as_ref().is_some_and(|path| hovered.as_ref() == Some(path) || search_path.as_ref() == Some(path));
-                        let chevron = if root_loading {
-                            tree_spinner("tree-root-spinner", theme.accent, reduce_motion)
-                        } else {
-                            tree_chevron(root_expanded, path.as_deref(), tree_animation.as_ref(), theme.accent)
-                        };
-                        let controls = path.as_ref().filter(|_| root_hover).map(|path| tree_controls(path, true, &theme, cx));
+                        let controls = path.as_ref().filter(|path| hovered.as_ref() == Some(*path))
+                            .map(|path| tree_controls(path, true, &theme, cx));
                         let target = path.as_deref().is_some_and(|path| workspace.explorer.drag.is_target(path));
-                        let mut root = div().id("tree-root").relative().top(px(-4.0)).mx(px(8.0)).w_full().h(px(28.0))
-                            .pl(px(12.0)).pr(px(4.0)).flex().items_center().gap(px(6.0))
-                            .rounded(px(4.0)).cursor_pointer().text_size(px(15.0)).text_color(theme.fg)
-                            .font_weight(FontWeight::SEMIBOLD).when(!target, |el| el.hover(|style| style.bg(row_hover)))
+                        let mut root = tree_root_row().id("tree-root").relative().top(px(-TREE_ROOT_LIFT)).mx(px(TREE_ROW_PADDING))
+                            .cursor_pointer().text_color(theme.fg)
+                            .when(!target, |el| el.hover(|style| style.bg(row_hover)))
                             .when(search_path.as_ref() == path.as_ref() && search_path.is_some(), |el| el.bg(theme.sidebar_active))
                             .when(target, |el| el.bg(theme.sidebar_active).rounded(px(9.0)))
-                            .child(div().w(px(16.0)).flex_none().child(chevron))
-                            .child(if target { tree_drag::receiving_icon(&theme) } else { icon(IconName::FolderOpen, 14.0, theme.accent).into_any_element() })
                             .child(div().flex_1().min_w(px(0.0)).overflow_hidden().child(TreeLabel::new(root_name.clone(), "", theme.search_match)))
+                            .children(root_loading.then(|| tree_spinner("tree-root-spinner", theme.accent, reduce_motion)))
                             .children(controls)
                             .on_hover(cx.listener(move |workspace, entered, _, cx| {
                                 if *entered { workspace.explorer.hovered = hover_path.clone(); }
@@ -129,19 +113,6 @@ impl Workspace {
                                 cx.stop_propagation();
                                 let focused = workspace.tree.as_ref().map(|tree| tree.root.clone());
                                 workspace.focus_tree_search(focused, window, cx);
-                                if let Some(tree) = &mut workspace.tree {
-                                    let path = tree.root.clone();
-                                    match tree.toggle_root_message() {
-                                        Ok(expanded) => {
-                                            workspace.animate_tree_chevron(path.clone(), expanded);
-                                            workspace.sync_tree_selection(false, cx);
-                                            if expanded { workspace.queue_tree_scan(path, false, cx); }
-                                            else { workspace.cancel_hidden_tree_scan(); }
-                                        }
-                                        Err(error) => workspace.notice = Some(error.render(ToolbarLocale::current(cx)).into()),
-                                    }
-                                    cx.notify();
-                                } else { workspace.prompt_open(true, window, cx); }
                             }));
                         if let Some(path) = path {
                             root = root.on_mouse_down(MouseButton::Right, cx.listener(move |workspace, event: &gpui::MouseDownEvent, _, cx| {
@@ -179,7 +150,7 @@ impl Workspace {
                     let chevron = is_dir.then(|| {
                         let folder = path.clone();
                         // 保留固定的点击区域，覆盖收起后箭头消失的情况。
-                        div().id("tree-chevron").w(px(16.0)).h_full().flex_none().flex().items_center()
+                        tree_chevron_slot().id("tree-chevron")
                             .when(can_expand, |el| el.child(tree_chevron(expanded, Some(&path), tree_animation.as_ref(), theme.muted)))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |workspace, _, window, cx| {
@@ -192,9 +163,9 @@ impl Workspace {
                     let kind = if is_dir { IconName::FolderOpen } else { IconName::FileText };
                     let target = workspace.explorer.drag.is_target(&path);
                     let file_icon = if target { tree_drag::receiving_icon(&theme) } else if row.loading { tree_spinner(("tree-spinner", index), theme.muted, reduce_motion) }
-                        else { icon(kind, 13.0, if active { theme.accent } else { theme.muted }).into_any_element() };
+                        else { icon(kind, TREE_ROW_ICON_SIZE, if active { theme.accent } else { theme.muted }).into_any_element() };
                     let marker = active.then(|| tree_selection_marker(display_index, row.depth, selection_animation.as_ref(), theme.accent));
-                    let controls = (is_dir && (hovered.as_ref() == Some(&path) || search_path.as_ref() == Some(&path)))
+                    let controls = (is_dir && hovered.as_ref() == Some(&path))
                         .then(|| tree_controls(&path, false, &theme, cx));
                     let editing = edit.as_ref().filter(|(kind, edit_path, _)| matches!(kind, super::explorer_actions::EditKind::Rename) && edit_path == &path)
                         .map(|(_, _, field)| field.clone());
@@ -208,11 +179,10 @@ impl Workspace {
                     };
                     let drag = PathDrag { path: path.clone(), root: root_path.clone().unwrap_or_default(), directory: is_dir, title: row.entry.name.clone().into(), visual: Default::default() };
                     let weak = cx.entity().downgrade();
-                    let indent = 34.0 + row.depth as f32 * 12.0;
+                    let indent = TREE_ROW_INDENT * (row.depth + 1) as f32 + TREE_CHEVRON_SLOT + TREE_ROW_GAP;
                     let animated_path = path.clone();
-                    let button = div().id(("tree", index)).relative().w_full().h(px(28.0)).flex().items_center().gap(px(6.0))
-                        .pl(px((if is_dir { 12.0 } else { 34.0 }) + row.depth as f32 * 12.0)).pr(px(4.0))
-                        .rounded(px(4.0)).cursor_pointer().text_color(if active { theme.accent } else { theme.fg })
+                    let button = tree_row(if is_dir { indent - TREE_CHEVRON_SLOT - TREE_ROW_GAP } else { indent })
+                        .id(("tree", index)).relative().cursor_pointer().text_color(if active { theme.accent } else { theme.fg })
                         .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
                         .when((active || search_path.as_ref() == Some(&path)) && !target, |el| el.bg(theme.sidebar_active))
                         .when(target, |el| el.child(div().absolute().left(px(row.depth as f32 * 12.0 + 3.0)).right(px(3.0)).top_0().bottom_0().rounded(px(9.0)).bg(theme.sidebar_active)))
@@ -256,14 +226,14 @@ impl Workspace {
                     let row = div().relative().size_full().child(button)
                         .children(marker.map(|marker| div().absolute().left(px(-8.0)).top(px(-1.0)).size_full().child(marker))).into_any_element();
                     let row = workspace.explorer.drag.animate_row(&animated_path, display_index, row, reduce_motion, &theme);
-                    div().w_full().h(px(TREE_ROW_HEIGHT)).px(px(8.0)).flex().items_center()
-                        .child(div().w_full().h(px(28.0)).child(row)).into_any_element()
+                    div().w_full().h(px(TREE_ROW_HEIGHT)).px(px(TREE_ROW_PADDING)).flex().items_center()
+                        .child(div().w_full().h(px(TREE_ROW_CONTENT_HEIGHT)).child(row)).into_any_element()
                 }).collect();
                 if workspace.explorer.drag.running() { window.request_animation_frame(); }
                 items
             })
         // GPUI 的 uniform_list 在内容尺寸和子项起点各计入一次 padding。
-        }).track_scroll(&self.tree_scroll).pt(px(4.0)).pb(px(9.0)).min_h(px(0.0)).size_full();
+        }).track_scroll(&self.tree_scroll).pt(px(TREE_LIST_TOP_PADDING)).pb(px(9.0)).min_h(px(0.0)).size_full();
 
         let handle = self.tree_scroll.0.borrow().base_handle.clone();
         let backdrop = self.explorer.drag.backdrop(f32::from(handle.offset().y) + 8.0, 8.0, &theme);
@@ -300,41 +270,28 @@ impl Workspace {
         };
         let search = search_field.map(|field| div().id("tree-speed-search").absolute()
             .top(px(if search_visible { 8.0 } else { 14.0 })).left(px(if search_visible { 12.0 } else { 20.0 }))
-            .w(px(if search_visible { 180.0 } else { 1.0 })).h(px(26.0)).flex().items_center()
+            .w(px(if search_visible { (width - 24.0).clamp(0.0, 220.0) } else { 1.0 })).h(px(26.0)).flex().items_center()
             .when(!search_visible, |el| el.opacity(0.0))
             .when(search_visible, |el| el.rounded(px(6.0)).bg(theme.surface).border_1().border_color(theme.border))
             .when(search_visible, |el| el.child(icon(IconName::Search, 13.0, theme.muted)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(field).when(search_visible, |el| el.child(div().px(px(5.0)).text_size(px(11.0)).text_color(theme.muted).child(search_count))));
-        let resizer = div().id("tree-resizer").absolute().right(px(-3.0)).top(px(0.0)).bottom(px(0.0)).w(px(6.0))
-            .flex().justify_center().cursor_col_resize()
-            .on_mouse_down(MouseButton::Left, cx.listener(|workspace, _, _, cx| {
-                cx.stop_propagation();
-                workspace.explorer.resizing = true;
-                cx.notify();
-            }));
-        let tracking = (self.explorer.resizing || self.explorer.scroll_dragging).then(|| {
+        let tracking = self.explorer.scroll_dragging.then(|| {
             let workspace = cx.entity().downgrade();
             let dragging = self.explorer.scroll_dragging;
             div().absolute().size_full().child(gpui::canvas(|_, _, _| (), move |_, _, window, _| {
                 if dragging { window.set_window_cursor_style(gpui::CursorStyle::ClosedHand); }
                 let moving = workspace.clone();
-                window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, window, cx| {
+                window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
                     if phase != gpui::DispatchPhase::Bubble { return; }
                     let _ = moving.update(cx, |workspace, cx| {
                         if event.pressed_button != Some(MouseButton::Left) {
-                            workspace.explorer.resizing = false;
                             workspace.end_tree_scroll_drag(cx);
                             cx.notify();
                             return;
                         }
                         let bounds = workspace.tree_scroll.0.borrow().base_handle.bounds();
-                        if workspace.explorer.resizing {
-                            let max = (f32::from(window.viewport_size().width) - 420.0).clamp(180.0, 500.0);
-                            workspace.explorer.sidebar_width = Some(f32::from(event.position.x - bounds.left()).clamp(180.0, max));
-                            cx.notify();
-                        }
                         if workspace.explorer.scroll_dragging {
                             workspace.move_tree_scrollbar(f32::from(event.position.y - bounds.top()), cx);
                         }
@@ -344,7 +301,6 @@ impl Workspace {
                 window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, _, cx| {
                     if phase == gpui::DispatchPhase::Bubble && event.button == MouseButton::Left {
                         let _ = released.update(cx, |workspace, cx| {
-                            workspace.explorer.resizing = false;
                             workspace.end_tree_scroll_drag(cx);
                             cx.notify();
                         });
@@ -407,7 +363,7 @@ impl Workspace {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|workspace, _, _, cx| workspace.end_tree_scroll_drag(cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|workspace, _, _, cx| workspace.end_tree_scroll_drag(cx)))
-            .child(backdrop).child(list).child(feedback).children(scrollbar).children(search).child(resizer).children(tracking).children(menu).into_any_element()
+            .child(backdrop).child(list).child(feedback).children(scrollbar).children(search).children(tracking).children(menu).into_any_element()
     }
 
     fn move_tree_scrollbar(&mut self, y: f32, cx: &mut Context<Self>) {

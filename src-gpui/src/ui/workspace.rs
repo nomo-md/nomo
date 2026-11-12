@@ -5,7 +5,7 @@
 use crate::editor::ViewMode;
 use crate::nomo_mark::{document_host::{DocumentHost, DocumentEvent, EditTarget, OutlineHeading as Heading}, native_port::NativeWindowPort, session_window::WindowRequest};
 use crate::text_document::markdown_session::MarkdownDocumentSessionManager;
-use crate::settings::{EditorMode, Settings, StatsMetric};
+use crate::settings::{DocumentNavigationLayout, EditorMode, Settings, StatsMetric};
 use crate::theme::Theme;
 use crate::ui::components::{ButtonKind, IconName, button, floating_card, icon, slider, small_icon_button, tooltip};
 use crate::ui::file_tree::FileTree;
@@ -36,8 +36,10 @@ mod explorer;
 mod explorer_actions;
 mod explorer_delete;
 mod explorer_ui;
+mod explorer_label;
 mod explorer_search;
 mod outline;
+mod navigation;
 mod toolbar;
 mod status;
 mod application_dialogs;
@@ -79,6 +81,7 @@ pub(crate) struct Tab {
     active_color: ScalarMotion,
     hidden_hover: ScalarMotion,
     autosave: Option<Task<()>>,
+    outline_scroll: UniformListScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -99,9 +102,32 @@ struct OpeningDocument {
 }
 
 const TREE_ROW_HEIGHT: f32 = 30.0;
+const TREE_ROW_CONTENT_HEIGHT: f32 = 28.0;
+const TREE_ROW_PADDING: f32 = 8.0;
+const TREE_ROW_INDENT: f32 = 12.0;
+const TREE_ROW_GAP: f32 = 6.0;
+const TREE_ROW_HOVER: u32 = 0x80808014;
+const TREE_LIST_TOP_PADDING: f32 = 4.0;
+const TREE_ROOT_LIFT: f32 = 4.0;
+const TREE_ROW_ICON_SIZE: f32 = 13.0;
+const TREE_CHEVRON_SLOT: f32 = 16.0;
+const TREE_CHEVRON_SIZE: f32 = 12.0;
 const TREE_SELECTION_DURATION: Duration = Duration::from_millis(180);
 const TREE_CHEVRON_DURATION: Duration = Duration::from_millis(200);
 const PAGE_TITLE_FADE: Duration = Duration::from_millis(120);
+
+fn tree_row(indent: f32) -> gpui::Div {
+    div().w_full().h(px(TREE_ROW_CONTENT_HEIGHT)).pl(px(indent)).pr(px(4.0))
+        .flex().items_center().gap(px(TREE_ROW_GAP)).rounded(px(4.0)).text_size(px(14.0))
+}
+
+fn tree_root_row() -> gpui::Div {
+    tree_row(TREE_ROW_INDENT).text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD)
+}
+
+fn tree_chevron_slot() -> gpui::Div {
+    div().w(px(TREE_CHEVRON_SLOT)).h_full().flex_none().flex().items_center()
+}
 
 #[derive(Clone, PartialEq, Eq)]
 struct TreeSelection {
@@ -175,7 +201,7 @@ impl TreeChevronAnimation {
 
 fn tree_chevron(expanded: bool, path: Option<&Path>, animation: Option<&TreeChevronAnimation>, color: gpui::Hsla) -> AnyElement {
     let target = if expanded { 0.0 } else { -std::f32::consts::FRAC_PI_2 };
-    let arrow = icon(IconName::ChevronDown, 12.0, color);
+    let arrow = icon(IconName::ChevronDown, TREE_CHEVRON_SIZE, color);
     if let Some(animation) = animation.filter(|animation| {
         path.is_some_and(|path| path == animation.path) && animation.started.elapsed() < TREE_CHEVRON_DURATION
     }) {
@@ -280,6 +306,7 @@ pub struct Workspace {
     popover: Option<PendingPopover>,
     outline_scroll: UniformListScrollHandle,
     outline_ui: outline::OutlineUi,
+    navigation: navigation::NavigationState,
     tree_scroll: UniformListScrollHandle,
     /// 待显示的短提示；渲染时消费，同一条消息再次出现也会重新计时。
     notice: Option<SharedString>,
@@ -381,6 +408,8 @@ impl Workspace {
                 workspace.refresh_system_motion(cx);
                 if let Some(document)=workspace.document(){let _=document.update(cx,|host,cx|host.set_active(true,cx));}
                 if workspace.home_visible { workspace.home.update(cx, |home, cx| home.refresh(cx)); }
+            } else {
+                workspace.finish_navigation_resize(cx);
             }
         });
         let motion_observer = cx.observe_global::<MotionPreference>(|workspace, cx| {
@@ -440,6 +469,7 @@ impl Workspace {
             popover: None,
             outline_scroll: UniformListScrollHandle::new(),
             outline_ui: outline::OutlineUi::new(window, cx),
+            navigation: navigation::NavigationState::new(cx),
             tree_scroll: UniformListScrollHandle::new(),
             notice: None,
             failure_notice: service_error,
@@ -537,8 +567,9 @@ impl Workspace {
         self.search = None;
         self.close_status(cx);
         self.outline_ui.clear_document();
+        self.finish_navigation_resize(cx);
         self.home_visible = true;
-        self.explorer.sidebar_temporarily_visible = false;
+        self.navigation.tree_visible = false;
         self.suspend_tree(cx);
         self.surface.clear();
         self.home.update(cx, |home, cx| home.set_active(true, cx));
@@ -828,7 +859,7 @@ impl Workspace {
                         if preview {for tab in &mut workspace.tabs {tab.preview=false;}}
                         let dirty=document.read(cx).is_dirty(cx);
                         if !workspace.comparison.items.iter().any(|item|item.contains(tab_key)) {workspace.comparison.items.push(TabItem::Single(tab_key));}
-                        workspace.tabs.push(Tab {key:tab_key,document,mode,preview,opened_at:Instant::now(),dirty,dirty_animation_started:dirty.then(Instant::now),hover:ScalarMotion::default(),close_hover:ScalarMotion::default(),active_color:ScalarMotion::default(),hidden_hover:ScalarMotion::default(),autosave:None,_subscriptions:subscriptions});
+                        workspace.tabs.push(Tab {key:tab_key,document,mode,preview,opened_at:Instant::now(),dirty,dirty_animation_started:dirty.then(Instant::now),hover:ScalarMotion::default(),close_hover:ScalarMotion::default(),active_color:ScalarMotion::default(),hidden_hover:ScalarMotion::default(),autosave:None,outline_scroll:UniformListScrollHandle::new(),_subscriptions:subscriptions});
                         if let Some(index)=focus_before_open.and_then(|key|workspace.tab_index(key)) {workspace.active=index;}
                         if generation!=workspace.open_requests.generation && tab_key!=id && !workspace.home_visible {
                             if let Some(item)=workspace.tab().and_then(|tab|workspace.comparison.item(tab.key)) {workspace.show_members(&item.keys(),cx);}
@@ -975,7 +1006,6 @@ impl Workspace {
         let from_home = self.home_visible;
         self.home_visible = false;
         self.home.update(cx, |home, cx| home.set_active(false, cx));
-        if from_home { self.resume_tree(cx); }
         if let Some(path) = document.read(cx).path().filter(|_| after.record_recent) {
             self.library.update(cx, |library, cx| library.change(LibraryChange::Opened(path), cx));
         }
@@ -986,7 +1016,7 @@ impl Workspace {
         self.tab_menu_open=false;
         if let Some(position)=self.comparison.position(key) {self.tab_scroll.scroll_to_item(position);}
         self.record_layout(cx);
-        self.sync_tree_selection(true,cx);
+        self.sync_tree_selection(!from_home,cx);
         window.set_window_title(&format!("{} — Nomo",document.read(cx).display_title(cx)));
         if !window.has_active_prompt() { window.focus(&document.focus_handle(cx), cx); }
         self.last_notice=None;
@@ -1979,9 +2009,15 @@ impl Render for Workspace {
             if let Some(document)=self.document(){document.update(cx,|host,cx|host.set_workspace_focus(true,cx));}
         }
         if mode.is_none() { self.outline_ui.clear_document(); }
+        if let Some(pair) = self.active_pair() {
+            for key in [pair.left, pair.right] {
+                if let Some(document) = self.host_for(key) { document.update(cx, |host, cx| host.set_workspace_focus(key == pair.focused, cx)); }
+            }
+        }
         if !mini && let Some(area) = self.outline_ui.bounds.get() && let Some(document) = self.document() {
             document.update(cx, |host, cx| host.update_outline_layout(f32::from(area.size.width), settings.content_width_percent, cx));
         }
+        self.sync_navigation(window, cx);
         let outline_visible = self.outline_visible(cx);
         let status=self.document().map(|document|document.read(cx).status().clone());
         let sidebar_visible = if self.home_visible {
@@ -2022,7 +2058,8 @@ impl Render for Workspace {
         });
         let viewport_width = f32::from(window.viewport_size().width);
         let default_sidebar_width = if viewport_width < home::COMPACT_WINDOW_WIDTH { 208.0 } else { 250.0 };
-        let sidebar_width = self.explorer.sidebar_width.unwrap_or(default_sidebar_width).min((viewport_width - 420.0).max(180.0));
+        let saved_sidebar_width = settings.value("documentSidebarWidth").as_f64().filter(|width| width.is_finite()).map(|width| (width as f32).clamp(180.0, 500.0));
+        let sidebar_width = self.explorer.sidebar_width.or(saved_sidebar_width).unwrap_or(default_sidebar_width).min((viewport_width - 420.0).max(180.0));
         let sidebar_frame = if mini {
             motion::SidebarFrame::default()
         } else {
@@ -2126,8 +2163,8 @@ impl Render for Workspace {
                 }
             }))
             .on_mouse_move(cx.listener(|workspace, event: &gpui::MouseMoveEvent, _, cx| {workspace.comparison_mouse_move(event,cx);workspace.outline_mouse_move(event,cx);}))
-            .on_mouse_up(MouseButton::Left, cx.listener(|workspace, _, window, cx| {workspace.finish_comparison_resize(cx);workspace.outline_mouse_up(window, cx);}))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|workspace, event: &gpui::MouseUpEvent, window, cx| {workspace.finish_comparison_resize(cx);workspace.outline_mouse_up_out(event, window, cx);}))
+            .on_mouse_up(MouseButton::Left, cx.listener(|workspace, _, window, cx| {workspace.finish_comparison_resize(cx);workspace.outline_mouse_up(window, cx);workspace.finish_navigation_resize(cx);}))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|workspace, event: &gpui::MouseUpEvent, window, cx| {workspace.finish_comparison_resize(cx);workspace.outline_mouse_up_out(event, window, cx);workspace.finish_navigation_resize(cx);}))
             .on_action(cx.listener(|w, _: &NewFile, window, cx| w.new_file(window, cx)))
             .on_action(cx.listener(|w, _: &ShowHome, window, cx| w.show_home(window, cx)))
             .on_action(cx.listener(|w, _: &RecoverDocuments, window, cx| w.show_recovery_list(window, cx)))

@@ -8,7 +8,7 @@
 | 启动、菜单、平台打开事件 | `src-gpui/src/main.rs`、`open_instance.rs`、`window_placement.rs` | 默认 Workspace 与 feature 开发入口；首个主窗口恢复上次的位置、大小与最大化状态；系统打开路由、Windows 同数据目录／会话的有界实例消息转交，无参数再次启动在原进程新建窗口 |
 | 文档主页与最近记录 | `src-gpui/src/ui/home.rs`、`home/browser.rs`、`home/navigation.rs`、`home/folder_card.rs`、`home/document_card.rs`、`home/library.rs`、`home/library_order.rs`、`home/thumbnail.rs` | 无文件启动进入主页；左侧文件夹／最近文档分组，右侧文件与文件夹卡片，点击目录直接打开工作区；路径规范化去重，有界封面快照，灰白档案套仅前页使用正文缩略图、背页绘制线条；纸页同向错层与低前套独立弹簧，卡片和排序浮层共用封面 |
 | 旧版记录兼容 | `src-gpui/src/legacy_records.rs`、`text_document/markdown_session/legacy.rs`、`ui/workspace/comparison_legacy.rs` | 只读旧配置和草稿；最近记录与标签一次性合并，草稿按需转为原生会话；原记录保留，处理标记防止重复恢复 |
-| 默认应用外壳 | `src-gpui/src/ui/workspace.rs`、`workspace/toolbar.rs`、`workspace_surface.rs` | 多标签、连体边框与阴影、文件树、模式、工具栏、搜索、自动保存 |
+| 默认应用外壳 | `src-gpui/src/ui/workspace.rs`、`workspace/toolbar.rs`、`workspace/navigation.rs`、`workspace_surface.rs` | 多标签、连体边框与阴影、三种文档导航布局和显隐生命周期、主页往返、模式、工具栏、搜索、自动保存；仅工作区左侧栏顶部显示主页入口，主页隐藏文档标签栏；侧栏宽度、左栏标签、分区比例与大纲显隐独立持久化 |
 | Windows 组合标签 | `src-gpui/src/ui/workspace/comparison.rs`、`comparison_ui.rs`、`comparison_close.rs`、`comparison_drag.rs`、`comparison_layout.rs` | 展示项与文档会话分离；双文档焦点、标签/成员拖放、批量关闭、跨窗归属移交及按需恢复 |
 | 普通工作区恢复 | `src-gpui/src/ui/workspace/comparison_layout.rs`、`folder_workspace.rs`、`workspace.rs` | 三平台记录普通标签顺序、活动文档、模式、选区、阅读位置及文件夹；进入目录自动恢复该目录最新布局，切换前保存并沿用关闭确认；macOS／Linux 将组合记录展开，沿用有界清单与按需恢复 |
 | 编辑收尾与文档切换 | `src-gpui/src/ui/workspace/document_transition.rs`、`nomo_mark/workspace_host.rs`、`nomo_mark/object_ui.rs` | 组字和对象草稿收尾、确认后继续切换或关闭；单个待执行意图、临时订阅，无正文镜像或轮询 |
@@ -37,7 +37,7 @@
 | macOS Quick Look | `src-gpui/macos-quick-look/`、`src-gpui/src/quick_look.rs`、`quick_look_model.rs`、`scripts/build-macos-quick-look.sh` | 按需沙箱预览扩展，AppKit 原生排版、内嵌图片和用户选定目录的相对图片；正文 1 MiB、可取消串行渲染、有限图片和增强结果，关闭释放；无编辑会话、网络或 WebView |
 | 公式字体回退 | `src-gpui/src/math_fallback.rs`、`vendor/latex-rust/NOMO-PATCH.md` | 固定版 TeX 引擎扩展缺字接口，系统字体度量及轮廓参与正常排版；缓存只活到单次公式完成，复用现有位图缓存 |
 | 主题、动效与平台字体 | `src-gpui/src/theme.rs`、`theme_catalog.rs`、`resources/color-themes.json`、`src-gpui/src/ui/motion.rs` | 四套原版主题、有限用户主题目录及 JSON 导入／导出；同明暗配色与字体变更也失效可见区布局，图表配色进入共享缓存键 |
-| 配置与设置窗口 | `src-gpui/src/settings.rs`、`ui/settings_schema.rs`、`ui/settings_window.rs`、`ui/settings_pages.rs`、`ui/settings_fonts.rs` | 八个原版分区、主题导入／导出、从本机字体中搜索选用或恢复主题、图片策略；按原有配置原子保存 |
+| 配置与设置窗口 | `src-gpui/src/settings.rs`、`ui/settings_schema.rs`、`ui/settings_window.rs`、`ui/settings_pages.rs`、`ui/settings_fonts.rs` | 八个原版分区、文档导航布局、主题导入／导出、从本机字体中搜索选用或恢复主题、图片策略；按原有配置原子保存 |
 | 文件管理器定位 | `src-gpui/src/ui/file_manager.rs` | 文件树、文档标签和本地图片共用定位入口。Windows 在后台线程解析路径并选中条目，失败时通过界面提示 |
 | Windows 文件集成 | `src-gpui/src/windows_integration.rs`、`ui/settings_pages.rs`、`src-gpui/windows-shell-extension/`、`scripts/msix/`、`scripts/packaging/{open-with.nsh,msix/}` | NSIS／ZIP 的当前用户默认应用候选与经典右键菜单；MSIX 的原生 IExplorerCommand、新式菜单与包内启停标记；注册／卸载按副本或包身份核对 |
 | 自定义快捷键 | `src-gpui/src/ui/shortcuts.rs`、`ui/settings_shortcuts.rs`、`ui/mod.rs` | 16 项配置键（含编辑锁、HTML／PDF 导出）、输入草稿与冲突校验；提交后替换有限应用键表并更新菜单提示，不累计旧绑定 |
@@ -56,7 +56,7 @@
 | 脚注悬停预览 | `src-gpui/src/nomo_mark/footnote_preview.rs`、`workspace_queries.rs` | 共享结构索引定位，最多读取 8 KiB／显示 360 字；提示关闭、文档隐藏和后续悬停取消旧请求 |
 | 键盘与局部资源失效 | `src-gpui/src/nomo_mark/keyboard.rs`、`keyboard_session.rs`、`navigation.rs`、`resources.rs` | 按词、行、文档与翻页动作；有界跨窗查询；按资源依赖失效，无全文镜像 |
 | 连续窗口与预算 | `src-gpui/src/nomo_mark/native_port.rs`、`session_actions.rs`、`session_window.rs`、`viewport_ui.rs`、`viewport_model.rs`、`resident_budget.rs` | 正式/开发共用会话连接、已发布索引前缀增量分组、未索引尾部估算占位与阅读锚点、大编辑重分配、超大结构原文分片、失败重试、预取、回收和驻留预算 |
-| 同会话单栏/双栏 | `src-gpui/src/nomo_mark/window_panes.rs`、`src-gpui/src/ui/workspace/outline.rs` | 按需 Pane、唯一输入控件、全局导航、局部窗口同步、模式/历史阅读锚点与取消，不持有完整正文/历史。单栏按编辑区百分比排正文，大纲可自动隐藏或手动浮在当前编辑区右侧 |
+| 同会话单栏/双栏 | `src-gpui/src/nomo_mark/window_panes.rs`、`src-gpui/src/ui/workspace/outline.rs` | 按需 Pane、唯一输入控件、全局导航、局部窗口同步、模式/历史阅读锚点与取消，不持有完整正文/历史。单栏按编辑区百分比排正文；右侧大纲自动隐藏或手动浮在当前编辑区，左栏大纲不参与正文偏移；两种容器共用分页、折叠、定位和章节拖动 |
 | 页面全文查询 | `src-gpui/src/nomo_mark/workspace_queries.rs` | 后台搜索分页、全文统计、大纲（`outline_queries.rs`）；隐藏大纲取消查询并保留有界标题分页，重新展开复用同修订缓存，过期时后台更新；按文档保留磁盘折叠投影，关闭会话释放；查找与批量替换独立调度，按文档校验请求身份与修订 |
 | 应用界面语言 | `src-gpui/src/ui/toolbar_i18n.rs`、`resources/app-locales.json`、`resources/markdown-lint-locales.json`、`main.rs`、`settings.rs` | 四种语言与系统语言、稳定消息键及延迟解析；菜单、托盘与已缓存提示跟随界面语言，用户内容及底层错误原文不翻译 |
 | 工具栏文档命令与语言 | `src-gpui/src/nomo_mark/toolbar_commands.rs`、`toolbar_global.rs`、`semantic_selection.rs`、`semantic_global.rs`、`toc_update.rs`、`src-gpui/src/ui/toolbar_i18n.rs`、`src-gpui/resources/toolbar-locales.json` | 脚注和目录分页、派生事务、跨窗口语义补丁、四种界面语言；按需和预算内处理 |

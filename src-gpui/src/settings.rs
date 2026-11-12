@@ -23,6 +23,15 @@ pub enum EditorMode {
     Split,
 }
 
+/// 文档辅助导航的位置；不改变编辑模式或文档会话。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DocumentNavigationLayout {
+    #[default]
+    RightOutline,
+    LeftTabs,
+    LeftSplit,
+}
+
 /// 主题模式：默认跟随系统外观（与 Web 版 `themeMode: 'system'` 一致）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ThemeMode {
@@ -64,6 +73,11 @@ pub fn default_value(key: &str) -> Value {
         "homeSidebarHidden" | "sidebarHidden" => json!(false),
         "toolbarHidden" => json!(false),
         "outlineVisible" => json!(true),
+        "documentNavigationLayout" => json!("right-outline"),
+        "documentNavigationTab" => json!("files"),
+        "documentNavigationSplitRatio" => json!(0.55),
+        "documentNavigationFilesCollapsed" | "documentNavigationOutlineCollapsed" => json!(false),
+        "documentSidebarWidth" => json!("auto"),
         "outlinePanelPosition" => json!({"positioned": false}),
         "writingStatsVisible" | "zoomControlVisible" | "markdownLintIndicatorVisible" | "editLockButtonVisible" => json!(true),
         "writingStatsMetric" => json!("words"),
@@ -106,6 +120,7 @@ pub struct Settings {
     /// 分栏时源码在左（`source-semantic`）。
     pub split_source_first: bool,
     pub show_outline: bool,
+    pub document_navigation_layout: DocumentNavigationLayout,
     pub show_home_sidebar: bool,
     pub show_sidebar: bool,
     pub show_toolbar: bool,
@@ -143,6 +158,7 @@ impl Default for Settings {
             default_mode: EditorMode::Semantic,
             split_source_first: false,
             show_outline: true,
+            document_navigation_layout: DocumentNavigationLayout::RightOutline,
             show_home_sidebar: true,
             show_sidebar: true,
             show_toolbar: true,
@@ -302,6 +318,11 @@ impl Settings {
         };
         self.split_source_first = self.string("splitViewLayout") == "source-semantic";
         self.show_outline = self.bool("outlineVisible");
+        self.document_navigation_layout = match self.string("documentNavigationLayout").as_str() {
+            "left-tabs" => DocumentNavigationLayout::LeftTabs,
+            "left-split" => DocumentNavigationLayout::LeftSplit,
+            _ => DocumentNavigationLayout::RightOutline,
+        };
         self.show_home_sidebar = !self.bool("homeSidebarHidden");
         self.show_sidebar = !self.bool("sidebarHidden");
         self.show_toolbar = !self.bool("toolbarHidden");

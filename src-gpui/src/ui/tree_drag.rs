@@ -145,7 +145,8 @@ impl TreeDrag {
         if moved && self.layout.source.is_some() && rows.iter().any(|row| row.path.as_ref() == item.path) { return; }
         let ready = if let Some(index) = rows.iter().position(|row| row.path.as_ref() == path) {
             let depth = rows[index].depth;
-            let next = rows[index + 1..].iter().take_while(|row| row.depth >= depth).find(|row| row.depth == depth);
+            let next = rows[index + 1..].iter().take_while(|row| row.depth >= depth)
+                .find(|row| row.depth == depth && (self.folder_section.is_none() || row.folder == item.directory));
             next.map(|row| row.path.as_ref()) == placement.before.as_deref()
         } else {
             moved && rows.iter().position(|row| row.path.as_ref() == placement.parent)

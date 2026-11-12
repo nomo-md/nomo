@@ -1,14 +1,83 @@
-//! 文档大纲浮层：界面只消费结构索引的有限页，不持有正文。
+//! 左栏与右侧浮层共用的大纲：界面只消费结构索引的有限页，不持有正文。
 use super::*;
+use super::explorer_label::TreeLabel;
 use crate::ui::toolbar_i18n::ToolbarLocale;
 use crate::nomo_mark::document_host::{OutlineLayout, OutlineSnapshot};
 
-const OUTLINE_ROW_HEIGHT: f32 = 32.0;
-const OUTLINE_ROW_CONTENT_HEIGHT: f32 = 24.0;
 const OUTLINE_PADDING: f32 = 14.0;
 const OUTLINE_PANEL_WIDTH: f32 = OutlineLayout::PANEL_WIDTH;
 const OUTLINE_EDGE_GAP: f32 = 8.0;
 const MAX_ANIMATED_ROWS: usize = 64;
+
+#[derive(Clone, Copy)]
+struct OutlineRowStyle {
+    docked: bool,
+    height: f32,
+    content_height: f32,
+    padding: f32,
+}
+
+impl OutlineRowStyle {
+    fn new(docked: bool) -> Self {
+        if docked {
+            Self { docked, height: TREE_ROW_HEIGHT, content_height: TREE_ROW_CONTENT_HEIGHT, padding: TREE_ROW_PADDING }
+        } else {
+            Self { docked, height: 32.0, content_height: 24.0, padding: OUTLINE_PADDING }
+        }
+    }
+
+    fn current(cx: &App) -> Self {
+        Self::new(cx.global::<Settings>().document_navigation_layout != DocumentNavigationLayout::RightOutline)
+    }
+
+    fn list_top_padding(self) -> f32 {
+        if self.docked { TREE_LIST_TOP_PADDING } else { 0.0 }
+    }
+
+    fn top(self, level: u8, position: usize) -> f32 {
+        if !self.docked { return 0.0; }
+        let centered = (self.height - self.content_height) * 0.5;
+        if level == 1 && position == 0 { centered - TREE_ROOT_LIFT } else { centered }
+    }
+
+    fn row(self, level: u8) -> gpui::Div {
+        let depth = f32::from(level.saturating_sub(1));
+        if self.docked {
+            return if level == 1 { tree_root_row() } else { tree_row((depth + 1.0) * TREE_ROW_INDENT) };
+        }
+        div().w_full().h(px(self.content_height)).pl(px(depth * 16.0))
+            .flex().items_center().gap(px(7.0)).rounded(px(4.0)).overflow_hidden().text_size(px(14.0))
+    }
+
+    fn chevron_slot(self) -> gpui::Div {
+        if self.docked { return tree_chevron_slot(); }
+        div().w(px(16.0)).h(px(self.content_height)).flex_none().flex().items_center().justify_center()
+    }
+
+    fn chevron(self, angle: f32, color: gpui::Hsla, theme: &Theme) -> impl IntoElement {
+        let (size, color) = if self.docked { (TREE_CHEVRON_SIZE, theme.muted) } else { (13.0, color) };
+        icon(IconName::ChevronDown, size, color).with_transformation(Transformation::rotate(radians(angle)))
+    }
+
+    fn can_fold(self, level: u8) -> bool {
+        !self.docked || level > 1
+    }
+
+    fn row_icon(self, level: u8, theme: &Theme) -> Option<impl IntoElement> {
+        (self.docked && level > 1).then(|| icon(IconName::FileText, TREE_ROW_ICON_SIZE, theme.muted))
+    }
+
+    fn label(self, title: String, theme: &Theme) -> gpui::Div {
+        let label = div().flex_1().min_w_0().overflow_hidden();
+        if self.docked {
+            return label.child(TreeLabel::new(title, "", theme.search_match));
+        }
+        let (number, rest) = split_number(&title);
+        label.flex().whitespace_nowrap()
+            .child(div().flex_none().max_w(px(55.0)).truncate().opacity(0.45).child(number.to_string()))
+            .child(div().flex_1().min_w_0().truncate().child(rest.to_string()))
+    }
+}
 
 fn outline_drag_cursor(held: bool) -> gpui::CursorStyle {
     use gpui::CursorStyle::{ClosedHand, OpenHand, PointingHand};
@@ -144,6 +213,7 @@ struct SectionDrag {
 }
 pub(super) struct OutlineUi {
     pub bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    pub sidebar_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     panel_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     focus: FocusHandle,
     keyboard_focus_visible: bool,
@@ -175,7 +245,7 @@ impl OutlineUi {
         let activation = cx.observe_window_activation(window, |workspace, window, cx| {
             if !window.is_window_active() { workspace.outline_ui.panel_drag = None; workspace.outline_ui.section_drag = None; workspace.outline_ui.auto_scroll = None; workspace.outline_ui.menu = None; cx.notify(); }
         });
-        Self { bounds: Rc::new(Cell::new(None)), panel_bounds: Rc::new(Cell::new(None)), focus: cx.focus_handle(), keyboard_focus_visible: true, selected: 0, selected_key: None, selected_revision: 0, panel_height: 92.0, list_height: 24.0, document_id: None,
+        Self { bounds: Rc::new(Cell::new(None)), sidebar_bounds: Rc::new(Cell::new(None)), panel_bounds: Rc::new(Cell::new(None)), focus: cx.focus_handle(), keyboard_focus_visible: true, selected: 0, selected_key: None, selected_revision: 0, panel_height: 92.0, list_height: 24.0, document_id: None,
             showing: false, visibility: ScalarMotion::default(), exit_snapshot: None, pending_projection: None,
             projection_motion: None, active_target: None, active_motion: None, row_hovers: Vec::new(), bulk_hover: ScalarMotion::default(),
             panel_drag: None, menu: None, section_drag: None, auto_scroll: None, suppress_click: false, drag_generation: 0, _activation: activation }
@@ -199,6 +269,15 @@ impl OutlineUi {
         self.drag_generation += 1;
     }
 
+    pub(super) fn suspend_for_navigation(&mut self) {
+        self.suspend_for_mini();
+        self.showing = false;
+        self.visibility.reset();
+    }
+
+    pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool { self.focus.contains_focused(window, cx) }
+    pub(super) fn focus(&self, window: &mut Window, cx: &mut App) { window.focus(&self.focus, cx); }
+
     pub(super) fn set_reduced_motion(&mut self, reduced: bool) {
         self.visibility.retime(reduced, Duration::from_millis(160));
         self.bulk_hover.retime(reduced, Duration::from_millis(140));
@@ -219,29 +298,30 @@ fn split_number(text: &str) -> (&str, &str) {
     (&text[..end], &text[end..])
 }
 
-fn fading_outline_row(row: &OutlineVisualRow, theme: &Theme) -> AnyElement {
-    let color = if row.active { theme.accent_strong } else { theme.muted };
-    let arrow = if row.has_children {
-        icon(IconName::ChevronDown, 13.0, color).with_transformation(Transformation::rotate(radians(
-            if row.collapsed { -std::f32::consts::FRAC_PI_2 } else { 0.0 }
-        ))).into_any_element()
-    } else { div().into_any_element() };
-    let (number, rest) = split_number(&row.text);
-    div().w_full().h(px(OUTLINE_ROW_CONTENT_HEIGHT)).pl(px((row.level.saturating_sub(1)) as f32 * 16.0))
-        .flex().items_center().gap(px(7.0)).rounded(px(4.0)).overflow_hidden()
-        .text_size(px(14.0)).text_color(color)
-        .when(row.active, |el| el.bg(theme.accent.opacity(0.07)).font_weight(FontWeight::SEMIBOLD))
-        .child(div().w(px(16.0)).h(px(24.0)).flex_none().flex().items_center().justify_center().child(arrow))
-        .child(div().flex().flex_1().min_w_0().overflow_hidden().whitespace_nowrap()
-            .child(div().flex_none().max_w(px(55.0)).truncate().opacity(0.45).child(number.to_string()))
-            .child(div().flex_1().min_w_0().truncate().child(rest.to_string())))
+fn fading_outline_row(row: &OutlineVisualRow, style: OutlineRowStyle, theme: &Theme) -> AnyElement {
+    let color = if style.docked { theme.fg } else if row.active { theme.accent_strong } else { theme.muted };
+    let arrow = (row.has_children && style.can_fold(row.level)).then(|| {
+        let angle = if row.collapsed { -std::f32::consts::FRAC_PI_2 } else { 0.0 };
+        style.chevron(angle, color, theme)
+    });
+    style.row(row.level).text_color(color)
+        .when(!style.docked && row.active, |el| el.bg(theme.accent.opacity(0.07)).font_weight(FontWeight::SEMIBOLD))
+        .when(style.can_fold(row.level), |el| el.child(style.chevron_slot().children(arrow)))
+        .children(style.row_icon(row.level, theme))
+        .child(style.label(row.text.clone(), theme))
         .into_any_element()
 }
 
 impl Workspace {
     pub(super) fn outline_visible(&self, cx: &App) -> bool {
-        (!self.mini.active() || self.mini.shell_frame().is_some()) && self.outline_ui.bounds.get().is_some_and(|area| area.size.width > px(0.0)) && cx.global::<Settings>().show_outline
-            && self.document().is_some_and(|doc| doc.read(cx).outline_can_show())
+        let settings = cx.global::<Settings>();
+        if self.home_visible || (self.mini.active() && self.mini.shell_frame().is_none()) || !settings.show_outline || self.document().is_none() { return false; }
+        match settings.document_navigation_layout {
+            DocumentNavigationLayout::RightOutline => self.outline_ui.bounds.get().is_some_and(|area| area.size.width > px(0.0))
+                && self.document().is_some_and(|doc| doc.read(cx).outline_can_show()),
+            DocumentNavigationLayout::LeftTabs => self.explorer.sidebar_visible(settings) && settings.string("documentNavigationTab") == "outline",
+            DocumentNavigationLayout::LeftSplit => self.explorer.sidebar_visible(settings) && !settings.bool("documentNavigationOutlineCollapsed"),
+        }
     }
 
     pub(super) fn toggle_outline(&mut self, cx: &mut Context<Self>) {
@@ -251,9 +331,21 @@ impl Workspace {
     fn set_outline_open(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.mini.active() { return; }
         let Some(document) = self.document() else { return; };
-        document.update(cx, |host, cx| host.set_manual_outline_open(open, cx));
-        if cx.global::<Settings>().show_outline != open {
-            Settings::set(cx, "outlineVisible", serde_json::json!(open));
+        match cx.global::<Settings>().document_navigation_layout {
+            DocumentNavigationLayout::LeftTabs => {
+                Settings::set(cx, "documentNavigationTab", serde_json::json!(if open { "outline" } else { "files" }));
+            }
+            DocumentNavigationLayout::LeftSplit => Settings::set(cx, "documentNavigationOutlineCollapsed", serde_json::json!(!open)),
+            DocumentNavigationLayout::RightOutline => {
+                document.update(cx, |host, cx| host.set_manual_outline_open(open, cx));
+                Settings::set(cx, "outlineVisible", serde_json::json!(open));
+                cx.notify();
+                return;
+            }
+        }
+        if open {
+            Settings::set(cx, "sidebarHidden", serde_json::json!(false));
+            Settings::set(cx, "outlineVisible", serde_json::json!(true));
         }
         cx.notify();
     }
@@ -265,7 +357,7 @@ impl Workspace {
         if snapshot.pending || snapshot.error.is_some() { return None; }
         let scroll = self.outline_scroll.0.borrow().base_handle.clone();
         let top = scroll.logical_scroll_top().0;
-        let count = ((self.outline_ui.list_height / OUTLINE_ROW_HEIGHT).ceil() as usize + 3).min(MAX_ANIMATED_ROWS);
+        let count = ((self.outline_ui.list_height / OutlineRowStyle::current(cx).height).ceil() as usize + 3).min(MAX_ANIMATED_ROWS);
         let from = top.saturating_sub(1);
         let rows = (from..from.saturating_add(count).min(snapshot.count)).filter_map(|index| snapshot.row(index)).map(|heading| OutlineVisualRow {
             key: heading.key(), position: heading.position, level: heading.level,
@@ -278,6 +370,7 @@ impl Workspace {
     }
 
     fn toggle_outline_heading(&mut self, heading: &Heading, cx: &mut Context<Self>) {
+        if !OutlineRowStyle::current(cx).can_fold(heading.level) { return; }
         if let Some(document) = self.begin_outline_projection_change(cx) {
             document.update(cx, |host, cx| host.set_outline_fold(heading, cx));
         }
@@ -308,6 +401,16 @@ impl Workspace {
     }
 
     pub(super) fn render_outline_panel(&mut self, theme: &Theme, mode: EditorMode, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if cx.global::<Settings>().document_navigation_layout != DocumentNavigationLayout::RightOutline { return None; }
+        self.render_outline(theme, mode, false, window, cx)
+    }
+
+    pub(super) fn render_docked_outline(&mut self, theme: &Theme, mode: EditorMode, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.render_outline(theme, mode, true, window, cx)
+    }
+
+    fn render_outline(&mut self, theme: &Theme, mode: EditorMode, docked: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let row_style = OutlineRowStyle::new(docked);
         self.outline_ui.panel_bounds.set(None);
         let document = self.document()?;
         let document_id = document.read(cx).status().document_id.clone();
@@ -330,18 +433,22 @@ impl Workspace {
             self.outline_ui.active_motion = None;
             self.outline_ui.row_hovers.clear();
             self.outline_ui.bulk_hover.reset();
-            self.outline_scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
+            self.outline_scroll = self.tab()?.outline_scroll.clone();
         }
         let settings = cx.global::<Settings>().clone();
-        let area = self.outline_ui.bounds.get()?;
+        let area = if docked { self.outline_ui.sidebar_bounds.get()? } else { self.outline_ui.bounds.get()? };
         let width = f32::from(area.size.width);
-        let can_show = width > 0.0 && document.read(cx).outline_can_show();
-        let visible = settings.show_outline && can_show;
+        let can_show = width > 0.0 && (docked || document.read(cx).outline_can_show());
+        let visible = self.outline_visible(cx) && can_show;
         let reduced = self.explorer.reduce_motion;
         if visible != self.outline_ui.showing {
             self.outline_ui.exit_snapshot = if !visible && can_show { Some(document.read(cx).outline_snapshot()) } else { None };
             self.outline_ui.showing = visible;
             if !can_show { self.outline_ui.visibility.reset(); }
+            else if docked && settings.document_navigation_layout == DocumentNavigationLayout::LeftTabs {
+                // 标签容器负责双向入场，大纲自身只保留分区和浮层的显隐动效。
+                self.outline_ui.visibility = ScalarMotion::settled(visible);
+            }
             else { self.outline_ui.visibility.set(visible, reduced, Duration::from_millis(160)); }
             if !visible {
                 if self.outline_ui.focus.contains_focused(window, cx) && !window.has_active_prompt() {
@@ -373,7 +480,7 @@ impl Workspace {
         if self.outline_ui.projection_motion.as_ref().is_some_and(|animation| !animation.running() || animation.before.revision != snapshot.revision) {
             self.outline_ui.projection_motion = None;
         }
-        if visible && self.outline_ui.active_target != snapshot.active_byte {
+        if !docked && visible && self.outline_ui.active_target != snapshot.active_byte {
             self.outline_ui.active_motion = Some(ActiveMotion { from: self.outline_ui.active_target, to: snapshot.active_byte,
                 started: Instant::now(), duration: Duration::from_millis(if reduced { 90 } else { 160 }) });
             self.outline_ui.active_target = snapshot.active_byte;
@@ -398,22 +505,25 @@ impl Workspace {
         let scroll = self.outline_scroll.0.borrow().base_handle.clone();
         let top_index = scroll.logical_scroll_top().0;
         let scroll_y = f32::from(scroll.offset().y);
-        if visible && !self.mini.active() { document.update(cx, |host, cx| host.request_outline_page(top_index, cx)); }
+        if visible && !self.mini.active() && snapshot.count > 0 { document.update(cx, |host, cx| host.request_outline_page(top_index, cx)); }
         let count = snapshot.count + usize::from(!snapshot.complete && snapshot.count > 0);
         let area_height = f32::from(area.size.height);
         let notice_height = if snapshot.error.is_some() || snapshot.incomplete { 40.0 } else { 0.0 };
-        let saved = SavedOutlinePosition::load(area, window, cx);
+        let saved = if docked { None } else { SavedOutlinePosition::load(area, window, cx) };
         let max_panel_height = if saved.is_some() { area_height - 16.0 } else { f32::from(window.viewport_size().height) - 260.0 };
-        // 虚拟列表的每格固定 32px；末行自带 8px 空隙，避免不足一格造成多余滚动。
-        let bottom_padding = if count == 0 { OUTLINE_PADDING } else { OUTLINE_PADDING - 8.0 };
-        let max_list_height = (max_panel_height.min(area_height - 16.0) - 54.0 - bottom_padding - notice_height).max(24.0);
-        let target_list_height = (count as f32 * OUTLINE_ROW_HEIGHT).clamp(24.0, max_list_height);
+        let header_height = if docked { 0.0 } else { 54.0 };
+        let top_padding = if count == 0 { row_style.list_top_padding() } else { 0.0 };
+        let bottom_padding = if docked { 6.0 } else if count == 0 { OUTLINE_PADDING } else { OUTLINE_PADDING - 8.0 };
+        let max_list_height = if docked { (area_height - top_padding - bottom_padding - notice_height).max(0.0) }
+            else { (max_panel_height.min(area_height - 16.0) - header_height - bottom_padding - notice_height).max(24.0) };
+        let target_list_height = if docked { max_list_height } else { (count as f32 * row_style.height).clamp(24.0, max_list_height) };
         let animation = self.outline_ui.projection_motion.clone();
         let progress = animation.as_ref().map_or(1.0, ProjectionMotion::progress);
-        let list_height = animation.as_ref().map_or(target_list_height, |animation|
-            (animation.before.list_height + (target_list_height - animation.before.list_height) * progress).clamp(24.0, max_list_height));
+        let list_height = if docked { target_list_height } else { animation.as_ref().map_or(target_list_height, |animation|
+            (animation.before.list_height + (target_list_height - animation.before.list_height) * progress).clamp(24.0, max_list_height))
+        };
         self.outline_ui.list_height = list_height;
-        let height = list_height + 54.0 + bottom_padding + notice_height;
+        let height = list_height + header_height + top_padding + bottom_padding + notice_height;
         self.outline_ui.panel_height = height;
         let visibility = self.outline_ui.visibility.value() * self.mini.shell_frame().map_or(1.0, |frame| frame.visibility);
         let active = snapshot.active_byte;
@@ -421,24 +531,25 @@ impl Workspace {
         let revision = snapshot.revision;
         let focused = self.outline_ui.focus.is_focused(window);
         if !focused { self.outline_ui.keyboard_focus_visible = true; }
-        let selected = (focused && self.outline_ui.keyboard_focus_visible).then_some(self.outline_ui.selected);
+        let selected = (!docked && focused && self.outline_ui.keyboard_focus_visible).then_some(self.outline_ui.selected);
         let drag_visual = self.outline_ui.section_drag.as_ref().filter(|d|d.moving).map(|d| (d.source.position,d.target.as_ref().map(|h|h.position),d.placement,d.valid));
         let row_hovers = Rc::new(self.outline_ui.row_hovers.iter().map(|entry| (entry.key.clone(), entry.motion.value())).collect::<Vec<_>>());
         let page = snapshot.clone();
         let theme = theme.clone();
         let rows: AnyElement = if count == 0 {
             let text: String = if snapshot.error.is_some() { ToolbarLocale::current(cx).app_text("outline.unavailable").into() } else if snapshot.pending && !snapshot.complete { ToolbarLocale::current(cx).app_text("outline.loading").into() } else if snapshot.incomplete { ToolbarLocale::current(cx).app_text("outline.incomplete").into() } else { ToolbarLocale::current(cx).app_text("outline.empty").into() };
-            div().w_full().h(px(list_height)).px(px(OUTLINE_PADDING)).text_size(px(13.0)).text_color(theme.muted).child(text).into_any_element()
+            div().w_full().h(px(list_height)).px(px(row_style.padding)).text_size(px(13.0)).text_color(theme.muted).child(text).into_any_element()
         } else {
             let ghosts: Vec<AnyElement> = animation.as_ref().map(|animation| {
-                let end = top_index.saturating_add(((list_height / OUTLINE_ROW_HEIGHT).ceil() as usize + 3).min(MAX_ANIMATED_ROWS)).min(snapshot.count);
+                let end = top_index.saturating_add(((list_height / row_style.height).ceil() as usize + 3).min(MAX_ANIMATED_ROWS)).min(snapshot.count);
                 let start = top_index.saturating_sub(1).min(end);
                 if (start..end).any(|index| snapshot.row(index).is_none()) { return Vec::new(); }
                 let keys: Vec<String> = (start..end).filter_map(|index| snapshot.row(index)).map(Heading::key).collect();
                 animation.before.rows.iter().filter(|row| !keys.contains(&row.key)).filter_map(|row| {
-                    let y = row.position as f32 * OUTLINE_ROW_HEIGHT + animation.before.offset_y - 3.0 * progress;
-                    (y > -OUTLINE_ROW_HEIGHT && y < list_height).then(|| div().absolute().left_0().right_0().top(px(y))
-                        .opacity(1.0 - progress).child(fading_outline_row(row, &theme)).into_any_element())
+                    let y = row.position as f32 * row_style.height + row_style.list_top_padding()
+                        + row_style.top(row.level, row.position) + animation.before.offset_y - 3.0 * progress;
+                    (y > -row_style.height && y < list_height).then(|| div().absolute().left_0().right_0().top(px(y))
+                        .opacity(1.0 - progress).child(fading_outline_row(row, row_style, &theme)).into_any_element())
                 }).collect()
             }).unwrap_or_default();
             let list = uniform_list("outline", count, {
@@ -448,29 +559,30 @@ impl Workspace {
                 cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
                     range.map(|index| {
                         let Some(heading) = page.row(index).cloned() else {
-                            return div().w_full().h(px(OUTLINE_ROW_HEIGHT)).text_color(theme.muted).child(ToolbarLocale::current(cx).app_text("outline.loadingRow")).into_any_element();
+                            return div().w_full().h(px(row_style.height)).text_color(theme.muted).child(ToolbarLocale::current(cx).app_text("outline.loadingRow")).into_any_element();
                         };
-                        let active = active == Some(heading.byte);
+                        let active = !docked && active == Some(heading.byte);
                         let active_weight = active_motion.as_ref().map_or(if active { 1.0 } else { 0.0 }, |animation| animation.weight(heading.byte));
                         let key = heading.key();
                         let old = animation.as_ref().and_then(|animation| animation.before.rows.iter().find(|row| row.key == key));
                         let (offset, opacity) = if let Some(animation) = &animation {
                             if let Some(old) = old {
-                                let delta = (old.position as f32 - index as f32) * OUTLINE_ROW_HEIGHT + animation.before.offset_y - scroll_y;
+                                let delta = (old.position as f32 - index as f32) * row_style.height + animation.before.offset_y - scroll_y;
                                 (delta.clamp(-list_height, list_height) * (1.0 - progress), 1.0)
                             } else { (-3.0 * (1.0 - progress), progress) }
                         } else { (0.0, 1.0) };
                         let hover = row_hovers.iter().find(|(hovered,_)| hovered == &key).map_or(0.0, |(_, value)| *value);
-                        let color = motion::color(motion::color(theme.muted, theme.accent_strong, hover), theme.accent_strong, active_weight);
+                        let color = if docked { theme.fg }
+                            else { motion::color(motion::color(theme.muted, theme.accent_strong, hover), theme.accent_strong, active_weight) };
                         let title = if heading.text.is_empty() { ToolbarLocale::current(cx).app_text("outline.emptyHeading").to_string() } else { heading.text.clone() };
                         let title_hint = ToolbarLocale::current(cx).app_format("outline.headingLine", &[("title", &title), ("line", &heading.line.to_string())]);
-                        let (number, rest) = split_number(&title);
-                        let number = number.to_string(); let rest = rest.to_string();
                         let fold_heading = heading.clone(); let goto_heading = heading.clone(); let menu_heading = heading.clone();
                         let drag_heading = heading.clone();
                         let hover_key = key.clone();
                         let drop = drag_visual.filter(|(_, target, _, _)| *target == Some(index));
-                        let toggle = if heading.has_children {
+                        let toggle = if !row_style.can_fold(heading.level) {
+                            None
+                        } else if heading.has_children {
                             let target = if heading.collapsed { -std::f32::consts::FRAC_PI_2 } else { 0.0 };
                             let angle = old.map_or(target, |old| {
                                 let from = if old.collapsed { -std::f32::consts::FRAC_PI_2 } else { 0.0 };
@@ -480,28 +592,29 @@ impl Workspace {
                                 });
                                 from + (target - from) * arrow_progress
                             });
-                            div().id((if heading.collapsed { "outline-fold-collapsed" } else { "outline-fold-expanded" }, index)).w(px(16.0)).h(px(24.0)).flex_none().flex().items_center().justify_center()
+                            Some(row_style.chevron_slot().id((if heading.collapsed { "outline-fold-collapsed" } else { "outline-fold-expanded" }, index))
                                 .cursor_pointer().tooltip(tooltip(if heading.collapsed { ToolbarLocale::current(cx).app_text("outline.expandHeading") } else { ToolbarLocale::current(cx).app_text("outline.collapseHeading") }))
-                                .child(icon(IconName::ChevronDown, 13.0, color).with_transformation(Transformation::rotate(radians(angle))))
+                                .child(row_style.chevron(angle, color, &theme))
                                 .on_mouse_down(MouseButton::Left, cx.listener(|workspace, _, _, cx| { workspace.outline_ui.keyboard_focus_visible = false; cx.stop_propagation(); cx.notify(); }))
                                 .on_click(cx.listener(move |workspace, _, _, cx| { cx.stop_propagation(); workspace.toggle_outline_heading(&fold_heading, cx); }))
-                                .into_any_element()
-                        } else { div().w(px(16.0)).h(px(24.0)).flex_none().into_any_element() };
-                        let row = div().id(("outline-row", index)).relative().top(px(offset)).w_full().h(px(OUTLINE_ROW_CONTENT_HEIGHT))
-                            .pl(px((heading.level.saturating_sub(1)) as f32 * 16.0))
-                            .flex().items_center().gap(px(7.0)).rounded(px(4.0)).overflow_hidden()
+                                .into_any_element())
+                        } else { Some(row_style.chevron_slot().into_any_element()) };
+                        let row = row_style.row(heading.level).id(("outline-row", index)).relative()
+                            .top(px(row_style.top(heading.level, index) + offset))
                             .when(editable, |row| row.cursor(outline_drag_cursor(false)))
                             .when(!editable, |row| row.cursor_pointer())
-                            .text_size(px(14.0)).text_color(color).opacity(opacity)
-                            .when(active_weight > 0.0, |el| el.bg(theme.accent.opacity(0.07 * active_weight)))
+                            .text_color(color).opacity(opacity)
+                            .when(!docked && active_weight > 0.0, |el| el.bg(theme.accent.opacity(0.07 * active_weight)))
+                            .when(docked && drop.is_none(), |el| el.hover(|style| style.bg(gpui::rgba(TREE_ROW_HOVER))))
                             .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
                             .when(selected == Some(index), |el| el.border_1().border_color(theme.accent))
                             .when(drag_visual.is_some_and(|(source,_,_,_)| source == index), |el| el.opacity(0.38))
                             .when(drop.is_some_and(|(_,_,_,valid)| !valid), |el| el.bg(theme.callout_caution.opacity(0.12)).border_1().border_color(theme.callout_caution))
                             .when(drop.is_some_and(|(_,_,place,valid)| valid && matches!(place,crate::text_document::markdown_session::OutlinePlacement::Inside)), |el| el.bg(theme.accent.opacity(0.15)).border_1().border_color(theme.accent))
-                            .child(toggle).child(div().id(("outline-title",index)).flex().items_center().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().tooltip(tooltip(title_hint))
-                                .child(div().flex_none().max_w(px(55.0)).truncate().opacity(0.45).child(number)).child(div().flex_1().min_w_0().truncate().child(rest)))
-                            .on_hover(cx.listener(move |workspace, hovered: &bool, _, cx| workspace.set_outline_row_hover(hover_key.clone(), *hovered, cx)))
+                            .children(toggle).children(row_style.row_icon(heading.level, &theme))
+                            .child(row_style.label(title, &theme).when(!docked, |el| el.items_center())
+                                .id(("outline-title", index)).tooltip(tooltip(title_hint)))
+                            .when(!docked, |el| el.on_hover(cx.listener(move |workspace, hovered: &bool, _, cx| workspace.set_outline_row_hover(hover_key.clone(), *hovered, cx))))
                             .on_click(cx.listener(move |workspace, _, _, cx| {
                                 if !workspace.outline_ui.showing { return; }
                                 if workspace.outline_ui.suppress_click { workspace.outline_ui.suppress_click=false; return; }
@@ -525,46 +638,51 @@ impl Workspace {
                                 workspace.outline_ui.keyboard_focus_visible = false;
                                 cx.stop_propagation(); workspace.outline_ui.menu = Some(OutlineMenu { position: event.position, heading: Some(menu_heading.clone()), revision }); cx.notify();
                             }));
-                        div().relative().w_full().h(px(OUTLINE_ROW_HEIGHT)).child(row)
+                        let before_line = if docked { 0.0 } else { -5.0 };
+                        let after_line = if docked { row_style.height - 2.0 } else { row_style.content_height + 3.0 };
+                        div().relative().w_full().h(px(row_style.height)).child(row)
                             .when(drop.is_some_and(|(_,_,place,valid)| valid && matches!(place,crate::text_document::markdown_session::OutlinePlacement::Before)), |el|
-                                el.child(div().absolute().left(px(3.0)).right(px(3.0)).top(px(offset - 5.0)).h(px(2.0)).rounded_full().bg(theme.accent)))
+                                el.child(div().absolute().left(px(3.0)).right(px(3.0)).top(px(offset + before_line)).h(px(2.0)).rounded_full().bg(theme.accent)))
                             .when(drop.is_some_and(|(_,_,place,valid)| valid && matches!(place,crate::text_document::markdown_session::OutlinePlacement::After)), |el|
-                                el.child(div().absolute().left(px(3.0)).right(px(3.0)).top(px(offset + OUTLINE_ROW_CONTENT_HEIGHT + 3.0)).h(px(2.0)).rounded_full().bg(theme.accent)))
+                                el.child(div().absolute().left(px(3.0)).right(px(3.0)).top(px(offset + after_line)).h(px(2.0)).rounded_full().bg(theme.accent)))
                             .into_any_element()
                     }).collect()
                 })
-            }).track_scroll(&self.outline_scroll).w_full().h(px(list_height))
+            }).track_scroll(&self.outline_scroll).w_full().h(px(list_height)).pt(px(row_style.list_top_padding()))
                 .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()));
-            div().w_full().px(px(OUTLINE_PADDING)).child(div().relative().w_full().h(px(list_height)).overflow_hidden()
+            div().w_full().px(px(row_style.padding)).child(div().relative().w_full().h(px(list_height)).overflow_hidden()
                 .child(list).children(ghosts)).into_any_element()
         };
-        let bulk_expand = snapshot.has_collapsed;
-        let bulk_hover = self.outline_ui.bulk_hover.value();
-        let bulk_border = motion::color(theme.border, motion::color(theme.border, theme.accent, 0.38), bulk_hover);
-        let bulk = div().id(if bulk_expand { "outline-bulk-expand" } else { "outline-bulk-default" }).size(px(28.0)).flex_none().flex().items_center().justify_center().rounded(px(4.0))
-            .border_1().border_color(bulk_border).bg(theme.accent.opacity(0.08 * bulk_hover)).cursor_pointer()
-            .tooltip(tooltip(if bulk_expand { ToolbarLocale::current(cx).app_text("outline.expandAll") } else { ToolbarLocale::current(cx).app_text("outline.defaultLevel") }))
-            .child(icon(if bulk_expand { IconName::ChevronsUpDown } else { IconName::ChevronsDownUp }, 15.0,
-                motion::color(theme.muted, theme.accent_strong, bulk_hover)))
-            .on_hover(cx.listener(|workspace, hovered: &bool, _, cx| {
-                workspace.outline_ui.bulk_hover.set(*hovered, workspace.explorer.reduce_motion, Duration::from_millis(140)); cx.notify();
-            }))
-            .on_mouse_down(MouseButton::Left, cx.listener(|workspace, _, _, cx| { workspace.outline_ui.keyboard_focus_visible = false; cx.stop_propagation(); cx.notify(); }))
-            .on_click(cx.listener(move |workspace, _, _, cx| { cx.stop_propagation(); let level = if bulk_expand { 6 } else { cx.global::<Settings>().outline_level }; workspace.set_outline_level_animated(level,cx); }));
-        let header = div().h(px(54.0)).px(px(14.0)).flex().items_center().justify_between()
-            .cursor(outline_drag_cursor(false))
-            .child(div().min_w_0().truncate().text_size(px(14.0)).font_weight(FontWeight::EXTRA_BOLD).text_color(theme.heading).child(ToolbarLocale::current(cx).app_text("outline.title")))
-            .when(snapshot.has_expandable, |el|el.child(bulk))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |workspace, event: &gpui::MouseDownEvent, window, cx| {
-                if !workspace.outline_ui.showing { return; }
-                let (Some(card), Some(area)) = (workspace.outline_ui.panel_bounds.get(), workspace.outline_ui.bounds.get()) else { return; };
-                workspace.outline_ui.keyboard_focus_visible = false;
-                cx.stop_propagation(); window.focus(&workspace.outline_ui.focus, cx);
-                let offset = card.origin - area.origin;
-                let origin = (f32::from(offset.x), f32::from(offset.y));
-                workspace.outline_ui.panel_drag = Some(PanelDrag { start: event.position, origin, current: origin, moved: false });
-                cx.notify();
-            }));
+        let header = (!docked).then(|| {
+            let bulk_expand = snapshot.has_collapsed;
+            let bulk_hover = self.outline_ui.bulk_hover.value();
+            let bulk_border = motion::color(theme.border, motion::color(theme.border, theme.accent, 0.38), bulk_hover);
+            let bulk = div().id(if bulk_expand { "outline-bulk-expand" } else { "outline-bulk-default" }).size(px(28.0)).flex_none().flex().items_center().justify_center().rounded(px(4.0))
+                .border_1().border_color(bulk_border).bg(theme.accent.opacity(0.08 * bulk_hover)).cursor_pointer()
+                .tooltip(tooltip(if bulk_expand { ToolbarLocale::current(cx).app_text("outline.expandAll") } else { ToolbarLocale::current(cx).app_text("outline.defaultLevel") }))
+                .child(icon(if bulk_expand { IconName::ChevronsUpDown } else { IconName::ChevronsDownUp }, 15.0,
+                    motion::color(theme.muted, theme.accent_strong, bulk_hover)))
+                .on_hover(cx.listener(|workspace, hovered: &bool, _, cx| {
+                    workspace.outline_ui.bulk_hover.set(*hovered, workspace.explorer.reduce_motion, Duration::from_millis(140)); cx.notify();
+                }))
+                .on_mouse_down(MouseButton::Left, cx.listener(|workspace, _, _, cx| { workspace.outline_ui.keyboard_focus_visible = false; cx.stop_propagation(); cx.notify(); }))
+                .on_click(cx.listener(move |workspace, _, _, cx| { cx.stop_propagation(); let level = if bulk_expand { 6 } else { cx.global::<Settings>().outline_level }; workspace.set_outline_level_animated(level,cx); }));
+            let title = ToolbarLocale::current(cx).app_text("outline.title");
+            div().h(px(header_height)).px(px(14.0)).flex().items_center().justify_between().gap(px(4.0)).cursor(outline_drag_cursor(false))
+                .child(div().id("outline-document-title").min_w_0().truncate().text_size(px(14.0))
+                    .font_weight(FontWeight::EXTRA_BOLD).text_color(theme.heading).tooltip(tooltip(title)).child(title))
+                .when(snapshot.has_expandable, |el| el.child(bulk))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |workspace, event: &gpui::MouseDownEvent, window, cx| {
+                    if !workspace.outline_ui.showing { return; }
+                    let (Some(card), Some(area)) = (workspace.outline_ui.panel_bounds.get(), workspace.outline_ui.bounds.get()) else { return; };
+                    workspace.outline_ui.keyboard_focus_visible = false;
+                    cx.stop_propagation(); window.focus(&workspace.outline_ui.focus, cx);
+                    let offset = card.origin - area.origin;
+                    let origin = (f32::from(offset.x), f32::from(offset.y));
+                    workspace.outline_ui.panel_drag = Some(PanelDrag { start: event.position, origin, current: origin, moved: false });
+                    cx.notify();
+                }))
+        });
         let notice = if let Some(error) = snapshot.error.clone() {
             Some(div().px(px(14.0)).pb(px(6.0)).text_size(px(11.0)).text_color(theme.callout_caution)
                 .child(error).child(div().id("outline-retry").cursor_pointer().text_color(theme.accent_strong).child(ToolbarLocale::current(cx).app_text("outline.retry"))
@@ -576,14 +694,20 @@ impl Workspace {
             gpui::BoxShadow { inset: false, color: gpui::rgba(if theme.dark { 0x00000029 } else { 0x16202c0d }).into(),
                 offset: gpui::point(px(0.0), px(6.0)), blur_radius: px(16.0), spread_radius: px(0.0) },
         ];
-        let card = div().id("outline-card").key_context("Outline").relative().w_full().rounded(px(8.0))
-            .opacity(visibility).bg(motion::color(theme.surface, theme.app_bg, 0.04)).border_1().border_color(theme.border.opacity(0.82)).shadow(shadows)
+        let card = div().id("outline-card").key_context("Outline").relative().w_full()
+            .opacity(visibility)
+            .when(docked, |el| el.h_full().pt(px(top_padding)).overflow_hidden().bg(theme.rail_bg))
+            .when(!docked, |el| el.rounded(px(8.0)).bg(motion::color(theme.surface, theme.app_bg, 0.04)).border_1().border_color(theme.border.opacity(0.82)).shadow(shadows))
             .occlude().track_focus(&self.outline_ui.focus).tab_index(0)
             .on_mouse_move(cx.listener(|workspace, event: &gpui::MouseMoveEvent, _, cx| workspace.outline_mouse_move(event, cx)))
             .on_mouse_down(MouseButton::Right, cx.listener(move |workspace, event: &gpui::MouseDownEvent, _, cx| { if !workspace.outline_ui.showing { return; } workspace.outline_ui.keyboard_focus_visible = false; cx.stop_propagation(); workspace.outline_ui.menu = Some(OutlineMenu { position: event.position, heading: None, revision }); cx.notify(); }))
             .on_key_down(cx.listener(|workspace, event: &gpui::KeyDownEvent, _, cx| workspace.outline_key(event, cx)))
-            .child(header).children(notice).child(rows).pb(px(bottom_padding));
+            .children(header).children(notice).child(rows).pb(px(bottom_padding));
         let panel_bounds = self.outline_ui.panel_bounds.clone();
+        if docked {
+            return Some(div().size_full().on_children_prepainted(move |bounds, _, _| panel_bounds.set(bounds.first().copied()))
+                .child(card).into_any_element());
+        }
         let drag = self.outline_ui.panel_drag.as_ref().filter(|drag| drag.moved).map(|drag| drag.current);
         let default_right = if mode == EditorMode::Split { (width * 0.035).clamp(32.0, 160.0) } else { OutlineLayout::RIGHT_INSET };
         let (inset, top) = panel_position(area, height, saved.as_ref(), drag, default_right);
@@ -607,7 +731,14 @@ impl Workspace {
             "up" => self.outline_ui.selected = self.outline_ui.selected.saturating_sub(1),
             "down" => self.outline_ui.selected = (self.outline_ui.selected + 1).min(state.count.saturating_sub(1)),
             "enter" => { if let Some(row) = state.row(self.outline_ui.selected) { let row=row.clone(); doc.update(cx, |host,cx|host.navigate_outline_entry(&row,state.revision,cx)); } },
-            "left" | "right" | "space" => { if let Some(row) = state.row(self.outline_ui.selected) { if row.has_children && (event.keystroke.key == "space" || row.collapsed == (event.keystroke.key == "right")) { let row=row.clone(); self.toggle_outline_heading(&row,cx); } } },
+            "left" | "right" | "space" => {
+                if let Some(row) = state.row(self.outline_ui.selected) {
+                    if !OutlineRowStyle::current(cx).can_fold(row.level) { return; }
+                    if row.has_children && (event.keystroke.key == "space" || row.collapsed == (event.keystroke.key == "right")) {
+                        self.toggle_outline_heading(&row.clone(), cx);
+                    }
+                }
+            }
             _ => return,
         }
         self.outline_ui.keyboard_focus_visible = true;
@@ -633,10 +764,12 @@ impl Workspace {
         let source=drag.source.clone(); let revision=drag.revision; let previous=drag.target.as_ref().map(|h|h.position);
         let scroll=self.outline_scroll.0.borrow().base_handle.clone();
         let bounds=scroll.bounds(); let offset=scroll.offset();
+        let row_style = OutlineRowStyle::current(cx);
         let local=f32::from(event.position.y-bounds.origin.y-offset.y);
-        let index=if bounds.contains(&event.position) && local>=0.0 { Some((local/32.0).floor() as usize) } else {None};
+        let row = (local - row_style.list_top_padding()).max(0.0) / row_style.height;
+        let index=if bounds.contains(&event.position) && local>=0.0 { Some(row.floor() as usize) } else {None};
         let target=self.document().and_then(|doc| { let state=doc.read(cx).outline_snapshot(); if state.revision==revision {index.and_then(|i|state.row(i).cloned())} else {None} });
-        let fraction=(local/32.0).fract();
+        let fraction=row.fract();
         let placement=if fraction<0.3 {crate::text_document::markdown_session::OutlinePlacement::Before}
             else if fraction>0.7 {crate::text_document::markdown_session::OutlinePlacement::After}
             else {crate::text_document::markdown_session::OutlinePlacement::Inside};
@@ -646,7 +779,7 @@ impl Workspace {
         if target_index != previous {
             self.outline_ui.drag_generation+=1; let generation=self.outline_ui.drag_generation;
             if let Some(drag)=self.outline_ui.section_drag.as_mut() {drag.generation=generation;}
-            if let Some(heading)=target.filter(|h| h.has_children && h.collapsed) {
+            if let Some(heading)=target.filter(|h| h.has_children && h.collapsed && OutlineRowStyle::current(cx).can_fold(h.level)) {
                 cx.spawn(async move |this,cx| {
                     cx.background_executor().timer(Duration::from_millis(500)).await;
                     let _=this.update(cx,|workspace,cx| {
@@ -737,8 +870,14 @@ impl Workspace {
         let menu = self.outline_ui.menu.as_ref()?; let heading = menu.heading.clone(); let revision = menu.revision;
         let mut items = Vec::new();
         if heading.is_some() { items.extend([("jump", ToolbarLocale::current(cx).app_text("outline.jump")), ("copy", ToolbarLocale::current(cx).app_text("outline.copy"))]); }
-        if heading.as_ref().is_some_and(|h| h.has_children) { items.push(("fold", ToolbarLocale::current(cx).app_text("outline.toggle"))); }
-        items.extend([("expand", ToolbarLocale::current(cx).app_text("outline.expandAll")), ("collapse", ToolbarLocale::current(cx).app_text("outline.collapseAll")), ("default", ToolbarLocale::current(cx).app_text("outline.defaultLevel")), ("reset", ToolbarLocale::current(cx).app_text("outline.resetPosition")), ("hide", ToolbarLocale::current(cx).app_text("outline.hide"))]);
+        if heading.as_ref().is_some_and(|h| h.has_children && OutlineRowStyle::current(cx).can_fold(h.level)) {
+            items.push(("fold", ToolbarLocale::current(cx).app_text("outline.toggle")));
+        }
+        items.extend([("expand", ToolbarLocale::current(cx).app_text("outline.expandAll")), ("collapse", ToolbarLocale::current(cx).app_text("outline.collapseAll")), ("default", ToolbarLocale::current(cx).app_text("outline.defaultLevel"))]);
+        if cx.global::<Settings>().document_navigation_layout == DocumentNavigationLayout::RightOutline {
+            items.push(("reset", ToolbarLocale::current(cx).app_text("outline.resetPosition")));
+        }
+        items.push(("hide", ToolbarLocale::current(cx).app_text("outline.hide")));
         let mut panel = div().id("outline-context-menu").w(px(if ToolbarLocale::current(cx).is_chinese() { 190.0 } else { 280.0 })).py(px(5.0)).flex().flex_col().rounded(px(8.0))
             .bg(theme.surface).border_1().border_color(theme.border).shadow_lg().occlude()
             .on_mouse_down_out(cx.listener(|workspace, _, _, cx| { workspace.outline_ui.menu=None; cx.notify(); }));

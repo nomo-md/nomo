@@ -194,8 +194,9 @@ impl Workspace {
         let available = self.outline_ui.bounds.get().map_or(0.0, |bounds| f32::from(bounds.size.width));
         let narrow = available <= 820.0;
         let gap = if available <= 620.0 { 0.0 } else { 16.0 };
+        let show_outline_button = settings.document_navigation_layout == DocumentNavigationLayout::RightOutline;
         // 固定右侧控件优先；剩余按钮按真实按钮宽度折入菜单，保持工具栏高度稳定。
-        let right_width = 114.0 + if narrow { 72.0 } else { 152.0 }
+        let right_width = 78.0 + if show_outline_button { 36.0 } else { 0.0 } + if narrow { 72.0 } else { 152.0 }
             + 6.0 + if self.active_pair().is_some() { 68.0 } else { 102.0 }
             + if mode == EditorMode::Split { 36.0 } else { 0.0 };
         let room = (available - 32.0 - gap - right_width).max(0.0);
@@ -311,7 +312,9 @@ impl Workspace {
         if mode == EditorMode::Split {
             right.push(tool("split-guide", IconName::ScanLine, "显示 / 隐藏分栏对齐线", self.split_guide_visible, |w, _, cx| w.toggle_split_guide(cx), cx));
         }
-        right.push(tool("outline", IconName::ListTree, "文档大纲 ⌘⌥O", self.outline_visible(cx), |w, _, cx| w.toggle_outline(cx), cx));
+        if show_outline_button {
+            right.push(tool("outline", IconName::ListTree, "文档大纲 ⌘⌥O", self.outline_visible(cx), |w, _, cx| w.toggle_outline(cx), cx));
+        }
         right.push(tool("hide-toolbar", IconName::ChevronUp, "隐藏工具栏 ⌘⇧B", false, |w, _, cx| w.toggle_toolbar(cx), cx));
         div()
             .h(px(44.0))
