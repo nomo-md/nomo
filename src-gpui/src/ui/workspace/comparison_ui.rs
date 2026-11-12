@@ -74,43 +74,6 @@ impl Workspace {
             })
             .collect()
     }
-    pub(in crate::ui::workspace) fn saved_tab_button(
-        &self,
-        item: TabItem,
-        title: String,
-        index: usize,
-        marker: Option<AnyElement>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .id(("saved-tab", index))
-            .relative()
-            .px_3()
-            .h(px(30.))
-            .max_w(px(180.))
-            .truncate()
-            .cursor_pointer()
-            .child(title)
-            .children(marker)
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |w, e: &gpui::MouseDownEvent, win, cx| {
-                    w.open_tab_context(item, e.position, win, cx)
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |w, e: &gpui::MouseDownEvent, win, cx| {
-                    w.arm_tab_drag(item, None, e.position, win, cx)
-                }),
-            )
-            .on_click(cx.listener(move |w, _, win, cx| {
-                if !w.drag_suppresses_click() {
-                    w.activate_item(item, win, cx);
-                }
-            }))
-            .into_any_element()
-    }
     pub(in crate::ui::workspace) fn render_comparison(
         &mut self,
         pair: Pair,

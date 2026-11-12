@@ -1499,25 +1499,25 @@ impl Workspace {
             let bounds = self.tab_scroll.bounds_for_item(index)?;
             if bounds.left() + offset >= viewport.left() && bounds.right() + offset <= viewport.right() { return None; }
             let item=row.item;
-            let Some(tab_index)=row.tab else {return Some(self.saved_tab_button(item,row.title,index,None,cx));};
-            let tab=&self.tabs[tab_index];
+            let tab=row.tab.map(|index| &self.tabs[index]);
+            let key=item.first();
             let title=row.title;
             let dirty=row.dirty;
-            let tab_id=tab.document.entity_id();
-            let hover=tab.hidden_hover.value();
+            let hover=tab.map_or(0.0, |tab| tab.hidden_hover.value());
             let active=self.tabs.get(self.active).is_some_and(|tab|item.contains(tab.key));
             let row = div().id(("hidden-tab", index)).h(px(30.0)).px(px(8.0)).flex().flex_none()
                 .items_center().gap(px(8.0)).rounded(px(5.0)).cursor_pointer()
                 .text_color(if active { theme.heading } else { motion::color(theme.muted, theme.fg, hover) })
                 .bg(gpui::Hsla::from(gpui::rgba(0x80808014)).opacity(hover))
+                .when(tab.is_none(), |el| el.hover(|style| style.text_color(theme.fg).bg(gpui::rgba(0x80808014))))
                 .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
                 .child(icon(IconName::FileText, 13.0, theme.accent))
                 .child(div().flex_1().min_w(px(0.0)).truncate()
-                    .when(tab.preview, |el| el.italic().opacity(0.85)).child(title))
+                    .when(tab.is_some_and(|tab| tab.preview), |el| el.italic().opacity(0.85)).child(title))
                 .children(dirty.then(|| div().size(px(6.0)).rounded_full().bg(theme.accent)))
                 .on_hover(cx.listener(move |workspace, hovered: &bool, _, cx| {
                     let reduced = workspace.explorer.reduce_motion;
-                    if let Some(tab) = workspace.tabs.iter_mut().find(|tab| tab.document.entity_id() == tab_id) {
+                    if let Some(tab) = workspace.tabs.iter_mut().find(|tab| tab.key == key) {
                         tab.hidden_hover.set(*hovered, reduced, Duration::from_millis(120));
                         cx.notify();
                     }
@@ -1558,23 +1558,25 @@ impl Workspace {
         let highlight=self.comparison.highlight;
         let tabs: Vec<AnyElement> = rows.into_iter().enumerate().map(|(index,row)| {
                 let item=row.item;
-                let Some(tab_index)=row.tab else {
-                    return self.saved_tab_button(item,row.title,index,Self::drop_marker(highlight,item,index,tab_count,theme),cx);
-                };
-                let tab=&mut self.tabs[tab_index];
+                let key=item.first();
                 let active=focused.is_some_and(|key|item.contains(key));
                 let title=row.title;
                 let dirty=row.dirty;
-                if tab.dirty != dirty {
-                    tab.dirty = dirty;
-                    tab.dirty_animation_started = dirty.then(Instant::now);
+                if let Some(tab_index)=row.tab {
+                    let tab=&mut self.tabs[tab_index];
+                    if tab.dirty != dirty {
+                        tab.dirty = dirty;
+                        tab.dirty_animation_started = dirty.then(Instant::now);
+                    }
                 }
+                // 恢复中的标签只读取布局元数据，共用外观但不创建文档宿主或动画状态。
+                let tab=row.tab.map(|index| &self.tabs[index]);
                 let enter_duration = Duration::from_millis(if reduced { 90 } else { 180 });
-                let animate = tab.opened_at.elapsed() < enter_duration;
-                let tab_id = tab.document.entity_id();
-                let hover = tab.hover.value();
-                let close_hover = tab.close_hover.value();
-                let active_color = tab.active_color.value();
+                let animate = tab.is_some_and(|tab| tab.opened_at.elapsed() < enter_duration);
+                let tab_id = tab.map(|tab| tab.document.entity_id());
+                let hover = tab.map_or(0.0, |tab| tab.hover.value());
+                let close_hover = tab.map_or(0.0, |tab| tab.close_hover.value());
+                let active_color = tab.map_or(0.0, |tab| tab.active_color.value());
                 // 新标签已有独立入场，回到已打开标签时才叠加页头过渡。
                 let title_opacity = if active && !animate { page_title_opacity } else { 1.0 };
                 let tab_text = motion::color(motion::color(theme.muted, theme.fg, hover), theme.heading, active_color).opacity(title_opacity);
@@ -1582,19 +1584,23 @@ impl Workspace {
                 let dirty_indicator = dirty.then(|| {
                     let dot = div().size(px(6.0)).flex_none().rounded_full().bg(theme.accent);
                     let duration = Duration::from_millis(if reduced { 80 } else { 120 });
-                    if tab.dirty_animation_started.is_some_and(|started| started.elapsed() < duration) {
-                        dot.with_animation(("tab-dirty", tab_id), Animation::new(duration).with_easing(tree_selection_ease),
+                    if let Some(tab) = tab.filter(|tab| tab.dirty_animation_started.is_some_and(|started| started.elapsed() < duration)) {
+                        dot.with_animation(("tab-dirty", tab.document.entity_id()), Animation::new(duration).with_easing(tree_selection_ease),
                             move |dot, progress| dot.opacity(if reduced { 0.78 + 0.22 * progress } else { progress })).into_any_element()
                     } else { dot.into_any_element() }
                 });
                 let close = div().id(("close", index)).size(px(14.0)).flex().flex_none()
+                    .when(tab.is_none(), |el| el.group("document-tab-close"))
                     .items_center().justify_center().rounded_full().cursor_pointer()
                     .bg(gpui::Hsla::from(gpui::rgba(0x80808033)).opacity(close_hover))
-                    .child(icon(IconName::Close, 12.0, motion::color(theme.muted, theme.palette_fg[0], close_hover)))
+                    .child(icon(IconName::Close, 12.0, motion::color(theme.muted, theme.palette_fg[0], close_hover))
+                        .when(tab.is_none(), |icon| icon.group_hover("document-tab-close", |style| style.text_color(theme.palette_fg[0]))))
                     .opacity(if active { 1.0 } else { hover })
+                    .when(tab.is_none(), |el| el.group_hover("document-tab", |style| style.opacity(1.0))
+                        .hover(|style| style.bg(gpui::rgba(0x80808033))))
                     .on_hover(cx.listener(move |workspace, hovered: &bool, _, cx| {
                         let reduced = workspace.explorer.reduce_motion;
-                        if let Some(tab) = workspace.tabs.iter_mut().find(|tab| tab.document.entity_id() == tab_id) {
+                        if let Some(tab) = workspace.tabs.iter_mut().find(|tab| tab.key == key) {
                             tab.close_hover.set(*hovered, reduced, Duration::from_millis(150));
                             cx.notify();
                         }
@@ -1606,6 +1612,7 @@ impl Workspace {
                     }));
                 let tab_element = div()
                     .id(("tab", index))
+                    .when(tab.is_none(), |el| el.group("document-tab"))
                     .relative()
                     .flex()
                     .flex_none()
@@ -1620,11 +1627,12 @@ impl Workspace {
                     .cursor_pointer()
                     .text_color(tab_text)
                     .bg(gpui::Hsla::from(gpui::rgba(0x8080800f)).opacity(hover * (1.0 - active_color)))
+                    .when(tab.is_none(), |el| el.hover(|style| style.text_color(theme.fg).bg(gpui::rgba(0x8080800f))))
                     .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
-                    .children(active.then(|| surface.tab_marker(tab_id, index, tab_count, tab_scroll.clone())))
+                    .children(tab_id.filter(|_| active).map(|tab_id| surface.tab_marker(tab_id, index, tab_count, tab_scroll.clone())))
                     .child(icon(IconName::FileText, 14.0, tab_icon))
                     .child(div().flex_1().min_w(px(0.0)).truncate()
-                        .when(tab.preview, |el| el.italic().opacity(0.85)).child(title))
+                        .when(tab.is_some_and(|tab| tab.preview), |el| el.italic().opacity(0.85)).child(title))
                     .children(Self::drop_marker(highlight,item,index,tab_count,theme))
                     .when(cfg!(windows), |el| el
                         .on_mouse_down(MouseButton::Right,cx.listener(move |w,e:&gpui::MouseDownEvent,win,cx| w.open_tab_context(item,e.position,win,cx)))
@@ -1633,7 +1641,7 @@ impl Workspace {
                     .child(close)
                     .on_hover(cx.listener(move |workspace, hovered: &bool, _, cx| {
                         let reduced = workspace.explorer.reduce_motion;
-                        if let Some(tab) = workspace.tabs.iter_mut().find(|tab| tab.document.entity_id() == tab_id) {
+                        if let Some(tab) = workspace.tabs.iter_mut().find(|tab| tab.key == key) {
                             tab.hover.set(*hovered, reduced, Duration::from_millis(150));
                             cx.notify();
                         }
@@ -1648,7 +1656,7 @@ impl Workspace {
                         }
                         workspace.activate_item(item, window, cx);
                     }));
-                if animate {
+                if let Some(tab_id) = tab_id.filter(|_| animate) {
                     tab_element.with_animation(
                         ("tab-enter", tab_id),
                         Animation::new(enter_duration).with_easing(tree_selection_ease),
@@ -1694,15 +1702,8 @@ impl Workspace {
                 .into_any_element()
         };
         let rail=self.comparison.rail.clone();
-        div()
-            .id("tabs")
-            .relative().child(gpui::canvas(move|bounds,_,_|rail.set(Some(bounds)),|_,_,_,_|{}).absolute().top_0().left_0().size_full())
-            .h(px(TAB_RAIL_HEIGHT))
-            .w_full()
-            .flex()
-            .flex_none()
-            .items_end()
-            .pl(px(18.0))
+        let documents = div().relative().h_full().flex_1().min_w(px(0.0)).flex().items_end()
+            .child(gpui::canvas(move|bounds,_,_|rail.set(Some(bounds)),|_,_,_,_|{}).absolute().top_0().left_0().size_full())
             .child(
                 div().on_children_prepainted(move |_, window, _| {
                     let overflow = measured_scroll.max_offset().x > px(0.0);
@@ -1727,7 +1728,17 @@ impl Workspace {
                     .children(tabs),
             )
             .child(div().ml(px(4.0)).mb(px(2.0)).size(px(28.0)).flex().flex_none()
-                .items_center().justify_center().child(action))
+                .items_center().justify_center().child(action));
+        div()
+            .id("tabs")
+            .relative()
+            .h(px(TAB_RAIL_HEIGHT))
+            .w_full()
+            .flex()
+            .flex_none()
+            .items_end()
+            .pl(px(18.0))
+            .child(documents)
     }
 
     fn toggle_split_guide(&mut self, cx: &mut Context<Self>) {
