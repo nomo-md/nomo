@@ -7,7 +7,7 @@ pub(crate) mod folder_card;
 pub(crate) mod document_card;
 
 use crate::{theme::Theme, ui::components::{ButtonKind, IconName, button, icon, small_icon_button, tooltip}};
-use crate::ui::{motion, popup::reduced_motion, workspace_surface::TAB_RAIL_HEIGHT};
+use crate::ui::{motion, popup::reduced_motion};
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, ParentElement, Render, RenderImage, SharedString, Styled, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list};
 use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
 use library::{Change, Entry, Library, Snapshot};
@@ -35,7 +35,7 @@ fn card_height(width: f32) -> f32 {
 
 #[derive(Clone)]
 pub(crate) enum HomeEvent {
-    Open(PathBuf), NewFile, OpenFile, OpenFolder, AddFolder, Resume, Restore,
+    Open(PathBuf), NewFile, OpenFile, OpenFolder, Resume, Restore,
     Place { item: PathDrag, placement: crate::ui::tree_drag::Placement },
 }
 
@@ -488,8 +488,6 @@ impl Render for Home {
             sidebar_theme.hover = gpui::rgba(0x80808014).into();
             let list = self.sidebar(self.sidebar_frame.full_width - 16.0, &sidebar_theme, cx);
             let panel = div().flex().flex_col()
-                .child(div().w_full().h(px(TAB_RAIL_HEIGHT)).flex_none().px(px(8.0)).flex().items_center()
-                    .child(nav_home_row(true, &theme, cx)))
                 .child(div().id("home-sidebar-list-region").w_full().flex_1().min_h(px(0.0)).px(px(8.0)).pt(px(6.0)).pb(px(10.0))
                     .overflow_hidden().child(list));
             self.sidebar_frame.clip(panel)
@@ -602,8 +600,15 @@ impl Render for Home {
                     .rounded_tl(px(12.0)).border_t_1().border_l_1().border_color(theme.workspace_edge)
                     .px(px(content_padding)).pt(px(14.0)).flex().flex_col().gap(px(12.0))
                     .child(div().w_full().flex_none().flex().items_center().gap(px(12.0))
-                        .child(div().flex_none().text_size(px(18.0)).font_weight(FontWeight::BOLD).opacity(self.title_opacity)
-                            .child(ToolbarLocale::current(cx).app_text("home.title")))
+                        .child(div().flex_none().flex().items_center().gap(px(6.0))
+                            .child(div().mr(px(4.0)).text_size(px(18.0)).font_weight(FontWeight::BOLD).opacity(self.title_opacity)
+                                .child(ToolbarLocale::current(cx).app_text("home.title")))
+                            .child(small_icon_button("home-refresh", IconName::RefreshCw, false, &theme).size(px(30.0))
+                                .tooltip(tooltip(ToolbarLocale::current(cx).app_text("home.refresh")))
+                                .on_click(cx.listener(|home, _, _, cx| home.refresh(cx))))
+                            .when(!self.snapshot.folders.is_empty() || !self.snapshot.recent.is_empty(), |row| row.child(small_icon_button("home-clear", IconName::Trash2, false, &theme).size(px(30.0))
+                                .tooltip(tooltip(ToolbarLocale::current(cx).app_text("home.clearEntries")))
+                                .on_click(cx.listener(|home, _, _, cx| home.library.update(cx, |library, cx| library.change(Change::ClearHome, cx)))))))
                         .child(div().flex_1().min_w(px(0.0)).flex().flex_wrap().items_center().justify_end().gap(px(6.0))
                             .when(self.restore_layout, |row| row.child(button("home-restore-layout", ToolbarLocale::current(cx).text("tab_restore_layout"), Some(IconName::Columns), ButtonKind::Ghost, &theme)
                                 .on_click(cx.listener(|_, _, _, cx| cx.emit(HomeEvent::Restore)))))
@@ -615,16 +620,6 @@ impl Render for Home {
                                 .on_click(cx.listener(|_, _, _, cx| cx.emit(HomeEvent::OpenFile))))
                             .child(button("home-new", ToolbarLocale::current(cx).app_text("home.new"), Some(IconName::Plus), ButtonKind::Primary, &theme)
                                 .on_click(cx.listener(|_, _, _, cx| cx.emit(HomeEvent::NewFile))))))
-                    .child(div().w_full().flex_none().flex().flex_wrap().items_center().justify_between().gap(px(6.0))
-                        .child(div().px(px(9.0)).py(px(4.0)).rounded(px(6.0)).bg(theme.hover).text_size(px(12.0))
-                            .font_weight(FontWeight::MEDIUM).child(ToolbarLocale::current(cx).app_text("home.library")))
-                        .child(div().flex().items_center().gap(px(8.0))
-                            .child(div().text_size(px(11.0)).text_color(theme.muted).child(self.browser.grid.len().to_string()))
-                            .child(small_icon_button("home-refresh", IconName::RefreshCw, false, &theme).tooltip(tooltip(ToolbarLocale::current(cx).app_text("home.refresh")))
-                                .on_click(cx.listener(|home, _, _, cx| home.refresh(cx))))
-                            .when(!self.snapshot.recent.is_empty(), |row| row.child(small_icon_button("home-clear", IconName::Trash2, false, &theme)
-                                .tooltip(tooltip(ToolbarLocale::current(cx).app_text("home.clearRecent")))
-                                .on_click(cx.listener(|home, _, _, cx| home.library.update(cx, |library, cx| library.change(Change::ClearRecent, cx))))))))
                     .children(error.map(|error| div().text_size(px(12.0)).text_color(theme.danger).child(error)))
                     .child(div().flex_1().min_h(px(0.0)).overflow_hidden().child(content))))
     }
@@ -640,7 +635,7 @@ pub(crate) fn entry_name(path: &Path) -> SharedString {
     path.file_name().unwrap_or_else(|| path.as_os_str()).to_string_lossy().chars().map(|ch|if ch.is_control(){' '}else{ch}).collect::<String>().into()
 }
 
-/// 主页与编辑页侧栏共用的“主页”导航行：主页内为选中态，编辑页内作为返回主页入口。
+/// 工作区侧栏的返回主页入口。
 pub(crate) fn nav_home_row(active: bool, theme: &Theme, cx: &App) -> gpui::Stateful<gpui::Div> {
     let color = if active { theme.accent } else { theme.fg };
     div().id("sidebar-home").w_full().h(px(28.0)).flex_none().px(px(12.0)).flex().items_center().gap(px(6.0)).rounded(px(4.0))

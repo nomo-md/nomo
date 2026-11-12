@@ -65,7 +65,7 @@ pub(super) struct LayoutState {
     pub(super) pending: BTreeMap<u64, SavedDocument>,
     target: Option<(u64, u64, bool)>,
     after_load: Option<Box<dyn FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>)>>,
-    anchor: Option<String>,
+    after_open: AfterOpen,
     pub(super) loading: Option<u64>,
     folder_open: Option<folder::FolderOpen>,
 }
@@ -83,7 +83,7 @@ impl Default for LayoutState {
             pending: Default::default(),
             target: None,
             after_load: None,
-            anchor: None,
+            after_open: AfterOpen::default(),
             loading: None,
             folder_open: None,
         }
@@ -457,7 +457,7 @@ impl Workspace {
             return false;
         }
         self.comparison.layout.after_load = None;
-        self.comparison.layout.anchor = None;
+        self.comparison.layout.after_open = AfterOpen::default();
         let generation = self.next_open_intent();
         self.comparison.layout.target = Some((item.focused(), generation, close));
         self.advance_saved_open(window, cx);
@@ -491,7 +491,7 @@ impl Workspace {
         if layout.target.is_some_and(|(key, _, _)| keys.contains(&key)) {
             layout.target = None;
             layout.after_load = None;
-            layout.anchor = None;
+            layout.after_open = AfterOpen::default();
         }
         !keys.is_empty()
     }
@@ -511,7 +511,7 @@ impl Workspace {
         }
         let generation = self.next_open_intent();
         self.comparison.layout.target = Some((item.focused(), generation, false));
-        self.comparison.layout.anchor = None;
+        self.comparison.layout.after_open = AfterOpen::default();
         self.comparison.layout.after_load = Some(Box::new(resume));
         self.advance_saved_open(window, cx);
         true
@@ -534,7 +534,7 @@ impl Workspace {
         let generation = self.next_open_intent();
         self.comparison.layout.after_load = None;
         self.comparison.layout.target = Some((key, generation, false));
-        self.comparison.layout.anchor = anchor;
+        self.comparison.layout.after_open = AfterOpen { anchor, record_recent: true, ..Default::default() };
         self.advance_saved_open(window, cx);
     }
     pub(in crate::ui::workspace) fn mark_saved_loading(
@@ -617,14 +617,11 @@ impl Workspace {
             } else if close {
                 self.close_item(item, window, cx);
             } else if let Some(index) = self.tab_index(key) {
-                let anchor = self.comparison.layout.anchor.take();
+                let after = std::mem::take(&mut self.comparison.layout.after_open);
                 self.activate_after_open(
                     index,
                     generation,
-                    AfterOpen {
-                        anchor,
-                        ..Default::default()
-                    },
+                    after,
                     window,
                     cx,
                 );
@@ -681,6 +678,7 @@ impl Workspace {
             self.comparison.remove_member(key);
             if let Some((wanted, generation, close)) = self.comparison.layout.target {
                 if wanted == key {
+                    self.comparison.layout.after_open = AfterOpen::default();
                     self.comparison.layout.target = fallback
                         .or_else(|| self.comparison.items.first().map(|item| item.focused()))
                         .map(|k| (k, generation, close && fallback.is_some()));

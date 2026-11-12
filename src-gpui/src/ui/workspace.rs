@@ -319,7 +319,6 @@ impl Workspace {
             HomeEvent::NewFile => workspace.new_file(window, cx),
             HomeEvent::OpenFile => workspace.prompt_open(false, window, cx),
             HomeEvent::OpenFolder => workspace.prompt_open(true, window, cx),
-            HomeEvent::AddFolder => workspace.prompt_home_folder(window, cx),
             HomeEvent::Resume => workspace.activate(workspace.active, window, cx),
             HomeEvent::Place { item, placement } => workspace.place_tree_entry(item.clone(), placement.clone(), cx),
         });
@@ -548,20 +547,6 @@ impl Workspace {
         cx.notify();
     }
 
-    fn prompt_home_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let response = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(ToolbarLocale::current(cx).app_text("home.addFolder").into()) });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = response.await {
-                let _ = this.update(cx, |workspace, cx| {
-                    for path in paths {
-                        let path = path.canonicalize().unwrap_or(path);
-                        workspace.library.update(cx, |library, cx| library.change(LibraryChange::AddFolder(path), cx));
-                    }
-                });
-            }
-        }).detach();
-    }
-
     fn document(&self) -> Option<Entity<DocumentHost>> { self.tab().map(|tab|tab.document.clone()) }
 
     pub fn open_path(&mut self,path:&Path,window:&mut Window,cx:&mut Context<Self>) {
@@ -626,7 +611,7 @@ impl Workspace {
         self.cancel_preview_opens(Some(&path));
         if let Some(index)=self.tabs.iter().position(|tab|tab.document.read(cx).path().as_ref()==Some(&path)) {
             if !preview {self.tabs[index].preview=false;}
-            self.activate_after_open(index,generation,AfterOpen {anchor,..Default::default()},window,cx);
+            self.activate_after_open(index,generation,AfterOpen {anchor,record_recent:true,..Default::default()},window,cx);
             return;
         }
         if let Some(opening)=self.opening.iter_mut().find(|opening|opening.path.as_ref()==Some(&path) && opening.request.check().is_ok()) {
@@ -834,7 +819,11 @@ impl Workspace {
                         if mode==EditorMode::Split {if let Err(e)=document.update(cx,|host,cx|host.change_mode(mode,cx)) {workspace.notice=Some(e.to_string().into());return false;}}
                         let subscriptions=workspace.subscribe_document(&document,window,cx);
                         let _=document.update(cx,|host,cx|host.set_active(false,cx));
-                        if let Some(path)=document.read(cx).path() {workspace.library.update(cx,|library,cx|library.change(LibraryChange::Opened(path),cx));}
+                        if matches!(&source, application_dialogs::OpenSource::File | application_dialogs::OpenSource::NewFile) {
+                            if let Some(path) = document.read(cx).path() {
+                                workspace.library.update(cx, |library, cx| library.change(LibraryChange::Opened(path), cx));
+                            }
+                        }
                         if workspace.tree.is_none() {if let Some(parent)=document.read(cx).path().as_ref().or(requested.as_ref()).and_then(|p|p.parent()){workspace.replace_tree(parent.to_path_buf(),cx);}}
                         if preview {for tab in &mut workspace.tabs {tab.preview=false;}}
                         let dirty=document.read(cx).is_dirty(cx);
@@ -854,7 +843,7 @@ impl Workspace {
                                 host.restore_workspace_position(saved.byte,saved.fraction,selection,cx);
                             });
                         } else {
-                            workspace.activate_after_open(workspace.tabs.len()-1,generation,AfterOpen {anchor,selection:reload_selection,save_as},window,cx);
+                            workspace.activate_after_open(workspace.tabs.len()-1,generation,AfterOpen {anchor,selection:reload_selection,save_as,..Default::default()},window,cx);
                             workspace.record_layout(cx);
                         }
                         true
@@ -987,7 +976,7 @@ impl Workspace {
         self.home_visible = false;
         self.home.update(cx, |home, cx| home.set_active(false, cx));
         if from_home { self.resume_tree(cx); }
-        if let Some(path) = document.read(cx).path() {
+        if let Some(path) = document.read(cx).path().filter(|_| after.record_recent) {
             self.library.update(cx, |library, cx| library.change(LibraryChange::Opened(path), cx));
         }
         self.popover=None;

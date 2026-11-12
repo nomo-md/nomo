@@ -20,6 +20,7 @@ pub(super) struct AfterOpen {
     pub anchor: Option<String>,
     pub selection: Option<crate::nomo_mark::protocol::DocumentSelection>,
     pub save_as: bool,
+    pub record_recent: bool,
 }
 
 #[derive(Default)]
@@ -149,7 +150,7 @@ impl Workspace {
                 let generation = target.next_open_intent();
                 if let Some(key)=saved {target.open_saved_member(key,request.anchor.clone(),target_window,cx);} else if let Some(index) = index {
                     if !request.preview { target.tabs[index].preview = false; }
-                    target.activate_after_open(index, generation, AfterOpen { anchor: request.anchor, ..Default::default() }, target_window, cx);
+                    target.activate_after_open(index, generation, AfterOpen { anchor: request.anchor, record_recent: true, ..Default::default() }, target_window, cx);
                 } else if let Some(opening) = target.opening.iter_mut().find(|opening| opening.path.as_ref() == Some(path) && opening.request.check().is_ok()) {
                     opening.generation = generation;
                     opening.preview &= request.preview;

@@ -26,6 +26,21 @@ pub(crate) struct Snapshot {
     pub folders: Vec<Entry>,
     pub recent: Vec<Entry>,
     pub order: Arc<TreeOrder>,
+    home_order_opened: Option<u64>,
+}
+
+impl Snapshot {
+    pub(super) fn home_entries(&self) -> Vec<(&Entry, bool)> {
+        let mut entries: Vec<_> = self.folders.iter().map(|entry| (entry, true))
+            .chain(self.recent.iter().map(|entry| (entry, false))).collect();
+        entries.sort_by(|(a, _), (b, _)| b.opened.cmp(&a.opened).then_with(|| a.path.cmp(&b.path)));
+        // 拖拽后的打开记录先按时间排列，剩余项目沿用拖拽后的相对顺序。
+        let manual_start = self.home_order_opened.map_or(0, |opened| {
+            entries.partition_point(|(entry, _)| entry.opened > opened)
+        });
+        self.order.sort(Path::new(""), &mut entries[manual_start..], |(entry, _)| &entry.path);
+        entries
+    }
 }
 
 pub(crate) enum Change {
@@ -35,6 +50,7 @@ pub(crate) enum Change {
     AddFolder(PathBuf),
     Remove { path: PathBuf, folder: bool },
     ClearRecent,
+    ClearHome,
     Rename(Vec<(PathBuf, PathBuf)>),
     Place { placement: crate::ui::tree_drag::Placement, path: PathBuf },
 }
@@ -150,7 +166,8 @@ fn connect() -> Result<Connection, UiMessage> {
         "CREATE TABLE IF NOT EXISTS entries (path TEXT NOT NULL, folder INTEGER NOT NULL, opened INTEGER NOT NULL, PRIMARY KEY(path, folder));
          CREATE TABLE IF NOT EXISTS thumbnails (path TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, png BLOB NOT NULL, touched INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
-         CREATE TABLE IF NOT EXISTS tree_order (parent TEXT PRIMARY KEY, paths TEXT NOT NULL);"
+         CREATE TABLE IF NOT EXISTS tree_order (parent TEXT PRIMARY KEY, paths TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS home_order (id INTEGER PRIMARY KEY CHECK (id=1), opened INTEGER NOT NULL);"
     ).map_err(|e| e.to_string())?;
     Ok(connection)
 }
@@ -162,6 +179,33 @@ fn read_entries(connection: &Connection, folder: bool) -> Result<Vec<Entry>, Str
         Ok(Entry { path: PathBuf::from(row.get::<_, String>(0)?), opened: row.get::<_, i64>(1)?.max(0) as u64, revision: 0 })
     }).map_err(|e| e.to_string())?;
     entries.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+fn read_snapshot(connection: &Connection) -> Result<Snapshot, UiMessage> {
+    let home_order_opened: Option<i64> = connection.query_row("SELECT opened FROM home_order WHERE id=1", [], |row| row.get(0))
+        .optional().map_err(|e| e.to_string())?;
+    Ok(Snapshot {
+        folders: read_entries(connection, true)?,
+        recent: read_entries(connection, false)?,
+        order: Arc::new(order::read(connection)?),
+        home_order_opened: home_order_opened.map(|opened| opened.max(0) as u64),
+    })
+}
+
+fn next_opened(connection: &Connection) -> Result<i64, UiMessage> {
+    let (latest, baseline): (i64, Option<i64>) = connection.query_row(
+        "SELECT COALESCE(MAX(opened), 0), (SELECT opened FROM home_order WHERE id=1) FROM entries",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+    if baseline.is_none() {
+        // 旧版手动顺序以本次打开之前的记录为基准。
+        connection.execute(
+            "INSERT INTO home_order(id,opened) SELECT 1,?1 WHERE EXISTS(SELECT 1 FROM tree_order WHERE parent='')",
+            [latest],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok((now() as i64).max(latest.max(baseline.unwrap_or(0)).saturating_add(1)))
 }
 
 fn import_legacy_recent(connection: &Connection) -> Result<(), String> {
@@ -210,7 +254,8 @@ fn apply(change: Change) -> Result<(Snapshot, Option<UiMessage>), UiMessage> {
             Change::Refresh => normalize_entries(&transaction)?,
             Change::Opened(path) => {
                 let key = path_key_message(&path)?;
-                transaction.execute("INSERT INTO entries(path,folder,opened) VALUES (?1,0,?2) ON CONFLICT(path,folder) DO UPDATE SET opened=excluded.opened", params![key, now() as i64]).map_err(|e| e.to_string())?;
+                let opened = next_opened(&transaction)?;
+                transaction.execute("INSERT INTO entries(path,folder,opened) VALUES (?1,0,?2) ON CONFLICT(path,folder) DO UPDATE SET opened=excluded.opened", params![key, opened]).map_err(|e| e.to_string())?;
                 transaction.execute("DELETE FROM entries WHERE folder=0 AND path NOT IN (SELECT path FROM entries WHERE folder=0 ORDER BY opened DESC,path LIMIT ?1)", params![RECENT_LIMIT as i64]).map_err(|e| e.to_string())?;
             },
             Change::Saved(path) => {
@@ -223,13 +268,29 @@ fn apply(change: Change) -> Result<(Snapshot, Option<UiMessage>), UiMessage> {
                 let key = path_key_message(&path)?;
                 let count: i64 = transaction.query_row("SELECT count(*) FROM entries WHERE folder=1 AND path<>?1", params![key], |row| row.get(0)).map_err(|e| e.to_string())?;
                 if count >= FOLDER_LIMIT as i64 { return Err(UiMessage::new("home.folderLimit").arg("count", FOLDER_LIMIT)); }
-                transaction.execute("INSERT INTO entries(path,folder,opened) VALUES (?1,1,?2) ON CONFLICT(path,folder) DO UPDATE SET opened=excluded.opened", params![key, now() as i64]).map_err(|e| e.to_string())?;
+                let opened = next_opened(&transaction)?;
+                transaction.execute("INSERT INTO entries(path,folder,opened) VALUES (?1,1,?2) ON CONFLICT(path,folder) DO UPDATE SET opened=excluded.opened", params![key, opened]).map_err(|e| e.to_string())?;
             },
             Change::Remove { path, folder } => {
                 transaction.execute("DELETE FROM entries WHERE path=?1 AND folder=?2", params![path_key(&path)?, folder]).map_err(|e| e.to_string())?;
             },
             Change::ClearRecent => { transaction.execute("DELETE FROM entries WHERE folder=0", []).map_err(|e| e.to_string())?; },
-            Change::Place { placement, path } => order::place(&transaction, placement, path)?,
+            Change::ClearHome => { transaction.execute("DELETE FROM entries", []).map_err(|e| e.to_string())?; },
+            Change::Place { mut placement, path } => {
+                if placement.parent.as_os_str().is_empty() {
+                    let snapshot = read_snapshot(&transaction)?;
+                    let entries = snapshot.home_entries();
+                    if entries.iter().any(|(entry, _)| entry.path == path) {
+                        let opened = entries.iter().map(|(entry, _)| entry.opened).max().unwrap_or(0);
+                        placement.siblings = entries.into_iter().map(|(entry, _)| entry.path.clone()).collect();
+                        order::place(&transaction, placement, path)?;
+                        transaction.execute("INSERT INTO home_order(id,opened) VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET opened=excluded.opened", [opened as i64])
+                            .map_err(|e| e.to_string())?;
+                    }
+                } else {
+                    order::place(&transaction, placement, path)?;
+                }
+            },
             Change::Rename(paths) => {
                 order::rename(&transaction, &paths)?;
                 for folder in [false, true] {
@@ -249,8 +310,8 @@ fn apply(change: Change) -> Result<(Snapshot, Option<UiMessage>), UiMessage> {
         Ok(())
     })();
     result?;
+    let snapshot = read_snapshot(&transaction)?;
     transaction.commit().map_err(|e| e.to_string())?;
-    let snapshot = Snapshot { folders: read_entries(&connection, true)?, recent: read_entries(&connection, false)?, order: Arc::new(order::read(&connection)?) };
     connection.execute_batch("PRAGMA incremental_vacuum(64);").map_err(|e| e.to_string())?;
     Ok((snapshot, warning))
 }

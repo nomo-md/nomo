@@ -41,7 +41,10 @@ impl Workspace {
                     return false;
                 }
                 if request.generation == self.open_requests.generation {
-                    if !target.tab_interaction_busy(target_window) { target.show_folder_workspace(target_window, cx); }
+                    if !target.tab_interaction_busy(target_window) {
+                        target.library.update(cx, |library, cx| library.change(LibraryChange::AddFolder(root.clone()), cx));
+                        target.show_folder_workspace(target_window, cx);
+                    }
                     target.reveal_window(target_window, cx);
                 }
                 true

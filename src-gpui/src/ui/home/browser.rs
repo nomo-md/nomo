@@ -94,18 +94,13 @@ impl Browser {
     }
 
     pub(super) fn rebuild(&mut self, snapshot: &Snapshot) {
-        let mut folders: Vec<_> = snapshot.folders.iter().map(|entry| Node {
-            entry: entry.clone(), root: entry.path.as_path().into(), directory: true,
+        let grid: Vec<_> = snapshot.home_entries().into_iter().map(|(entry, directory)| Node {
+            entry: entry.clone(),
+            root: if directory { entry.path.as_path() } else { entry.path.parent().unwrap_or(&entry.path) }.into(),
+            directory,
         }).collect();
-        let mut recent: Vec<_> = snapshot.recent.iter().map(|entry| Node {
-            entry: entry.clone(), root: entry.path.parent().unwrap_or(&entry.path).into(), directory: false,
-        }).collect();
-        // 恢复文件夹／最近文档两组入口；手动排序只在各组内体现。
-        snapshot.order.sort(Path::new(""), &mut folders, |node| &node.entry.path);
-        snapshot.order.sort(Path::new(""), &mut recent, |node| &node.entry.path);
-        let rows: Vec<_> = folders.into_iter().chain(recent).collect();
-        let mut grid = rows.clone();
-        snapshot.order.sort(Path::new(""), &mut grid, |node| &node.entry.path);
+        let rows: Vec<_> = grid.iter().filter(|node| node.directory)
+            .chain(grid.iter().filter(|node| !node.directory)).cloned().collect();
         if self.rows.len() != rows.len() || self.rows.iter().zip(&rows).any(|(a, b)| a.entry.path != b.entry.path) {
             self.tree_revision = self.tree_revision.wrapping_add(1);
         }

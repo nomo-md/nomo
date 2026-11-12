@@ -42,11 +42,7 @@ pub(super) fn place(connection: &Connection, placement: crate::ui::tree_drag::Pl
     let paths = orders.0.entry(placement.parent.clone()).or_default();
     // 已展开的目录以本次可见兄弟顺序为准；折叠目录保留已有顺序。
     if !placement.siblings.is_empty() {
-        if placement.parent.as_os_str().is_empty() {
-            // 左侧按类型分组，卡片可以混排；侧栏的一次调整不应重置其他卡片的相对顺序。
-            paths.retain(|old| *old == path || placement.siblings.contains(old));
-            for sibling in placement.siblings { if !paths.contains(&sibling) { paths.push(sibling); } }
-        } else { *paths = placement.siblings; }
+        *paths = placement.siblings;
     }
     paths.retain(|old| *old != path);
     let index = placement.before.as_ref().and_then(|before| paths.iter().position(|old| old == before))

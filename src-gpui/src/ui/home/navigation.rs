@@ -223,10 +223,7 @@ impl Home {
                     let offset = if folder { 0.0 } else { home.tree_drag.section_offset(index, reduced_motion(cx)) };
                     return div().w_full().h(px(30.0)).child(div().relative().top(px(offset)).size_full().px(px(12.0)).flex().items_center().justify_between()
                         .text_size(px(11.0)).font_weight(FontWeight::MEDIUM).text_color(theme.muted)
-                        .child(ToolbarLocale::current(cx).app_text(if folder { "home.folders" } else { "home.recentDocuments" }))
-                        .child(small_icon_button(if folder { "home-add-folder" } else { "home-open-recent" }, IconName::Plus, false, &theme)
-                            .tooltip(tooltip(ToolbarLocale::current(cx).app_text(if folder { "home.addFolder" } else { "home.openFile" })))
-                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(if folder { HomeEvent::AddFolder } else { HomeEvent::OpenFile })))))
+                        .child(ToolbarLocale::current(cx).app_text(if folder { "home.folders" } else { "home.recentDocuments" })))
                         .into_any_element();
                 }
                 let logical = index - 1 - usize::from(index > folders + 1);
