@@ -14,6 +14,8 @@ use windows_sys::Win32::{
 const CLASSES: &str = r"Software\Classes";
 const CAPABILITIES: &str = r"Software\Nomo\Capabilities";
 const PROG_ID: &str = "Nomo.Markdown";
+// Negative icon indices select a resource ID. Keep this in sync with build.rs and open-with.nsh.
+const EXPLORER_ICON: &str = "-6";
 const MENU_DISABLED_MARKER: &str = "shell-context-menu.disabled";
 
 #[derive(serde::Deserialize)]
@@ -135,7 +137,7 @@ impl ShellAction {
 fn register_markdown(root: &Key, exe: &str) -> windows_registry::Result<()> {
     let prog = root.create(format!(r"{CLASSES}\{PROG_ID}"))?;
     prog.set_string("", "Markdown Document")?;
-    prog.create("DefaultIcon")?.set_string("", format!("\"{exe}\",0"))?;
+    prog.create("DefaultIcon")?.set_string("", format!("\"{exe}\",{EXPLORER_ICON}"))?;
     prog.create(r"shell\open\command")?.set_string("", format!("\"{exe}\" \"%1\""))?;
 
     let caps = root.create(CAPABILITIES)?;
@@ -159,7 +161,7 @@ fn change_menu(root: &Key, exe: &str, register: bool) -> windows_registry::Resul
         if register {
             let menu = root.create(&key)?;
             menu.create("command")?.set_string("", &command)?;
-            menu.set_string("Icon", format!("\"{exe}\",0"))?;
+            menu.set_string("Icon", format!("\"{exe}\",{EXPLORER_ICON}"))?;
             menu.set_string("MUIVerb", label)?;
         } else {
             let existing = root.open(format!(r"{key}\command")).and_then(|k| k.get_string(""));

@@ -90,7 +90,7 @@ cargo test --locked --release --features nomo-mark-demo --bin nomo
 pwsh -File scripts/package-windows.ps1
 ```
 
-脚本重新构建默认 Release，在 `.artifacts/packages/` 生成 `Nomo_<版本>_x64-setup.exe` 和 `Nomo_<版本>_x64.zip`；版本读取根 `Cargo.toml`。安装包与便携 ZIP 均包含渲染和导出依赖的许可证，卸载器只移除这些已知许可证文件。
+脚本重新构建默认 Release，在 `.artifacts/packages/` 生成 `Nomo_<版本>_x64-setup.exe` 和 `Nomo_<版本>_x64.zip`；版本读取根 `Cargo.toml`。安装包与便携 ZIP 均包含渲染和导出依赖的许可证，卸载器只移除这些已知许可证文件。 Windows 任务栏主图标和 MSIX 的目标尺寸图标使用无描边的品牌 SVG，底板外沿贴齐画布。安装器、资源管理器菜单及文件关联使用保留描边的独立图标。便携版已登记的文件关联或右键菜单可在设置中重新登记以更新图标引用。
 
 安装包使用当前用户范围，复用 `Software\Microsoft\Windows\CurrentVersion\Uninstall\Nomo` 卸载键与旧 InstallLocation。保留快捷方式和“打开方式”，不改写默认程序。卸载仅删除已知文件，不递归删除安装目录或配置。旧版全机／商店安装不属于此 NSIS 升级路径。
 

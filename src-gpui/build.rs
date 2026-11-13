@@ -3,6 +3,7 @@ fn main() {
     {
         use std::{env, fs, path::PathBuf};
         println!("cargo:rerun-if-changed=assets/app/icon.ico");
+        println!("cargo:rerun-if-changed=assets/app/taskbar.ico");
         println!("cargo:rerun-if-changed=assets/app/tray");
         println!("cargo:rerun-if-changed=assets/app/windows.manifest");
         println!("cargo:rerun-if-env-changed=CARGO_PKG_VERSION");
@@ -12,16 +13,18 @@ fn main() {
         let numeric = format!("{},{},{},0", env::var("CARGO_PKG_VERSION_MAJOR").unwrap(),
             env::var("CARGO_PKG_VERSION_MINOR").unwrap(), env::var("CARGO_PKG_VERSION_PATCH").unwrap());
         let icon = root.join("assets/app/icon.ico").to_string_lossy().replace('\\', "/");
+        let taskbar = root.join("assets/app/taskbar.ico").to_string_lossy().replace('\\', "/");
         let tray = root.join("assets/app/tray").to_string_lossy().replace('\\', "/");
         let manifest = root.join("assets/app/windows.manifest").to_string_lossy().replace('\\', "/");
         let resource = out.join("nomo.rc");
         fs::write(&resource, format!(r#"
 #pragma code_page(65001)
-1 ICON "{icon}"
+1 ICON "{taskbar}"
 2 ICON "{tray}/light-active.ico"
 3 ICON "{tray}/light-inactive.ico"
 4 ICON "{tray}/dark-active.ico"
 5 ICON "{tray}/dark-inactive.ico"
+6 ICON "{icon}"
 1 24 "{manifest}"
 1 VERSIONINFO
 FILEVERSION {numeric}

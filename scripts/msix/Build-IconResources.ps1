@@ -13,7 +13,7 @@ if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw 'Package man
 $source = Join-Path $NomoRepositoryRoot 'scripts/packaging/msix/Assets'
 $assets = Join-Path $package 'Assets'
 New-Item -ItemType Directory -Path $assets | Out-Null
-foreach ($name in @('StoreLogo', 'Square44x44Logo', 'Square71x71Logo', 'Square150x150Logo')) {
+foreach ($name in @('StoreLogo', 'Square44x44Logo', 'Square71x71Logo', 'Square150x150Logo', 'DocumentLogo')) {
     foreach ($suffix in @('', '.scale-125', '.scale-150', '.scale-200', '.scale-400')) {
         Copy-Item -LiteralPath (Join-Path $source "$name$suffix.png") -Destination $assets
     }

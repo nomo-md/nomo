@@ -9,17 +9,18 @@
   WriteRegStr SHCTX "Software\Classes\Applications\${MAINBINARYNAME}.exe\shell\open\command" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\" $\"%1$\""
 
   WriteRegStr SHCTX "Software\Classes\Nomo.Markdown" "" "Markdown Document"
-  WriteRegStr SHCTX "Software\Classes\Nomo.Markdown\DefaultIcon" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\",0"
+  ; Use the outlined Explorer icon by resource ID, as in build.rs.
+  WriteRegStr SHCTX "Software\Classes\Nomo.Markdown\DefaultIcon" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\",-6"
   WriteRegStr SHCTX "Software\Classes\Nomo.Markdown\shell\open" "" "Open with ${PRODUCTNAME}"
   WriteRegStr SHCTX "Software\Classes\Nomo.Markdown\shell\open\command" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\" $\"%1$\""
 
   WriteRegStr SHCTX "Software\Classes\Nomo.Text" "" "Text Document"
-  WriteRegStr SHCTX "Software\Classes\Nomo.Text\DefaultIcon" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\",0"
+  WriteRegStr SHCTX "Software\Classes\Nomo.Text\DefaultIcon" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\",-6"
   WriteRegStr SHCTX "Software\Classes\Nomo.Text\shell\open" "" "Open with ${PRODUCTNAME}"
   WriteRegStr SHCTX "Software\Classes\Nomo.Text\shell\open\command" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\" $\"%1$\""
 
   WriteRegStr SHCTX "Software\Classes\Nomo.Json" "" "JSON Document"
-  WriteRegStr SHCTX "Software\Classes\Nomo.Json\DefaultIcon" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\",0"
+  WriteRegStr SHCTX "Software\Classes\Nomo.Json\DefaultIcon" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\",-6"
   WriteRegStr SHCTX "Software\Classes\Nomo.Json\shell\open" "" "Open with ${PRODUCTNAME}"
   WriteRegStr SHCTX "Software\Classes\Nomo.Json\shell\open\command" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\" $\"%1$\""
 

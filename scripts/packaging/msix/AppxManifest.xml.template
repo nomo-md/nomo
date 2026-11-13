@@ -58,7 +58,7 @@
         <uap:Extension Category="windows.fileTypeAssociation">
           <uap3:FileTypeAssociation Name="nomodocuments" Parameters="&quot;%1&quot;">
             <uap:DisplayName>Nomo documents</uap:DisplayName>
-            <uap:Logo>Assets\Square44x44Logo.png</uap:Logo>
+            <uap:Logo>Assets\DocumentLogo.png</uap:Logo>
             <uap:SupportedFileTypes>
               <uap:FileType>.md</uap:FileType>
               <uap:FileType>.markdown</uap:FileType>
