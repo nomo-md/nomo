@@ -1135,7 +1135,8 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
             Event::InlineMath(tex) => {
                 builder.image_only = false;
                 if !push_math_input(&mut builder.para, &range, builder.font_size, builder.width - builder.indent, env) {
-                    builder.inline_math(&tex, range.start + 1);
+                    let delimiter = if source[range.clone()].starts_with(r"\(") { 2 } else { 1 };
+                    builder.inline_math(&tex, range.start + delimiter);
                     if let Some(map) = builder.para.map.last_mut() { map.source_end = range.end; }
                 }
             }

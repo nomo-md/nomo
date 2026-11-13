@@ -446,7 +446,8 @@ pub fn release_code(parsed: &ParsedWindow, span: &InlineSpan) -> Vec<SourceEdit>
             edits.push(SourceEdit {
                 from_byte: base + (content.start + offset) as u64,
                 to_byte: base + (content.start + offset + 1) as u64,
-                inserted_text: format!("\\{ch}"),
+                // Backslash-escaped brackets are now math delimiters.
+                inserted_text: if matches!(ch, '(' | ')' | '[' | ']') { format!("&#{};", ch as u32) } else { format!("\\{ch}") },
             });
         }
     }
@@ -528,7 +529,7 @@ pub fn release_code_selection(
             .chars()
             .map(|ch| {
                 if ch.is_ascii_punctuation() {
-                    format!("\\{ch}")
+                    if matches!(ch, '(' | ')' | '[' | ']') { format!("&#{};", ch as u32) } else { format!("\\{ch}") }
                 } else {
                     ch.to_string()
                 }
@@ -667,16 +668,19 @@ mod tests {
     }
     #[test]
     fn clearing_code_preserves_literal_markup() {
-        let (text, parsed) = run("`**literal** [x](url)`", 0..22, None);
-        assert!(parsed.inline.is_empty(), "{text}");
-        let visible: String = parsed
-            .events
-            .iter()
-            .filter_map(|(event, _)| match event {
-                Event::Text(s) => Some(s.as_ref()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(visible, "**literal** [x](url)");
+        for literal in ["**literal** [x](url)", "(x) [y]", r"\(x\) \[y\]"] {
+            let source = format!("`{literal}`");
+            let (text, parsed) = run(&source, 0..source.len(), None);
+            assert!(parsed.inline.is_empty(), "{text}");
+            let visible: String = parsed
+                .events
+                .iter()
+                .filter_map(|(event, _)| match event {
+                    Event::Text(s) => Some(s.as_ref()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(visible, literal);
+        }
     }
 }

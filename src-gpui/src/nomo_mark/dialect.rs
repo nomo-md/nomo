@@ -117,7 +117,7 @@ pub fn events(
     };
     let projected = nomo_syntax::project_comment_paragraphs(&source[from..], options);
     let math =
-        nomo_syntax::project_math_setext_with_links(&projected, options, |label, link_type| {
+        nomo_syntax::project_math_with_links(&projected, options, |label, link_type| {
             pending_target(link_type)
                 || context.references.contains_key(&normalize_reference_label(label))
         });
@@ -252,7 +252,7 @@ fn project_empty_list_items(source: &str, options: Options, document_start: bool
         from += line.len();
     }
     if candidates.is_empty() { return (source.into(), Vec::new()); }
-    let math = nomo_syntax::project_math_setext(source, options);
+    let math = nomo_syntax::project_math(source, options);
     let mut containers = Parser::new_ext(math.as_ref(), options).into_offset_iter().filter_map(|(event, range)| match event {
         Event::Start(Tag::Item) => Some((true, range)),
         Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock) => Some((false, range)),
@@ -296,7 +296,7 @@ fn parser_definitions(
     options: Options,
 ) -> Vec<(String, super::protocol::ReferenceTarget)> {
     let projected = nomo_syntax::project_comment_paragraphs(source, options);
-    let math = nomo_syntax::project_math_setext(&projected, options);
+    let math = nomo_syntax::project_math(&projected, options);
     let parser = Parser::new_ext(math.as_ref(), options);
     parser
         .reference_definitions()
@@ -320,6 +320,46 @@ fn parser_definitions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn latex_delimiters_render_through_editor_pipeline() {
+        let source = "行内 \\(x_1+1\\)。\n\n\\[\n\\Phi_k=\\sum_{r=1}^4 p_k(r)u_r\n\\]\n";
+        for source in [source.to_string(), format!("<details>\n<summary>公式</summary>\n\n{source}\n</details>\n")] {
+            let parsed = crate::nomo_mark::parse::fixture(&source);
+            assert_eq!(&*parsed.source, source);
+            let mut inline = 0;
+            let mut display = 0;
+            for (event, range) in &parsed.events {
+                let (tex, block) = match event {
+                    Event::InlineMath(tex) => { inline += 1; (tex, false) },
+                    Event::DisplayMath(tex) => { display += 1; (tex, true) },
+                    _ => continue,
+                };
+                assert!(source[range.clone()].starts_with(if block { r"\[" } else { r"\(" }));
+                assert!(source[range.clone()].ends_with(if block { r"\]" } else { r"\)" }));
+                let (svg, depth) = crate::embeds::math_svg(tex, block, [0, 0, 0]).unwrap();
+                assert!(depth.is_finite());
+                let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+                let size = tree.size().to_int_size();
+                let mut pixels = resvg::tiny_skia::Pixmap::new(size.width(), size.height()).unwrap();
+                resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pixels.as_mut());
+                assert!(pixels.pixels().iter().any(|pixel| pixel.alpha() != 0));
+            }
+            assert_eq!((inline, display), (1, 1));
+        }
+    }
+
+    #[test]
+    fn latex_delimiters_do_not_change_pending_reference_keys() {
+        let source = r"[\(x\)][ref\(y\)]";
+        let context = ParseContext { pending_references: true, ..Default::default() };
+        let mut keys = BTreeSet::new();
+        let parsed = events(source, 17, false, Options::ENABLE_MATH, &context,
+            &mut Vec::new(), &mut Vec::new(), &mut keys);
+        assert_eq!(keys, BTreeSet::from([normalize_reference_label(r"ref\(y\)")]));
+        assert!(parsed.iter().any(|(event, range)| matches!(event, Event::InlineMath(tex) if tex.as_ref() == "x")
+            && source[range.start - 17..range.end - 17] == *r"\(x\)"));
+    }
+
     #[test]
     fn standalone_equal_formula_renders_through_editor_pipeline() {
         let formula = "$$\np_{\\theta,v}(z_v\\mid K,H,z_{<v})\n=\n\\frac{p_{0,v}(z_v\\mid z_{<v},K)\\exp f_\\theta(z_v;K,H,z_{<v})}{\\sum_{z\\in\\mathcal F_v}p_{0,v}(z\\mid z_{<v},K)\\exp f_\\theta(z;K,H,z_{<v})}\n$$\n";

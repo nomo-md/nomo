@@ -937,7 +937,7 @@ impl NomoMark {
         let html_cell = super::table_inline::html_cell(&self.host.parsed, &(at..at)).is_some();
         let inserted = if !semantic || literal_context || html_cell { text }
             else if plain { super::clipboard_content::literal_paragraphs(&text) }
-            else if let Some(html) = html { let converted = super::clipboard_content::from_html(&html); if converted.is_empty() { text } else { converted } }
+            else if let Some(html) = html { super::clipboard_content::from_rich_clipboard(&text, &html) }
             else if (text.starts_with("---\n") || text.starts_with("---\r\n")) && !self.host.parsed.source.trim().is_empty() { super::clipboard_content::literal(&text) }
             else { text };
         if !inserted.is_empty() {

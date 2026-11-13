@@ -2,11 +2,15 @@
 use pulldown_cmark::{BrokenLink, Event, LinkType, Options, Parser, Tag};
 use std::{borrow::Cow, collections::BTreeMap, ops::Range};
 
-/// Only neutralize Setext underlines which the parser confirms belong to $$ math.
+#[path = "math_delimiters.rs"]
+mod math_delimiters;
+
+/// Adapt math delimiters and Setext underlines only where the parser confirms math.
 /// The projection is byte-for-byte aligned with source and lives for one parse.
 pub struct MathProjection<'a> {
     source: Cow<'a, str>,
     marker: Option<char>,
+    delimiters: Option<(char, char)>,
 }
 
 impl AsRef<str> for MathProjection<'_> {
@@ -15,25 +19,43 @@ impl AsRef<str> for MathProjection<'_> {
 
 impl MathProjection<'_> {
     pub fn restore<'a>(&self, event: Event<'a>) -> Event<'a> {
-        match (self.marker, event) {
-            (Some(marker), Event::DisplayMath(tex)) if tex.contains(marker) => {
-                Event::DisplayMath(tex.replace(marker, "=").into())
-            }
-            (_, event) => event,
+        let restore = |tex: pulldown_cmark::CowStr<'a>| {
+            if !self.marker.is_some_and(|marker| tex.contains(marker))
+                && !self.delimiters.is_some_and(|(padding, dollar)| tex.contains([padding, dollar]))
+            { return tex; }
+            tex.chars().filter_map(|ch| {
+                if self.marker == Some(ch) { Some('=') }
+                else if self.delimiters.is_some_and(|(padding, _)| ch == padding) { None }
+                else if self.delimiters.is_some_and(|(_, dollar)| ch == dollar) { Some('$') }
+                else { Some(ch) }
+            }).collect::<String>().into()
+        };
+        match event {
+            Event::InlineMath(tex) => Event::InlineMath(restore(tex)),
+            Event::DisplayMath(tex) => Event::DisplayMath(restore(tex)),
+            event => event,
         }
     }
 }
 
-pub fn project_math_setext(source: &str, options: Options) -> MathProjection<'_> {
-    project_math_setext_with_links(source, options, |_, _| false)
+pub fn project_math(source: &str, options: Options) -> MathProjection<'_> {
+    project_math_with_links(source, options, |_, _| false)
 }
 
-pub fn project_math_setext_with_links<'a>(
+pub fn project_math_with_links<'a>(
     source: &'a str,
     options: Options,
     resolves_link: impl Fn(&str, LinkType) -> bool,
 ) -> MathProjection<'a> {
-    let unchanged = || MathProjection { source: Cow::Borrowed(source), marker: None };
+    math_delimiters::project(source, options, resolves_link)
+}
+
+fn project_math_setext_with_links<'a>(
+    source: &'a str,
+    options: Options,
+    resolves_link: impl Fn(&str, LinkType) -> bool,
+) -> MathProjection<'a> {
+    let unchanged = || MathProjection { source: Cow::Borrowed(source), marker: None, delimiters: None };
     if !options.contains(Options::ENABLE_MATH) || !source.contains("$$") {
         return unchanged();
     }
@@ -109,7 +131,7 @@ pub fn project_math_setext_with_links<'a>(
             projected.replace_range(range.clone(), &source[range]);
         }
     }
-    MathProjection { source: Cow::Owned(projected), marker: Some(marker) }
+    MathProjection { source: Cow::Owned(projected), marker: Some(marker), delimiters: None }
 }
 
 #[cfg(test)]
@@ -118,7 +140,7 @@ mod math_setext_tests {
     use pulldown_cmark::TagEnd;
 
     fn parse(source: &str) -> Vec<(Event<'static>, Range<usize>)> {
-        let projected = project_math_setext(source, Options::ENABLE_MATH);
+        let projected = project_math(source, Options::ENABLE_MATH);
         assert_eq!(projected.as_ref().len(), source.len());
         Parser::new_ext(projected.as_ref(), Options::ENABLE_MATH).into_offset_iter()
             .map(|(event, range)| (projected.restore(event).into_static(), range)).collect()
@@ -211,17 +233,17 @@ mod math_setext_tests {
         let events = parse(source);
         assert!(events.iter().any(|(e, _)| matches!(e, Event::Text(t) if t.contains('\u{1}'))));
         assert!(events.iter().any(|(e, _)| matches!(e, Event::DisplayMath(t) if t.contains("\n=\n"))));
-        let projected = project_math_setext(source, Options::empty());
+        let projected = project_math(source, Options::empty());
         assert!(matches!(projected.source, Cow::Borrowed(_)));
         assert_eq!(projected.as_ref(), source);
         let occupied = format!("{}\n{source}", (1u8..=8).map(char::from).collect::<String>());
-        assert_eq!(project_math_setext(&occupied, Options::ENABLE_MATH).as_ref(), occupied);
+        assert_eq!(project_math(&occupied, Options::ENABLE_MATH).as_ref(), occupied);
     }
 
     #[test]
     fn ordinary_input_borrows_source() {
         for source in ["# Heading\ntext\n", "$$\nx = y\n$$\n", "title\n=\n\n$$x$$"] {
-            assert!(matches!(project_math_setext(source, Options::ENABLE_MATH).source, Cow::Borrowed(_)));
+            assert!(matches!(project_math(source, Options::ENABLE_MATH).source, Cow::Borrowed(_)));
         }
         assert!(parse("title\n=\n").iter().any(|(e, _)| matches!(e, Event::End(TagEnd::Heading(_)))));
     }
