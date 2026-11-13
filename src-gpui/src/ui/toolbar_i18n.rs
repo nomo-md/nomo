@@ -9,7 +9,9 @@ pub(crate) struct ToolbarLocale(&'static str);
 impl ToolbarLocale {
     pub fn code(self) -> &'static str { self.0 }
     // 仅用于原生回调的原子状态，不写入配置文件。
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn id(self) -> u8 { match self.0 { "zh-TW" => 1, "en-US" => 2, "ja-JP" => 3, _ => 0 } }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn from_id(id: u8) -> Self { Self(match id { 1 => "zh-TW", 2 => "en-US", 3 => "ja-JP", _ => "zh-CN" }) }
     pub fn fallback() -> Self { Self("zh-CN") }
     pub fn is_chinese(self) -> bool { self.0 == "zh-CN" || self.0 == "zh-TW" }

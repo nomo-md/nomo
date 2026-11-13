@@ -197,6 +197,8 @@ fn main() {
             // 结束本轮关闭通知后再联动设置窗口，让它也完整走过关闭与释放回调。
             cx.defer(ui::settings_window::close_if_orphaned);
             ui::updates::prune_closed_windows(cx);
+            #[cfg(windows)]
+            cx.defer(ui::tray::windows::refresh_icon);
             #[cfg(target_os = "macos")]
             if !cx.windows().iter().any(|window| window.downcast::<Workspace>().is_some()) {
                 ui::chrome::ViewMenuState::from_settings(cx.global::<settings::Settings>()).sync_native(cx);
@@ -218,6 +220,8 @@ fn main() {
 
         // 系统直接请求退出时仍可读取当前窗口。应用内退出已在关闭路径保存。
         cx.on_app_quit(|cx| {
+            #[cfg(windows)]
+            ui::tray::windows::shutdown(cx);
             if let Some(handle) = preferred_workspace(cx)
                 && let Ok(Some(placement)) = handle.update(cx, |workspace, window, cx| workspace.window_placement(window, cx))
             {
@@ -228,6 +232,10 @@ fn main() {
         let mut paths = paths;
         paths.append(&mut open_state.borrow_mut().1);
         open_workspace(paths, cx);
+        #[cfg(windows)]
+        if let Err(error) = ui::tray::windows::install(cx) {
+            app_logger::warn("Tray", &error);
+        }
         open_state.borrow_mut().0 = Some(cx.to_async());
         #[cfg(windows)]
         if let Some(mut instance)=instance {
@@ -289,6 +297,8 @@ fn try_open_workspace(paths: Vec<PathBuf>, cx: &mut App) -> Result<gpui::WindowH
         theme::Theme::apply(window.appearance(), cx);
         // 跟随系统深浅色：外观变化时重新应用主题（手动指定模式时 apply 会忽略外观）。
         window.observe_window_appearance(|window, cx| theme::Theme::apply(window.appearance(), cx)).detach();
+        #[cfg(windows)]
+        window.observe_window_visibility(|_, _, cx| cx.defer(ui::tray::windows::refresh_icon)).detach();
         cx.new(|cx| Workspace::new(paths, window_bounds.get_bounds(), window, cx))
     })
     .map_err(|error|error.to_string())

@@ -10,6 +10,7 @@ pub(super) enum OpenSource { File, NewFile, Layout(u64,Option<RecoveryCandidate>
 #[derive(Default)]
 pub(super) struct ApplicationDialogs {
     pub close_approved: bool,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     tray: Option<crate::ui::tray::TrayIcon>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     tray_start: Option<Task<()>>,
@@ -48,10 +49,16 @@ pub(super) fn mark_recovered_change(workspace:&mut Workspace,document:&Entity<Do
 }
 
 pub(crate) fn refresh_interface_locales(cx: &mut App) {
+    #[cfg(windows)]
+    if let Err(error) = crate::ui::tray::windows::refresh_locale(cx) {
+        crate::app_logger::warn("Tray", &error);
+    }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let locale = ToolbarLocale::current(cx);
     for handle in cx.windows().into_iter().filter_map(|handle| handle.downcast::<Workspace>()) {
         let _ = handle.update(cx, |workspace, window, cx| {
             if let Some(document) = workspace.document() { window.set_window_title(&format!("{} — Nomo", document.read(cx).display_title(cx))); }
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             if let Some(tray) = &mut workspace.application_dialogs.tray {
                 if let Err(error) = tray.set_locale(locale, cx) { workspace.failure_notice = Some(tray_error(error, cx)); cx.notify(); }
             }
@@ -65,8 +72,12 @@ fn tray_error(error: impl std::fmt::Display, cx: &App) -> SharedString {
 
 impl Workspace {
     pub(crate) fn reveal_window(&mut self,window:&mut Window,cx:&mut Context<Self>) {
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        if let Some(tray)=&self.application_dialogs.tray{tray.restore();}
+        #[cfg(windows)]
+        if let Err(error) = crate::ui::tray::windows::restore_window(window) {
+            self.failure_notice = Some(tray_error(error, cx));
+            cx.notify();
+            return;
+        }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             self.application_dialogs.tray_generation = self.application_dialogs.tray_generation.wrapping_add(1);
@@ -270,8 +281,6 @@ impl Workspace {
     }
 
     pub(super) fn choose_close_behavior(&mut self,window:&mut Window,cx:&mut Context<Self>) {
-        #[cfg(windows)]
-        if self.application_dialogs.tray.as_ref().is_some_and(|tray|tray.exit_requested()) {cx.defer(crate::quit_workspaces);return;}
         let preference=cx.global::<Settings>().string("closeWindowBehavior");
         if preference=="close-window" {self.application_dialogs.close_approved=true;if self.request_close_window(window,cx){window.remove_window();}return;}
         if preference=="close-to-tray" && crate::ui::tray::supported(window) {self.begin_hide_to_tray(false,window,cx);return;}
@@ -306,8 +315,13 @@ impl Workspace {
 
     #[cfg(windows)]
     fn hide_to_tray(&mut self,window:&mut Window,cx:&mut Context<Self>)->bool {
+        if let Err(error) = crate::ui::tray::windows::install(cx) {
+            self.failure_notice = Some(tray_error(error, cx));
+            cx.notify();
+            return false;
+        }
         if let Some(document)=self.document(){if let Err(error)=document.update(cx,|host,cx|host.set_active(false,cx)){self.failure_notice=Some(error.to_string().into());cx.notify();return false;}}
-        let result=if let Some(tray)=&self.application_dialogs.tray {tray.hide_again();Ok(())}else{crate::ui::tray::TrayIcon::hide(window, ToolbarLocale::current(cx)).map(|tray|self.application_dialogs.tray=Some(tray))};
+        let result = crate::ui::tray::windows::hide_window(window, cx);
         if let Err(error)=result {self.failure_notice=Some(tray_error(error, cx));if let Some(document)=self.document(){let _=document.update(cx,|host,cx|host.set_active(true,cx));}cx.notify();return false;}
         true
     }
