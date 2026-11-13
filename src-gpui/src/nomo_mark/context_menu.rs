@@ -329,6 +329,10 @@ impl NomoMark {
             }
             A::ObjectEdit => if let Target::Block(range, kind) = menu.target { self.begin_object(range, kind, window, cx); },
             A::ObjectCopy => if let Target::Block(range, kind) = menu.target {
+                if kind == ObjectKind::BlockMath {
+                    self.context_copy_text(&self.host.parsed.source[range], cx);
+                    return;
+                }
                 let text = BlockFrame::split(&self.host.parsed.source[range.clone()], kind).map(|(_, text)| text)
                     .unwrap_or_else(|| self.host.parsed.events.iter().filter(|(_, span)| range.start <= span.start && span.end <= range.end)
                         .filter_map(|(event, _)| match event { Event::Text(text) | Event::DisplayMath(text) => Some(text.as_ref()), _ => None }).collect());

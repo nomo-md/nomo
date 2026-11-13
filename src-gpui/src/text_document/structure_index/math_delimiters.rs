@@ -73,7 +73,7 @@ pub(super) fn project<'a>(
         }
         // Consume escaped backslashes together, so \\( and \\[ remain literal.
         let next = bytes[at + 1];
-        if matches!(next, b'(' | b'[') {
+        if matches!(next, b'(' | b'[' | b')' | b']') {
             while protected_at < protected.len() && protected[protected_at].end <= at {
                 protected_at += 1;
             }
@@ -82,25 +82,27 @@ pub(super) fn project<'a>(
             }
             // Escaped punctuation is a text event; URLs, titles and reference
             // definitions are not. They must not become math after projection.
-            if text
+            let in_text = text
                 .get(text_at)
                 .is_some_and(|range| range.contains(&(at + 1)))
                 && !protected
                     .get(protected_at)
-                    .is_some_and(|range| range.start <= at && at < range.end)
-            {
-                opening = Some((at, next == b'['));
-            }
-        } else if let Some((start, display)) = opening {
-            if next == if display { b']' } else { b')' } {
-                let body = &source[start + 2..at];
-                if display || (!body.is_empty() && !body.contains(['\r', '\n'])) {
-                    candidates.push(DelimitedMath {
-                        range: start..at + 2,
-                        display,
-                    });
+                    .is_some_and(|range| range.start <= at && at < range.end);
+            if in_text {
+                if matches!(next, b'(' | b'[') {
+                    opening = Some((at, next == b'['));
+                } else if let Some((start, display)) = opening
+                    && next == if display { b']' } else { b')' }
+                {
+                    let body = &source[start + 2..at];
+                    if display || (!body.is_empty() && !body.contains(['\r', '\n'])) {
+                        candidates.push(DelimitedMath {
+                            range: start..at + 2,
+                            display,
+                        });
+                    }
+                    opening = None;
                 }
-                opening = None;
             }
         }
         at += 2;

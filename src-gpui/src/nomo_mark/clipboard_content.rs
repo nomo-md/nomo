@@ -5,6 +5,11 @@ use std::ops::Range;
 
 pub(crate) struct Payload { pub text: String, pub html: String }
 
+const CLIPBOARD_MARKDOWN: Options = Options::ENABLE_TABLES
+    .union(Options::ENABLE_STRIKETHROUGH)
+    .union(Options::ENABLE_TASKLISTS)
+    .union(Options::ENABLE_MATH);
+
 pub(super) fn from_session(port: &super::native_port::NativeWindowPort, revision: u64, range: Range<u64>, markdown: bool, request: &super::session_window::WindowRequest) -> Result<Payload, ControlError> {
     let mut payload = Payload { text: String::new(), html: String::new() };
     let mut at = range.start;
@@ -157,10 +162,11 @@ fn safe_url(value: &str) -> bool {
 pub(super) fn html(markdown: &str) -> String {
     let mut output = String::new();
     let mut image: Option<(String, String, String)> = None;
-    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_MATH;
+    let options = CLIPBOARD_MARKDOWN;
     let projected = super::nomo_syntax::project_comment_paragraphs(markdown, options);
-    for (event, range) in Parser::new_ext(&projected, options).into_offset_iter() {
-        let event = super::nomo_syntax::restore_inline_comment(markdown, event, &range);
+    let math = super::nomo_syntax::project_math(&projected, options);
+    for (event, range) in Parser::new_ext(math.as_ref(), options).into_offset_iter() {
+        let event = super::nomo_syntax::restore_inline_comment(markdown, math.restore(event), &range);
         match &event {
             Event::Start(Tag::Image { dest_url, title, .. }) => { image = Some((dest_url.to_string(), title.to_string(), String::new())); continue; }
             Event::Text(text) | Event::Code(text) if image.is_some() => { image.as_mut().unwrap().2.push_str(text); continue; }
@@ -196,10 +202,13 @@ pub(super) fn html(markdown: &str) -> String {
                 TagEnd::Link => "</a>".into(), _ => String::new()
             }),
             Event::Text(text) => output.push_str(&html_escape::encode_text(&text)),
-            Event::InlineMath(text) => output.push_str(&format!("<span class=\"math-inline\" data-tex=\"{}\">{}</span>",
-                html_escape::encode_double_quoted_attribute(&text), html_escape::encode_text(&text))),
-            Event::DisplayMath(text) => output.push_str(&format!("<div class=\"math-block\" data-tex=\"{}\">{}</div>",
-                html_escape::encode_double_quoted_attribute(&text), html_escape::encode_text(&text))),
+            Event::InlineMath(ref text) | Event::DisplayMath(ref text) => {
+                let (tag, class) = if matches!(event, Event::DisplayMath(_)) { ("div", "math-block") } else { ("span", "math-inline") };
+                let source = html_escape::encode_double_quoted_attribute(&markdown[range])
+                    .replace('\r', "&#13;").replace('\n', "&#10;");
+                output.push_str(&format!("<{tag} class=\"{class}\" data-tex=\"{}\" data-nomo-math-source=\"{source}\">{}</{tag}>",
+                    html_escape::encode_double_quoted_attribute(text), html_escape::encode_text(text)));
+            }
             Event::Code(text) => output.push_str(&format!("<code>{}</code>", html_escape::encode_text(&text))),
             Event::SoftBreak | Event::HardBreak => output.push_str("<br>"),
             Event::Rule => output.push_str("<hr>"),
@@ -240,7 +249,8 @@ pub(super) fn sanitize_html(input: &str) -> String {
                     || (key == "href" && tag.name == "a" && safe_url(value))
                     || (tag.name == "img" && ((key == "src" && safe_url(value)) || matches!(key.as_str(), "alt" | "title")))
                     || (key == "class" && matches!(value.as_str(), "math-inline" | "math-block"))
-                    || (key == "data-tex" && matches!(tag.attrs.get("class").map(String::as_str), Some("math-inline" | "math-block")))
+                    || (matches!(key.as_str(), "data-tex" | "data-nomo-math-source")
+                        && matches!(tag.attrs.get("class").map(String::as_str), Some("math-inline" | "math-block")))
                     || (matches!(key.as_str(), "align" | "data-align") && matches!(value.as_str(), "left" | "center" | "right")) {
                     let key = if key == "align" { "data-align" } else { key.as_str() };
                     output.push_str(&format!(" {key}=\"{}\"", html_escape::encode_double_quoted_attribute(value)));
@@ -259,7 +269,16 @@ pub(super) fn sanitize_html(input: &str) -> String {
 
 pub(super) fn literal(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
-    for ch in text.chars() { if "\\`*_~^<>[]$#|!+-.".contains(ch) { output.push('\\'); } output.push(ch); }
+    for ch in text.chars() {
+        match ch {
+            '[' => output.push_str("&#91;"),
+            ']' => output.push_str("&#93;"),
+            _ => {
+                if "\\`*_~^<>$#|!+-.".contains(ch) { output.push('\\'); }
+                output.push(ch);
+            }
+        }
+    }
     output
 }
 
@@ -286,9 +305,23 @@ pub(super) fn from_html(input: &str) -> String {
             if !tag.closing && matches!(tag.attrs.get("class").map(String::as_str), Some("math-inline" | "math-block")) {
                 if let Some(tex) = tag.attrs.get("data-tex") {
                     if let Some(length) = input[at..].find(&format!("</{}>", tag.name)) {
-                        let tex = html_escape::decode_html_entities(tex);
-                        if tag.attrs.get("class").is_some_and(|c| c == "math-block") { output.push_str(&format!("\n\n$$\n{tex}\n$$\n\n")); }
-                        else { output.push_str(&format!("{}{tex}{}", "$", "$")); }
+                        let display = tag.attrs.get("class").is_some_and(|c| c == "math-block");
+                        if let Some(source) = tag.attrs.get("data-nomo-math-source").filter(|source| {
+                            let math = super::nomo_syntax::project_math(source, CLIPBOARD_MARKDOWN);
+                            Parser::new_ext(math.as_ref(), CLIPBOARD_MARKDOWN).into_offset_iter().any(|(event, range)| {
+                                range == (0..source.len()) && match math.restore(event) {
+                                    Event::InlineMath(body) => !display && body.as_ref() == tex,
+                                    Event::DisplayMath(body) => display && body.as_ref() == tex,
+                                    _ => false,
+                                }
+                            })
+                        }) {
+                            output.push_str(source);
+                        } else if display {
+                            output.push_str(&format!("\n\n$$\n{tex}\n$$\n\n"));
+                        } else {
+                            output.push_str(&format!("${tex}$"));
+                        }
                         at += length + tag.name.len() + 3;
                         continue;
                     }
@@ -339,6 +372,32 @@ pub(super) fn from_html(input: &str) -> String {
         }
     }
     output.trim_matches('\n').to_string()
+}
+
+fn math_sources(source: &str) -> Vec<&str> {
+    if !source.contains('$') && !source.contains(r"\(") && !source.contains(r"\[") {
+        return Vec::new();
+    }
+    let math = super::nomo_syntax::project_math(source, CLIPBOARD_MARKDOWN);
+    Parser::new_ext(math.as_ref(), CLIPBOARD_MARKDOWN).into_offset_iter().filter_map(|(event, range)| {
+        matches!(event, Event::InlineMath(_) | Event::DisplayMath(_)).then(|| &source[range])
+    }).collect()
+}
+
+pub(super) fn from_rich_clipboard(text: &str, html: &str) -> String {
+    let converted = from_html(html);
+    if !converted.is_empty() {
+        let sources = math_sources(text);
+        if sources.is_empty() {
+            return converted;
+        }
+        let mut retained = math_sources(&converted).into_iter();
+        // External rich text can discard TeX source that is still present in text/plain.
+        if sources.into_iter().all(|source| retained.any(|candidate| candidate == source)) {
+            return converted;
+        }
+    }
+    text.to_owned()
 }
 
 fn normalize_table(input: &str) -> String {
