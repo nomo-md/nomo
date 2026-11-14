@@ -60,6 +60,11 @@ impl NomoMark {
                     }
                 }
             }
+            #[cfg(target_os = "macos")]
+            {
+                self.ime_geometry.caret = self.document_caret_bounds(anchor)
+                    .map(|(_, bounds)| bounds);
+            }
             self.external_composition = Some(ExternalComposition {
                 selection, text: String::new(), selected: 0..0, anchor,
                 preview: None, preview_key: None,
@@ -134,6 +139,8 @@ impl NomoMark {
         self.external_composition = None;
         self.composition_templates.clear();
         self.host.interaction.end_composition();
+        #[cfg(target_os = "macos")]
+        self.clear_ime_geometry();
         self.history_serial += 1;
         cx.emit(ControlEvent::CompositionChanged { identity: self.host.parsed.identity.clone(), active: false });
         if commit { self.invalidate(); self.submit(cx); }
@@ -149,6 +156,10 @@ impl NomoMark {
             metrics.body_size(), metrics.body_line_height(), Wrap::Greedy);
         composition.preview = Some(Rc::new(layout_text(&spec, width.max(1.0), window)));
         composition.preview_key = Some(key);
+        #[cfg(target_os = "macos")]
+        {
+            self.ime_geometry.needs_update = true;
+        }
         cx.emit(ControlEvent::ResourceUsage {
             identity: self.host.parsed.identity.clone(), parsed_bytes: self.host.parsed.estimated_bytes(),
             layout_bytes: self.layout.as_ref().map_or(0, |layout| layout.estimated_bytes())

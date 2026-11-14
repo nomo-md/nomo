@@ -55,6 +55,14 @@ mod code_ui;
 
 gpui::actions!(nomo_mark, [Dismiss, SoftBreak, DeleteWordRight, SelectPageUp, SelectPageDown, PastePlain, ParagraphBefore, ParagraphAfter]);
 
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct ImeGeometry {
+    caret: Option<Bounds<Pixels>>,
+    // 重排可能改变标记文字的行首，即使选区光标的矩形相同。
+    needs_update: bool,
+}
+
 pub struct NomoMark {
     heading_indicator: node_controls::HeadingIndicator,
     table_size_picker: bool,
@@ -84,6 +92,8 @@ pub struct NomoMark {
     visible_bounds: Option<Bounds<Pixels>>,
     composition_templates: super::template_projection::CompositionTemplates,
     external_composition: Option<composition::ExternalComposition>,
+    #[cfg(target_os = "macos")]
+    ime_geometry: ImeGeometry,
     preferred_x: Option<f32>,
     // 同一字节既是软换行行尾又是下一行行首时，保留实际选中的视觉侧。
     upstream_caret: Option<u64>,
@@ -150,6 +160,8 @@ impl NomoMark {
             visible_bounds: None,
             composition_templates: Default::default(),
             external_composition: None,
+            #[cfg(target_os = "macos")]
+            ime_geometry: ImeGeometry::default(),
             preferred_x: None,
             upstream_caret: None,
             pending_page: None,
@@ -317,6 +329,8 @@ impl NomoMark {
         self.pending_page = None;
         self.bounds = None;
         self.visible_bounds = None;
+        #[cfg(target_os = "macos")]
+        self.clear_ime_geometry();
         self.last_geometry = None;
         self.horizontal_drag = None;
         self.code_scroll_drag = None;
@@ -356,6 +370,8 @@ impl NomoMark {
         self.object = None;
         self.pending_comment_history = None;
         self.external_composition = None;
+        #[cfg(target_os = "macos")]
+        self.clear_ime_geometry();
         self.menu_open = false;
         self.slash_range = None;
         self.emoji_catalog = None;
@@ -1673,6 +1689,31 @@ impl NomoMark {
             Bounds::new(bounds.origin + point(px(x), px(y)), size(px(caret_width), px(h))),
         ))
     }
+    #[cfg(target_os = "macos")]
+    fn clear_ime_geometry(&mut self) {
+        self.ime_geometry = ImeGeometry::default();
+    }
+    #[cfg(target_os = "macos")]
+    fn update_ime_geometry(&mut self, caret: Option<Bounds<Pixels>>, window: &Window) {
+        if !self.host.interaction.composing
+            || self.host.presentation != Presentation::Editable
+            || !self.focus.is_focused(window)
+            || !window.is_window_active()
+        {
+            self.clear_ime_geometry();
+            return;
+        }
+        let Some(caret) = caret else {
+            self.ime_geometry.needs_update = true;
+            return;
+        };
+        if self.ime_geometry.needs_update || self.ime_geometry.caret != Some(caret) {
+            self.ime_geometry.caret = Some(caret);
+            self.ime_geometry.needs_update = false;
+            // GPUI 下一轮从输入处理器取坐标，此时本帧的布局与输入处理器已就绪。
+            window.invalidate_character_coordinates();
+        }
+    }
     /// 弹层使用当前可见窗口几何，不能以整段内容顶部为锚点。
     fn popup_position(&self, width: f32, height: f32, above: bool) -> (f32, f32) {
         let Some(bounds) = self.bounds else {
@@ -1700,7 +1741,7 @@ impl NomoMark {
             y.clamp(top, (bottom - height).max(top)),
         )
     }
-    fn report_geometry(&mut self, cx: &mut Context<Self>) {
+    fn report_geometry(&mut self, _window: &Window, cx: &mut Context<Self>) {
         let (Some((stamp, ..)), Some(layout), Some(bounds), Some(visible)) = (
             &self.layout_key,
             &self.layout,
@@ -1743,20 +1784,23 @@ impl NomoMark {
                 })
             })
             .collect();
+        let caret = self
+            .caret_bounds(self.host.selection.head_byte)
+            .map(|(_, bounds)| bounds);
         let event = ControlEvent::Geometry {
             stamp: stamp.clone(),
             viewport: rect(visible),
             anchor_byte: base + anchor as u64,
             anchor_y,
-            caret: self
-                .caret_bounds(self.host.selection.head_byte)
-                .map(|(_, bounds)| rect(bounds)),
+            caret: caret.map(rect),
             selection,
         };
         if self.last_geometry.as_ref() != Some(&event) {
             self.last_geometry = Some(event.clone());
             cx.emit(event);
         }
+        #[cfg(target_os = "macos")]
+        self.update_ime_geometry(caret, _window);
     }
     fn layout_height_ready(&self, height: Pixels, window: &Window) -> bool {
         let scale = window.scale_factor();
@@ -1988,6 +2032,10 @@ impl NomoMark {
         key.0 = stamp.clone();
         self.layout = Some(Rc::new(layout));
         self.layout_key = Some(key);
+        #[cfg(target_os = "macos")]
+        if self.host.interaction.composing {
+            self.ime_geometry.needs_update = true;
+        }
         self.resolve_navigation_caret(cx);
         // 标签宽度变化即使不改变整段高度，也要更新同一位置的命中区和输入控件。
         if self.inline_editing() || self.block_editing() || self.layout.as_ref().is_some_and(|layout| !layout.comment_rects().is_empty()
@@ -2120,6 +2168,8 @@ impl EntityInputHandler for NomoMark {
         if self.finish_external_composition(true, cx) { return; }
         self.composition_templates.clear();
         self.host.interaction.end_composition();
+        #[cfg(target_os = "macos")]
+        self.clear_ime_geometry();
         self.history_serial += 1;
         cx.emit(ControlEvent::CompositionChanged {
             identity: self.host.parsed.identity.clone(),
@@ -2153,22 +2203,43 @@ impl EntityInputHandler for NomoMark {
     fn bounds_for_range(
         &mut self,
         range: Range<usize>,
-        _: Bounds<Pixels>,
-        _: &mut Window,
-        _: &mut Context<Self>,
+        _bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        if let Some(composition) = &self.external_composition {
-            return self.external_caret_bounds(utf16_to_utf8(&composition.text, range.start)).map(|(_, bounds)| bounds);
-        }
-        if local_range(&self.host.parsed.source, self.host.parsed.identity.from_byte, self.host.selection.range()).is_err() {
-            let identity = &self.host.parsed.identity;
-            return self.document_caret_bounds(self.host.selection.range().start.clamp(identity.from_byte, identity.to_byte)).map(|(_, bounds)| bounds);
-        }
-        self.caret_bounds(
-            self.host.parsed.identity.from_byte
-                + utf16_to_utf8(&self.host.parsed.source, range.start) as u64,
+        let caret = if let Some(composition) = &self.external_composition {
+            self.external_caret_bounds(utf16_to_utf8(&composition.text, range.start))
+        } else if local_range(
+            &self.host.parsed.source,
+            self.host.parsed.identity.from_byte,
+            self.host.selection.range(),
         )
-        .map(|(_, bounds)| bounds)
+        .is_err()
+        {
+            let identity = &self.host.parsed.identity;
+            self.document_caret_bounds(
+                self.host.selection.range().start.clamp(identity.from_byte, identity.to_byte),
+            )
+        } else {
+            self.document_caret_bounds(
+                self.host.parsed.identity.from_byte
+                    + utf16_to_utf8(&self.host.parsed.source, range.start) as u64,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        if caret.is_none()
+            && self.host.interaction.composing
+            && self.host.presentation == Presentation::Editable
+            && self.focus.is_focused(_window)
+        {
+            // AppKit 可能在组字回调之后、绘制之前立即取坐标。
+            return Some(self.ime_geometry.caret.unwrap_or_else(|| {
+                let area = self.visible_bounds.unwrap_or(_bounds);
+                let height = _cx.global::<Settings>().metrics().body_line_height();
+                Bounds::new(area.origin, size(px(1.5), px(height)))
+            }));
+        }
+        caret.map(|(_, bounds)| bounds)
     }
     fn character_index_for_point(
         &mut self,
@@ -2269,6 +2340,13 @@ impl NomoMark {
             .map(|range| utf16_to_utf8(source, range.start)..utf16_to_utf8(source, range.end))
             .or(self.host.interaction.marked.clone())
             .unwrap_or(selected_range);
+        #[cfg(target_os = "macos")]
+        let initial_ime_caret = if mark && !self.host.interaction.composing && !text.is_empty() {
+            self.document_caret_bounds(base + range.start as u64)
+                .map(|(_, bounds)| bounds)
+        } else {
+            None
+        };
         let mut start = range.start;
         let open_quick = self.quick_insert_input(&range,text,mark,cx);
         self.dismiss_quick_insert(cx);
@@ -2374,9 +2452,15 @@ impl NomoMark {
                     });
                 }
                 if !self.host.interaction.composing {
+                    #[cfg(target_os = "macos")]
+                    self.clear_ime_geometry();
                     self.composition_templates.clear();
                     self.update_completion(cx);
                     if open_quick {self.open_quick_insert(start..end,text,cx);}
+                }
+                #[cfg(target_os = "macos")]
+                if self.host.interaction.composing && !was_composing {
+                    self.ime_geometry.caret = initial_ime_caret;
                 }
                 self.invalidate();
                 self.submit(cx);
@@ -2839,7 +2923,7 @@ impl Element for ControlElement {
                 }
             }
             v.prepare_heading_indicator(bounds, window, cx);
-            v.report_geometry(cx);
+            v.report_geometry(window, cx);
         });
         let mut cursors = Vec::new();
         let control = self.control.read(cx);
