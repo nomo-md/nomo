@@ -4,7 +4,7 @@ use crate::ui::toolbar_i18n::UiMessage;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions}, io::{self, Read, Write},
-    os::windows::fs::OpenOptionsExt, path::{Path, PathBuf}, process::Command,
+    os::windows::fs::{MetadataExt, OpenOptionsExt}, path::{Path, PathBuf}, process::Command,
     sync::atomic::{AtomicBool, Ordering}, time::Duration,
 };
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
@@ -43,17 +43,70 @@ impl Candidate {
     }
 }
 
-fn cache_path() -> Result<PathBuf, UiMessage> {
+fn cache_directory(create: bool) -> Result<Option<PathBuf>, UiMessage> {
     let base = crate::settings::config_path().and_then(|p| p.parent().map(Path::to_path_buf)).ok_or(UiMessage::new("installer.directory"))?;
     let dir = base.join("native-updates");
-    fs::create_dir_all(&dir).map_err(|e| UiMessage::new("installer.createDirectory").arg("error", e))?;
-    Ok(dir.canonicalize().map_err(|e| e.to_string())?.join("nomo-update-x64-setup.exe"))
+    if create { fs::create_dir_all(&dir).map_err(|e| UiMessage::new("installer.createDirectory").arg("error", e))?; }
+    let meta = match fs::symlink_metadata(&dir) {
+        Ok(meta) => meta,
+        Err(error) if !create && error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(UiMessage::raw(error)),
+    };
+    if !meta.is_dir() || meta.file_attributes() & 0x400 != 0 {
+        return Err(UiMessage::raw("更新缓存目录不是普通目录，已保留"));
+    }
+    Ok(Some(dir.canonicalize().map_err(UiMessage::raw)?))
 }
 
-// 只清理这个受控文件；崩溃或安装器占用时留下的缓存也不超过一个安装包。
-struct StagedPath(PathBuf);
+fn cache_lease(directory: &Path) -> Result<Option<File>, UiMessage> {
+    let path = directory.join(".active");
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if !meta.is_file() || meta.file_attributes() & 0x400 != 0 =>
+            return Err(UiMessage::raw("更新缓存锁不是普通文件，已保留")),
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(UiMessage::raw(error)),
+        _ => {},
+    }
+    let lease = OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        .share_mode(FILE_SHARE_READ | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE)
+        .open(path).map_err(UiMessage::raw)?;
+    match lease.try_lock() {
+        Ok(()) => Ok(Some(lease)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(error) => Err(UiMessage::raw(error)),
+    }
+}
+
+pub(super) fn clean_stale() -> Result<(), UiMessage> {
+    let Some(directory) = cache_directory(false)? else { return Ok(()); };
+    let Some(_lease) = cache_lease(&directory)? else { return Ok(()); };
+    let path = directory.join("nomo-update-x64-setup.exe");
+    let meta = match fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(UiMessage::raw(error)),
+    };
+    if !meta.is_file() || meta.file_attributes() & 0x400 != 0 { return Ok(()); }
+    // 兼容尚无缓存租约的旧版本，避开下载结束到校验打开之间的短暂窗口。
+    if meta.modified().map_err(UiMessage::raw)?.elapsed().unwrap_or_default() < Duration::from_secs(24 * 60 * 60) {
+        return Ok(());
+    }
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        // Windows 拒绝删除仍在下载、校验或运行的安装包；下次启动再检查。
+        Err(error) if matches!(error.raw_os_error(), Some(5 | 32 | 33)) => Ok(()),
+        Err(error) => Err(UiMessage::raw(error)),
+    }
+}
+
+// 租约覆盖下载、校验、待安装及本对象的清理，防止另一进程在句柄切换时删除文件。
+struct StagedPath { path: PathBuf, _lease: File }
 impl Drop for StagedPath {
-    fn drop(&mut self) { let _ = fs::remove_file(&self.0); }
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_file(&self.path) && error.kind() != io::ErrorKind::NotFound {
+            crate::app_logger::warn("UpdateCache", &format!("更新包暂未删除，后续启动将重试：{error}"));
+        }
+    }
 }
 pub(super) struct Verified {
     pub version: String,
@@ -64,7 +117,7 @@ pub(super) struct Verified {
 impl Verified {
     pub(super) fn launch(&self) -> Result<(), UiMessage> {
         if !installed() { return Err(UiMessage::new("installer.locationChanged")); }
-        Command::new(&self.path.0).current_dir(self.path.0.parent().expect("cache directory"))
+        Command::new(&self.path.path).current_dir(self.path.path.parent().expect("cache directory"))
             .arg(format!("/NOMOUPDATE={}", std::process::id())).args(["/P", "/R"])
             .spawn().map_err(|e| UiMessage::new("installer.launchFailed").arg("error", e))?;
         Ok(())
@@ -85,11 +138,13 @@ impl DownloadCancel {
 pub(super) fn download(candidate: Candidate, cancel: &DownloadCancel, progress: impl Fn(u8)) -> Result<Verified, UiMessage> {
     cancel.check()?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
-    let path = cache_path()?;
+    let directory = cache_directory(true)?.expect("created cache directory");
+    let lease = cache_lease(&directory)?.ok_or_else(|| UiMessage::raw("另一进程正在使用更新缓存，请稍后重试"))?;
+    let path = directory.join("nomo-update-x64-setup.exe");
     // 不能截断已有链接指向的文件；只解除固定文件名，再排他创建。
     if let Err(e) = fs::remove_file(&path) && e.kind() != io::ErrorKind::NotFound { return Err(UiMessage::new("installer.cleanupFailed").arg("error", e)); }
     let mut writer = OpenOptions::new().write(true).create_new(true).share_mode(0).open(&path).map_err(|e| e.to_string())?;
-    let path = StagedPath(path);
+    let path = StagedPath { path, _lease: lease };
     let transfer = async {
         let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).read_timeout(Duration::from_secs(25))
             .timeout(Duration::from_secs(300)).redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -124,7 +179,7 @@ pub(super) fn download(candidate: Candidate, cancel: &DownloadCancel, progress: 
     });
     drop(writer);
     result?;
-    let mut lock = OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(&path.0).map_err(|e| e.to_string())?;
+    let mut lock = OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(&path.path).map_err(|e| e.to_string())?;
     if lock.metadata().map_err(|e| e.to_string())?.len() != candidate.size { return Err(UiMessage::new("installer.sizeFailed")); }
     let mut hash = Sha256::new(); let mut buf = [0u8; 32 * 1024];
     loop {

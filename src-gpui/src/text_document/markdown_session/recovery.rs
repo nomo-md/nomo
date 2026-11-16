@@ -6,6 +6,13 @@ pub(crate) struct SessionLease(pub File);
 impl SessionLease {
     pub(crate) fn acquire(root: &Path) -> TextDocumentResult<Self> {
         fs::create_dir_all(root)?;
+        let meta = fs::symlink_metadata(root)?;
+        if !meta.is_dir() || cache_cleanup::is_link(&meta) { return Err(error("session-root", "会话目录不是普通目录")); }
+        match fs::symlink_metadata(root.join(".active")) {
+            Ok(meta) if !meta.is_file() || cache_cleanup::is_link(&meta) => return Err(error("session-lock", "会话锁不是普通文件")),
+            Err(cause) if cause.kind() != std::io::ErrorKind::NotFound => return Err(cause.into()),
+            _ => {},
+        }
         let file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(root.join(".active"))?;
         file.try_lock().map_err(|cause| error("session-active", cause.to_string()))?;
         Ok(Self(file))
@@ -44,19 +51,41 @@ impl RecoveryCandidate {
     }
     pub(crate) fn discover(parent: &Path, current: &Path, cancel:&std::sync::atomic::AtomicBool) -> TextDocumentResult<Vec<Self>> {
         let mut candidates = Vec::new();
+        match fs::symlink_metadata(parent) {
+            Ok(meta) if !meta.is_dir() || cache_cleanup::is_link(&meta) => return Err(error("recovery-root", "恢复目录不是普通目录")),
+            Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
+            Err(cause) => return Err(cause.into()),
+            _ => {},
+        }
+        let mut cleanup_budget = 65_536;
         let entries = match fs::read_dir(parent) { Ok(entries) => entries, Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => return Ok(candidates), Err(cause) => return Err(cause.into()) };
-        for entry in entries {
+        for (index, entry) in entries.enumerate() {
+            if index == 4096 {
+                crate::app_logger::warn("Recovery", "旧会话目录达到扫描上限，剩余资料已保留");
+                break;
+            }
             super::super::markdown_search::check_cancel(cancel)?;
             let entry = entry?;
-            if entry.path() == current || !entry.file_type()?.is_dir() || entry.file_type()?.is_symlink() { continue; }
+            let meta = fs::symlink_metadata(entry.path())?;
+            if entry.path() == current || !meta.is_dir() || cache_cleanup::is_link(&meta) { continue; }
             let name = entry.file_name().to_string_lossy().into_owned();
+            if !cache_cleanup::numbered_name(&name, "", 2) { continue; }
             let Some(pid) = name.split('-').next().and_then(|value| value.parse::<u32>().ok()) else { continue; };
             if process_active(pid) { continue; }
             let lease = match SessionLease::acquire(&entry.path()) { Ok(lease) => Arc::new(lease), Err(_) => continue };
+            if cleanup_budget > 0 {
+                if let Err(cause) = cache_cleanup::clean(&entry.path(), &mut cleanup_budget, cancel) {
+                    super::super::markdown_search::check_cancel(cancel)?;
+                    crate::app_logger::warn("CacheCleanup", &format!("旧索引未能完全清理，已保留剩余文件：{cause}"));
+                }
+            }
+            // 恢复列表仍最多 32 项，但清理继续遍历后续旧进程目录。
+            if candidates.len() == 32 { continue; }
             for document in fs::read_dir(entry.path())?.take(256) {
                 super::super::markdown_search::check_cancel(cancel)?;
                 let document = document?;
-                if !document.file_type()?.is_dir() || document.file_type()?.is_symlink() { continue; }
+                let meta = fs::symlink_metadata(document.path())?;
+                if !meta.is_dir() || cache_cleanup::is_link(&meta) { continue; }
                 let id = document.file_name().to_string_lossy().into_owned();
                 if !id.starts_with("md-") || !id.bytes().all(|value| value.is_ascii_alphanumeric() || value == b'-') { continue; }
                 let path = document.path().join("manifest.json");
@@ -72,7 +101,7 @@ impl RecoveryCandidate {
                 let change=manifest.path.as_ref().and_then(|path|external::identity(path).ok().filter(|current|manifest.legacy_unconfirmed || *current!=manifest.identity).map(|current|ExternalChange{path:path.clone(),revision:manifest.revision,deleted:current.is_none(),token:external::token(&current)}));
                 let conflict=change.is_some();
                 candidates.push(Self { root: entry.path(), document_id: id, path: manifest.path, conflict, verified, change, modified: file_modified(&path), _lease: Some(lease.clone()), legacy: None });
-                if candidates.len() == 32 { candidates.sort_by_key(|candidate|std::cmp::Reverse(candidate.modified)); return Ok(candidates); }
+                if candidates.len() == 32 { break; }
             }
         }
         candidates.sort_by_key(|candidate|std::cmp::Reverse(candidate.modified));
@@ -151,10 +180,11 @@ impl MarkdownDocumentSessionManager {
 #[cfg(windows)]
 fn process_active(pid: u32) -> bool {
     use windows_sys::Win32::{Foundation::{CloseHandle, STILL_ACTIVE}, System::Threading::{OpenProcess, GetExitCodeProcess, PROCESS_QUERY_LIMITED_INFORMATION}};
-    unsafe { let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid); if handle.is_null() { return std::io::Error::last_os_error().raw_os_error() == Some(5); } let mut code = 0; let active = GetExitCodeProcess(handle, &mut code) != 0 && code == STILL_ACTIVE as u32; CloseHandle(handle); active }
+    unsafe { let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid); if handle.is_null() { return std::io::Error::last_os_error().raw_os_error() != Some(87); } let mut code = 0; let active = GetExitCodeProcess(handle, &mut code) == 0 || code == STILL_ACTIVE as u32; CloseHandle(handle); active }
 }
 #[cfg(unix)]
 fn process_active(pid: u32) -> bool {
     unsafe extern "C" {fn kill(pid:i32,signal:i32)->i32;}
-    unsafe {kill(pid as i32,0)==0 || std::io::Error::last_os_error().raw_os_error()==Some(1)}
+    if pid == 0 || pid > i32::MAX as u32 { return true; }
+    unsafe {kill(pid as i32,0)==0 || std::io::Error::last_os_error().raw_os_error()!=Some(3)}
 }

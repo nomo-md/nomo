@@ -9,6 +9,7 @@ mod rename;
 mod delete;
 mod external;
 mod recovery;
+mod cache_cleanup;
 mod legacy;
 pub(crate) use external::ExternalChange;
 pub(crate) use delete::{DeleteDocument, DeleteReport};

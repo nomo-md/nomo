@@ -49,6 +49,12 @@ pub(crate) fn startup(window:&mut Window,cx:&mut App) {
     if cx.try_global::<Updates>().is_some_and(|state|state.started){return;}
     if cx.try_global::<Updates>().is_none(){cx.set_global(Updates::default());}
     cx.global_mut::<Updates>().started=true;
+    #[cfg(windows)]
+    cx.background_executor().spawn(async {
+        if let Err(error) = installer::clean_stale() {
+            crate::app_logger::warn("UpdateCache", &format!("旧更新包清理失败，已保留：{error}"));
+        }
+    }).detach();
     if cx.global::<Settings>().bool("softwareUpdateAutoCheckEnabled"){check(window,cx,true);}
 }
 pub(crate) fn check(window:&mut Window,cx:&mut App,startup:bool) {

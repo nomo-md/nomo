@@ -330,3 +330,12 @@ Windows x64 的默认／`nomo-mark-demo` 两种 `cargo check --locked`、默认 
 macOS／Linux 目标编译与实机验收、真实 PicGo 上传、网络图片成功下载、四语言布局、IME／DPI／性能和 MSIX 安装激活仍未验证。原生 Wayland 关闭到托盘尚未实现；Wayland Mini 的置顶和精确位置恢复受限。格式检查对不支持的非默认 `configure-file` 参数明确报错，不能视为所有自定义配置组合与原版完全等价。
 
 未签名 Review MSIX 已生成：`.artifacts/msix/package-718aefdfa2474934886be39fa2ff19e6/output/Nomo_0.6.2_x64_REVIEW-UNSIGNED.msix`，SHA-256 为 `835748CAA4D34207F172BA36183ADC1305759CFD08A0AF8DEBC723AB32616B5F`。MakeAppx 打包／解包和 78 个载荷回读通过；包内 EXE 与上述 Release 一致，包内样例与当前 sample.md 一致。完整协调记录见 `.artifacts/p2-coordination-20261105/verification.json`；未安装、注册、签名或发布。
+
+
+### 旧索引与更新缓存自动回收
+
+正式工作区启动时，既有后台恢复扫描同时检查旧进程会话目录。仅在确认原进程已经退出并取得该目录的独占 `.active` 租约后，删除符合生成规则的 `structure-*.sqlite` 及其 SQLite 附属文件、文档目录内的 `writing-stats` 派生缓存。正在使用、进程状态不确定或租约被其他恢复入口持有的会话均跳过。正文、`added`、撤销历史、保存点、`manifest.json`、未保存草稿及原始文档不参与自动删除；旧进程目录本身也保留。
+
+清理复用恢复扫描的取消标记，不新增正文副本、缓存或常驻任务。每次最多扫描 4,096 个进程目录，派生清理最多检查 65,536 个条目、统计目录深度最多 8 层，超限部分保留；恢复候选达到 32 项后仍继续检查后续旧目录的派生缓存。符号链接、Windows junction／其他重解析点及非普通文件不作为删除目标；失败记录警告，剩余文件保留供后续启动重试。
+
+Windows 启动时另执行一次固定文件清理，不受自动检查更新开关影响。`native-updates/.active` 独占租约覆盖下载、校验、待安装和释放阶段；启动只尝试删除最后修改时间超过 24 小时的固定 `nomo-update-x64-setup.exe`。24 小时保护期用于兼容尚未使用缓存租约的旧版本；锁被占用、安装包仍在使用或时间无法确认时保留，不扫描或删除其他下载文件。
