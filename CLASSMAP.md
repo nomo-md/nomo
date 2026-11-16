@@ -9,6 +9,7 @@
 | 文档主页与最近记录 | `src-gpui/src/ui/home.rs`、`home/browser.rs`、`home/navigation.rs`、`home/folder_card.rs`、`home/document_card.rs`、`home/library.rs`、`home/library_order.rs`、`home/thumbnail.rs` | 无文件启动进入主页；左侧文件夹／最近文档分组，右侧文件与文件夹卡片，点击目录直接打开工作区；路径规范化去重，有界封面快照，灰白档案套仅前页使用正文缩略图、背页绘制线条；纸页同向错层与低前套独立弹簧，卡片和排序浮层共用封面 |
 | 旧版记录兼容 | `src-gpui/src/legacy_records.rs`、`text_document/markdown_session/legacy.rs`、`ui/workspace/comparison_legacy.rs` | 只读旧配置和草稿；最近记录与标签一次性合并，草稿按需转为原生会话；原记录保留，处理标记防止重复恢复 |
 | 旧派生缓存回收 | `src-gpui/src/text_document/markdown_session/{recovery,cache_cleanup}.rs`、`ui/updates/installer.rs` | 后台扫描已退出且可独占租约的旧会话，只回收结构／统计索引；保留正文、历史和草稿，拒绝链接目录；更新缓存租约覆盖下载至安装准备，启动清理超过 24 小时且未占用的残留安装包 |
+| 应用数据清理 | `src-gpui/src/app_data.rs`、`main.rs`、`ui/settings_window.rs`、`scripts/packaging/windows.nsi` | 设置分别恢复偏好／清除使用数据，卸载可全清；共享／独占锁、退出后按原范围清理和失败重试，不删除外部文档 |
 | 默认应用外壳 | `src-gpui/src/ui/workspace.rs`、`workspace/toolbar.rs`、`workspace/navigation.rs`、`workspace_surface.rs` | 多标签、连体边框与阴影、三种文档导航布局和显隐生命周期、主页往返、模式、工具栏、搜索、自动保存；仅工作区左侧栏顶部显示主页入口，主页隐藏文档标签栏；侧栏宽度、左栏标签、分区比例与大纲显隐独立持久化 |
 | Windows 组合标签 | `src-gpui/src/ui/workspace/comparison.rs`、`comparison_ui.rs`、`comparison_close.rs`、`comparison_drag.rs`、`comparison_layout.rs` | 展示项与文档会话分离；双文档焦点、标签/成员拖放、批量关闭、跨窗归属移交及按需恢复 |
 | 普通工作区恢复 | `src-gpui/src/ui/workspace/comparison_layout.rs`、`folder_workspace.rs`、`workspace.rs` | 三平台记录普通标签顺序、活动文档、模式、选区、阅读位置及文件夹；进入目录自动恢复该目录最新布局，切换前保存并沿用关闭确认；macOS／Linux 将组合记录展开，沿用有界清单与按需恢复 |

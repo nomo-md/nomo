@@ -28,6 +28,7 @@ mod layout;
 mod markdown;
 mod markdown_templates;
 mod settings;
+mod app_data;
 mod legacy_records;
 mod theme;
 mod ui;
@@ -59,7 +60,7 @@ use ui::workspace::{self, Workspace};
 use window_placement::WindowPlacement;
 
 #[derive(Clone, Copy)]
-enum QuitReason { Normal, #[cfg(windows)] Install }
+enum QuitReason { Normal, Reset(app_data::Scope), #[cfg(windows)] Install }
 #[derive(Clone, Copy)]
 struct PendingQuit {
     reason: QuitReason,
@@ -74,6 +75,12 @@ impl gpui::Global for LastActiveWorkspace {}
 pub(crate) fn cancel_quit(cx:&mut App){cx.set_global(QuitRequested(None));}
 pub(crate) fn quit_workspaces(cx:&mut App){
     request_quit(QuitReason::Normal,cx);
+}
+pub(crate) fn quit_to_reset(scope: app_data::Scope, cx: &mut App) {
+    for handle in cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()) {
+        if !handle.update(cx, |workspace, window, cx| workspace.can_quit_to_install(window, cx)).unwrap_or(false) { return; }
+    }
+    request_quit(QuitReason::Reset(scope), cx);
 }
 #[cfg(windows)]
 pub(crate) fn quit_to_install(cx:&mut App){
@@ -106,6 +113,11 @@ fn finish_quit(cx:&mut App){
     if cx.windows().iter().any(|window|window.downcast::<Workspace>().is_some()){return;}
     cancel_quit(cx);
     if let Some(placement) = placement { placement.save(); }
+    if let QuitReason::Reset(scope) = _reason && let Err(error) = app_data::launch_after_close(scope) {
+        app_data::show_error(&error);
+        open_workspace(Vec::new(), cx);
+        return;
+    }
     #[cfg(windows)]
     if matches!(_reason, QuitReason::Install) && let Err(error)=ui::updates::launch_after_close(cx) {
         match try_open_workspace(Vec::new(),cx) {
@@ -132,6 +144,7 @@ fn save_closing_workspace_placement(workspace: &Workspace, window: &gpui::Window
 }
 
 fn main() {
+    if let Some(code) = app_data::run_command() { std::process::exit(code); }
     #[cfg(feature = "nomo-mark-demo")]
     let nomo_mark_demo = std::env::args().any(|argument| matches!(argument.as_str(), "--nomo-mark-demo" | "--editor-control-demo"));
     #[cfg(feature = "nomo-mark-demo")]
@@ -143,6 +156,11 @@ fn main() {
         eprintln!("自动化隔离校验失败：{error}");
         std::process::exit(2);
     }
+    // 整个进程持有共享租约；退出后清理进程取得独占租约才可删除资料。
+    let _data_lease = match app_data::start() {
+        Ok(lease) => lease,
+        Err(error) => { app_data::show_error(&error); return; }
+    };
     #[cfg(windows)]
     let instance=if !development_entry {
         match open_instance::start(&paths) {

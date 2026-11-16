@@ -163,6 +163,10 @@ pub const CATEGORIES: &[Category] = &[
                 item("developerMode", "settings.developerMode.label", "settings.developerMode.description", Control::Toggle, Support::None("settings.developerMode.support")),
                 item("exportSettings", "settings.exportSettings.label", "settings.exportSettings.description", Control::Info, Support::Full),
             ]),
+            group("settings.group.data", &[
+                item("resetSettings", "settings.resetSettings.label", "settings.resetSettings.description", Control::Action("settings.resetSettings.action"), Support::Full),
+                item("clearAppData", "settings.clearData.label", "settings.clearData.description", Control::Action("settings.clearData.action"), Support::Full),
+            ]),
         ]),
     },
     Category { title: "settings.category.about", icon: IconName::Info, page: Page::About },

@@ -4,6 +4,7 @@ Unicode true
 !include "LogicLib.nsh"
 !include "FileFunc.nsh"
 !include "x64.nsh"
+!include "nsDialogs.nsh"
 !define PRODUCTNAME "Nomo"
 !define MAINBINARYNAME "nomo"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nomo"
@@ -28,6 +29,7 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
+UninstPage custom un.DataPage un.DataPageLeave
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "English"
@@ -35,8 +37,42 @@ LangString NomoCloseForInstall ${LANG_SIMPCHINESE} "此安装目录中的 Nomo �
 LangString NomoCloseForInstall ${LANG_ENGLISH} "Nomo is running from this installation folder. Save all your documents first.$\r$\nClick OK to end this Nomo process and continue setup.$\r$\n$\r$\n$INSTDIR\nomo.exe"
 LangString NomoInstallLocked ${LANG_SIMPCHINESE} "以下文件仍被占用。请从 Nomo 的托盘菜单退出，或关闭占用该文件的程序，然后重试。$\r$\n$\r$\n$INSTDIR\nomo.exe"
 LangString NomoInstallLocked ${LANG_ENGLISH} "The file below is still in use. Quit Nomo from its tray menu or close the program using the file, then retry.$\r$\n$\r$\n$INSTDIR\nomo.exe"
+LangString NomoDataTitle ${LANG_SIMPCHINESE} "应用数据"
+LangString NomoDataTitle ${LANG_ENGLISH} "Application data"
+LangString NomoDataSubtitle ${LANG_SIMPCHINESE} "选择卸载后是否保留 Nomo 的设置和记录。"
+LangString NomoDataSubtitle ${LANG_ENGLISH} "Choose whether to keep your Nomo settings and history."
+LangString NomoDeleteData ${LANG_SIMPCHINESE} "同时清除应用数据"
+LangString NomoDeleteData ${LANG_ENGLISH} "Also clear application data"
+LangString NomoDataWarning ${LANG_SIMPCHINESE} "清除设置、使用记录、缓存和未保存草稿。保存在其他位置的文档会保留。"
+LangString NomoDataWarning ${LANG_ENGLISH} "Clears settings, history, caches and unsaved drafts. Documents saved elsewhere are kept."
+LangString NomoDataFailed ${LANG_SIMPCHINESE} "应用数据未能完全清除，卸载已取消。请退出其他 Nomo 进程、检查目录权限后重试。"
+LangString NomoDataFailed ${LANG_ENGLISH} "Application data could not be completely cleared. Uninstall was cancelled. Quit other Nomo processes, check folder permissions and retry."
 !include /CHARSET=UTF8 "open-with.nsh"
 Var NomoUpdateRestart
+Var NomoDeleteData
+Var NomoDeleteDataCheckbox
+
+Function un.onInit
+  StrCpy $NomoDeleteData 0
+FunctionEnd
+
+Function un.DataPage
+  !insertmacro MUI_HEADER_TEXT "$(NomoDataTitle)" "$(NomoDataSubtitle)"
+  nsDialogs::Create 1018
+  Pop $0
+  StrCmp $0 error 0 +2
+    Abort
+  ${NSD_CreateCheckbox} 0 0 100% 20u "$(NomoDeleteData)"
+  Pop $NomoDeleteDataCheckbox
+  ${NSD_SetState} $NomoDeleteDataCheckbox $NomoDeleteData
+  ${NSD_CreateLabel} 0 30u 100% 130u "$(NomoDataWarning)"
+  Pop $0
+  nsDialogs::Show
+FunctionEnd
+
+Function un.DataPageLeave
+  ${NSD_GetState} $NomoDeleteDataCheckbox $NomoDeleteData
+FunctionEnd
 
 ; 旧版启动安装器用 /P /R，新版另传已获用户确认退出的进程号。
 Function PrepareNomoUpdate
@@ -311,6 +347,31 @@ SectionEnd
 Section "Uninstall"
   SetRegView 64
   SetShellVarContext current
+  ; 不在应用仍持有文件时继续删除；不强制结束进程或丢弃未保存内容。
+  check_uninstall:
+  IfFileExists "$INSTDIR\nomo.exe" 0 uninstall_ready
+  System::Call 'kernel32::CreateFileW(w "$INSTDIR\nomo.exe", i 0x40000000, i 1, p 0, i 3, i 0, p 0) p.r0'
+  StrCmp $0 -1 uninstall_locked
+  System::Call 'kernel32::CloseHandle(p r0)'
+  Goto uninstall_ready
+  uninstall_locked:
+  MessageBox MB_ICONEXCLAMATION|MB_RETRYCANCEL "$(NomoInstallLocked)" /SD IDCANCEL IDRETRY check_uninstall
+  SetErrorLevel 1
+  Abort
+  uninstall_ready:
+  ${If} $NomoDeleteData == ${BST_CHECKED}
+    ; 复用应用的目录校验、跨进程锁和旧版残留清理；卸载不采用开发环境的数据目录。
+    SetOutPath "$TEMP"
+    System::Call 'kernel32::SetEnvironmentVariableW(w "NOMO_DATA_DIR", p 0)'
+    ClearErrors
+    ExecWait '"$INSTDIR\nomo.exe" --clear-app-data' $0
+    ${If} ${Errors}
+    ${OrIf} $0 != 0
+      MessageBox MB_ICONSTOP "$(NomoDataFailed)" /SD IDOK
+      SetErrorLevel 1
+      Abort
+    ${EndIf}
+  ${EndIf}
   !insertmacro NOMO_UNREGISTER_OPEN_WITH
   Delete "$SMPROGRAMS\Nomo\Nomo.lnk"
   RMDir "$SMPROGRAMS\Nomo"

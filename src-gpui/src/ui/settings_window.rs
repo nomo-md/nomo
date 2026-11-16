@@ -64,6 +64,29 @@ pub(crate) fn close_if_orphaned(cx: &mut App) {
     }
 }
 
+fn confirm_clear_data(scope: crate::app_data::Scope, window: &mut Window, cx: &mut App) {
+    if window.has_active_prompt() { return; }
+    let locale = ToolbarLocale::current(cx);
+    if let Err(error) = crate::app_data::validate(scope) {
+        let _ = window.prompt(gpui::PromptLevel::Warning, locale.app_text("settings.clearData.failed"), Some(&error),
+            &[gpui::PromptButton::cancel(locale.text("close"))], cx);
+        return;
+    }
+    let (title, message, action) = if scope == crate::app_data::Scope::Settings {
+        ("settings.resetSettings.label", "settings.resetSettings.confirm", "settings.resetSettings.action")
+    } else { ("settings.clearData.label", "settings.clearData.confirm", "settings.clearData.action") };
+    let response = window.prompt(gpui::PromptLevel::Warning, locale.app_text(title),
+        Some(locale.app_text(message)), &[
+            gpui::PromptButton::cancel(locale.text("cancel")),
+            gpui::PromptButton::new(locale.app_text(action)),
+        ], cx);
+    window.to_async(cx).spawn(async move |context| {
+        if matches!(response.await, Ok(1)) {
+            let _ = context.update(|_, cx| cx.defer(move |cx| crate::quit_to_reset(scope, cx)));
+        }
+    }).detach();
+}
+
 pub fn open(cx: &mut App) {
     if let Some(handle) = cx.try_global::<SettingsWindowHandle>().and_then(|handle| handle.0) {
         if handle.update(cx, |_, window, _| window.activate_window()).is_ok() { return; }
@@ -311,6 +334,13 @@ impl SettingsWindow {
                 .child(readonly_input(value.as_i64().unwrap_or_default().to_string(), width.min(180.0), theme))
                 .child(div().text_size(px(13.0)).font_family(crate::theme::font_for(crate::theme::Family::Mono, false, false).family)
                     .text_color(theme.muted).child(locale.app_text(unit))).into_any_element(),
+            Control::Action(label) if matches!(key, "clearAppData" | "resetSettings") => {
+                let scope = if key == "resetSettings" { crate::app_data::Scope::Settings } else { crate::app_data::Scope::Usage };
+                let icon = if key == "resetSettings" { IconName::RefreshCw } else { IconName::Trash2 };
+                button(eid("data-action", key), locale.app_text(label), Some(icon), ButtonKind::Secondary, theme)
+                    .on_click(cx.listener(move |_, _, window, cx| super::settings_window::confirm_clear_data(scope, window, cx)))
+                    .into_any_element()
+            },
             Control::Action(label) if key=="updateCheck" => {
                 let busy=super::updates::busy(cx);
                 let label = match super::updates::chrome_state(cx) {
