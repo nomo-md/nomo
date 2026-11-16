@@ -93,31 +93,31 @@ pub(super) fn diagram_template(kind: crate::ui::chrome::DiagramKind, default_typ
 }
 
 struct FormatTool {
-    id: &'static str, icon: IconName, tip: &'static str, mark: u8, anchor: Option<usize>,
+    id: &'static str, icon: IconName, mark: u8, anchor: Option<usize>,
     action: fn(&mut Workspace, gpui::Point<gpui::Pixels>, &mut Window, &mut Context<Workspace>),
 }
 const FORMAT_TOOLS: &[FormatTool] = &[
-    FormatTool { id: "h1", icon: IconName::Heading1, tip: "一级标题 ⌘⌥1", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.set_heading(1, cx)) },
-    FormatTool { id: "bold", icon: IconName::Bold, tip: "加粗 ⌘B", mark: 1, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("**", "**", cx)) },
-    FormatTool { id: "italic", icon: IconName::Italic, tip: "斜体 ⌘I", mark: 2, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("*", "*", cx)) },
-    FormatTool { id: "strike", icon: IconName::Strikethrough, tip: "删除线 Alt+Shift+5", mark: 4, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("~~", "~~", cx)) },
-    FormatTool { id: "underline", icon: IconName::Underline, tip: "下划线 ⌘U", mark: 8, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("<u>", "</u>", cx)) },
-    FormatTool { id: "highlight", icon: IconName::Highlighter, tip: "高亮", mark: 16, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("<mark>", "</mark>", cx)) },
-    FormatTool { id: "superscript", icon: IconName::Superscript, tip: "上标", mark: 32, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::ToggleInline(crate::nomo_mark::parse::InlineFormat::Superscript), cx)) },
-    FormatTool { id: "subscript", icon: IconName::Subscript, tip: "下标", mark: 64, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::ToggleInline(crate::nomo_mark::parse::InlineFormat::Subscript), cx)) },
-    FormatTool { id: "link", icon: IconName::Link, tip: "", mark: 0, anchor: Some(LINK_ANCHOR), action: |w, at, win, cx| w.open_editor_popover_at(EditorPopoverKind::Link, Some(at), win, cx) },
-    FormatTool { id: "inline-comment", icon: IconName::MessageSquare, tip: "行内注释", mark: 0, anchor: None, action: |w, _, win, cx| w.open_inline_comment(win, cx) },
-    FormatTool { id: "quote", icon: IconName::Quote, tip: "引用", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.toggle_line_prefix("> ", cx)) },
-    FormatTool { id: "callout", icon: IconName::Info, tip: "提示块", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.insert_block("> [!NOTE]\n> ", 12, cx)) },
-    FormatTool { id: "details", icon: IconName::PanelTopClose, tip: "折叠块", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::InsertDetails, cx)) },
-    FormatTool { id: "ul", icon: IconName::List, tip: "无序列表", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.toggle_line_prefix("- ", cx)) },
-    FormatTool { id: "task", icon: IconName::SquareCheck, tip: "任务列表", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.toggle_line_prefix("- [ ] ", cx)) },
-    FormatTool { id: "table", icon: IconName::Table, tip: "", mark: 0, anchor: Some(TABLE_ANCHOR), action: |w, at, win, cx| w.open_editor_popover_at(EditorPopoverKind::Table, Some(at), win, cx) },
-    FormatTool { id: "codeblock", icon: IconName::CodeXml, tip: "代码块 ⌘⇧K", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| insert_code_block(b, cx)) },
-    FormatTool { id: "math", icon: IconName::Sigma, tip: "", mark: 0, anchor: Some(1), action: |w, at, win, cx| w.open_toolbar_popup(ToolbarPopupKind::Math, at, win, cx) },
-    FormatTool { id: "diagram", icon: IconName::Braces, tip: "", mark: 0, anchor: Some(2), action: |w, at, win, cx| w.open_toolbar_popup(ToolbarPopupKind::Diagram, at, win, cx) },
-    FormatTool { id: "footnote", icon: IconName::Superscript, tip: "插入脚注", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.insert_footnote(cx)) },
-    FormatTool { id: "toc", icon: IconName::TableOfContents, tip: "插入目录", mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.insert_toc(cx)) },
+    FormatTool { id: "h1", icon: IconName::Heading1, mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.set_heading(1, cx)) },
+    FormatTool { id: "bold", icon: IconName::Bold, mark: 1, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("**", "**", cx)) },
+    FormatTool { id: "italic", icon: IconName::Italic, mark: 2, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("*", "*", cx)) },
+    FormatTool { id: "strike", icon: IconName::Strikethrough, mark: 4, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("~~", "~~", cx)) },
+    FormatTool { id: "underline", icon: IconName::Underline, mark: 8, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("<u>", "</u>", cx)) },
+    FormatTool { id: "highlight", icon: IconName::Highlighter, mark: 16, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.wrap_selection("<mark>", "</mark>", cx)) },
+    FormatTool { id: "superscript", icon: IconName::Superscript, mark: 32, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::ToggleInline(crate::nomo_mark::parse::InlineFormat::Superscript), cx)) },
+    FormatTool { id: "subscript", icon: IconName::Subscript, mark: 64, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::ToggleInline(crate::nomo_mark::parse::InlineFormat::Subscript), cx)) },
+    FormatTool { id: "link", icon: IconName::Link, mark: 0, anchor: Some(LINK_ANCHOR), action: |w, at, win, cx| w.open_editor_popover_at(EditorPopoverKind::Link, Some(at), win, cx) },
+    FormatTool { id: "inline-comment", icon: IconName::MessageSquare, mark: 0, anchor: None, action: |w, _, win, cx| w.open_inline_comment(win, cx) },
+    FormatTool { id: "quote", icon: IconName::Quote, mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.toggle_line_prefix("> ", cx)) },
+    FormatTool { id: "callout", icon: IconName::Info, mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.insert_block("> [!NOTE]\n> ", 12, cx)) },
+    FormatTool { id: "details", icon: IconName::PanelTopClose, mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::InsertDetails, cx)) },
+    FormatTool { id: "ul", icon: IconName::List, mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.toggle_line_prefix("- ", cx)) },
+    FormatTool { id: "task", icon: IconName::SquareCheck, mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.toggle_line_prefix("- [ ] ", cx)) },
+    FormatTool { id: "table", icon: IconName::Table, mark: 0, anchor: Some(TABLE_ANCHOR), action: |w, at, win, cx| w.open_editor_popover_at(EditorPopoverKind::Table, Some(at), win, cx) },
+    FormatTool { id: "codeblock", icon: IconName::CodeXml, mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| insert_code_block(b, cx)) },
+    FormatTool { id: "math", icon: IconName::Sigma, mark: 0, anchor: Some(1), action: |w, at, win, cx| w.open_toolbar_popup(ToolbarPopupKind::Math, at, win, cx) },
+    FormatTool { id: "diagram", icon: IconName::Braces, mark: 0, anchor: Some(2), action: |w, at, win, cx| w.open_toolbar_popup(ToolbarPopupKind::Diagram, at, win, cx) },
+    FormatTool { id: "footnote", icon: IconName::Superscript, mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.insert_footnote(cx)) },
+    FormatTool { id: "toc", icon: IconName::TableOfContents, mark: 0, anchor: None, action: |w, _, win, cx| w.with_document(win, cx, |b, cx| b.insert_toc(cx)) },
 ];
 
 impl Workspace {
@@ -182,10 +182,9 @@ impl Workspace {
         let locked = document.as_ref().is_some_and(|document| document.read(cx).editing_locked());
         let marks = document.map_or(0, |document| document.read(cx).toolbar_marks());
         type Action = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
-        let tool = |id: &'static str, name: IconName, tip: &'static str, active: bool, action: Action, cx: &mut Context<Self>| {
+        let tool = |id: &'static str, name: IconName, _tip: &'static str, active: bool, action: Action, cx: &mut Context<Self>| {
             let key = if id == "outline" { if active { "outline_hide" } else { "outline_show" } } else { id };
-            let tip = if id == "codeblock" { format!("{} {}", locale.text(key), crate::ui::shortcuts::current("insert-code-block", cx)) }
-                else { locale.tooltip(key, tip) };
+            let tip = format!("{} {}", locale.text(key), crate::ui::shortcuts::toolbar_label(id, cx)).trim_end().to_owned();
             toolbar_button(id, name, active, theme)
                 .tooltip(tooltip(tip))
                 .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| action(workspace, window, cx)))
@@ -219,9 +218,7 @@ impl Workspace {
                 "diagram" => self.toolbar_popup.as_ref().is_some_and(|p| p.kind == ToolbarPopupKind::Diagram),
                 _ => false,
             };
-            let tip = if matches!(item.id, "codeblock" | "link") {
-                format!("{} {}", locale.text(item.id), crate::ui::shortcuts::current(if item.id == "link" { "menu-link" } else { "insert-code-block" }, cx))
-            } else { locale.tooltip(item.id, item.tip) };
+            let tip = format!("{} {}", locale.text(item.id), crate::ui::shortcuts::toolbar_label(item.id, cx)).trim_end().to_owned();
             toolbar_button(item.id, item.icon, active, theme).relative().tooltip(tooltip(tip))
                 .children(item.anchor.map(|anchor| trigger_marker(self.toolbar_popup_anchors[anchor].clone())))
                 .children((active && item.anchor.is_some()).then(|| trigger_marker(self.toolbar_trigger_bounds.clone())))
@@ -229,9 +226,9 @@ impl Workspace {
                 .when(!locked, |button| button.on_click(cx.listener(move |w, event: &ClickEvent, win, cx| (item.action)(w, event.position(), win, cx))))
                 .into_any_element()
         }).collect();
-        let mode_segment = |id: &'static str, name: IconName, _label: &'static str, tip: &'static str, target: EditorMode, cx: &mut Context<Self>| {
+        let mode_segment = |id: &'static str, name: IconName, _label: &'static str, _tip: &'static str, target: EditorMode, cx: &mut Context<Self>| {
             toolbar_mode_button(id, name, mode == target, theme)
-                .tooltip(tooltip(if id == "mode-source" { format!("{} {}", locale.text(id), crate::ui::shortcuts::current("toggle-source", cx)) } else { locale.tooltip(id, tip) }))
+                 .tooltip(tooltip(format!("{} {}", locale.text(id), crate::ui::shortcuts::toolbar_label(id, cx)).trim_end().to_owned()))
                 .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| workspace.set_mode(target, window, cx)))
         };
         let target = match mode { EditorMode::Semantic => 0.0, EditorMode::Source => 34.0, EditorMode::Split => 68.0 };

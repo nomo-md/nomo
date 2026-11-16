@@ -33,9 +33,9 @@ pub enum DiagramKind { Default, Blank, Flowchart, Sequence, Class, State, Pie, G
 
 pub(crate) use crate::document_export::Format as ExportFormat;
 
-/// 这四项在固定 master 本身调用 comingSoon，保留相同业务语义。
+/// 尚未接通的菜单占位项。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UnavailableFeature { ParagraphBefore, ParagraphAfter, InlineMath, Image }
+pub enum UnavailableFeature { ParagraphBefore, ParagraphAfter, InlineMath }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChromeCommand {
@@ -254,7 +254,7 @@ impl Chrome {
                 action(locale.app_text("chrome.highlight"), "", || Box::new(action::Highlight), doc),
                 event(locale.app_text("chrome.inlineComment"), "", E::Command(Cmd::InlineComment), C::InlineComment, true), separator(),
                 event(locale.app_text("menu.link"), "Ctrl + K", E::LinkPicker, C::LinkPicker, true),
-                event(locale.app_text("chrome.imageMenu"), "", E::Unavailable(UnavailableFeature::Image), C::UnavailableNotice, true), separator(),
+                action(locale.app_text("chrome.imageMenu"), "", || Box::new(action::InsertImage), doc), separator(),
                 event(locale.app_text("shortcuts.clear"), r"Ctrl + \", E::Command(Cmd::ClearFormatting), C::ClearFormatting, true),
             ],
             Menu::View | Menu::ViewText | Menu::ViewCorner | Menu::ViewAppearance => self.state.view_menu.items(menu, locale),
@@ -305,10 +305,24 @@ impl Chrome {
             let command: Option<Box<dyn Action>> = match &entry.action {
                 A::Dispatch(action) => {
                     let command = action();
-                    Some(if command.name() == action::ModeSource.name() { Box::new(action::ToggleSource) } else { command })
+                    Some(command)
                 }
                 A::Emit(E::Export(ExportFormat::Html)) => Some(Box::new(action::ExportHtml)),
                 A::Emit(E::Export(ExportFormat::Pdf)) => Some(Box::new(action::ExportPdf)),
+                A::Emit(E::Export(ExportFormat::Word)) => Some(Box::new(action::ExportWord)),
+                A::Emit(E::NewWindow) => Some(Box::new(action::NewWindow)),
+                A::Emit(E::Quit) => Some(Box::new(action::Quit)),
+                A::Emit(E::FrontMatter) => Some(Box::new(action::EditFrontMatter)),
+                A::Emit(E::Command(Cmd::BlockComment)) => Some(Box::new(action::BlockComment)),
+                A::Emit(E::Command(Cmd::Footnote)) => Some(Box::new(action::InsertFootnote)),
+                A::Emit(E::Command(Cmd::Toc)) => Some(Box::new(action::InsertToc)),
+                A::Emit(E::Command(Cmd::Callout)) => Some(Box::new(action::InsertCallout)),
+                A::Emit(E::Command(Cmd::Details)) => Some(Box::new(action::InsertDetails)),
+                A::Emit(E::Command(Cmd::Heading(4))) => Some(Box::new(action::Heading4)),
+                A::Emit(E::Command(Cmd::Heading(5))) => Some(Box::new(action::Heading5)),
+                A::Emit(E::Command(Cmd::Heading(6))) => Some(Box::new(action::Heading6)),
+                A::Emit(E::Command(Cmd::AdjustHeading { increase: true })) => Some(Box::new(action::PromoteHeading)),
+                A::Emit(E::Command(Cmd::AdjustHeading { increase: false })) => Some(Box::new(action::DemoteHeading)),
                 A::Emit(E::TablePicker) => Some(Box::new(action::Table)),
                 A::Emit(E::LinkPicker) => Some(Box::new(action::Link)),
                 A::Emit(E::Command(Cmd::ClearFormatting)) => Some(Box::new(action::ClearFormatting)),

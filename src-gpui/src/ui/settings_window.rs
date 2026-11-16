@@ -128,6 +128,12 @@ pub struct SettingsWindow {
     fields: HashMap<&'static str, Entity<TextField>>,
     /// 每个快捷键最多一个稳定错误键；切换语言时不替换草稿、焦点或校验结果。
     shortcut_errors: HashMap<&'static str, UiMessage>,
+    shortcut_recording: Option<shortcut_fields::Recording>,
+    shortcut_popup: Option<shortcut_fields::ShortcutPopup>,
+    shortcut_return_focus: Option<FocusHandle>,
+    shortcut_popup_focus: FocusHandle,
+    shortcut_filter: usize,
+    shortcut_reset_confirm: bool,
     /// 文本设置校验错误的稳定翻译键。
     field_errors: HashMap<&'static str, &'static str>,
     scroll: ScrollHandle,
@@ -153,6 +159,13 @@ impl Focusable for SettingsWindow {
 
 impl SettingsWindow {
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shortcut_recording.take().is_some() {
+            self.shortcut_errors.clear(); window.focus(&self.shortcut_popup_focus, cx);
+            cx.stop_propagation(); cx.notify(); return;
+        }
+        if self.shortcut_popup.is_some() {
+            self.close_shortcut_popup(window, cx); cx.stop_propagation(); return;
+        }
         if let Some((picker, _)) = &self.font_picker {
             if picker.read(cx).composing(cx) { cx.propagate(); return; }
             self.font_picker = None;
@@ -162,12 +175,10 @@ impl SettingsWindow {
         if self.open_select.take().is_some() {
             cx.notify();
         } else {
-            // 组字与未提交的快捷键草稿先由字段处理，再按 Esc 才关闭设置。
-            let editing = self.fields.iter().any(|(key, field)| {
+            // 输入法组字先由字段处理，再按 Esc 才关闭设置。
+            let editing = self.fields.values().any(|field| {
                 let field = field.read(cx);
-                field.focus_handle(cx).is_focused(window) && (field.is_composing()
-                    || (super::shortcuts::SHORTCUTS.iter().any(|shortcut| shortcut.id == *key)
-                        && field.content != super::shortcuts::current(key, cx)))
+                field.focus_handle(cx).is_focused(window) && field.is_composing()
             });
             if editing { cx.propagate(); return; }
             window.remove_window();
@@ -184,6 +195,7 @@ impl SettingsWindow {
             category: 0, open_select: None, font_picker: None, dragging: None,
             tray_unavailable: crate::ui::tray::unavailable_reason_key(window),
             toggles: HashMap::new(), fields: HashMap::new(), field_errors: HashMap::new(), shortcut_errors: HashMap::new(),
+            shortcut_recording: None, shortcut_popup: None, shortcut_return_focus: None, shortcut_popup_focus: cx.focus_handle(), shortcut_filter: 0, shortcut_reset_confirm: false,
             scroll: ScrollHandle::new(), _subscriptions: Vec::new(),
             image_test: None, image_test_message: None,
             #[cfg(windows)]
@@ -384,13 +396,12 @@ impl SettingsWindow {
             Control::Action(label) => unavailable_action(key, locale.app_text(label), theme, locale).into_any_element(),
             Control::Info => div().px(px(9.0)).py(px(5.0)).rounded_full().border_1().border_color(theme.border)
                 .text_size(px(13.0)).text_color(theme.muted).child(locale.app_text("settings.future")).into_any_element(),
-            Control::ThemePicker | Control::Shortcuts => div().into_any_element(),
+            Control::ThemePicker => div().into_any_element(),
         }
     }
 
     fn render_item(&mut self, item: &'static Item, theme: &Theme, viewport: gpui::Size<gpui::Pixels>, cx: &mut Context<Self>) -> AnyElement {
         if matches!(item.control, Control::ThemePicker) { return self.render_theme_picker(theme, viewport, cx); }
-        if matches!(item.control, Control::Shortcuts) { return self.render_shortcuts(theme, viewport, cx); }
         let locale = ToolbarLocale::current(cx);
         let compact = f32::from(viewport.width) <= COMPACT_WIDTH || item.key == "documentNavigationLayout";
         let note = match &item.support {
@@ -470,6 +481,11 @@ impl Render for SettingsWindow {
                     .when(!compact, |el| el.child(locale.app_text(entry.title)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.category = index;
+                        this.shortcut_recording = None;
+                        this.shortcut_popup = None;
+                        this.shortcut_return_focus = None;
+                        this.shortcut_errors.clear();
+                        this.shortcut_reset_confirm = false;
                         this.open_select = None;
                         this.font_picker = None;
                         this.toggles.clear();
@@ -482,6 +498,15 @@ impl Render for SettingsWindow {
         let content: Vec<AnyElement> = match &category.page {
             Page::Groups(groups) => self.render_groups(groups, &theme, viewport, cx),
             Page::About => self.render_about(&theme, viewport, cx),
+            Page::Shortcuts => Vec::new(),
+        };
+        let body = if matches!(category.page, Page::Shortcuts) {
+            self.render_shortcuts(&theme, viewport, cx)
+        } else {
+            div().id("settings-content").flex_1().min_h(px(0.0)).overflow_y_scroll()
+                .track_scroll(&self.scroll).p(px(if compact { 16.0 } else { 24.0 }))
+                .child(div().w_full().max_w(px(740.0)).flex().flex_col().gap(px(28.0)).children(content))
+                .into_any_element()
         };
         // 原生按钮位于透明标题栏内。窄侧栏同样将图标放到按钮下方。
         let has_traffic_lights = cfg!(target_os = "macos") && !window.is_fullscreen();
@@ -519,6 +544,8 @@ impl Render for SettingsWindow {
             .id("settings")
             .relative().children(animate_theme.then(crate::ui::motion::theme_frame))
             .track_focus(&self.focus)
+            .key_context(if self.shortcut_popup.is_some() { "Settings ShortcutRecorder" } else { "Settings" })
+            .capture_key_down(cx.listener(Self::record_shortcut))
             .capture_action(cx.listener(|this, _: &crate::ui::text_field::FieldCancel, window, cx| this.escape(window, cx)))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" { this.escape(window, cx); }
@@ -550,16 +577,7 @@ impl Render for SettingsWindow {
                     .flex()
                     .flex_col()
                     .child(header)
-                    .child(
-                        div()
-                            .id("settings-content")
-                            .flex_1()
-                            .min_h(px(0.0))
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll)
-                            .p(px(if compact { 16.0 } else { 24.0 }))
-                            .child(div().w_full().max_w(px(740.0)).flex().flex_col().gap(px(28.0)).children(content)),
-                    ),
+                    .child(body),
             );
         #[cfg(target_os = "windows")]
         if !window.is_maximized() && !window.is_fullscreen() {

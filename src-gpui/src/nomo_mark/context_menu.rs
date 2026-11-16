@@ -46,6 +46,7 @@ pub(super) enum MenuAction {
 }
 
 pub(super) struct Item {
+    key: &'static str,
     pub label: SharedString,
     pub icon: &'static str,
     pub shortcut: String,
@@ -58,11 +59,8 @@ pub(super) struct Item {
 }
 impl Item {
     fn new(locale: ToolbarLocale, key: &'static str, icon: &'static str, action: MenuAction) -> Self {
-        Self { label: locale.context_text(key).into(), icon, shortcut: String::new(), action,
+        Self { key, label: locale.context_text(key).into(), icon, shortcut: String::new(), action,
             children: Vec::new(), enabled: true, checked: false, danger: false, separator: false }
-    }
-    fn shortcut(mut self, shortcut: &str) -> Self {
-        self.shortcut = if cfg!(target_os = "macos") { shortcut.replace("Ctrl+", "⌘").replace("Shift+", "⇧") } else { shortcut.into() }; self
     }
     fn enabled(mut self, enabled: bool) -> Self { self.enabled = enabled; self }
     fn checked(mut self, checked: bool) -> Self { self.checked = checked; self }
@@ -151,9 +149,9 @@ impl NomoMark {
             let mut row = edit("headingLevel", "heading", EditIntent::Heading(level));
             row.label = locale.context_text("headingLevel").replace("{level}", &level.to_string()).into(); row
         };
-        match &menu.target {
+        let mut items = match &menu.target {
             Target::Text => {
-                let mut insert: Vec<_> = (1..=6).map(|level| heading(level).shortcut(&format!("Ctrl+{level}"))).collect();
+                let mut insert: Vec<_> = (1..=6).map(|level| heading(level)).collect();
                 insert.push(sep());
                 insert.extend([
                     edit("unorderedList", "list", EditIntent::LinePrefix("- ".into())),
@@ -171,37 +169,37 @@ impl NomoMark {
                     edit("horizontalRule", "separator-horizontal", EditIntent::ToggleRule),
                 ]);
                 vec![
-                    item("undo", "undo-2", MenuAction::Undo).shortcut("Ctrl+Z").enabled(editable && self.context_history.0),
-                    item("redo", "redo-2", MenuAction::Redo).shortcut(if cfg!(target_os = "macos") { "Ctrl+Shift+Z" } else { "Ctrl+Y" }).enabled(editable && self.context_history.1),
-                    item("paste", "clipboard", MenuAction::Paste(false)).shortcut("Ctrl+V").enabled(editable),
-                    item("pasteAsPlainText", "clipboard", MenuAction::Paste(true)).shortcut("Ctrl+Shift+V").enabled(editable), sep(),
+                    item("undo", "undo-2", MenuAction::Undo).enabled(editable && self.context_history.0),
+                    item("redo", "redo-2", MenuAction::Redo).enabled(editable && self.context_history.1),
+                    item("paste", "clipboard", MenuAction::Paste(false)).enabled(editable),
+                    item("pasteAsPlainText", "clipboard", MenuAction::Paste(true)).enabled(editable), sep(),
                     item("insert", "list-plus", MenuAction::None).enabled(editable).children(insert), sep(),
-                    item("selectAll", "text-cursor-input", MenuAction::SelectAll).shortcut("Ctrl+A"),
-                    item("find", "search", MenuAction::Find).shortcut("Ctrl+F").enabled(self.workspace_hosted),
+                    item("selectAll", "text-cursor-input", MenuAction::SelectAll),
+                    item("find", "search", MenuAction::Find).enabled(self.workspace_hosted),
                 ]
             }
             Target::Selection => {
                 let mut formats = Vec::new();
-                for (key, icon, format, shortcut) in [
-                    ("bold", "crop", InlineFormat::Strong, "Ctrl+B"), ("italic", "crop", InlineFormat::Emphasis, "Ctrl+I"),
-                    ("underline", "crop", InlineFormat::Underline, "Ctrl+U"), ("strikethrough", "crop", InlineFormat::Strike, ""),
-                    ("inlineCode", "code-xml", InlineFormat::Code, "Ctrl+`"), ("highlight", "crop", InlineFormat::Highlight, ""),
+                for (key, icon, format) in [
+                    ("bold", "crop", InlineFormat::Strong), ("italic", "crop", InlineFormat::Emphasis),
+                    ("underline", "crop", InlineFormat::Underline), ("strikethrough", "crop", InlineFormat::Strike),
+                    ("inlineCode", "code-xml", InlineFormat::Code), ("highlight", "crop", InlineFormat::Highlight),
                 ] {
                     let selected = local_range(&self.host.parsed.source, self.host.parsed.identity.from_byte, menu.selection.range()).ok();
                     let active = selected.as_ref().is_some_and(|range| self.host.parsed.inline.iter().any(|span|
                         span.format == format && span.content.start <= range.start && range.end <= span.content.end));
-                    formats.push(edit(key, icon, EditIntent::ToggleInline(format)).shortcut(shortcut).checked(active));
+                    formats.push(edit(key, icon, EditIntent::ToggleInline(format)).checked(active));
                 }
                 formats.extend([sep(), edit("clearStyle", "crop", EditIntent::ClearFormatting)]);
-                vec![item("cut", "scissors", MenuAction::Cut).shortcut("Ctrl+X").enabled(editable),
-                    item("copy", "copy", MenuAction::Copy).shortcut("Ctrl+C"),
-                    item("paste", "clipboard", MenuAction::Paste(false)).shortcut("Ctrl+V").enabled(editable),
-                    item("pasteAsPlainText", "clipboard", MenuAction::Paste(true)).shortcut("Ctrl+Shift+V").enabled(editable), sep(),
+                vec![item("cut", "scissors", MenuAction::Cut).enabled(editable),
+                    item("copy", "copy", MenuAction::Copy),
+                    item("paste", "clipboard", MenuAction::Paste(false)).enabled(editable),
+                    item("pasteAsPlainText", "clipboard", MenuAction::Paste(true)).enabled(editable), sep(),
                     item("format", "crop", MenuAction::None).enabled(editable).children(formats),
-                    item("createLink", "link", MenuAction::LinkEdit).shortcut(&crate::ui::shortcuts::current("menu-link", cx)).enabled(editable && semantic),
+                    item("createLink", "link", MenuAction::LinkEdit).enabled(editable && semantic),
                     item("insertInlineComment", "pencil", MenuAction::InlineComment).enabled(editable && semantic), sep(),
-                    item("selectAll", "text-cursor-input", MenuAction::SelectAll).shortcut("Ctrl+A"),
-                    item("find", "search", MenuAction::Find).shortcut("Ctrl+F").enabled(self.workspace_hosted)]
+                    item("selectAll", "text-cursor-input", MenuAction::SelectAll),
+                    item("find", "search", MenuAction::Find).enabled(self.workspace_hosted)]
             }
             Target::Link(at) => {
                 let ready = !self.host.parsed.context.reference_pending(&(*at..*at));
@@ -211,12 +209,12 @@ impl NomoMark {
                     item("removeLink", "link-2-off", MenuAction::LinkRemove).enabled(editable && ready)]
             }
             Target::Heading(level) => vec![
-                item("cut", "scissors", MenuAction::Cut).shortcut("Ctrl+X").enabled(editable && !menu.selection.range().is_empty()),
-                item("copy", "copy", MenuAction::Copy).shortcut("Ctrl+C").enabled(!menu.selection.range().is_empty()),
-                item("paste", "clipboard", MenuAction::Paste(false)).shortcut("Ctrl+V").enabled(editable),
-                item("pasteAsPlainText", "clipboard", MenuAction::Paste(true)).shortcut("Ctrl+Shift+V").enabled(editable),
+                item("cut", "scissors", MenuAction::Cut).enabled(editable && !menu.selection.range().is_empty()),
+                item("copy", "copy", MenuAction::Copy).enabled(!menu.selection.range().is_empty()),
+                item("paste", "clipboard", MenuAction::Paste(false)).enabled(editable),
+                item("pasteAsPlainText", "clipboard", MenuAction::Paste(true)).enabled(editable),
                 edit("deleteAction", "trash-2", EditIntent::Replace(String::new())).enabled(editable && !menu.selection.range().is_empty()),
-                item("selectAll", "text-cursor-input", MenuAction::SelectAll).shortcut("Ctrl+A"), sep(),
+                item("selectAll", "text-cursor-input", MenuAction::SelectAll), sep(),
                 item("heading", "heading", MenuAction::None)
                     .children((1..=6).map(|n| heading(n).checked(n == *level)).collect()),
                 edit("paragraph", "crop", EditIntent::Heading(0)), sep(),
@@ -265,7 +263,27 @@ impl NomoMark {
                     item("copyImagePath", "copy", MenuAction::ImagePath).enabled(ready), sep(),
                     item("deleteAction", "trash-2", MenuAction::Delete).enabled(editable).danger()]
             }
+        };
+        fn update(items: &mut [Item], cx: &App) {
+            for item in items {
+                let id = match item.key {
+                    "undo" => "undo", "redo" => "redo", "cut" => "cut", "copy" => "copy", "paste" => "paste",
+                    "pasteAsPlainText" => "paste-plain", "selectAll" => "select-all", "find" => "find",
+                    "bold" => "bold", "italic" => "italic", "underline" => "underline", "strikethrough" => "strike",
+                    "inlineCode" => "inline-code", "highlight" => "highlight", "clearStyle" => "menu-clear-format",
+                    "createLink" | "editLink" => "menu-link", "unorderedList" => "bullet-list", "orderedList" => "ordered-list",
+                    "taskList" => "task-list", "quote" => "quote", "callout" => "insert-callout", "details" => "insert-details",
+                    "codeBlock" => "insert-code-block", "table" => "insert-table", "image" => "insert-image", "mathBlock" => "insert-math-block",
+                    _ => "",
+                };
+                item.shortcut = if let MenuAction::Edit(EditIntent::Heading(level)) = &item.action {
+                    crate::ui::shortcuts::current(&format!("heading-{level}"), cx)
+                } else { crate::ui::shortcuts::current(id, cx) };
+                update(&mut item.children, cx);
+            }
         }
+        update(&mut items, cx);
+        items
     }
 
     pub(super) fn dismiss_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -64,7 +64,7 @@ actions!(
         ResetOutlinePosition, ToggleSplitGuide, ToggleCodeLineNumbers, ToggleZoomControl, ToggleWritingStats, ToggleLintIndicator, ToggleEditLockButton,
         ToggleTheme, FollowSystemTheme, ToggleTypography, Underline, Highlight, ZoomIn, ZoomOut, ZoomReset, Bold, Italic, Strike, InlineCode, Link,
         Heading1, Heading2, Heading3, Heading4, Heading5, Heading6, ClearFormatting, Paragraph, Quote, BulletList, OrderedList, TaskList, CodeBlock, Table,
-        MathBlock, BlockComment, EditFrontMatter, Rule, PromoteHeading, DemoteHeading, OpenSettings, ShowHome, RecoverDocuments, ToggleMini, Quit
+        MathBlock, InsertImage, InsertFootnote, InsertToc, InsertCallout, InsertDetails, BlockComment, EditFrontMatter, Rule, PromoteHeading, DemoteHeading, OpenSettings, ShowHome, RecoverDocuments, ToggleMini, Quit
     ]
 );
 
@@ -1157,7 +1157,6 @@ impl Workspace {
         false
     }
     fn cancel_close(&mut self,cx:&mut Context<Self>){self.cancel_folder_open();self.comparison.closing=None;self.comparison.batch.clear();self.closing_window=false;self.application_dialogs.close_approved=false;self.record_layout(cx);crate::cancel_quit(cx);}
-    #[cfg(windows)]
     pub(crate) fn can_quit_to_install(&mut self, window:&mut Window,cx:&mut Context<Self>) -> bool {
         if window.has_active_prompt() || self.closing_window || self.application_dialogs.busy || !self.opening.is_empty()
             || !self.open_requests.pending.is_empty() || self.pending_document_transition.is_some() || !self.pending_saves.is_empty() {
@@ -1358,6 +1357,17 @@ impl Workspace {
     // ---- 大纲 ----
 
     // ---- 格式命令 ----
+
+    fn choose_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_prompt() || self.closing_window || self.application_dialogs.busy { return; }
+        let Some(document) = self.document() else { return; };
+        if document.read(cx).editing_locked() { return; }
+        let weak = document.downgrade();
+        if !self.prepare_document_transition(&document, false, window, cx, move |workspace, window, cx| {
+            if weak.upgrade().as_ref() == workspace.document().as_ref() { workspace.choose_images(window, cx); }
+        }) { return; }
+        document.update(cx, |host, cx| host.choose_images(window, cx));
+    }
 
     fn with_document(&mut self, window: &mut Window, cx: &mut Context<Self>, update: impl FnOnce(&mut DocumentHost, &mut Context<DocumentHost>)) {
         let Some(tab) = self.tab() else { return };
@@ -2258,6 +2268,13 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &CodeBlock, window, cx| w.with_document(window, cx, |b, cx| insert_code_block(b, cx))))
             .on_action(cx.listener(|w, _: &Table, window, cx| w.open_editor_popover(EditorPopoverKind::Table,window,cx)))
             .on_action(cx.listener(|w, _: &MathBlock, window, cx| w.with_document(window, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::InsertMathBlock, cx))))
+            .on_action(cx.listener(|w, _: &InsertImage, window, cx| {
+                w.choose_images(window, cx);
+            }))
+            .on_action(cx.listener(|w, _: &InsertFootnote, window, cx| w.with_document(window, cx, |b, cx| b.insert_footnote(cx))))
+            .on_action(cx.listener(|w, _: &InsertToc, window, cx| w.with_document(window, cx, |b, cx| b.insert_toc(cx))))
+            .on_action(cx.listener(|w, _: &InsertCallout, window, cx| w.chrome_event(&ChromeEvent::Command(ChromeCommand::Callout), window, cx)))
+            .on_action(cx.listener(|w, _: &InsertDetails, window, cx| w.chrome_event(&ChromeEvent::Command(ChromeCommand::Details), window, cx)))
             .on_action(cx.listener(|w, _: &BlockComment, window, cx| w.open_block_comment(window, cx)))
             .on_action(cx.listener(|w, _: &EditFrontMatter, window, cx| w.open_front_matter(window, cx)))
             .on_action(cx.listener(|w, _: &Rule, window, cx| w.with_document(window, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::ToggleRule, cx))))
@@ -2308,58 +2325,5 @@ impl Render for Workspace {
             )
             // 帧采样终点：作为根节点最后一个子元素在常规绘制末尾执行（延迟弹层除外）。
             .child(gpui::canvas(|_, _, _| (), |_, _, _, _| crate::frame_profile::frame_end()).absolute().size_0())
-    }
-}
-
-pub fn bind_keys(cx: &mut App) {
-    use gpui::KeyBinding;
-    let context = Some("Workspace");
-    cx.bind_keys([
-        crate::ui::key_binding("secondary-alt-shift-h", ShowHome, context, cx),
-        crate::ui::key_binding("secondary-shift-n", NewWindow, context, cx),
-        crate::ui::key_binding("secondary-shift-o", OpenFolder, context, cx),
-        crate::ui::key_binding("secondary-shift-s", SaveAs, context, cx),
-        crate::ui::key_binding("secondary-w", CloseTab, context, cx),
-        KeyBinding::new("ctrl-tab", NextTab, context),
-        KeyBinding::new("ctrl-shift-tab", PrevTab, context),
-        crate::ui::key_binding("secondary-f", ToggleFind, context, cx),
-        crate::ui::key_binding("secondary-alt-f", ToggleReplace, context, cx),
-        crate::ui::key_binding("secondary-g", FindNext, context, cx),
-        crate::ui::key_binding("secondary-shift-g", FindPrev, context, cx),
-        crate::ui::key_binding("secondary-1", Heading1, context, cx),
-        crate::ui::key_binding("secondary-2", Heading2, context, cx),
-        crate::ui::key_binding("secondary-3", Heading3, context, cx),
-        crate::ui::key_binding("secondary-4", Heading4, context, cx),
-        crate::ui::key_binding("secondary-5", Heading5, context, cx),
-        crate::ui::key_binding("secondary-6", Heading6, context, cx),
-        crate::ui::key_binding("secondary-alt-o", ToggleOutline, context, cx),
-        crate::ui::key_binding("secondary-z", crate::editor::Undo, Some("Outline"), cx),
-        crate::ui::key_binding("secondary-shift-z", crate::editor::Redo, Some("Outline"), cx),
-        KeyBinding::new("ctrl-y", crate::editor::Redo, Some("Outline")),
-        crate::ui::key_binding("secondary-alt-s", ToggleSidebar, context, cx),
-        crate::ui::key_binding("secondary-=", PromoteHeading, context, cx),
-        crate::ui::key_binding("secondary-+", ZoomIn, context, cx),
-        crate::ui::key_binding("secondary--", DemoteHeading, context, cx),
-        crate::ui::key_binding("secondary-0", Paragraph, context, cx),
-        crate::ui::key_binding("secondary-b", Bold, context, cx),
-        crate::ui::key_binding("secondary-i", Italic, context, cx),
-        KeyBinding::new("alt-shift-5", Strike, context),
-        crate::ui::key_binding("secondary-shift-x", TaskList, context, cx),
-        crate::ui::key_binding("secondary-shift-q", Quote, context, cx),
-        crate::ui::key_binding("secondary-shift-[", OrderedList, context, cx),
-        crate::ui::key_binding("secondary-shift-]", BulletList, context, cx),
-        crate::ui::key_binding("secondary-u", Underline, context, cx),
-        crate::ui::key_binding("secondary-shift-h", Rule, context, cx),
-        crate::ui::key_binding("secondary-`", InlineCode, context, cx),
-        crate::ui::key_binding("secondary-shift-c", InlineCode, context, cx),
-        crate::ui::key_binding("secondary-alt-1", Heading1, context, cx),
-        crate::ui::key_binding("secondary-alt-2", Heading2, context, cx),
-        crate::ui::key_binding("secondary-alt-3", Heading3, context, cx),
-        crate::ui::key_binding("secondary-alt-0", Paragraph, context, cx),
-        crate::ui::key_binding("secondary-q", Quit, None, cx),
-        crate::ui::key_binding("secondary-,", OpenSettings, None, cx),
-    ]);
-    if !cfg!(target_os = "macos") {
-        cx.bind_keys([KeyBinding::new("ctrl-h", ToggleReplace, context)]);
     }
 }

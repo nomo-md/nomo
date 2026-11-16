@@ -10,7 +10,6 @@ pub enum Control {
     FontFamily,
     Number { unit: &'static str },
     ThemePicker,
-    Shortcuts,
     Action(&'static str),
     Info,
 }
@@ -40,6 +39,7 @@ pub struct Group {
 pub enum Page {
     Groups(&'static [Group]),
     About,
+    Shortcuts,
 }
 
 pub struct Category {
@@ -93,6 +93,10 @@ pub const CATEGORIES: &[Category] = &[
                 item("markdownLintRuleSet", "settings.markdownLintRuleSet.label", "settings.markdownLintRuleSet.description", Control::Choice(&[("relaxed", "settings.markdownLintRuleSet.choice.relaxed"), ("default", "settings.markdownLintRuleSet.choice.default")]), Support::Full),
             ] },
         ]),
+    },
+    Category {
+        title: "settings.category.shortcuts", icon: IconName::Keyboard,
+        page: Page::Shortcuts,
     },
     Category {
         title: "settings.category.appearance", icon: IconName::Palette,
@@ -155,9 +159,6 @@ pub const CATEGORIES: &[Category] = &[
             group("settings.group.insertion", &[
                 item("defaultCodeBlockLanguage", "settings.defaultCodeBlockLanguage.label", "settings.defaultCodeBlockLanguage.description", Control::Text { placeholder: "ts", compact: true }, Support::Full),
                 item("defaultDiagramType", "settings.defaultDiagramType.label", "settings.defaultDiagramType.description", Control::Choice(&[("flowchart", "settings.defaultDiagramType.choice.flowchart"), ("sequenceDiagram", "settings.defaultDiagramType.choice.sequenceDiagram"), ("classDiagram", "settings.defaultDiagramType.choice.classDiagram"), ("stateDiagram", "settings.defaultDiagramType.choice.stateDiagram"), ("erDiagram", "settings.defaultDiagramType.choice.erDiagram"), ("gantt", "settings.defaultDiagramType.choice.gantt"), ("pie", "settings.defaultDiagramType.choice.pie")]), Support::Full),
-            ]),
-            group("settings.group.shortcuts", &[
-                item("shortcutPreferences", "", "", Control::Shortcuts, Support::Full),
             ]),
             group("settings.group.developer", &[
                 item("developerMode", "settings.developerMode.label", "settings.developerMode.description", Control::Toggle, Support::None("settings.developerMode.support")),

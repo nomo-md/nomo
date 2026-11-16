@@ -29,6 +29,20 @@ impl QuickInsertUi {pub fn cancel(&mut self) {if let Some(request)=self.import.t
 impl Drop for QuickInsertUi {fn drop(&mut self){self.cancel();}}
 
 impl DocumentHost {
+    /// 与粘贴、拖放共用导入路径；选择器返回时重新验证原文档和选区。
+    pub(crate) fn choose_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = match self.edit_target(cx) { Ok(target) => target, Err(error) => { self.report(error, cx); return; } };
+        let response = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: true,
+            prompt: Some(ToolbarLocale::current(cx).text("quick_choose_images").into()) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = response.await;
+            let _ = this.update_in(cx, |host, window, cx| match result {
+                Ok(Ok(Some(paths))) if !paths.is_empty() => host.insert_image_inputs(target, paths.into_iter().map(ImageInput::File).collect(), window, cx),
+                Ok(Ok(_)) => {},
+                _ => host.report(ControlError::HostFailure("无法打开图片选择窗口".into()), cx),
+            });
+        }).detach();
+    }
     fn quick_target(&self,cx:&App)->Result<QuickTarget,ControlError> {
         let edit=self.edit_target(cx)?;
         let view=self.control.read(cx);

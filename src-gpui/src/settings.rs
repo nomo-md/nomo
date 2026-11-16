@@ -247,7 +247,14 @@ impl Settings {
                 }
             }
             if !shortcuts.is_object() { shortcuts = crate::ui::shortcuts::defaults(); }
-            shortcuts[field] = value;
+            if let Some((platform, command)) = field.split_once('.') {
+                if !shortcuts[platform].is_object() { shortcuts[platform] = serde_json::json!({}); }
+                shortcuts[platform][command] = value;
+            } else if field.starts_with("__") && value.is_object() {
+                // 恢复当前平台的已知命令，同时保留其它版本写入的未知项。
+                if !shortcuts[field].is_object() { shortcuts[field] = serde_json::json!({}); }
+                shortcuts[field].as_object_mut().unwrap().extend(value.as_object().unwrap().clone());
+            } else { shortcuts[field] = value; }
             return Self::set_with(cx, "shortcutPreferences", shortcuts, persist);
         }
         if let Some(field)=key.strip_prefix("imageHandlingSettings.") {

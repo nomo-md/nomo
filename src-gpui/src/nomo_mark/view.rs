@@ -2803,21 +2803,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("delete", Delete, context),
         KeyBinding::new("enter", Newline, context),
         KeyBinding::new("shift-enter", SoftBreak, context),
-        crate::ui::key_binding("secondary-enter", ParagraphAfter, context, cx),
-        crate::ui::key_binding("secondary-shift-enter", ParagraphBefore, context, cx),
         KeyBinding::new("tab", Indent, context),
         KeyBinding::new("shift-tab", Outdent, context),
         KeyBinding::new("escape", Dismiss, context),
-        crate::ui::key_binding("secondary-a", SelectAll, context, cx),
-        crate::ui::key_binding("secondary-z", Undo, context, cx),
-        crate::ui::key_binding("secondary-shift-z", Redo, context, cx),
-        KeyBinding::new("ctrl-y", Redo, context),
-        crate::ui::key_binding("secondary-c", Copy, context, cx),
-        crate::ui::key_binding("secondary-x", Cut, context, cx),
-        crate::ui::key_binding("secondary-v", Paste, context, cx),
-        crate::ui::key_binding("secondary-shift-v", PastePlain, context, cx),
-        crate::ui::key_binding("secondary-b", crate::ui::workspace::Bold, context, cx),
-        crate::ui::key_binding("secondary-i", crate::ui::workspace::Italic, context, cx),
     ]);
     if cfg!(target_os = "macos") {
         cx.bind_keys([

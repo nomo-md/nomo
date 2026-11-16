@@ -44,6 +44,5 @@ pub(crate) fn reload_key_bindings(cx: &mut gpui::App) {
     cx.clear_key_bindings();
     crate::nomo_mark::view::bind_keys(cx);
     text_field::bind_keys(cx);
-    workspace::bind_keys(cx);
     shortcuts::bind_keys(cx);
 }
