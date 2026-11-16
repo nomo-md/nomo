@@ -198,18 +198,31 @@ impl Workspace {
                 let _ = cx.update(|cx| {
                     let store = cx.global_mut::<Store>();
                     store.importing = false;
+                    let mut limited = false;
                     let result = result.map_err(UiMessage::raw).and_then(|(mut layouts, warning)| {
-                        if !layouts.is_empty() && layouts.len() + store.book.windows.len() > CLOSED_WINDOWS {
-                            return Err(UiMessage::new("layout.windowLimit").arg("count", CLOSED_WINDOWS));
-                        }
+                        // 原生记录优先；旧布局只取预算内最新的一批，原配置及草稿不删除。
+                        layouts.retain(|layout| !store.book.windows.iter().any(|saved| saved.id == layout.id));
+                        let capacity = CLOSED_WINDOWS.saturating_sub(store.book.windows.len());
+                        let excess = layouts.len().saturating_sub(capacity);
+                        limited = excess > 0;
+                        layouts.drain(..excess);
+                        let mut imported = layouts.len();
                         layouts.extend(store.book.windows.clone());
-                        store.persist(LayoutBook {windows: layouts, legacy_imported: true})?;
+                        let mut next = LayoutBook { windows: layouts, legacy_imported: true };
+                        while serde_json::to_vec(&next)
+                            .map_err(|e| UiMessage::raw(e.to_string()))?.len() > MAX_BYTES && imported > 0 {
+                            next.windows.remove(0);
+                            imported -= 1;
+                            limited = true;
+                        }
+                        store.persist(next)?;
                         Ok(warning)
                     });
                     for handle in cx.windows().into_iter().filter_map(|handle|handle.downcast::<Workspace>()) {
                         let _ = handle.update(cx, |workspace, window, cx| {
                             if let Err(error) = &result {workspace.failure_notice=Some(ToolbarLocale::current(cx).app_format("layout.legacyFailed", &[("error", &error.render(ToolbarLocale::current(cx)))]).into());}
                             if let Ok(Some(warning)) = &result {workspace.failure_notice=Some(ToolbarLocale::current(cx).app_format("layout.legacyPartial", &[("error", warning)]).into());}
+                            if matches!(&result, Ok(None)) && limited {workspace.notice=Some(ToolbarLocale::current(cx).app_text("layout.legacyLimited").into());}
                             workspace.continue_folder_open(window, cx);
                             workspace.drain_open_requests(window, cx);
                             cx.notify();

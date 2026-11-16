@@ -1,5 +1,6 @@
 {
   "zh-CN": {
+    "layout.legacyLimited": "旧版工作区已完成导入，仅保留容量范围内最近的布局。其余旧记录仍保留，未保存草稿可从恢复入口找回。",
     "settings.documentNavigationLayout.label": "文档导航布局",
     "settings.documentNavigationLayout.description": "选择文件树与大纲的位置，立即生效。主页独立显示。",
     "settings.documentNavigationLayout.choice.right-outline": "右侧大纲",
@@ -721,6 +722,7 @@
     "mini.restoreFullscreen": "请先退出全屏，再恢复主窗口"
   },
   "zh-TW": {
+    "layout.legacyLimited": "舊版工作區已完成匯入，僅保留容量範圍內最近的配置。其餘舊記錄仍保留，未儲存草稿可從復原入口找回。",
     "settings.documentNavigationLayout.label": "文件導覽配置",
     "settings.documentNavigationLayout.description": "選擇檔案樹與大綱的位置，立即生效。首頁獨立顯示。",
     "settings.documentNavigationLayout.choice.right-outline": "右側大綱",
@@ -1442,6 +1444,7 @@
     "mini.restoreFullscreen": "請先退出全螢幕，再還原主視窗"
   },
   "en-US": {
+    "layout.legacyLimited": "Legacy workspace import is complete. Only the most recent layouts within the storage limit were imported. Other legacy records are preserved; unsaved drafts remain available through recovery.",
     "settings.documentNavigationLayout.label": "Document navigation layout",
     "settings.documentNavigationLayout.description": "Choose where files and the outline appear. Applies immediately; Home stays separate.",
     "settings.documentNavigationLayout.choice.right-outline": "Right outline",
@@ -2163,6 +2166,7 @@
     "mini.restoreFullscreen": "Exit full screen before restoring the main window."
   },
   "ja-JP": {
+    "layout.legacyLimited": "旧版ワークスペースのインポートが完了しました。容量内の最新レイアウトのみを取り込みました。他の旧記録は保持され、未保存の下書きは復元できます。",
     "settings.documentNavigationLayout.label": "文書ナビゲーションの配置",
     "settings.documentNavigationLayout.description": "ファイルツリーとアウトラインの位置を選択します。即時反映され、ホームは独立して表示されます。",
     "settings.documentNavigationLayout.choice.right-outline": "右側アウトライン",
