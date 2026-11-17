@@ -5,7 +5,7 @@ use gpui::{App, Global, Subscription, Task, Window, WindowHandle};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::sync::mpsc;
 use windows_sys::Win32::{
-    Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
+    Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, SetLastError, WPARAM},
     System::LibraryLoader::GetModuleHandleW,
     UI::{Shell::*, WindowsAndMessaging::*},
 };
@@ -336,6 +336,25 @@ struct TrayWindow {
     title: String,
 }
 
+fn window_title(window: &Window) -> Result<String, String> {
+    let hwnd = window_hwnd(window)?;
+    // GPUI 的标题读取仅在 macOS 实现；Windows 直接读取已设置的原生标题。
+    unsafe { SetLastError(0) };
+    let length = unsafe { GetWindowTextLengthW(hwnd) };
+    if length == 0 && unsafe { GetLastError() } != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let capacity = length.checked_add(1).ok_or("窗口标题过长")?;
+    let mut buffer = vec![0u16; capacity as usize];
+    unsafe { SetLastError(0) };
+    let copied = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), capacity) };
+    if copied == 0 && unsafe { GetLastError() } != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let title = String::from_utf16_lossy(&buffer[..copied as usize]);
+    Ok(if title.trim().is_empty() { "Nomo".into() } else { title })
+}
+
 fn workspaces(cx: &mut App) -> Vec<TrayWindow> {
     let mut windows: Vec<_> = cx.windows()
         .into_iter()
@@ -344,7 +363,10 @@ fn workspaces(cx: &mut App) -> Vec<TrayWindow> {
             handle.update(cx, |_, window, _| TrayWindow {
                 handle,
                 shown: window_shown(window),
-                title: window.window_title(),
+                title: window_title(window).unwrap_or_else(|error| {
+                    crate::app_logger::warn("Tray", &format!("读取窗口标题失败：{error}"));
+                    "Nomo".into()
+                }),
             }).ok()
         })
         .collect();
