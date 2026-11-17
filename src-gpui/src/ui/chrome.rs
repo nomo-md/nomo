@@ -554,7 +554,8 @@ impl Render for Chrome {
                 .text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(theme.fg)
                 .child(div().min_w(px(0.0)).truncate().child(title))
                 .children(dirty.then(|| div().size(px(6.0)).flex_none().rounded_full().bg(theme.accent))))));
-        let mut right = div().flex().items_center().h_full().flex_none();
+        let mut right = div().flex().items_center().h_full().flex_none()
+            .when(cfg!(target_os = "macos"), |el| el.pr(px(14.0)));
         if let Some(update) = self.state.update {
             let enabled = self.capable(ChromeCapability::SoftwareUpdate);
             right = right.child(self.icon_button("chrome-update", IconName::ArrowDown, &theme).relative()
