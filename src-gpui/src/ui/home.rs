@@ -8,6 +8,7 @@ pub(crate) mod document_card;
 
 use crate::{theme::Theme, ui::components::{ButtonKind, IconName, button, icon, small_icon_button, tooltip}};
 use crate::ui::{motion, popup::reduced_motion};
+use crate::ui::components::{SIDEBAR_ROW_HOVER, sidebar_row};
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, ParentElement, Render, RenderImage, SharedString, Styled, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list};
 use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
 use library::{Change, Entry, Library, Snapshot};
@@ -603,10 +604,10 @@ impl Render for Home {
         let reflow = self.update_grid_layout(grid_layout, rows, row_height);
         let sidebar = (sidebar_width > 0.0).then(|| {
             let mut sidebar_theme = theme.clone();
-            sidebar_theme.hover = gpui::rgba(0x80808014).into();
+            sidebar_theme.hover = gpui::rgba(SIDEBAR_ROW_HOVER).into();
             let list = self.sidebar(self.sidebar_frame.full_width - 16.0, &sidebar_theme, cx);
             let panel = div().flex().flex_col()
-                .child(div().id("home-sidebar-list-region").w_full().flex_1().min_h(px(0.0)).px(px(8.0)).pt(px(6.0)).pb(px(10.0))
+                .child(div().id("home-sidebar-list-region").w_full().flex_1().min_h(px(0.0)).px(px(8.0)).pb(px(10.0))
                     .overflow_hidden().child(list));
             self.sidebar_frame.clip(panel)
         });
@@ -755,9 +756,9 @@ pub(crate) fn entry_name(path: &Path) -> SharedString {
 
 /// 工作区侧栏的返回主页入口。
 pub(crate) fn nav_home_row(active: bool, theme: &Theme, cx: &App) -> gpui::Stateful<gpui::Div> {
-    let color = if active { theme.accent } else { theme.fg };
-    div().id("sidebar-home").w_full().h(px(28.0)).flex_none().px(px(12.0)).flex().items_center().gap(px(6.0)).rounded(px(4.0))
-        .text_size(px(14.0)).text_color(color).when(active, |el| el.bg(theme.sidebar_active).font_weight(FontWeight::SEMIBOLD))
-        .when(!active, |el| el.cursor_pointer().hover(|style| style.bg(gpui::rgba(0x80808014))))
-        .child(icon(IconName::Home, 14.0, if active { theme.accent } else { theme.muted })).child(ToolbarLocale::current(cx).app_text("home.title"))
+    let color = if active { theme.accent } else { theme.muted };
+    sidebar_row().id("sidebar-home").flex_none().px(px(12.0))
+        .text_color(color).font_weight(FontWeight::SEMIBOLD).when(active, |el| el.bg(theme.sidebar_active))
+        .when(!active, |el| el.cursor_pointer().hover(|style| style.bg(gpui::rgba(SIDEBAR_ROW_HOVER))))
+        .child(icon(IconName::Home, 14.0, color)).child(ToolbarLocale::current(cx).app_text("home.title"))
 }

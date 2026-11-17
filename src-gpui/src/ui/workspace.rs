@@ -8,6 +8,7 @@ use crate::text_document::markdown_session::MarkdownDocumentSessionManager;
 use crate::settings::{DocumentNavigationLayout, EditorMode, Settings, StatsMetric};
 use crate::theme::Theme;
 use crate::ui::components::{ButtonKind, IconName, button, floating_card, icon, slider, small_icon_button, tooltip};
+use crate::ui::components::{SIDEBAR_ROW_CONTENT_HEIGHT as TREE_ROW_CONTENT_HEIGHT, SIDEBAR_ROW_GAP as TREE_ROW_GAP, SIDEBAR_ROW_HEIGHT as TREE_ROW_HEIGHT, SIDEBAR_ROW_HOVER as TREE_ROW_HOVER, SIDEBAR_ROW_ICON_SIZE as TREE_ROW_ICON_SIZE, sidebar_row};
 use crate::ui::file_tree::FileTree;
 use crate::ui::home::{self, Home, HomeEvent, library::{Library, Change as LibraryChange}};
 use crate::nomo_mark::{link_edit::LinkDraft, protocol::ControlError};
@@ -101,15 +102,10 @@ struct OpeningDocument {
     anchor: Option<String>,
 }
 
-const TREE_ROW_HEIGHT: f32 = 30.0;
-const TREE_ROW_CONTENT_HEIGHT: f32 = 28.0;
 const TREE_ROW_PADDING: f32 = 8.0;
 const TREE_ROW_INDENT: f32 = 12.0;
-const TREE_ROW_GAP: f32 = 6.0;
-const TREE_ROW_HOVER: u32 = 0x80808014;
 const TREE_LIST_TOP_PADDING: f32 = 4.0;
 const TREE_ROOT_LIFT: f32 = 4.0;
-const TREE_ROW_ICON_SIZE: f32 = 13.0;
 const TREE_CHEVRON_SLOT: f32 = 16.0;
 const TREE_CHEVRON_SIZE: f32 = 12.0;
 const TREE_SELECTION_DURATION: Duration = Duration::from_millis(180);
@@ -117,8 +113,7 @@ const TREE_CHEVRON_DURATION: Duration = Duration::from_millis(200);
 const PAGE_TITLE_FADE: Duration = Duration::from_millis(120);
 
 fn tree_row(indent: f32) -> gpui::Div {
-    div().w_full().h(px(TREE_ROW_CONTENT_HEIGHT)).pl(px(indent)).pr(px(4.0))
-        .flex().items_center().gap(px(TREE_ROW_GAP)).rounded(px(4.0)).text_size(px(14.0))
+    sidebar_row().pl(px(indent)).pr(px(4.0))
 }
 
 fn tree_root_row() -> gpui::Div {

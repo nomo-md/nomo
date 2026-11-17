@@ -1,5 +1,6 @@
 //! 主页分组入口、文件夹卡片和拖放反馈；文件夹点击直接打开工作区。
 use super::*;
+use crate::ui::components::{SIDEBAR_ROW_CONTENT_HEIGHT, SIDEBAR_ROW_HEIGHT, SIDEBAR_ROW_ICON_SIZE, sidebar_section_style};
 
 const REFLOW_ARRIVAL_DURATION: Duration = Duration::from_millis(150);
 
@@ -56,13 +57,13 @@ impl Home {
         let title = if directory { entry_name(&path) } else { document_name(&path) };
         let target = self.tree_drag.is_target(&path);
         let remove_path = path.clone();
-        let row = div().id((gpui::ElementId::Path(path.as_path().into()), "home-tree-row")).group("home-tree-row")
-            .relative().w_full().h(px(28.0)).flex().items_center().gap(px(6.0))
+        let row = sidebar_row().id((gpui::ElementId::Path(path.as_path().into()), "home-tree-row")).group("home-tree-row")
+            .relative()
             .px(px(12.0)).rounded(px(if target { 9.0 } else { 4.0 })).cursor_pointer()
-            .text_size(px(14.0)).text_color(theme.fg).when(!target, |el| el.hover(|el| el.bg(theme.hover)))
+            .text_color(theme.fg).when(!target, |el| el.hover(|el| el.bg(theme.hover)))
             .when(target, |el| el.child(div().absolute().left(px(3.0)).right(px(3.0)).top(px(1.0)).bottom(px(1.0)).rounded(px(9.0)).bg(theme.sidebar_active)))
             .tooltip(tooltip(title.clone()))
-            .child(if target { crate::ui::tree_drag::receiving_icon(theme) } else { icon(if directory { IconName::Folder } else { IconName::FileText }, 13.0, theme.muted).into_any_element() })
+            .child(if target { crate::ui::tree_drag::receiving_icon(theme) } else { icon(if directory { IconName::Folder } else { IconName::FileText }, SIDEBAR_ROW_ICON_SIZE, theme.muted).into_any_element() })
             .child(div().flex_1().min_w(px(0.0)).truncate().child(title))
             .child(small_icon_button((gpui::ElementId::Path(remove_path.as_path().into()), "home-remove"), IconName::Close, false, theme)
                 .absolute().right(px(4.0)).top(px(3.0)).bg(theme.hover)
@@ -82,11 +83,10 @@ impl Home {
         let open = path.clone();
         let remove_path = path.clone();
         let title = document_name(&path);
-        div().id((gpui::ElementId::Path(path.as_path().into()), "home-favorite-row")).group("home-favorite-row")
-            .relative().w_full().h(px(28.0)).flex().items_center().gap(px(6.0))
-            .px(px(12.0)).rounded(px(4.0)).cursor_pointer().hover(|element| element.bg(theme.hover))
-            .text_size(px(14.0)).text_color(theme.fg).tooltip(tooltip(title.clone()))
-            .child(icon(IconName::StarFilled, 13.0, theme.accent))
+        sidebar_row().id((gpui::ElementId::Path(path.as_path().into()), "home-favorite-row")).group("home-favorite-row")
+            .relative().px(px(12.0)).cursor_pointer().hover(|element| element.bg(theme.hover))
+            .text_color(theme.fg).tooltip(tooltip(title.clone()))
+            .child(icon(IconName::StarFilled, SIDEBAR_ROW_ICON_SIZE, theme.accent))
             .child(div().flex_1().min_w(px(0.0)).truncate().child(title))
             .child(small_icon_button((gpui::ElementId::Path(remove_path.as_path().into()), "home-unfavorite"), IconName::Close, false, theme)
                 .absolute().right(px(4.0)).top(px(3.0)).bg(theme.hover)
@@ -249,15 +249,15 @@ impl Home {
                 if index == 0 || index == recent_heading || (favorite_block > 0 && index == favorite_heading) {
                     let heading = if index == 0 { "home.folders" } else if index == favorite_heading && favorite_block > 0 { "home.favoriteDocuments" } else { "home.recentDocuments" };
                     let offset = if index == recent_heading { home.tree_drag.section_offset(index, reduced_motion(cx)) } else { 0.0 };
-                    return div().w_full().h(px(30.0)).child(div().relative().top(px(offset)).size_full().px(px(12.0)).flex().items_center().justify_between()
-                        .text_size(px(11.0)).font_weight(FontWeight::MEDIUM).text_color(theme.muted)
+                    return div().w_full().h(px(SIDEBAR_ROW_HEIGHT)).child(sidebar_section_style(
+                        div().relative().top(px(offset)).size_full().px(px(12.0)).flex().items_center().justify_between(), &theme)
                         .child(ToolbarLocale::current(cx).app_text(heading)))
                         .into_any_element();
                 }
                 if favorite_block > 0 && index > favorite_heading && index < recent_heading {
                     let entry = &snapshot.favorites[index - favorite_heading - 1];
-                    return div().w_full().h(px(30.0)).flex().items_center()
-                        .child(div().w_full().h(px(28.0)).child(home.favorite_row(entry, &theme, cx))).into_any_element();
+                    return div().w_full().h(px(SIDEBAR_ROW_HEIGHT)).flex().items_center()
+                        .child(div().w_full().h(px(SIDEBAR_ROW_CONTENT_HEIGHT)).child(home.favorite_row(entry, &theme, cx))).into_any_element();
                 }
                 let logical = index - 1 - usize::from(index > recent_heading)
                     - if index > recent_heading { favorite_block } else { 0 };
@@ -265,7 +265,7 @@ impl Home {
                 let node = &rows[original];
                 let row = home.tree_row(node, width, &theme, cx);
                 let row = home.tree_drag.animate_row(&node.entry.path, index, row, reduced_motion(cx), &theme);
-                div().w_full().h(px(30.0)).flex().items_center().child(div().w_full().h(px(28.0)).child(row)).into_any_element()
+                div().w_full().h(px(SIDEBAR_ROW_HEIGHT)).flex().items_center().child(div().w_full().h(px(SIDEBAR_ROW_CONTENT_HEIGHT)).child(row)).into_any_element()
             }).collect::<Vec<_>>();
             if home.tree_drag.running() { window.request_animation_frame(); }
             items

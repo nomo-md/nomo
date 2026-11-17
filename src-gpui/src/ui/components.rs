@@ -226,6 +226,21 @@ pub fn icon(name: IconName, size: f32, color: Hsla) -> Svg {
     svg().path(name.path()).size(px(size)).flex_none().text_color(color)
 }
 
+pub(super) const SIDEBAR_ROW_HEIGHT: f32 = 30.0;
+pub(super) const SIDEBAR_ROW_CONTENT_HEIGHT: f32 = 28.0;
+pub(super) const SIDEBAR_ROW_GAP: f32 = 6.0;
+pub(super) const SIDEBAR_ROW_ICON_SIZE: f32 = 13.0;
+pub(super) const SIDEBAR_ROW_HOVER: u32 = 0x80808014;
+
+pub(super) fn sidebar_row() -> Div {
+    div().w_full().h(px(SIDEBAR_ROW_CONTENT_HEIGHT)).flex().items_center()
+        .gap(px(SIDEBAR_ROW_GAP)).rounded(px(4.0)).text_size(px(14.0))
+}
+
+pub(super) fn sidebar_section_style(row: Div, theme: &Theme) -> Div {
+    row.text_size(px(12.0)).font_weight(FontWeight::MEDIUM).text_color(theme.muted)
+}
+
 /// 工具栏图标按钮：28×28，悬停底色，激活态使用强调色底。
 pub fn icon_button(id: impl Into<ElementId>, name: IconName, active: bool, theme: &Theme) -> Stateful<Div> {
     let color = if active { theme.accent_strong } else { theme.fg };
