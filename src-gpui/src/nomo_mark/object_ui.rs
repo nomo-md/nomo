@@ -1026,7 +1026,7 @@ impl NomoMark {
             let (key, state) = self.object_preview(cx)?;
             let store = cx.global::<EmbedStore>();
             let crate::embeds::EmbedState::Ready(info) = state else { return None; };
-            Some((store.image(key)?, (info.width, info.height)))
+            Some((store.visible_image(key, cx)?, (info.width, info.height)))
         } else {
             let path = self.preview_image_path()?;
             let store = cx.global::<ImageStore>();
@@ -1103,6 +1103,7 @@ impl NomoMark {
             let embed_failure = object.preview_key.and_then(|key| cx.global::<EmbedStore>().state(key)).and_then(|state| match state {
                 crate::embeds::EmbedState::Failed(message) => Some(message), _ => None });
             let message = embed_failure.as_deref().or_else(|| path.as_deref().and_then(|path| store.failure(path)))
+                .or_else(|| object.preview_key.map(|key| cx.global::<EmbedStore>().notice(key)))
                 .unwrap_or("正在加载预览…");
             contents = contents.child(message.to_string());
         }
@@ -1254,7 +1255,7 @@ impl NomoMark {
             .when(!diagram, |s| s.mt(px(8.0 * zoom)));
         if let Some((key, state)) = self.object_preview(cx) {
             match state {
-                EmbedState::Ready(info) => if let Some(image) = cx.global::<EmbedStore>().image(key) {
+                EmbedState::Ready(info) => if let Some(image) = cx.global::<EmbedStore>().visible_image(key, cx) {
                     let available_width = (content_width - pad * 2.0).max(1.0);
                     let available_height = (preview_height - pad * 2.0).max(1.0);
                     let scale = if diagram && object.preview_mode == 0 {
@@ -1264,7 +1265,7 @@ impl NomoMark {
                     preview = preview.child(div().w(px((info.width * scale).max(available_width))).min_h(px(available_height))
                         .flex().items_center().justify_center()
                         .child(gpui::img(image).w(px(info.width * scale)).h(px(info.height * scale)).flex_shrink_0()));
-                },
+                } else { preview = preview.text_color(theme.muted).child(cx.global::<EmbedStore>().notice(key)); },
                 EmbedState::Failed(message) => preview = preview.text_color(theme.warning).child(message.to_string()),
                 EmbedState::Pending => preview = preview.text_color(theme.muted).child("正在生成预览…"),
             }
@@ -1298,10 +1299,10 @@ impl NomoMark {
                 let mut preview = div().id("inline-math-preview").p(px(10.0 * zoom)).max_w(px(360.0 * zoom))
                     .bg(theme.surface).border_1().border_color(theme.border).rounded(px(6.0 * zoom)).shadow_md().text_size(px(12.0 * zoom));
                 match state {
-                    crate::embeds::EmbedState::Ready(info) => if let Some(image) = store.image(key) {
+                    crate::embeds::EmbedState::Ready(info) => if let Some(image) = store.visible_image(key, cx) {
                         let scale = (320.0 * zoom / info.width.max(1.0)).min(100.0 * zoom / info.height.max(1.0)).min(1.0);
                         preview = preview.child(gpui::img(image).w(px(info.width * scale)).h(px(info.height * scale)));
-                    },
+                    } else { preview = preview.child(store.notice(key)); },
                     crate::embeds::EmbedState::Failed(message) => preview = preview.child(message.to_string()),
                     _ => preview = preview.child("正在生成预览…"),
                 }
@@ -1342,10 +1343,10 @@ impl NomoMark {
             let mut panel = div().id("object-preview").mt(px(10.0)).h(px(180.0)).overflow_y_scroll()
                 .flex().items_center().justify_center().bg(theme.code_bg).rounded(px(6.0)).text_size(px(12.0));
             match store.state(key) {
-                Some(crate::embeds::EmbedState::Ready(info)) => if let Some(image) = store.image(key) {
+                Some(crate::embeds::EmbedState::Ready(info)) => if let Some(image) = store.visible_image(key, cx) {
                     let scale = ((width - 40.0).max(20.0) / info.width.max(1.0)).min(164.0 / info.height.max(1.0)).min(1.0);
                     panel = panel.child(gpui::img(image).w(px(info.width * scale)).h(px(info.height * scale)));
-                },
+                } else { panel = panel.child(store.notice(key)); },
                 Some(crate::embeds::EmbedState::Failed(message)) => panel = panel.child(message.to_string()),
                 _ => panel = panel.child("正在生成预览…"),
             }

@@ -99,12 +99,16 @@ impl ResourceAdapter<'_> {
         };
         let key = spec.key();
         let first = self.dependencies.borrow_mut().embed(key);
-        if let Some(state) = self.embeds.state(key) {
-            (key, state)
-        } else {
-            if first { self.demands.borrow_mut().push(ResourceRequest::Embed(spec)); }
-            (key, EmbedState::Pending)
-        }
+        let state = self.embeds.state(key);
+        let fallback = if state.is_none() || matches!(state, Some(EmbedState::Pending)) {
+            self.embeds.scaled_fallback(&spec)
+        } else { None };
+        if state.is_none() && first { self.demands.borrow_mut().push(ResourceRequest::Embed(spec)); }
+        if let Some((fallback_key, info)) = fallback {
+            // 同时跟踪目标键：高清结果完成后必须重新布局并切换到目标位图。
+            self.dependencies.borrow_mut().embed(fallback_key);
+            (fallback_key, EmbedState::Ready(info))
+        } else { (key, state.unwrap_or(EmbedState::Pending)) }
     }
 }
 

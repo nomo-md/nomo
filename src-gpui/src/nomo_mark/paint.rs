@@ -15,6 +15,10 @@ struct LinkSpan<'a> { source: Range<usize>, target: Cow<'a, str> }
 /// 静态降级仍保留图片尺寸，提示叠在图内，不让资源状态变化挤动正文。
 pub(super) fn paint_image_notice(store: &ImageStore, path: &std::path::Path, bounds: Bounds<Pixels>, theme: &Theme, window: &mut Window) {
     let Some(message) = store.notice(path) else { return; };
+    paint_resource_notice(message, bounds, theme, window);
+}
+
+fn paint_resource_notice(message: &str, bounds: Bounds<Pixels>, theme: &Theme, window: &mut Window) {
     let width = f32::from(bounds.size.width) - 12.0;
     if width < 24.0 || bounds.size.height < px(18.0) { return; }
     let spec = crate::layout::ParaSpec::plain(message.into(), crate::layout::InlineStyle { color: crate::layout::ColorRole::Muted, ..Default::default() },
@@ -388,7 +392,16 @@ fn paint_layer(
                             paint_box(bounds, theme.surface, 4.0, Some((theme.accent, 1.0)), window);
                             None
                         }
-                        crate::layout::InlineAsset::Embed(key) => embeds.image(*key),
+                        crate::layout::InlineAsset::Embed(key) => {
+                            let bounds = Bounds::new(origin + point(px(x + ox), px(y + oy)), size(px(w), px(h)));
+                            if bounds.intersect(&window.content_mask().bounds).is_empty() { continue; }
+                            let image = embeds.visible_image(*key, cx);
+                            if image.is_none() {
+                                paint_box(bounds, theme.code_bg, 4.0, None, window);
+                                paint_resource_notice(embeds.notice(*key), bounds, theme, window);
+                            }
+                            image
+                        },
                         crate::layout::InlineAsset::Image(path) => store.image(path),
                         crate::layout::InlineAsset::Comment { .. } => {
                             let bounds = Bounds::new(origin + point(px(x + ox), px(y + oy)), size(px(w), px(h)));
@@ -414,11 +427,16 @@ fn paint_layer(
                     continue;
                 }
                 let bounds = Bounds::new(origin + point(px(*x), px(*y)), size(px(*w), px(*h)));
-                match embeds.image(*key) {
+                if bounds.intersect(&window.content_mask().bounds).is_empty() { continue; }
+                match embeds.visible_image(*key, cx) {
                     Some(image) => {
                         let _ = window.paint_image(bounds, bounds, Corners::default(), image, 0, false);
                     }
-                    None => paint_box(bounds, theme.code_bg, 6.0, None, window),
+                    None => {
+                        paint_box(bounds, theme.code_bg, 6.0, None, window);
+                        let visible = bounds.intersect(&window.content_mask().bounds);
+                        if !visible.is_empty() { paint_resource_notice(embeds.notice(*key), visible, theme, window); }
+                    },
                 }
             }
             DisplayItem::Image {
