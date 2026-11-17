@@ -62,7 +62,7 @@ pub enum DisplayItem {
     CalloutHeader { x: f32, y: f32, size: f32, button_offset: f32, source: usize, kind: BlockQuoteKind, role: ColorRole },
     /// 当前窗口内单元格的真实边界，供控件命中和矩形选区使用；不绘制正文。
     TableCell { x: f32, y: f32, w: f32, h: f32, table: usize, row: usize, column: usize, rowspan: usize, colspan: usize, source: Range<usize> },
-    /// 宽表格只在自己的矩形内横向滚动，正文与宿主纵向调度保持原位。
+    /// 宽表格及无法拆开的段落只在自己的矩形内横向滚动，宿主纵向调度保持原位。
     Horizontal {x:f32,y:f32,w:f32,h:f32,content_width:f32,source:Range<usize>,offset:std::cell::Cell<f32>,layout:Box<BlockLayout>},
     Text { x: f32, y: f32, layout: Rc<TextLayout>, map: Vec<MapSeg> },
     Rect { x: f32, y: f32, w: f32, h: f32, paint: Paint, radius: f32, border: Option<Paint> },
@@ -376,7 +376,7 @@ impl BlockLayout {
             let DisplayItem::Text { x: ix, y: iy, layout, map } = item else { continue };
             let height = layout.height();
             let vertical = if y < *iy { iy - y } else if y > iy + height { y - iy - height } else { 0.0 };
-            let right = ix + layout.max_line_width();
+            let right = ix + layout.max_hit_width();
             let horizontal = if x < *ix { ix-x } else if x > right { x-right } else { 0.0 };
             let distance = (vertical, horizontal);
             if best.is_some_and(|(current, _)| current <= distance) {
@@ -465,8 +465,16 @@ impl BlockLayout {
                 }
                 continue;
             }
-            if let DisplayItem::Horizontal{x,y,source:range,offset,layout,..}=item{
-                if range.start<=source&&source<=range.end{if let Some((sx,sy,h))=layout.caret_at_with_affinity(source,upstream){return Some((x+sx-offset.get(),y+sy,h));}}continue;
+            if let DisplayItem::Horizontal{x,y,w,source:range,offset,layout,..}=item{
+                if range.start<=source&&source<=range.end {
+                    if let Some((sx,sy,h))=layout.caret_at_with_affinity(source,upstream) {
+                        let sx = sx - offset.get();
+                        if sx < 0.0 || sx > *w { return None; }
+                        // 手动滚动后屏外光标不穿出容器；IME 与可见光标使用同一落点。
+                        return Some((x + sx.min((w - crate::layout::CARET_WIDTH).max(0.0)), y + sy, h));
+                    }
+                }
+                continue;
             }
             if let DisplayItem::Image { x, y, w, h, source: range, .. } = item {
                 if range.start <= source && source <= range.end {
@@ -1486,13 +1494,30 @@ impl Builder<'_> {
         self.apply_gap();
         let para = std::mem::replace(&mut self.para, ParaBuilder::new());
         let (spec, map) = self.spec(para);
-        let width = (self.width - self.indent).max(40.0);
-        let layout = table_layout::layout(&spec, width, self.env, self.window);
+        // 缩进耗尽宽度时仍把滚动入口留在控件内，不再虚构 40px 可用空间。
+        let x = self.indent.min((self.width - 1.0).max(0.0));
+        let available = (self.width - x).max(1.0);
+        let width = (available - spec.hanging_gutter(self.window.scale_factor())).max(1.0);
+        let layout = table_layout::layout_with_image_width(&spec, width, available, self.env, self.window);
         self.draw_marker();
         let height = layout.height();
+        let content_width = layout.max_hit_width();
+        if content_width > available + 0.001 {
+            // 保留禁则组、行内代码和图片的完整尺寸，复用已有滚动、选区和光标显露逻辑。
+            let source = map.iter().map(|seg| seg.source).min().unwrap_or(0)
+                ..map.iter().map(|seg| seg.source_end).max().unwrap_or(0);
+            self.items.push(DisplayItem::Horizontal {
+                x, y: self.y, w: available, h: height + 8.0,
+                content_width: content_width + crate::layout::CARET_WIDTH + 1.0 / self.window.scale_factor(),
+                source, offset: std::cell::Cell::new(0.0),
+                layout: Box::new(BlockLayout { height, items: vec![DisplayItem::Text { x: 0.0, y: 0.0, layout, map }] }),
+            });
+            self.y += height + 8.0;
+            return;
+        }
         let free = (width - layout.max_line_width()).max(0.0);
         let offset = match self.html_align.as_deref() { Some("center") => free / 2.0, Some("right") => free, _ => 0.0 };
-        self.items.push(DisplayItem::Text { x: self.indent + offset, y: self.y, layout, map });
+        self.items.push(DisplayItem::Text { x: x + offset, y: self.y, layout, map });
         self.y += height;
     }
 

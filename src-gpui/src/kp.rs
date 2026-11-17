@@ -60,10 +60,10 @@ fn is_cjk_char(ch: char) -> bool {
 fn is_cjk(grapheme: &str) -> bool { grapheme.chars().next().is_some_and(is_cjk_char) }
 
 pub(crate) fn no_line_start(grapheme: &str) -> bool {
-    !grapheme.is_empty() && "）］｝》〉」』】〕〗〙〛”’，。、；：！？".contains(grapheme)
+    !grapheme.is_empty() && "）］｝》〉」』】〕〗〙〛”’，。、；：！？,.;:!?%)]}".contains(grapheme)
 }
 pub(crate) fn no_line_end(grapheme: &str) -> bool {
-    !grapheme.is_empty() && "（［｛《〈「『【〔〖〘〚“‘".contains(grapheme)
+    !grapheme.is_empty() && "（［｛《〈「『【〔〖〘〚“‘([{".contains(grapheme)
 }
 pub(crate) fn can_break_between(before: &str, after: &str) -> bool {
     !no_line_end(before) && !no_line_start(after)
@@ -106,7 +106,11 @@ pub fn build_items(text: &str, font_size: f32, space_width: f32, x_at: impl Fn(u
             previous = Some(&text[index..end]);
             continue;
         }
-        if !is_cjk(grapheme) {
+        // 只将中西文交界的半角标点独立成盒；英文缩写、小数和 URL 内部仍属原词。
+        // 否则“中文,English”的逗号会和后面的英文捆绑，整组被推到下一行。
+        let mixed_punctuation = grapheme.is_ascii() && (no_line_start(grapheme) || no_line_end(grapheme))
+            && (previous.is_some_and(is_cjk) || graphemes.peek().is_some_and(|(_, next)| is_cjk(next)));
+        if !is_cjk(grapheme) && !mixed_punctuation {
             if word_start.is_none() {
                 if previous.is_some_and(|before| !breakable_space(before) && can_break_between(before, grapheme)) {
                     push_han_glue(&mut items, index, font_size);

@@ -105,7 +105,7 @@ fn visit_link_rects(
             }
             DisplayItem::Text { x, y, layout, map } if !map.is_empty() => {
                 let text_origin = origin + point(px(*x), px(*y));
-                let bounds = Bounds::new(text_origin, size(px(layout.max_line_width()), px(layout.height()))).intersect(&clip);
+                let bounds = Bounds::new(text_origin, size(px(layout.max_hit_width()), px(layout.height()))).intersect(&clip);
                 if bounds.is_empty() { continue; }
                 let rows = ((f32::from(bounds.top() - text_origin.y) / layout.line_height).floor() as usize)
                     ..((f32::from(bounds.bottom() - text_origin.y) / layout.line_height).ceil() as usize);
@@ -138,7 +138,7 @@ pub(super) fn prepaint_cursors(
     for item in &layout.items {
         let (x, y, w, h, cursor) = match item {
             DisplayItem::Text { x, y, layout, map } if !map.is_empty() =>
-                (*x, *y, layout.max_line_width().max(4.0), layout.height(), IBeam),
+                (*x, *y, layout.max_hit_width().max(4.0), layout.height(), IBeam),
             DisplayItem::TableCell { x, y, w, h, .. } => (*x, *y, *w, *h, IBeam),
             DisplayItem::Checkbox { x, y, size, .. } | DisplayItem::Disclosure { x, y, size, .. }
                 | DisplayItem::CopyButton { x, y, size, .. } => (*x, *y, *size, *size, PointingHand),

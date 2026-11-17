@@ -767,6 +767,7 @@ impl NomoMark {
         let upstream = self.layout.as_ref().and_then(|layout| layout.caret_at(at)).is_some_and(|(_, top, _)| y < top);
         self.move_to(at, extend, cx);
         self.upstream_caret = upstream.then_some(self.host.selection.head_byte);
+        self.ensure_horizontal_caret();
     }
     fn visual_caret_at(&self, at: usize) -> Option<(f32, f32, f32)> {
         let byte = self.host.parsed.identity.from_byte + at as u64;
@@ -892,6 +893,7 @@ impl NomoMark {
         self.preferred_x = None;
         self.move_to(target, extend, cx);
         self.upstream_caret = end.then_some(self.host.selection.head_byte);
+        self.ensure_horizontal_caret();
     }
     fn copy(&mut self, cut: bool, cx: &mut Context<Self>) {
         if cut && self.host.editing_locked() { return; }
@@ -1504,7 +1506,7 @@ impl NomoMark {
             } = item
             {
                 if source.start <= at && at <= source.end {
-                    if let Some((x, _, _)) = layout.caret_at(at) {
+                    if let Some((x, _, _)) = layout.caret_at_with_affinity(at, self.upstream_caret == Some(self.host.selection.head_byte)) {
                         let current = offset.get();
                         let next = if x < current + 4.0 {
                             x - 4.0
@@ -1681,7 +1683,7 @@ impl NomoMark {
         }
         let (x, y, h) = self.visual_caret_at(local)?;
         let width = f32::from(bounds.size.width);
-        let caret_width = 1.5;
+        let caret_width = crate::layout::CARET_WIDTH;
         // 满宽图片的右缘和正文裁切边界重合，保留一整条可见光标。
         let x = if (width - x).abs() < caret_width { (width - caret_width).max(0.0) } else { x };
         Some((
@@ -1993,6 +1995,12 @@ impl NomoMark {
             });
         }
         let old = self.height;
+        // 状态仅随当前布局内的滚动容器存活，不累积历史段落或已关闭视图。
+        let horizontal_sources: std::collections::BTreeSet<_> = layout.items.iter().filter_map(|item| {
+            if let DisplayItem::Horizontal { source, .. } = item { Some(base + source.start as u64) } else { None }
+        }).collect();
+        self.host.interaction.horizontal_offsets.retain(|at, _|
+            horizontal_sources.contains(at) || (self.auxiliary_comment.is_some() && *at == 0));
         for item in &layout.items {
             if let DisplayItem::CodeBody { source, w, h, body, .. } = item {
                 if let Some(offset) = self.host.interaction.code_offsets.get(&(base+source.start as u64)) {

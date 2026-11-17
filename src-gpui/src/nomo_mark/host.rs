@@ -682,23 +682,13 @@ impl WindowHostAdapter {
                 .any(|block| base + block.source.start as u64 == *at)
                 || self.parsed.nodes.iter().any(|node| node.kind == "code" && base + node.source.start as u64 == *at)
         });
-        let mut tables = std::collections::BTreeSet::new();
-        tables.extend(
-            self.parsed
-                .nodes
-                .iter()
-                .filter(|node| node.kind == "table")
-                .map(|node| base + node.source.start as u64),
-        );
-        tables.extend(
-            self.parsed
-                .html_tables
-                .iter()
-                .map(|table| base + table.source.start as u64),
-        );
+        // 横向容器还可能来自不可拆的正文段落；解析阶段只保留当前片段内的合法端点，
+        // 完成本帧布局后再按实际滚动容器清理，避免编辑时丢失段落阅读位置。
         self.interaction
             .horizontal_offsets
-            .retain(|at, offset| tables.contains(at) && offset.is_finite() && *offset >= 0.0);
+            .retain(|at, offset| offset.is_finite() && *offset >= 0.0
+                && at.checked_sub(base).is_some_and(|local| local <= self.parsed.source.len() as u64
+                    && self.parsed.source.is_char_boundary(local as usize)));
     }
     pub fn suspend(&mut self) -> Result<(), ControlError> {
         self.interaction

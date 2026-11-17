@@ -18,6 +18,8 @@ use std::{collections::HashMap, rc::{Rc, Weak}};
 /// 布局代数：字体、代码行号等影响排版但不在段落规格内的设置变化时递增，使所有布局缓存键失效。
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) const CARET_WIDTH: f32 = 1.5;
+
 pub fn bump_generation() {
     GENERATION.fetch_add(1, Ordering::Relaxed);
 }
@@ -199,6 +201,15 @@ impl ParaSpec {
         Self { text, spans: Vec::new(), base, family, font_size, line_height, wrap, objects: Vec::new() }
     }
 
+    /// 悬挂仍伸出断行边缘，但必须留在宿主的绘制与鼠标命中区域内。
+    pub(crate) fn hanging_gutter(&self, scale_factor: f32) -> f32 {
+        if self.wrap != Wrap::KnuthPlass { return 0.0; }
+        let scale = self.spans.iter().map(|(_, style)| style.scale())
+            .fold(self.base.scale(), f32::max);
+        // 与 punctuation_edges 的半字号上限一致，并容纳行尾光标和一个设备像素的取整。
+        self.font_size * scale * 0.5 + CARET_WIDTH + 1.0 / scale_factor
+    }
+
     /// 布局缓存键：内容、样式、字号与行宽共同决定排版结果。
     pub fn cache_key(&self, width: f32) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -285,6 +296,7 @@ pub struct TextLayout {
     glyphs: Vec<Glyph>,
     natural_width: f32,
     max_width: f32,
+    max_hit_width: f32,
     min_content_width: f32,
     pub lines: Vec<VisualLine>,
     pub line_height: f32,
@@ -350,6 +362,9 @@ impl TextLayout {
         self.max_width
     }
 
+    /// 命中范围包含悬挂标点；排版对齐仍使用不含悬挂的 max_line_width。
+    pub(crate) fn max_hit_width(&self) -> f32 { self.max_hit_width }
+
     /// 表格正常断点之间的最大宽度；紧急拆词不参与列宽下限。
     pub(crate) fn min_content_width(&self) -> f32 { self.min_content_width }
 
@@ -369,7 +384,10 @@ impl TextLayout {
         let edge = if offset == line.end {
             line.hyphen.map_or(0.0, |hyphen| hyphen.width) - line.trim_end
         } else { 0.0 };
-        self.shaped_x(offset) - line.origin_x + extra + edge
+        let x = self.shaped_x(offset) - line.origin_x + extra + edge;
+        // 字形仍按 origin_x 压缩行首标点留白；交互边界不能跟着移到裁剪区外。
+        // 光标、选区、点击及 IME 都通过此坐标，避免仅在绘制光标时修正。
+        if offset == line.start { x.max(0.0) } else { x }
     }
 
     pub fn line_for_offset(&self, offset: usize) -> usize {
@@ -716,6 +734,7 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
         glyphs,
         natural_width,
         max_width: 0.0,
+        max_hit_width: 0.0,
         min_content_width: 0.0,
         lines: Vec::new(),
         line_height,
@@ -803,6 +822,7 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
         start += logical.len() + 1;
     }
     layout.max_width = layout.lines.iter().map(|line| (layout.x_in_line(line, line.end) - line.hang).max(0.0)).fold(0.0, f32::max);
+    layout.max_hit_width = layout.lines.iter().map(|line| layout.x_in_line(line, line.end).max(0.0)).fold(0.0, f32::max);
     layout
 }
 

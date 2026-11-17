@@ -92,14 +92,19 @@ fn append_semantic(spec: &ParaSpec, semantic: &mut ParaSpec, range: Range<usize>
 }
 
 pub(super) fn layout(spec: &ParaSpec, width: f32, env: &RenderEnv, window: &Window) -> Rc<TextLayout> {
+    layout_with_image_width(spec, width, width, env, window)
+}
+
+/// 正文悬挂留白只影响断行，图片百分比和缩放仍以未扣留白的内容区域为准。
+pub(super) fn layout_with_image_width(spec: &ParaSpec, width: f32, image_width: f32, env: &RenderEnv, window: &Window) -> Rc<TextLayout> {
     if !spec.objects.iter().any(|object| matches!(object.key, InlineAsset::Image(_))) {
         return env.layout(spec, width, window);
     }
     let mut fitted = spec.clone();
     for object in &mut fitted.objects {
         if !matches!(object.key, InlineAsset::Image(_)) { continue; }
-        let next = object.width_percent.take().map_or(object.width, |percent| width * percent / 100.0)
-            .min(width);
+        let next = object.width_percent.take().map_or(object.width, |percent| image_width * percent / 100.0)
+            .min(image_width);
         let scale = next / object.width.max(f32::EPSILON);
         object.width = next;
         object.ascent *= scale;
