@@ -95,15 +95,53 @@ impl GridLayout {
         };
         let width_with_sidebar = (available - sidebar.full_width).max(MIN_CARD_WIDTH);
         let columns_with_sidebar = columns_that_fit(width_with_sidebar, MIN_CARD_WIDTH);
-        let card_width = ((width_with_sidebar - (columns_with_sidebar - 1) as f32 * GRID_GAP)
-            / columns_with_sidebar as f32).min(300.0);
-        // 展开前先腾出位置。完全收起后才用新空间增加整列。
+        // 动画期间保持展开态列数，只让现有列跟随侧栏占位连续伸缩。
         let columns = if sidebar.target_visible || sidebar.progress > 0.0 {
             columns_with_sidebar
         } else {
-            columns_that_fit(available, card_width).max(columns_with_sidebar)
+            columns_that_fit(available, MIN_CARD_WIDTH).max(columns_with_sidebar)
         };
+        let layout_width = (available - sidebar.occupied_width()).max(MIN_CARD_WIDTH);
+        let card_width = ((layout_width - (columns - 1) as f32 * GRID_GAP)
+            / columns as f32).min(300.0);
         Self { columns, card_width }
+    }
+}
+
+#[cfg(test)]
+mod grid_layout_tests {
+    use super::{GRID_GAP, GridLayout};
+    use crate::ui::motion::SidebarFrame;
+
+    #[test]
+    fn closing_sidebar_expands_existing_columns_to_the_live_width() {
+        let available = 1100.0;
+        let sidebar = SidebarFrame {
+            full_width: 250.0,
+            progress: 0.5,
+            target_visible: false,
+        };
+
+        let layout = GridLayout::for_width(available, sidebar);
+
+        assert_eq!(layout.columns, 4);
+        let occupied = layout.card_width * layout.columns as f32
+            + GRID_GAP * (layout.columns - 1) as f32;
+        assert!((occupied - (available - sidebar.occupied_width())).abs() < 0.01);
+    }
+
+    #[test]
+    fn fully_closed_sidebar_adds_columns_after_the_spring_finishes() {
+        let layout = GridLayout::for_width(1100.0, SidebarFrame {
+            full_width: 250.0,
+            progress: 0.0,
+            target_visible: false,
+        });
+
+        assert_eq!(layout.columns, 5);
+        let occupied = layout.card_width * layout.columns as f32
+            + GRID_GAP * (layout.columns - 1) as f32;
+        assert!((occupied - 1100.0).abs() < 0.01);
     }
 }
 
