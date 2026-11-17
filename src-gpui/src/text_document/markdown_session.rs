@@ -11,6 +11,8 @@ mod external;
 mod recovery;
 mod cache_cleanup;
 mod legacy;
+mod code_view;
+pub(crate) use code_view::CodeViewState;
 pub(crate) use external::ExternalChange;
 pub(crate) use delete::{DeleteDocument, DeleteReport};
 pub(crate) use recovery::{RecoveryCandidate, SessionLease};
@@ -163,6 +165,8 @@ struct Session {
     history: DiskHistory,
     dirty: bool,
     editing_locked: bool,
+    // 锚在不可变正文片段上，编辑、章节移动及历史切换无需扫描或重映射全文。
+    code_view_states: std::collections::BTreeMap<(bool, u64), CodeViewState>,
     ack: HashMap<String, ([u8; 32], MarkdownStatus)>,
     ack_order: VecDeque<String>,
     search_ack: VecDeque<(String, super::markdown_search::ReplaceResult)>,
@@ -450,6 +454,7 @@ impl MarkdownDocumentSessionManager {
             saved: content,
             dirty: false,
             editing_locked: false,
+            code_view_states: Default::default(),
             ack: HashMap::new(),
             ack_order: VecDeque::new(),
             search_ack: VecDeque::new(),
@@ -591,6 +596,7 @@ impl MarkdownDocumentSessionManager {
             history,
             dirty,
             editing_locked: false,
+            code_view_states: Default::default(),
             ack: HashMap::new(),
             ack_order: VecDeque::new(),
             search_ack: VecDeque::new(),

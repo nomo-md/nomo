@@ -583,7 +583,7 @@ impl DocumentHost {
             adapter.set_editing_locked(self.editing_locked());
             let base_dir=view.base_dir.clone();
             let selected=self.control.read(cx).host.selection;
-            let control=cx.new(|cx| {let mut view=NomoMark::new(adapter,cx);view.mode=other_mode;view.base_dir=base_dir;view.workspace_hosted=self.embedded;view.windowed_navigation=self.production;view.host.set_readonly(true);view.host.selection=selected;view});
+            let control=cx.new(|cx| {let mut view=NomoMark::new(adapter,cx);view.code_view_port=Some(self.port.clone());view.mode=other_mode;view.base_dir=base_dir;view.workspace_hosted=self.embedded;view.windowed_navigation=self.production;view.host.set_readonly(true);view.host.selection=selected;view});
             let subscription=cx.subscribe(&control,Self::event);
             let mut pane=Pane::new(control,subscription,other_mode);
             pane.reading_restore=anchor;
@@ -616,7 +616,7 @@ impl DocumentHost {
             for (mut adapter,base_dir,bytes) in neighbors {
                 if !self.panes[1].viewport.budget.reserve(super::super::resident_budget::Cost {views:1,source:bytes,layout:0},false) {break;}
                 adapter.set_editing_locked(self.editing_locked());
-                let view=cx.new(|cx| {let mut view=NomoMark::new(adapter,cx);view.mode=other_mode;view.base_dir=base_dir;view.workspace_hosted=self.embedded;view.windowed_navigation=self.production;view.host.set_readonly(true);view.host.selection=selected;view});
+                let view=cx.new(|cx| {let mut view=NomoMark::new(adapter,cx);view.code_view_port=Some(self.port.clone());view.mode=other_mode;view.base_dir=base_dir;view.workspace_hosted=self.embedded;view.windowed_navigation=self.production;view.host.set_readonly(true);view.host.selection=selected;view});
                 let subscription=cx.subscribe(&view,Self::event);
                 self.panes[1].viewport.mounts.push(viewport_ui::Mounted {view,_subscription:subscription,height:32.0});
                 self.update_pane_cost(1,cx);

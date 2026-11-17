@@ -510,7 +510,7 @@ impl DocumentHost {
                         let mode=host.panes[pane].mode;
                         let base_dir=host.panes[pane].control.read(cx).base_dir.clone();
                         let embedded=host.embedded;
-                        let view=cx.new(|cx| {let mut view=NomoMark::new(adapter,cx);view.reserve_layout_height(reserved_height);view.mode=mode;view.base_dir=base_dir;view.workspace_hosted=embedded;view.windowed_navigation=host.production;view});
+                        let view=cx.new(|cx| {let mut view=NomoMark::new(adapter,cx);view.code_view_port=Some(host.port.clone());view.reserve_layout_height(reserved_height);view.mode=mode;view.base_dir=base_dir;view.workspace_hosted=embedded;view.windowed_navigation=host.production;view});
                         let subscription=cx.subscribe(&view,Self::event);
                         host.panes[pane].viewport.mounts.push(Mounted{view,_subscription:subscription,height:reserved_height});
                         host.panes[pane].viewport.demand.prepared(started.elapsed().as_secs_f64()*1000.0);

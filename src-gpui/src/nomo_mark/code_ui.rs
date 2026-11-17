@@ -33,6 +33,73 @@ impl CopyFeedback {
 }
 
 impl NomoMark {
+    pub(crate) fn code_view_state_changed(&mut self, cx: &mut Context<Self>) {
+        self.code_view_identity = None;
+        self.invalidate();
+        cx.notify();
+    }
+
+    pub(super) fn refresh_code_view_state(&mut self, cx: &mut Context<Self>) {
+        if self.code_view_identity.as_ref() == Some(&self.host.parsed.identity) || self.host.pending_count() > 0 { return; }
+        let Some(port) = &self.code_view_port else { return; };
+        let identity = &self.host.parsed.identity;
+        let starts: Vec<_> = self.host.parsed.nodes.iter().filter(|node| node.kind == "code")
+            .map(|node| identity.from_byte + node.source.start as u64).collect();
+        let result = port.code_view_states_at(identity.revision, &starts);
+        self.code_view_identity = Some(identity.clone());
+        match result {
+            Ok(states) => {
+                self.host.interaction.code_wrapped.clear();
+                // 历史窗口的字节位置可能已变化；只恢复代码块，不覆盖 Details 的临时状态。
+                for at in starts {
+                    let state = states.get(&at).copied().unwrap_or_default();
+                    if state.wrapped { self.host.interaction.code_wrapped.insert(at); }
+                    if state.expanded { self.host.interaction.details_open.insert(at, true); }
+                    else { self.host.interaction.details_open.remove(&at); }
+                }
+            },
+            // 邻窗可能仍展示旧修订；沿用旧投影，待宿主重基/替换后再读取。
+            Err(ControlError::Stale) => {},
+            Err(error) => self.error(error, cx),
+        }
+    }
+
+    fn toggle_code_wrapping(&mut self, identity: &WindowIdentity, source: usize, wrapped: bool, cx: &mut Context<Self>) {
+        if self.host.parsed.identity != *identity || self.has_composition(cx) || self.host.interaction.dragging
+            || (self.host.interaction.draft && self.object.is_none()) { return; }
+        // 会话位置必须属于已确认版本；待提交输入仍按原事务完成，不把显示开关写进历史。
+        if self.host.pending_count() > 0 { self.error(ControlError::Busy, cx); return; }
+        let at = identity.from_byte + source as u64;
+        if let Some(port) = &self.code_view_port {
+            if let Err(error) = port.set_code_wrapped(identity.revision, at, wrapped) { self.error(error, cx); return; }
+        }
+        if wrapped { self.host.interaction.code_wrapped.insert(at); }
+        else { self.host.interaction.code_wrapped.remove(&at); }
+        self.host.interaction.code_offsets.remove(&at);
+        self.preferred_x = None;
+        self.upstream_caret = None;
+        self.invalidate();
+        cx.emit(ControlEvent::CodeViewStateChanged);
+        cx.notify();
+    }
+
+    fn toggle_code_expansion(&mut self, identity: &WindowIdentity, source: usize, expanded: bool, cx: &mut Context<Self>) {
+        // 展开只改会话显示状态，不提交公式等对象草稿；仍保护组字及正文拖选。
+        if self.host.parsed.identity != *identity || self.has_composition(cx) || self.host.interaction.dragging
+            || (self.host.interaction.draft && self.object.is_none()) { return; }
+        if self.host.pending_count() > 0 { self.error(ControlError::Busy, cx); return; }
+        let at = identity.from_byte + source as u64;
+        if let Some(port) = &self.code_view_port {
+            if let Err(error) = port.set_code_expanded(identity.revision, at, expanded) { self.error(error, cx); return; }
+        }
+        if expanded { self.host.interaction.details_open.insert(at, true); }
+        else { self.host.interaction.details_open.remove(&at); }
+        if let Some(offset) = self.host.interaction.code_offsets.get_mut(&at) { offset.1 = 0.0; }
+        self.invalidate();
+        cx.emit(ControlEvent::CodeViewStateChanged);
+        cx.notify();
+    }
+
     fn close_code_language(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.code_language = None;
         window.focus(&self.focus, cx);
@@ -183,7 +250,7 @@ impl NomoMark {
     }
 
     pub(super) fn code_header_controls(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if self.effective_mode() != ViewMode::Semantic || self.auxiliary_input || self.object.is_some()
+        if self.effective_mode() != ViewMode::Semantic || self.auxiliary_input
             || !matches!(self.host.presentation, Presentation::Editable | Presentation::ReadOnly) { return None; }
         if self.layout_key.as_ref().is_none_or(|key| key.0.identity != self.host.parsed.identity) { return None; }
         let layout = self.layout.as_ref()?;
@@ -192,7 +259,7 @@ impl NomoMark {
         let zoom = cx.global::<Settings>().metrics().zoom;
         let mut overlay = div().absolute().top_0().left_0().w_full().h(px(0.0));
         for item in &layout.items {
-            let DisplayItem::CodeHeader { x, y, w, h, source, text, expanded } = item else { continue; };
+            let DisplayItem::CodeHeader { x, y, w, h, source, text, expanded, wrapped } = item else { continue; };
             let source = *source;
             let identity = self.host.parsed.identity.clone();
             let feedback = self.code_copy.as_ref().filter(|state| state.source == source && state.identity == identity);
@@ -213,6 +280,21 @@ impl NomoMark {
                     view.copy_code(source, &text, cx);
                 }));
             overlay = overlay.child(button);
+            let wrapped = *wrapped;
+            let identity = self.host.parsed.identity.clone();
+            let wrap_x = x - (w + 6.0*zoom) * if expanded.is_some() { 2.0 } else { 1.0 };
+            overlay = overlay.child(div().id(("code-wrap", source)).absolute().left(px(wrap_x)).top(px(*y)).w(px(*w)).h(px(*h))
+                .flex().items_center().justify_center().border_1().rounded(px(4.0*zoom))
+                .border_color(if wrapped { theme.accent } else { theme.code_border })
+                .bg(crate::ui::motion::color(theme.code_bg, if wrapped { theme.accent } else { theme.surface }, if wrapped { 0.16 } else { 0.18 }))
+                .cursor_pointer().tooltip(tooltip(locale.text(if wrapped { "code_wrap_off" } else { "code_wrap_on" })))
+                .hover(|button| button.border_color(theme.accent).bg(crate::ui::motion::color(theme.code_bg, theme.accent, 0.12)))
+                .child(icon(IconName::WrapText, 16.0*zoom, if wrapped { theme.accent } else { theme.code_fg }))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    cx.stop_propagation();
+                    view.toggle_code_wrapping(&identity, source, !wrapped, cx);
+                })));
             if let Some(open) = expanded {
                 let open = *open;
                 let identity = self.host.parsed.identity.clone();
@@ -225,12 +307,7 @@ impl NomoMark {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |view, _, _, cx| {
                         cx.stop_propagation();
-                        if view.host.parsed.identity != identity || view.host.interaction.protected() { return; }
-                        let at = identity.from_byte+source as u64;
-                        view.host.interaction.details_open.insert(at, !open);
-                        if let Some(offset) = view.host.interaction.code_offsets.get_mut(&at) { offset.1 = 0.0; }
-                        view.invalidate();
-                        cx.notify();
+                        view.toggle_code_expansion(&identity, source, !open, cx);
                     })));
             }
         }
@@ -326,9 +403,9 @@ impl NomoMark {
         let Some(layout) = &self.layout else { return false; };
         let at = self.local_cursor();
         for item in &layout.items {
-            let DisplayItem::CodeBody { x, source, w, h, body, .. } = item else { continue; };
+            let DisplayItem::CodeBody { x, y, source, w, h, body, .. } = item else { continue; };
             if !source.contains(&at) { continue; }
-            let Some((sx, sy, line)) = body.code.caret_at(at) else { return false; };
+            let Some((sx, sy, line)) = body.code.caret_at_with_affinity(at, self.upstream_caret == Some(self.host.selection.head_byte)) else { return false; };
             let old = body.offset.get();
             let screen_x = self.preferred_x.unwrap_or(x+body.gutter+sx-old.0);
             let distance = if page { (body.viewport(*w, *h).1-line).max(line) } else { line };
@@ -336,6 +413,8 @@ impl NomoMark {
             let Some(target) = body.code.source_at(screen_x-x-body.gutter+old.0, target_y) else { return false; };
             // 首末行之外跳过卡片内边距，交回相邻正文或宿主窗口导航。
             let Some((_, row, _)) = body.code.caret_at(target) else { return false; };
+            let upstream = target_y < row;
+            let Some((_, row, _)) = body.code.caret_at_with_affinity(target, upstream) else { return false; };
             if (!down && row >= sy) || (down && row <= sy) {
                 let Some(node) = self.host.parsed.nodes.iter().find(|node| node.kind == "code" && node.source.start == source.start) else { return false; };
                 let edge = if down { node.source.end.saturating_sub(1) } else { node.source.start };
@@ -348,7 +427,7 @@ impl NomoMark {
                 return true;
             }
             self.preferred_x = Some(screen_x);
-            self.move_to(target, extend, cx);
+            self.move_to_row(target, y + target_y - old.1, extend, cx);
             return true;
         }
         false

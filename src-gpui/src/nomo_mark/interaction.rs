@@ -15,11 +15,16 @@ pub struct EditorInteraction {
     pub horizontal_offsets: std::collections::BTreeMap<u64, f32>,
     /// 当前驻留代码块的横纵滚动位置；随源码锚点重基、删除和窗口回收清理。
     pub code_offsets: std::collections::BTreeMap<u64, (f32, f32)>,
+    /// 当前片段的会话换行状态投影，不持有正文。
+    pub code_wrapped: std::collections::BTreeSet<u64>,
     revealed: Vec<Range<usize>>,
     composition_anchor: Option<usize>,
 }
 impl EditorInteraction {
     pub(super) fn map_code_offsets(&mut self, edits: &[super::protocol::SourceEdit]) {
+        self.code_wrapped = std::mem::take(&mut self.code_wrapped).into_iter()
+            .filter(|at| !edits.iter().any(|edit| edit.from_byte <= *at && *at < edit.to_byte))
+            .map(|at| super::commands::map_selection(super::protocol::DocumentSelection::caret(at), edits).head_byte).collect();
         self.code_offsets = std::mem::take(&mut self.code_offsets).into_iter()
             .filter(|(at, _)| !edits.iter().any(|edit| edit.from_byte < *at && *at < edit.to_byte))
             .map(|(at, value)| {

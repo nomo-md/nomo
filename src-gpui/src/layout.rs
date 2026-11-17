@@ -144,6 +144,8 @@ impl InlineStyle {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Wrap {
     None,
+    /// 代码按字素折行，保留全部空白和原文字节，不应用正文的断词、标点或空格裁剪。
+    Code,
     Greedy,
     KnuthPlass,
     TableCell,
@@ -754,6 +756,24 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
             start += logical.len() + 1;
             continue;
         }
+        if spec.wrap == Wrap::Code {
+            let mut from = start;
+            let mut previous = start;
+            for at in text.grapheme_indices(true).map(|(at, _)| start + at).skip(1)
+                .chain(std::iter::once(start + text.len())) {
+                // 不在塑形簇内部断行，避免拆开 Emoji、组合字符及连字。
+                if at < start + text.len() && layout.glyphs.get(layout.glyphs.partition_point(|glyph| glyph.index < at))
+                    .is_none_or(|glyph| glyph.index != at) { continue; }
+                if previous > from && layout.shaped_x(at) - layout.shaped_x(from) > width.max(1.0) {
+                    layout.lines.push(VisualLine { start: from, end: previous, origin_x: layout.shaped_x(from), glues: Vec::new(), trim_end: 0.0, hang: 0.0, hyphen: None });
+                    from = previous;
+                }
+                previous = at;
+            }
+            layout.lines.push(VisualLine { start: from, end: start + text.len(), origin_x: layout.shaped_x(from), glues: Vec::new(), trim_end: 0.0, hang: 0.0, hyphen: None });
+            start += logical.len() + 1;
+            continue;
+        }
         let x_at = |byte| layout.shaped_x(start + byte);
         let mut items = if spec.wrap == Wrap::TableCell {
             kp::build_table_items(text, x_at)
@@ -808,7 +828,7 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
             layout.lines.push(VisualLine { start, end: start, origin_x: layout.shaped_x(start), glues: Vec::new(), trim_end: 0.0, hang: 0.0, hyphen: None });
         } else {
             let lines = match spec.wrap {
-                Wrap::None => unreachable!("unwrapped lines are handled before line breaking"),
+                Wrap::None | Wrap::Code => unreachable!("literal lines are handled before paragraph line breaking"),
                 Wrap::KnuthPlass => if edges.is_empty() && breaks.is_empty() { kp::break_lines(&items, width) }
                     else { kp::break_lines_with(&items, width, &edges, &breaks) },
                 Wrap::Greedy | Wrap::TableCell => kp::greedy_lines(&items, width),

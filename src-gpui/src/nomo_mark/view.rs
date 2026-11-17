@@ -70,6 +70,8 @@ pub struct NomoMark {
     code_language: Option<code_ui::LanguagePicker>,
     code_copy: Option<code_ui::CopyFeedback>,
     code_scroll_drag: Option<(usize, bool, f32, f32)>,
+    pub(crate) code_view_port: Option<super::native_port::NativeWindowPort>,
+    code_view_identity: Option<WindowIdentity>,
     block_menu_open: bool,
     front_matter_delete: Option<(u64, u64)>,
     context_menu: Option<context_menu::ContextMenu>,
@@ -141,6 +143,8 @@ impl NomoMark {
             code_language: None,
             code_copy: None,
             code_scroll_drag: None,
+            code_view_port: None,
+            code_view_identity: None,
             block_menu_open: false,
             front_matter_delete: None,
             context_menu: None,
@@ -397,6 +401,9 @@ impl NomoMark {
             + self.code_language.as_ref().map_or(0, |picker| picker.estimated_bytes())
             + self.code_copy.as_ref().map_or(0, |feedback| feedback.estimated_bytes())
             + self.host.interaction.code_offsets.len() * 64
+            + self.host.interaction.code_wrapped.len() * 32
+            + self.code_view_port.as_ref().map_or(0, |port| port.owner.capacity() + port.document_id.capacity())
+            + self.code_view_identity.as_ref().map_or(0, |identity| identity.document_id.capacity() + identity.window_id.capacity())
             + self.context_menu.as_ref().map_or(0, |menu| menu.estimated_bytes())
             + self.context_form.as_ref().map_or(0, |form| form.estimated_bytes())
     }
@@ -1492,7 +1499,7 @@ impl NomoMark {
         for item in &layout.items {
             if let DisplayItem::CodeBody { source, w, h, body, .. } = item {
                 if source.contains(&at) {
-                    body.reveal(at, *w, *h);
+                    body.reveal(at, *w, *h, self.upstream_caret == Some(self.host.selection.head_byte));
                     self.host.interaction.code_offsets.insert(self.host.parsed.identity.from_byte+source.start as u64, body.offset.get());
                 }
             }
@@ -1678,7 +1685,7 @@ impl NomoMark {
         };
         for item in &self.layout.as_ref()?.items {
             if let DisplayItem::CodeBody { source, w, h, body, .. } = item {
-                if source.contains(&local) && !body.caret_visible(local, *w, *h) { return None; }
+                if source.contains(&local) && !body.caret_visible(local, *w, *h, self.upstream_caret == Some(byte)) { return None; }
             }
         }
         let (x, y, h) = self.visual_caret_at(local)?;
@@ -1823,6 +1830,7 @@ impl NomoMark {
             return;
         }
         self.layout_external_composition(width, window, cx);
+        self.refresh_code_view_state(cx);
         let settings = cx.global::<Settings>();
         let metrics = settings.metrics();
         let wrap = settings.wrap();
@@ -1858,6 +1866,7 @@ impl NomoMark {
         cx.global::<Theme>().dark.hash(&mut configuration);
         self.base_dir.hash(&mut configuration);
         self.host.interaction.details_open.hash(&mut configuration);
+        self.host.interaction.code_wrapped.hash(&mut configuration);
         self.active_code().hash(&mut configuration);
         self.comment_edit().hash(&mut configuration);
         self.math_edit().hash(&mut configuration);
@@ -1942,6 +1951,7 @@ impl NomoMark {
                 code_line_numbers: settings.code_line_numbers,
                 inline_code: settings.inline_code_rendering,
                 block_open: Some(&self.host.interaction.details_open),
+                code_wrapped: &self.host.interaction.code_wrapped,
                 source_base: self.host.parsed.identity.from_byte,
                 active_code: self.active_code(),
                 comment_edit: self.comment_edit(),

@@ -83,6 +83,7 @@ pub enum IconName {
     ZoomIn,
     ZoomOut,
     Copy,
+    WrapText,
     Check,
     Pilcrow,
     Superscript,
@@ -107,6 +108,7 @@ pub enum IconName {
 impl IconName {
     pub fn path(self) -> &'static str {
         match self {
+            IconName::WrapText => "icons/wrap-text.svg",
             IconName::Download => "icons/download.svg",
             IconName::Upload => "icons/upload.svg",
             IconName::Clock3 => "icons/clock-3.svg",

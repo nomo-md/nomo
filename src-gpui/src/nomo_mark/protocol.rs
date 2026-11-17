@@ -206,6 +206,7 @@ pub struct GeometryRect {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ControlEvent {
     ContextMenuOpened,
+    CodeViewStateChanged,
     ObjectExit { forward: bool },
     FootnotePreview {
         identity: WindowIdentity,

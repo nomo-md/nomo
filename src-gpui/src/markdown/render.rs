@@ -54,7 +54,7 @@ pub enum Paint {
 
 pub enum DisplayItem {
     CodeBody { x: f32, y: f32, w: f32, h: f32, source: Range<usize>, body: Box<code_layout::CodeViewport> },
-    CodeHeader { x: f32, y: f32, w: f32, h: f32, source: usize, text: Rc<str>, expanded: Option<bool> },
+    CodeHeader { x: f32, y: f32, w: f32, h: f32, source: usize, text: Rc<str>, expanded: Option<bool>, wrapped: bool },
     /// 代码语言标签的真实命中区域；文字仍由共享显示列表绘制。
     CodeLanguage { x: f32, y: f32, w: f32, h: f32, source: usize },
     BlockControls { x: f32, y: f32, w: f32, h: f32, source: Range<usize>, kind: &'static str },
@@ -290,7 +290,7 @@ impl BlockLayout {
         let mut image_boundary = None;
         for item in &self.items {
             match item {
-                DisplayItem::CodeBody { source, body, .. } if source.contains(&at) => return body.code.line_boundary(at, end),
+                DisplayItem::CodeBody { source, body, .. } if source.contains(&at) => return body.code.line_boundary_with_affinity(at, end, upstream),
                 DisplayItem::Horizontal { source, layout, .. } if source.start <= at && at <= source.end => return layout.line_boundary_with_affinity(at, end, upstream),
                 DisplayItem::Image { source, .. } if source.start <= at && at <= source.end => {
                     let boundary = if end { source.end } else { source.start };
@@ -458,7 +458,7 @@ impl BlockLayout {
         for item in &self.items {
             if let DisplayItem::CodeBody { x, y, source: range, body, .. } = item {
                 if range.contains(&source) {
-                    if let Some((sx, sy, h)) = body.code.caret_at(source) {
+                    if let Some((sx, sy, h)) = body.code.caret_at_with_affinity(source, upstream) {
                         let (dx, dy) = body.offset.get();
                         return Some((x+body.gutter+sx-dx, y+sy-dy, h));
                     }
@@ -526,6 +526,7 @@ pub struct RenderEnv<'a> {
     /// 设置“渲染行内代码”：关闭时行内代码按源码（含反引号）显示。
     pub inline_code: bool,
     pub block_open: Option<&'a std::collections::BTreeMap<u64, bool>>,
+    pub code_wrapped: &'a std::collections::BTreeSet<u64>,
     pub source_base: u64,
     pub active_code: Option<usize>,
     pub comment_edit: Option<(Range<usize>, &'a str)>,

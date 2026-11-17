@@ -60,7 +60,7 @@ impl DocumentHost {
             .and_then(|p| PathBuf::from(p).parent().map(PathBuf::from));
         adapter.set_editing_locked(status.editing_locked);
         let control = cx.new(|cx| {
-            let mut view = NomoMark::new(adapter, cx);
+            let mut view = NomoMark::new(adapter, cx); view.code_view_port = Some(port.clone());
             view.base_dir = base_dir;
             view.mode = mode;
             view.workspace_hosted = true;

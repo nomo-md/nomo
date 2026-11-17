@@ -3,6 +3,7 @@
 pub fn icon_bytes(path: &str) -> Option<&'static [u8]> {
     match path {
         "icons/heading.svg" => Some(include_bytes!("../../assets/icons/heading.svg")),
+        "icons/wrap-text.svg" => Some(include_bytes!("../../assets/icons/wrap-text.svg")),
         "icons/image.svg" => Some(include_bytes!("../../assets/icons/image.svg")),
         "icons/pencil.svg" => Some(include_bytes!("../../assets/icons/pencil.svg")),
         "icons/maximize-2.svg" => Some(include_bytes!("../../assets/icons/maximize-2.svg")),

@@ -347,7 +347,7 @@ impl DocumentHost {
                                                 PathBuf::from(p).parent().map(|p| p.to_path_buf())
                                             });
                                         host.control = cx.new(|cx| {
-                                            let mut v = NomoMark::new(adapter, cx);
+                                            let mut v = NomoMark::new(adapter, cx); v.code_view_port = Some(host.port.clone());
                                             v.windowed_navigation = host.production;
                                             v.base_dir = base_dir;
                                             v.host.selection = DocumentSelection::caret(from);

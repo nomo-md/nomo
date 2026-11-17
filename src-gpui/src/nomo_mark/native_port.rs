@@ -46,6 +46,15 @@ impl NativeWindowPort {
             .status(&self.owner, &self.document_id)
             .map_err(convert_error)
     }
+    pub(crate) fn code_view_states_at(&self, revision: u64, starts: &[u64]) -> Result<std::collections::BTreeMap<u64, crate::text_document::markdown_session::CodeViewState>, ControlError> {
+        self.manager.code_view_states_at(&self.owner, &self.document_id, revision, starts).map_err(super::session_window::structure_error)
+    }
+    pub(crate) fn set_code_wrapped(&self, revision: u64, at: u64, wrapped: bool) -> Result<(), ControlError> {
+        self.manager.set_code_wrapped(&self.owner, &self.document_id, revision, at, wrapped).map_err(super::session_window::structure_error)
+    }
+    pub(crate) fn set_code_expanded(&self, revision: u64, at: u64, expanded: bool) -> Result<(), ControlError> {
+        self.manager.set_code_expanded(&self.owner, &self.document_id, revision, at, expanded).map_err(super::session_window::structure_error)
+    }
     pub(crate) fn set_editing_locked(&self, locked: bool) -> Result<(), ControlError> {
         self.manager.set_editing_locked(&self.owner, &self.document_id, locked).map_err(convert_error)
     }

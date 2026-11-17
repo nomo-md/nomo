@@ -120,7 +120,7 @@ impl DocumentHost {
             .expect("read supplied sample");
         let host = WindowHostAdapter::new(input, "demo-window", 0, WindowContext::Complete)
             .expect("valid sample");
-        let control = cx.new(|cx| { let mut view = NomoMark::new(host, cx); view.windowed_navigation = production; view });
+        let control = cx.new(|cx| { let mut view = NomoMark::new(host, cx); view.code_view_port = Some(port.clone()); view.windowed_navigation = production; view });
         let subscription = cx.subscribe(&control, Self::event);
         Self::register_resources(cx);
         let this = cx.entity().downgrade();
@@ -159,6 +159,15 @@ impl DocumentHost {
         }
     }
     fn event(&mut self, source: Entity<NomoMark>, event: &ControlEvent, cx: &mut Context<Self>) {
+        if matches!(event, ControlEvent::CodeViewStateChanged) {
+            for pane in &self.panes {
+                for mount in &pane.viewport.mounts {
+                    if mount.view != source { mount.view.update(cx, |view, cx| view.code_view_state_changed(cx)); }
+                }
+            }
+            cx.notify();
+            return;
+        }
         if matches!(event, ControlEvent::ContextMenuOpened) {
             if !self.promote(&source, cx) { return; }
             let history = (self.status().can_undo, self.status().can_redo);
@@ -183,6 +192,7 @@ impl DocumentHost {
         }
         if source != self.control && !matches!(event, ControlEvent::ResourceDemand { .. } | ControlEvent::ResourceUsage { .. } | ControlEvent::Geometry { .. } | ControlEvent::Released(_)) { return; }
         match event {
+            ControlEvent::CodeViewStateChanged => unreachable!(),
             ControlEvent::ContextMenuOpened => unreachable!(),
             ControlEvent::FootnotePreview { .. } => unreachable!(),
             ControlEvent::InsertImages { .. } => unreachable!(),

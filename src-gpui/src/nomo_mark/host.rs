@@ -613,6 +613,7 @@ impl WindowHostAdapter {
         let mut code = std::collections::BTreeMap::new();
         for (&at, &offset) in &self.interaction.code_offsets { code.insert(map(at)?, offset); }
         self.interaction.code_offsets = code;
+        self.interaction.code_wrapped = self.interaction.code_wrapped.iter().map(|at| map(*at)).collect::<Result<_, _>>()?;
         identity.from_byte = from;
         identity.to_byte = to;
         identity.revision = revision;
@@ -673,6 +674,7 @@ impl WindowHostAdapter {
     }
     fn prune_view_state(&mut self) {
         let base = self.parsed.identity.from_byte;
+        self.interaction.code_wrapped.retain(|at| self.parsed.nodes.iter().any(|node| node.kind == "code" && base + node.source.start as u64 == *at));
         self.interaction.code_offsets.retain(|at, (x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0
             && self.parsed.nodes.iter().any(|node| node.kind == "code" && base + node.source.start as u64 == *at));
         self.interaction.details_open.retain(|at, _| {

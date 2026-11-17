@@ -28,8 +28,8 @@ impl CodeViewport {
         (offset.0.clamp(0.0, (self.content_width-w).max(0.0)), offset.1.clamp(0.0, (self.code.height-h).max(0.0)))
     }
 
-    pub fn reveal(&self, source: usize, width: f32, height: f32) {
-        let Some((x, y, line)) = self.code.caret_at(source) else { return; };
+    pub fn reveal(&self, source: usize, width: f32, height: f32, upstream: bool) {
+        let Some((x, y, line)) = self.code.caret_at_with_affinity(source, upstream) else { return; };
         let (w, h) = self.viewport(width, height);
         let (dx, dy) = self.offset.get();
         let dx = if x < dx+4.0 { x-4.0 } else if x > dx+w-6.0 { x-w+6.0 } else { dx };
@@ -37,8 +37,8 @@ impl CodeViewport {
         self.offset.set(self.clamp_offset(width, height, (dx, dy)));
     }
 
-    pub fn caret_visible(&self, source: usize, width: f32, height: f32) -> bool {
-        let Some((x, y, line)) = self.code.caret_at(source) else { return false; };
+    pub fn caret_visible(&self, source: usize, width: f32, height: f32, upstream: bool) -> bool {
+        let Some((x, y, line)) = self.code.caret_at_with_affinity(source, upstream) else { return false; };
         let (w, h) = self.viewport(width, height);
         let (dx, dy) = self.offset.get();
         x >= dx && x < dx+w && y >= dy && y+line <= dy+h+0.5
@@ -57,10 +57,14 @@ impl Builder<'_> {
         let pad = 12.0 * zoom;
         let count = body.split('\n').count();
         let expanded = self.env.block_open.and_then(|open| open.get(&(self.env.source_base+block_start as u64))).copied().unwrap_or(false);
+        let wrapped = self.env.code_wrapped.contains(&(self.env.source_base+block_start as u64));
         let number_spec = |label: String| ParaSpec::plain(label, InlineStyle { color: ColorRole::CodeLineNumber, ..Default::default() }, Family::Code, font_size, line_height, Wrap::None);
         let gutter = if self.env.code_line_numbers {
             self.env.layout(&number_spec(count.to_string()), 1_000_000.0, self.window).max_line_width()+14.0*zoom+border
         } else { 0.0 };
+        let body_width = (width-2.0*border).max(1.0);
+        // 收起时预留纵向滚动条，避免折行高度与滚动条宽度互相触发二次全块布局。
+        let wrap_width = (body_width-gutter-pad-16.0*zoom-if expanded { 0.0 } else { 13.0*zoom }).max(1.0);
         let mut code = Vec::new();
         let mut numbers = Vec::new();
         let mut offset = 0;
@@ -71,9 +75,9 @@ impl Builder<'_> {
             let spec = ParaSpec {
                 text: line.to_string(), spans: highlighted[number].clone(),
                 base: InlineStyle { color: ColorRole::CodeFg, ..Default::default() },
-                family: Family::Code, font_size, line_height, wrap: Wrap::None, objects: Vec::new(),
+                family: Family::Code, font_size, line_height, wrap: if wrapped { Wrap::Code } else { Wrap::None }, objects: Vec::new(),
             };
-            let layout = self.env.layout(&spec, 1_000_000.0, self.window);
+            let layout = self.env.layout(&spec, if wrapped { wrap_width } else { 1_000_000.0 }, self.window);
             let height = layout.height();
             if gutter > 0.0 {
                 let label = self.env.layout(&number_spec((number+1).to_string()), gutter, self.window);
@@ -95,8 +99,9 @@ impl Builder<'_> {
         }
         let content_height = (y-pad).max(3.0*line_height)+pad*2.0;
         let limit = (24.0*line_height+pad*2.0).min(f32::from(self.window.viewport_size().height)*0.6).max(3.0*line_height+pad*2.0);
+        // 按实际限高提供入口；展开后保留收起按钮，避免窗口变大或删行后无法复位。
+        let can_toggle = content_height > limit || expanded;
         let body_height = if expanded { content_height } else { content_height.min(limit) };
-        let body_width = (width-2.0*border).max(1.0);
         let viewport = CodeViewport {
             code: BlockLayout { height: content_height, items: code },
             numbers: BlockLayout { height: content_height, items: numbers },
@@ -110,7 +115,7 @@ impl Builder<'_> {
         self.items.push(DisplayItem::CodeBody { x: x+border, y: top+header+border, w: body_width, h: body_height, source: block_start..source_end.saturating_add(1), body: Box::new(viewport) });
         let label = if lang == "mermaid" { failure.map_or_else(|| "Mermaid".into(), |reason| format!("Mermaid · {reason}")) }
             else { crate::nomo_mark::code_blocks::language_label(lang).to_string() };
-        let limit = (width-14.0*zoom-10.0*zoom-if count > 24 { 76.0*zoom } else { 38.0*zoom }).max(1.0);
+        let limit = (width-14.0*zoom-10.0*zoom-if can_toggle { 114.0*zoom } else { 76.0*zoom }).max(1.0);
         let mut label: String = label.chars().take(64).collect();
         let label_layout = loop {
             let spec = ParaSpec::plain(label.clone(), InlineStyle { bold: true, color: ColorRole::CodeLabel, ..Default::default() }, Family::Code, 12.0*zoom, header-border, Wrap::None);
@@ -121,7 +126,7 @@ impl Builder<'_> {
         let label_width = label_layout.max_line_width();
         self.items.push(DisplayItem::Text { x: x+border+14.0*zoom, y: top+border, layout: label_layout, map: Vec::new() });
         if lang != "mermaid" { self.items.push(DisplayItem::CodeLanguage { x: x+border+14.0*zoom, y: top+border, w: label_width.max(12.0*zoom), h: header-border, source: block_start }); }
-        self.items.push(DisplayItem::CodeHeader { x: x+width-border-10.0*zoom-32.0*zoom, y: top+border+(header-border-28.0*zoom)/2.0, w: 32.0*zoom, h: 28.0*zoom, source: block_start, text: Rc::from(body), expanded: (count > 24).then_some(expanded) });
+        self.items.push(DisplayItem::CodeHeader { x: x+width-border-10.0*zoom-32.0*zoom, y: top+border+(header-border-28.0*zoom)/2.0, w: 32.0*zoom, h: 28.0*zoom, source: block_start, text: Rc::from(body), expanded: can_toggle.then_some(expanded), wrapped });
         self.y = top+header+body_height+2.0*border;
         self.gap(18.0*zoom);
     }
