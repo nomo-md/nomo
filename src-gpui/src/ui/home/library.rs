@@ -32,7 +32,7 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
-    pub(super) fn is_favorite(&self, path: &Path) -> bool {
+    pub(in crate::ui) fn is_favorite(&self, path: &Path) -> bool {
         self.favorites.iter().any(|entry| entry.path == path)
     }
 

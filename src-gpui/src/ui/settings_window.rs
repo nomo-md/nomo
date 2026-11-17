@@ -528,7 +528,7 @@ impl Render for SettingsWindow {
             .child(window_chrome::drag_surface("settings-header-drag"))
             .child(div().flex_1().min_w(px(0.0)).text_size(px(16.0)).font_weight(FontWeight::BOLD)
                 .text_color(theme.heading).child(category_title))
-            .child(window_chrome::caption_controls(&theme, window, &self.caption_focus, |action, window, _| match action {
+            .child(window_chrome::caption_controls(&theme, window, &self.caption_focus, 46.0, |action, window, _| match action {
                 CaptionAction::Minimize => window.minimize_window(),
                 CaptionAction::Maximize => {}
                 CaptionAction::Close => window.remove_window(),

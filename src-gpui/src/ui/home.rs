@@ -17,13 +17,16 @@ use crate::ui::path_drag::{ItemMotion, PathDrag, PathDragPreview};
 
 const MEMORY_CACHE_BYTES: usize = 24 * 1024 * 1024;
 const BITMAP_BYTES: usize = (thumbnail::WIDTH * thumbnail::HEIGHT * 4) as usize;
+// 每张位图另留 1 KiB 给标题和指纹，避免超宽窗口内的预览相互淘汰并反复加载。
+const MAX_VISIBLE_PREVIEWS: usize = MEMORY_CACHE_BYTES / (BITMAP_BYTES + 1024);
 const CARD_PADDING: f32 = 16.0;
 const CARD_TITLE_HEIGHT: f32 = 40.0;
 const CARD_PREVIEW_GAP: f32 = 12.0;
 const CARD_FOOTER_HEIGHT: f32 = 18.0;
 const CARD_LIFT: f32 = 3.0;
 const PREVIEW_FADE: Duration = Duration::from_millis(140);
-const MIN_CARD_WIDTH: f32 = 188.0;
+const MIN_CARD_WIDTH: f32 = 240.0;
+const MAX_CARD_WIDTH: f32 = 300.0;
 const GRID_GAP: f32 = 16.0;
 const GRID_SHADOW_INSET: f32 = 12.0;
 pub(super) const COMPACT_WINDOW_WIDTH: f32 = 850.0;
@@ -91,32 +94,36 @@ struct GridLayout {
 
 impl GridLayout {
     fn for_width(available: f32, sidebar: motion::SidebarFrame) -> Self {
-        let columns_that_fit = |width: f32, card_width: f32| {
-            ((width + GRID_GAP) / (card_width + GRID_GAP)).floor().clamp(1.0, 6.0) as usize
+        let columns_for_width = |width: f32| {
+            // 先让现有列长到上限，再在新列能维持最小宽度时平分空间。
+            let span = width + GRID_GAP;
+            let preferred = (span / (MAX_CARD_WIDTH + GRID_GAP)).ceil();
+            let fit = (span / (MIN_CARD_WIDTH + GRID_GAP)).floor();
+            preferred.min(fit).max(1.0) as usize
         };
         let width_with_sidebar = (available - sidebar.full_width).max(MIN_CARD_WIDTH);
-        let columns_with_sidebar = columns_that_fit(width_with_sidebar, MIN_CARD_WIDTH);
+        let columns_with_sidebar = columns_for_width(width_with_sidebar);
         // 动画期间保持展开态列数，只让现有列跟随侧栏占位连续伸缩。
         let columns = if sidebar.target_visible || sidebar.progress > 0.0 {
             columns_with_sidebar
         } else {
-            columns_that_fit(available, MIN_CARD_WIDTH).max(columns_with_sidebar)
+            columns_for_width(available)
         };
         let layout_width = (available - sidebar.occupied_width()).max(MIN_CARD_WIDTH);
         let card_width = ((layout_width - (columns - 1) as f32 * GRID_GAP)
-            / columns as f32).min(300.0);
+            / columns as f32).min(MAX_CARD_WIDTH);
         Self { columns, card_width }
     }
 }
 
 #[cfg(test)]
 mod grid_layout_tests {
-    use super::{GRID_GAP, GridLayout};
+    use super::{GRID_GAP, GridLayout, MAX_CARD_WIDTH, MIN_CARD_WIDTH};
     use crate::ui::motion::SidebarFrame;
 
     #[test]
     fn closing_sidebar_expands_existing_columns_to_the_live_width() {
-        let available = 1100.0;
+        let available = 1040.0;
         let sidebar = SidebarFrame {
             full_width: 250.0,
             progress: 0.5,
@@ -125,7 +132,7 @@ mod grid_layout_tests {
 
         let layout = GridLayout::for_width(available, sidebar);
 
-        assert_eq!(layout.columns, 4);
+        assert_eq!(layout.columns, 3);
         let occupied = layout.card_width * layout.columns as f32
             + GRID_GAP * (layout.columns - 1) as f32;
         assert!((occupied - (available - sidebar.occupied_width())).abs() < 0.01);
@@ -133,16 +140,45 @@ mod grid_layout_tests {
 
     #[test]
     fn fully_closed_sidebar_adds_columns_after_the_spring_finishes() {
-        let layout = GridLayout::for_width(1100.0, SidebarFrame {
+        let available = 1040.0;
+        let layout = GridLayout::for_width(available, SidebarFrame {
             full_width: 250.0,
             progress: 0.0,
             target_visible: false,
         });
 
-        assert_eq!(layout.columns, 5);
+        assert_eq!(layout.columns, 4);
         let occupied = layout.card_width * layout.columns as f32
             + GRID_GAP * (layout.columns - 1) as f32;
-        assert!((occupied - 1100.0).abs() < 0.01);
+        assert!((occupied - available).abs() < 0.01);
+    }
+
+    #[test]
+    fn wide_grid_fills_the_row_beyond_six_columns() {
+        let available = 2488.0;
+        let layout = GridLayout::for_width(available, SidebarFrame::default());
+
+        assert_eq!(layout.columns, 8);
+        let occupied = layout.card_width * layout.columns as f32
+            + GRID_GAP * (layout.columns - 1) as f32;
+        assert!((occupied - available).abs() < 0.01);
+    }
+
+    #[test]
+    fn cards_grow_before_shrinking_to_fit_another_column() {
+        let sidebar = SidebarFrame::default();
+        let layout = GridLayout::for_width(600.0, sidebar);
+        assert_eq!((layout.columns, layout.card_width), (2, 292.0));
+
+        let third_column_width = 3.0 * MIN_CARD_WIDTH + 2.0 * GRID_GAP;
+        let layout = GridLayout::for_width(third_column_width - 1.0, sidebar);
+        assert_eq!((layout.columns, layout.card_width), (2, MAX_CARD_WIDTH));
+
+        let layout = GridLayout::for_width(third_column_width, sidebar);
+        assert_eq!((layout.columns, layout.card_width), (3, MIN_CARD_WIDTH));
+
+        let layout = GridLayout::for_width(third_column_width + 48.0, sidebar);
+        assert_eq!((layout.columns, layout.card_width), (3, MIN_CARD_WIDTH + 16.0));
     }
 }
 
@@ -277,7 +313,8 @@ impl Home {
         }
     }
 
-    fn request_visible(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    fn request_visible(&mut self, mut paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        paths.truncate(MAX_VISIBLE_PREVIEWS);
         self.clock = self.clock.wrapping_add(1);
         let reduced = reduced_motion(cx);
         for path in &paths {
@@ -467,35 +504,41 @@ impl Home {
         let press_path = path.clone();
         let release_path = path.clone();
         let outside_path = path.clone();
-        let favorite_path = path.clone();
         let paper = cover.render(width, height, elevation, hint, reduced, theme);
         // 感应区域覆盖浮起前后的卡片，避免边缘因视觉位移而反复触发 hover。
         let placeholder = self.dragging.as_ref() == Some(&entry.path) && !self.grid_drag.committing && !self.tree_drag.committing;
-        let lift = if reduced { 0.0 } else { CARD_LIFT * elevation };
-        let favorite_button = div().id((gpui::ElementId::Path(favorite_path.clone()), "home-favorite-toggle"))
-            .absolute().right(px(CARD_PADDING + document_card::FAVORITE_RIGHT))
-            .top(px(CARD_PADDING + CARD_LIFT - lift + document_card::FAVORITE_TOP)).size(px(document_card::FAVORITE_SIZE))
-            .flex().items_center().justify_center().rounded(px(6.0)).cursor_pointer().hover(|style| style.bg(theme.hover))
-            .child(document_card::favorite_icon(cover.favorite, theme))
-            .when(placeholder, |element| element.invisible())
-            .tooltip(tooltip(ToolbarLocale::current(cx).app_text(if favorite { "home.unfavorite" } else { "home.favorite" })))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |home, _, _, cx| {
-                cx.stop_propagation();
-                home.toggle_favorite(favorite_path.clone(), cx);
-            }));
+        let show_favorite = !placeholder && (favorite || card_state.is_some_and(|state| state.hovered));
         let card = div().id((gpui::ElementId::Path(path.clone()), "home-card")).relative()
             .w(px(width)).h(px(height + CARD_LIFT)).flex_none().cursor_pointer()
             .when(placeholder, |el| el.bg(theme.hover).rounded(px(14.0)))
             .tooltip(tooltip(title)).child(div().opacity(if placeholder { 0.0 } else { 1.0 }).child(paper))
-            .child(favorite_button)
+            .when(show_favorite, |card| {
+                let favorite_path = path.clone();
+                let lift = if reduced { 0.0 } else { CARD_LIFT * elevation };
+                let reveal = if favorite || reduced { 1.0 } else { hint };
+                let star = document_card::FavoriteVisual {
+                    scale: cover.favorite.scale * (0.9 + 0.1 * reveal),
+                    ..cover.favorite
+                };
+                card.child(div().id((gpui::ElementId::Path(favorite_path.clone()), "home-favorite-toggle"))
+                    .absolute().right(px(CARD_PADDING + document_card::FAVORITE_RIGHT))
+                    .top(px(CARD_PADDING + CARD_LIFT - lift + document_card::FAVORITE_TOP)).size(px(document_card::FAVORITE_SIZE))
+                    .flex().items_center().justify_center().rounded(px(6.0)).cursor_pointer().hover(|style| style.bg(theme.hover))
+                    .child(document_card::favorite_icon(star, theme).opacity(reveal))
+                    .tooltip(tooltip(ToolbarLocale::current(cx).app_text(if favorite { "home.unfavorite" } else { "home.favorite" })))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |home, _, _, cx| {
+                        cx.stop_propagation();
+                        home.toggle_favorite(favorite_path.clone(), cx);
+                    })))
+            })
             .on_hover(cx.listener(move |home, hovered, _, cx| home.set_card_hover(hover_path.clone(), *hovered, cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(move |home, _, _, cx| home.set_card_pressed(press_path.clone(), true, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(move |home, _, _, cx| home.set_card_pressed(release_path.clone(), false, cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(move |home, _, _, cx| home.set_card_pressed(outside_path.clone(), false, cx)))
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Open(path.to_path_buf()))));
         self.draggable(card, node, Some((width, height)), Some(document_card::DocumentCover {
-            favorite: document_card::FavoriteVisual { visible: true, ..cover.favorite },
+            favorite: document_card::FavoriteVisual { visible: favorite, ..cover.favorite },
             thumbnail_opacity: 1.0, ..cover
         }), 0.0, cx).into_any_element()
     }

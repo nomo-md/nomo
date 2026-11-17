@@ -1542,7 +1542,7 @@ impl Workspace {
                 .bg(gpui::Hsla::from(gpui::rgba(0x80808014)).opacity(hover))
                 .when(tab.is_none(), |el| el.hover(|style| style.text_color(theme.fg).bg(gpui::rgba(0x80808014))))
                 .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
-                .child(icon(IconName::FileText, 13.0, theme.accent))
+                .child(icon(if row.favorite { IconName::StarFilled } else { IconName::FileText }, 13.0, theme.accent))
                 .child(div().flex_1().min_w(px(0.0)).truncate()
                     .when(tab.is_some_and(|tab| tab.preview), |el| el.italic().opacity(0.85)).child(title))
                 .children(dirty.then(|| div().size(px(6.0)).rounded_full().bg(theme.accent)))
@@ -1611,7 +1611,7 @@ impl Workspace {
                 // 新标签已有独立入场，回到已打开标签时才叠加页头过渡。
                 let title_opacity = if active && !animate { page_title_opacity } else { 1.0 };
                 let tab_text = motion::color(motion::color(theme.muted, theme.fg, hover), theme.heading, active_color).opacity(title_opacity);
-                let tab_icon = motion::color(theme.muted, theme.accent, active_color).opacity(title_opacity);
+                let tab_icon_color = if row.favorite { theme.accent } else { motion::color(theme.muted, theme.accent, active_color) };
                 let dirty_indicator = dirty.then(|| {
                     let dot = div().size(px(6.0)).flex_none().rounded_full().bg(theme.accent);
                     let duration = Duration::from_millis(if reduced { 80 } else { 120 });
@@ -1661,7 +1661,7 @@ impl Workspace {
                     .when(tab.is_none(), |el| el.hover(|style| style.text_color(theme.fg).bg(gpui::rgba(0x8080800f))))
                     .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
                     .children(tab_id.filter(|_| active).map(|tab_id| surface.tab_marker(tab_id, index, tab_count, tab_scroll.clone())))
-                    .child(icon(IconName::FileText, 14.0, tab_icon))
+                    .child(icon(if row.favorite { IconName::StarFilled } else { IconName::FileText }, 14.0, tab_icon_color.opacity(title_opacity)))
                     .child(div().flex_1().min_w(px(0.0)).truncate()
                         .when(tab.is_some_and(|tab| tab.preview), |el| el.italic().opacity(0.85)).child(title))
                     .children(Self::drop_marker(highlight,item,index,tab_count,theme))

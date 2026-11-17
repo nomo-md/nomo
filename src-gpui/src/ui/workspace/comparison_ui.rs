@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(in crate::ui::workspace) struct PaneFocus {
     keys: [u64; 2],
@@ -19,6 +19,7 @@ enum MenuPage {
     Combine,
     Copy,
     Reveal,
+    Favorites,
 }
 #[derive(Clone, Copy)]
 enum Choice {
@@ -32,6 +33,7 @@ enum Choice {
     Right,
     All,
     Path(u64, bool),
+    SetFavorite(u64, bool),
 }
 
 pub(in crate::ui::workspace) struct TabRow {
@@ -39,6 +41,7 @@ pub(in crate::ui::workspace) struct TabRow {
     pub tab: Option<usize>,
     pub title: String,
     pub dirty: bool,
+    pub favorite: bool,
 }
 
 impl Workspace {
@@ -49,10 +52,38 @@ impl Workspace {
             .enumerate()
             .map(|(index, tab)| (tab.key, index))
             .collect();
+        let favorites: HashSet<_> = self
+            .library
+            .read(cx)
+            .snapshot
+            .favorites
+            .iter()
+            .map(|entry| entry.path.as_path())
+            .collect();
         self.comparison
             .items
             .iter()
             .map(|&item| {
+                let key = item.first();
+                let tab = indices.get(&key).copied();
+                let favorite = matches!(item, TabItem::Single(_)) && {
+                    let path = match tab {
+                        Some(index) => self.tabs[index]
+                            .document
+                            .read(cx)
+                            .status()
+                            .path
+                            .as_deref()
+                            .map(Path::new),
+                        None => self
+                            .comparison
+                            .layout
+                            .pending
+                            .get(&key)
+                            .and_then(|doc| doc.path.as_deref()),
+                    };
+                    path.is_some_and(|path| favorites.contains(path))
+                };
                 let mut titles = Vec::new();
                 let mut dirty = false;
                 for key in item.keys() {
@@ -67,9 +98,10 @@ impl Workspace {
                 }
                 TabRow {
                     item,
-                    tab: indices.get(&item.first()).copied(),
+                    tab,
                     title: titles.join("｜"),
                     dirty,
+                    favorite,
                 }
             })
             .collect()
@@ -309,6 +341,28 @@ impl Workspace {
         cx.stop_propagation();
         cx.notify();
     }
+    fn tab_favorite_path(&self, key: u64, cx: &App) -> Option<PathBuf> {
+        if let Some(doc) = self.host_for(key) {
+            doc.read(cx).path()
+        } else {
+            self.comparison.layout.pending.get(&key)?.path.clone()
+        }
+    }
+
+    fn tab_favorite_choice(&self, key: u64, show_name: bool, cx: &App) -> Option<(String, Choice, bool)> {
+        let path = self.tab_favorite_path(key, cx)?;
+        let library = self.library.read(cx);
+        let favorite = !library.snapshot.is_favorite(&path);
+        let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
+        let action = locale.app_text(if favorite { "home.favorite" } else { "home.unfavorite" });
+        let label = if show_name {
+            format!("{} · {}", action, path.file_name()?.to_string_lossy())
+        } else {
+            action.to_owned()
+        };
+        Some((label, Choice::SetFavorite(key, favorite), library.loaded))
+    }
+
     fn tab_choices(&self, menu: &TabMenu, cx: &App) -> Vec<(String, Choice, bool)> {
         use Choice::*;
         let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
@@ -347,6 +401,13 @@ impl Workspace {
                         .is_some_and(|p| p + 1 < self.comparison.items.len()),
                 ));
                 choices.push((locale.text("tab_close_all").into(), All, true));
+                if item.pair().is_some() {
+                    if item.keys().iter().any(|&key| self.tab_favorite_path(key, cx).is_some()) {
+                        choices.push((format!("{}  ›", locale.app_text("tab.favorites")), Page(MenuPage::Favorites), true));
+                    }
+                } else {
+                    choices.extend(self.tab_favorite_choice(key, false, cx));
+                }
                 if item.keys().iter().any(|k| {
                     self.host_for(*k)
                         .is_some_and(|doc| doc.read(cx).path().is_some())
@@ -396,7 +457,12 @@ impl Workspace {
                     })
                 })
                 .collect(),
-            page => item
+            MenuPage::Favorites => item
+                .keys()
+                .into_iter()
+                .filter_map(|key| self.tab_favorite_choice(key, true, cx))
+                .collect(),
+            page @ (MenuPage::Copy | MenuPage::Reveal) => item
                 .keys()
                 .into_iter()
                 .filter_map(|k| {
@@ -433,6 +499,13 @@ impl Workspace {
                 self.split_or_swap(item.focused(), matches!(action, Choice::Swap), window, cx)
             }
             Choice::Move => self.transfer_item(item, None, None, drag::Placement::End, window, cx),
+            Choice::SetFavorite(key, favorite) => {
+                if let Some(path) = self.tab_favorite_path(key, cx) {
+                    self.library.update(cx, |library, cx| {
+                        library.change(LibraryChange::SetFavorite { path, favorite }, cx);
+                    });
+                }
+            }
             Choice::Path(key, reveal) => {
                 if let Some(path) = self.host_for(key).and_then(|doc| doc.read(cx).path()) {
                     if reveal {

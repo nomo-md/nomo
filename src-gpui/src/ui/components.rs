@@ -397,8 +397,8 @@ pub fn text_segment(id: impl Into<ElementId>, label: impl Into<SharedString>, ac
         .whitespace_nowrap()
         .when(enabled, |el| el.cursor_pointer())
         .when(!enabled, |el| el.cursor(gpui::CursorStyle::OperationNotAllowed))
-        .text_color(if active { theme.accent_strong } else { theme.muted })
-        .when(active, |el| el.bg(theme.app_bg).shadow(settings_raised_shadow(theme)))
+        .text_color(if active { theme.on_accent } else { theme.muted })
+        .when(active, |el| el.bg(theme.accent_fill))
         .when(!active && enabled, |el| el.hover(|style| style.bg(theme.hover)))
         .child(label.into())
 }
