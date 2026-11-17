@@ -1,4 +1,4 @@
-name: Merged PR release
+name: PR release and preview cleanup
 
 on:
   pull_request:
@@ -50,3 +50,20 @@ jobs:
           git tag "$release_tag" "$MERGE_COMMIT"
           git push origin "refs/tags/$release_tag"
           echo "Pushed $release_tag. The preview will be removed after the formal release succeeds."
+
+  cleanup-closed:
+    name: Clean up an unmerged PR preview
+    if: github.event.pull_request.merged == false && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Delete the preview release, tag, and build artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: bash scripts/cleanup-pr-preview.sh "$PR_NUMBER" "$HEAD_REF"
