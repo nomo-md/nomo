@@ -40,6 +40,16 @@ jobs:
           PREVIEW_TAG: pre-${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
+          require_open_pr() {
+            local state
+            state="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq '.state')"
+            if [[ "$state" != "open" ]]; then
+              echo "PR #${PR_NUMBER} is ${state}; skipping preview publication."
+              exit 0
+            fi
+          }
+
+          require_open_pr
           git tag -f "$PREVIEW_TAG" "$GITHUB_SHA"
           git push --force origin "refs/tags/$PREVIEW_TAG"
 
@@ -53,6 +63,7 @@ jobs:
 
           EOF
 
+          require_open_pr
           title="Nomo PR #${PR_NUMBER} Preview"
           if gh release view "$PREVIEW_TAG" --json id >/dev/null 2>&1; then
             gh release edit "$PREVIEW_TAG" --title "$title" --notes-file preview-notes.md --prerelease --latest=false
