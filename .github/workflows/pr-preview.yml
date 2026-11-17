@@ -1,0 +1,61 @@
+name: PR preview packages
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build preview packages
+    uses: ./.github/workflows/native-build.yml
+    with:
+      packages: true
+
+  publish:
+    name: Publish PR preview
+    needs: build
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-packages
+          path: release-assets
+      - name: Publish or update the preview release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PREVIEW_TAG: pre-${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          git tag -f "$PREVIEW_TAG" "$GITHUB_SHA"
+          git push --force origin "refs/tags/$PREVIEW_TAG"
+
+          cat > preview-notes.md <<EOF
+          Temporary preview build for PR #${PR_NUMBER}.
+
+          - Branch: ${GITHUB_HEAD_REF}
+          - Commit: ${GITHUB_SHA}
+          - These packages are for testing only.
+          - This preview release, its tag, and its build artifacts are removed after the PR is merged.
+
+          EOF
+
+          title="Nomo PR #${PR_NUMBER} Preview"
+          if gh release view "$PREVIEW_TAG" --json id >/dev/null 2>&1; then
+            gh release edit "$PREVIEW_TAG" --title "$title" --notes-file preview-notes.md --prerelease --latest=false
+          else
+            gh release create "$PREVIEW_TAG" --verify-tag --title "$title" --notes-file preview-notes.md --prerelease --latest=false
+          fi
+          gh release upload "$PREVIEW_TAG" release-assets/* --clobber
