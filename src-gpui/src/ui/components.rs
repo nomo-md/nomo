@@ -103,6 +103,9 @@ pub enum IconName {
     Github,
     CircleDot,
     ExternalLink,
+    Star,
+    StarFilled,
+    StarBurst,
 }
 
 impl IconName {
@@ -194,6 +197,9 @@ impl IconName {
             IconName::Keyboard => "icons/keyboard.svg",
             IconName::Settings => "icons/settings.svg",
             IconName::RotateCcw => "icons/rotate-ccw.svg",
+            IconName::Star => "icons/star.svg",
+            IconName::StarFilled => "icons/star-filled.svg",
+            IconName::StarBurst => "icons/star-burst.svg",
         }
     }
 }

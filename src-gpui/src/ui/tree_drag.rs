@@ -78,6 +78,7 @@ pub(crate) struct TreeDrag {
     target: Option<Target>,
     layout: Layout,
     folder_section: Option<usize>,
+    favorite_section: usize,
     positions: HashMap<Arc<Path>, RowPosition>,
     gap_position: Option<(Position, Position)>,
     section_position: Option<Position>,
@@ -89,14 +90,23 @@ pub(crate) struct TreeDrag {
 }
 
 impl TreeDrag {
-    /// 主页恢复两组平铺入口；标题占空间但不作为路径或拖拽对象。
-    pub fn set_sections(&mut self, folders: usize) { self.folder_section = Some(folders); }
+    /// 主页恢复分组平铺入口；标题和收藏行占空间，但不参与原有入口排序。
+    pub fn set_sections(&mut self, folders: usize, favorites: usize) {
+        self.folder_section = Some(folders);
+        self.favorite_section = favorites;
+    }
     pub fn folder_section_end(&self) -> Option<usize> {
         self.folder_section.map(|folders| self.layout.boundary(folders,
             self.target.as_ref().is_some_and(|target| target.parent.is_some()) || self.item.as_ref().is_some_and(|item| item.directory)))
     }
+    fn favorite_block(&self) -> usize {
+        if self.favorite_section > 0 { self.favorite_section + 1 } else { 0 }
+    }
     fn visual_index(&self, index: usize, end: bool) -> usize {
-        self.folder_section_end().map_or(index, |folders| index + 1 + usize::from(index > folders || (index == folders && !end)))
+        self.folder_section_end().map_or(index, |folders| {
+            let after_folders = index > folders || (index == folders && !end);
+            index + 1 + usize::from(after_folders) + if after_folders { self.favorite_block() } else { 0 }
+        })
     }
     fn row_indent(&self, depth: usize) -> f32 {
         (if self.folder_section.is_some() { 12.0 } else { 34.0 }) + depth as f32 * 12.0
@@ -161,11 +171,16 @@ impl TreeDrag {
         let physical = (y.max(0.0) / ROW_HEIGHT).floor() as usize;
         let part = y.max(0.0) % ROW_HEIGHT / ROW_HEIGHT;
         let display = if let Some(folders) = self.folder_section_end() {
-            if physical == 0 || physical == folders + 1 {
+            let recent_heading = folders + 1 + self.favorite_block();
+            if physical == 0 || physical == recent_heading {
                 let boundary = if physical == 0 { 0 } else { self.folder_section.unwrap_or(0) };
                 return self.set_target(Some(Target { parent: None, boundary }), reduced);
             }
-            physical - 1 - usize::from(physical > folders + 1)
+            if physical > folders && physical < recent_heading {
+                return self.set_target(None, reduced);
+            }
+            physical - 1 - usize::from(physical > recent_heading)
+                - if physical > recent_heading { self.favorite_block() } else { 0 }
         } else { physical };
         // 主页只调整入口顺序；工作区的文件夹只在原父目录下排序，不再作为目录移动手势。
         if self.folder_section.is_some() || self.item.as_ref().is_some_and(|item| item.directory) {
@@ -332,7 +347,11 @@ impl TreeDrag {
         } else { self.gap_position = None; }
         if self.active() {
             let folder_end = self.folder_section_end();
-            let visual_index = |index: usize, end: bool| folder_end.map_or(index, |folders| index + 1 + usize::from(index > folders || (index == folders && !end)));
+            let favorite_block = self.favorite_block();
+            let visual_index = |index: usize, end: bool| folder_end.map_or(index, |folders| {
+                let after_folders = index > folders || (index == folders && !end);
+                index + 1 + usize::from(after_folders) + if after_folders { favorite_block } else { 0 }
+            });
             for group in &mut self.groups {
                 let top = visual_index(self.layout.boundary(group.start, false), false) as f32 * ROW_HEIGHT;
                 let bottom = visual_index(self.layout.boundary(group.end, true), true) as f32 * ROW_HEIGHT;

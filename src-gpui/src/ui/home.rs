@@ -1,4 +1,4 @@
-//! 文档主页：轻量目录入口、最近文件与按可见行请求的位图预览。
+//! 文档主页：轻量目录入口、收藏、最近文件与按可见行请求的位图预览。
 pub(crate) mod library;
 mod thumbnail;
 mod browser;
@@ -54,6 +54,7 @@ impl CachedPreview {
 struct CardMotion {
     hovered: bool,
     pressed: bool,
+    favorite: Option<bool>,
     document: Option<Rc<RefCell<document_card::DocumentMotion>>>,
     folder: Option<Rc<RefCell<folder_card::FolderFx>>>,
 }
@@ -205,7 +206,8 @@ impl Home {
         let subscription = cx.observe(&library, |home, library, cx| {
             if (home.tree_drag.committing || home.grid_drag.committing) && !library.read(cx).is_busy() { home.order_finished(cx); }
             let next = library.read(cx).snapshot.clone();
-            if Arc::ptr_eq(&home.snapshot, &next) { return; }
+            for state in home.card_motion.values_mut() { state.favorite = None; }
+            if Arc::ptr_eq(&home.snapshot, &next) { cx.notify(); return; }
             let retired: Vec<_> = home.previews.keys().filter(|path| {
                 let old = home.snapshot.recent.iter().find(|entry| &entry.path == *path);
                 let new = next.recent.iter().find(|entry| &entry.path == *path);
@@ -394,6 +396,18 @@ impl Home {
         cx.notify();
     }
 
+    fn toggle_favorite(&mut self, path: Arc<Path>, cx: &mut Context<Self>) {
+        let current = self.card_motion.get(path.as_ref()).and_then(|state| state.favorite)
+            .unwrap_or_else(|| self.snapshot.is_favorite(path.as_ref()));
+        let favorite = !current;
+        let reduced = reduced_motion(cx);
+        let state = self.card_motion.entry(path.clone()).or_default();
+        state.favorite = Some(favorite);
+        state.document.get_or_insert_with(Default::default).borrow_mut().favorite(favorite, Instant::now(), reduced);
+        self.library.update(cx, |library, cx| library.change(Change::SetFavorite { path: path.to_path_buf(), favorite }, cx));
+        cx.notify();
+    }
+
     fn update_grid_layout(&mut self, layout: GridLayout, rows: usize, row_height: f32) -> bool {
         let Some(previous) = self.grid_layout.replace(layout) else { return false; };
         if previous.columns == layout.columns { return false; }
@@ -426,9 +440,13 @@ impl Home {
     fn card(&self, node: &Node, width: f32, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let entry = &node.entry;
         let reduced = reduced_motion(cx);
-        let (elevation, hint) = self.card_motion.get(entry.path.as_path())
-            .and_then(|state| state.document.as_ref())
+        let card_state = self.card_motion.get(entry.path.as_path());
+        let (elevation, hint) = card_state.and_then(|state| state.document.as_ref())
             .map(|motion| motion.borrow().values()).unwrap_or_default();
+        let (favorite_scale, favorite_burst) = card_state.and_then(|state| state.document.as_ref())
+            .map(|motion| motion.borrow().favorite_values(self.grid_time)).unwrap_or((1.0, 1.0));
+        let favorite = card_state.and_then(|state| state.favorite)
+            .unwrap_or_else(|| self.snapshot.is_favorite(&entry.path));
         let cached = self.previews.get(&entry.path);
         let preview = cached.map(|entry| &entry.preview);
         let title = match preview {
@@ -440,6 +458,7 @@ impl Home {
             image: match preview { Some(Preview::Ready { image, .. }) => Some(image.clone()), _ => None },
             error: match preview { Some(Preview::Failed(error)) => Some(error.render(ToolbarLocale::current(cx)).into()), _ => None },
             open_label: ToolbarLocale::current(cx).app_text("home.openDocument").into(),
+            favorite: document_card::FavoriteVisual { active: favorite, visible: false, scale: favorite_scale, burst: favorite_burst },
             thumbnail_opacity: if reduced { 1.0 } else { cached.map_or(1.0, |preview| motion::ease(preview.fade_progress(self.grid_time))) },
         };
         let height = card_height(width);
@@ -448,19 +467,37 @@ impl Home {
         let press_path = path.clone();
         let release_path = path.clone();
         let outside_path = path.clone();
+        let favorite_path = path.clone();
         let paper = cover.render(width, height, elevation, hint, reduced, theme);
         // 感应区域覆盖浮起前后的卡片，避免边缘因视觉位移而反复触发 hover。
         let placeholder = self.dragging.as_ref() == Some(&entry.path) && !self.grid_drag.committing && !self.tree_drag.committing;
+        let lift = if reduced { 0.0 } else { CARD_LIFT * elevation };
+        let favorite_button = div().id((gpui::ElementId::Path(favorite_path.clone()), "home-favorite-toggle"))
+            .absolute().right(px(CARD_PADDING + document_card::FAVORITE_RIGHT))
+            .top(px(CARD_PADDING + CARD_LIFT - lift + document_card::FAVORITE_TOP)).size(px(document_card::FAVORITE_SIZE))
+            .flex().items_center().justify_center().rounded(px(6.0)).cursor_pointer().hover(|style| style.bg(theme.hover))
+            .child(document_card::favorite_icon(cover.favorite, theme))
+            .when(placeholder, |element| element.invisible())
+            .tooltip(tooltip(ToolbarLocale::current(cx).app_text(if favorite { "home.unfavorite" } else { "home.favorite" })))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |home, _, _, cx| {
+                cx.stop_propagation();
+                home.toggle_favorite(favorite_path.clone(), cx);
+            }));
         let card = div().id((gpui::ElementId::Path(path.clone()), "home-card")).relative()
             .w(px(width)).h(px(height + CARD_LIFT)).flex_none().cursor_pointer()
             .when(placeholder, |el| el.bg(theme.hover).rounded(px(14.0)))
             .tooltip(tooltip(title)).child(div().opacity(if placeholder { 0.0 } else { 1.0 }).child(paper))
+            .child(favorite_button)
             .on_hover(cx.listener(move |home, hovered, _, cx| home.set_card_hover(hover_path.clone(), *hovered, cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(move |home, _, _, cx| home.set_card_pressed(press_path.clone(), true, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(move |home, _, _, cx| home.set_card_pressed(release_path.clone(), false, cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(move |home, _, _, cx| home.set_card_pressed(outside_path.clone(), false, cx)))
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Open(path.to_path_buf()))));
-        self.draggable(card, node, Some((width, height)), Some(document_card::DocumentCover { thumbnail_opacity: 1.0, ..cover }), 0.0, cx).into_any_element()
+        self.draggable(card, node, Some((width, height)), Some(document_card::DocumentCover {
+            favorite: document_card::FavoriteVisual { visible: true, ..cover.favorite },
+            thumbnail_opacity: 1.0, ..cover
+        }), 0.0, cx).into_any_element()
     }
 }
 

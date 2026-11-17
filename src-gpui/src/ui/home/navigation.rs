@@ -77,6 +77,30 @@ impl Home {
         row.into_any_element()
     }
 
+    fn favorite_row(&self, entry: &Entry, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let path = entry.path.clone();
+        let open = path.clone();
+        let remove_path = path.clone();
+        let title = document_name(&path);
+        div().id((gpui::ElementId::Path(path.as_path().into()), "home-favorite-row")).group("home-favorite-row")
+            .relative().w_full().h(px(28.0)).flex().items_center().gap(px(6.0))
+            .px(px(12.0)).rounded(px(4.0)).cursor_pointer().hover(|element| element.bg(theme.hover))
+            .text_size(px(14.0)).text_color(theme.fg).tooltip(tooltip(title.clone()))
+            .child(icon(IconName::StarFilled, 13.0, theme.accent))
+            .child(div().flex_1().min_w(px(0.0)).truncate().child(title))
+            .child(small_icon_button((gpui::ElementId::Path(remove_path.as_path().into()), "home-unfavorite"), IconName::Close, false, theme)
+                .absolute().right(px(4.0)).top(px(3.0)).bg(theme.hover)
+                .invisible().group_hover("home-favorite-row", |element| element.visible())
+                .tooltip(tooltip(ToolbarLocale::current(cx).app_text("home.unfavorite")))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |home, _, _, cx| {
+                    cx.stop_propagation();
+                    home.library.update(cx, |library, cx| library.change(Change::SetFavorite { path: remove_path.clone(), favorite: false }, cx));
+                })))
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Open(open.clone()))))
+            .into_any_element()
+    }
+
     fn folder_cover(&self, node: &Node, cx: &App) -> folder_card::FolderCover {
         let path = &node.entry.path;
         let locale = ToolbarLocale::current(cx);
@@ -136,7 +160,7 @@ impl Home {
         if !self.tree_drag.active() && self.browser.rows.iter().any(|node| node.entry.path == item.path) {
             self.dragging = Some(item.path.clone());
             self.tree_drag_rows = Some(self.browser.rows.clone());
-            self.tree_drag.set_sections(self.browser.rows.iter().take_while(|node| node.directory).count());
+            self.tree_drag.set_sections(self.browser.rows.iter().take_while(|node| node.directory).count(), self.snapshot.favorites.len());
             self.tree_drag.begin(item, Self::drag_rows(&self.browser.rows), self.browser.tree_revision as usize, reduced_motion(cx));
         }
     }
@@ -206,27 +230,37 @@ impl Home {
 
     pub(super) fn sidebar(&mut self, width: f32, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let rows = self.tree_drag_rows.as_ref().unwrap_or(&self.browser.rows).clone();
-        self.tree_drag.set_sections(rows.iter().take_while(|node| node.directory).count());
+        let snapshot = self.snapshot.clone();
+        self.tree_drag.set_sections(rows.iter().take_while(|node| node.directory).count(), snapshot.favorites.len());
         self.tree_drag.begin_frame(reduced_motion(cx));
         let layout = self.tree_drag.layout();
         let landing = self.tree_drag.landing_index();
         let folders = self.tree_drag.folder_section_end().unwrap_or(0);
-        let count = layout.len(rows.len()) + 2;
+        let favorite_block = if snapshot.favorites.is_empty() { 0 } else { snapshot.favorites.len() + 1 };
+        let favorite_heading = folders + 1;
+        let recent_heading = favorite_heading + favorite_block;
+        let count = layout.len(rows.len()) + 2 + favorite_block;
         let scroll = f32::from(self.sidebar_scroll.0.borrow().base_handle.offset().y);
         let backdrop = self.tree_drag.backdrop(scroll, 0.0, theme);
         let feedback = self.tree_drag.feedback(scroll, 0.0, theme);
         let theme = theme.clone();
         let list = uniform_list("home-sidebar-tree", count, cx.processor(move |home, range: std::ops::Range<usize>, window, cx| {
             let items = range.map(|index| {
-                if index == 0 || index == folders + 1 {
-                    let folder = index == 0;
-                    let offset = if folder { 0.0 } else { home.tree_drag.section_offset(index, reduced_motion(cx)) };
+                if index == 0 || index == recent_heading || (favorite_block > 0 && index == favorite_heading) {
+                    let heading = if index == 0 { "home.folders" } else if index == favorite_heading && favorite_block > 0 { "home.favoriteDocuments" } else { "home.recentDocuments" };
+                    let offset = if index == recent_heading { home.tree_drag.section_offset(index, reduced_motion(cx)) } else { 0.0 };
                     return div().w_full().h(px(30.0)).child(div().relative().top(px(offset)).size_full().px(px(12.0)).flex().items_center().justify_between()
                         .text_size(px(11.0)).font_weight(FontWeight::MEDIUM).text_color(theme.muted)
-                        .child(ToolbarLocale::current(cx).app_text(if folder { "home.folders" } else { "home.recentDocuments" })))
+                        .child(ToolbarLocale::current(cx).app_text(heading)))
                         .into_any_element();
                 }
-                let logical = index - 1 - usize::from(index > folders + 1);
+                if favorite_block > 0 && index > favorite_heading && index < recent_heading {
+                    let entry = &snapshot.favorites[index - favorite_heading - 1];
+                    return div().w_full().h(px(30.0)).flex().items_center()
+                        .child(div().w_full().h(px(28.0)).child(home.favorite_row(entry, &theme, cx))).into_any_element();
+                }
+                let logical = index - 1 - usize::from(index > recent_heading)
+                    - if index > recent_heading { favorite_block } else { 0 };
                 let Some(original) = layout.original(logical).or(landing) else { return home.tree_drag.gap_row(&theme); };
                 let node = &rows[original];
                 let row = home.tree_row(node, width, &theme, cx);
