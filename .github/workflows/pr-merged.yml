@@ -1,0 +1,69 @@
+name: PR release and preview cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish a new version or clean up the preview
+    if: github.event.pull_request.merged == true && github.base_ref == 'master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+      - name: Publish a new version or clean up without releasing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          MERGE_COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Automatic merged releases require a stable major.minor.patch version; found $version."
+            exit 1
+          fi
+          release_tag="v$version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$release_tag" >/dev/null 2>&1; then
+            echo "$release_tag already exists; no new version will be published."
+            if [[ "$HEAD_REPO" == "$GH_REPO" ]]; then
+              bash scripts/cleanup-pr-preview.sh "$PR_NUMBER" "$HEAD_REF"
+            fi
+            exit 0
+          fi
+          notes=".github/release-notes/$release_tag.md"
+          if [[ ! -f "$notes" ]]; then
+            echo "::error::Missing release notes: $notes. The preview is retained until the release is ready."
+            exit 1
+          fi
+          git tag "$release_tag" "$MERGE_COMMIT"
+          git push origin "refs/tags/$release_tag"
+          echo "Pushed $release_tag. The preview will be removed after the formal release succeeds."
+
+  cleanup-closed:
+    name: Clean up an unmerged PR preview
+    if: github.event.pull_request.merged == false && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Delete the preview release, tag, and build artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: bash scripts/cleanup-pr-preview.sh "$PR_NUMBER" "$HEAD_REF"

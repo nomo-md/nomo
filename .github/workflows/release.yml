@@ -66,6 +66,33 @@ jobs:
           [[ "$RELEASE_TAG" != *-* ]] || prerelease=true
           gh release edit "$RELEASE_TAG" --draft=false --notes-file "$notes" --prerelease="$prerelease" --latest="$([[ "$prerelease" = false ]] && echo true || echo false)"
 
+  cleanup-pr-preview:
+    name: Clean up the merged PR preview
+    needs: publish
+    if: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Delete the preview release, tag, and build artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          pr="$(gh api "repos/$GH_REPO/commits/$GITHUB_SHA/pulls" --jq '[.[] | select(.merged_at != null) | {number, head_ref: .head.ref, head_repo: .head.repo.full_name}] | .[0]')"
+          if [[ -z "$pr" || "$pr" == "null" ]]; then
+            echo "No merged PR is associated with $GITHUB_SHA; skipping preview cleanup."
+            exit 0
+          fi
+          if [[ "$(jq -r '.head_repo' <<<"$pr")" != "$GH_REPO" ]]; then
+            echo "The merged PR came from a fork; no repository preview was published."
+            exit 0
+          fi
+          bash scripts/cleanup-pr-preview.sh "$(jq -r '.number' <<<"$pr")" "$(jq -r '.head_ref' <<<"$pr")"
+
   update-homebrew-cask:
     name: Update Homebrew cask
     runs-on: ubuntu-latest
