@@ -1083,7 +1083,7 @@ impl NomoMark {
                     {
                         from += 1;
                     }
-                    while !source.is_char_boundary(from) || !original.source.is_char_boundary(from)
+                    while !super::mapping::edit_boundary(&source, from) || !super::mapping::edit_boundary(&original.source, from)
                     {
                         from -= 1;
                     }
@@ -1094,8 +1094,8 @@ impl NomoMark {
                         to_old -= 1;
                         to_new -= 1;
                     }
-                    while !source.is_char_boundary(to_new)
-                        || !original.source.is_char_boundary(to_old)
+                    while !super::mapping::edit_boundary(&source, to_new)
+                        || !super::mapping::edit_boundary(&original.source, to_old)
                     {
                         to_new += 1;
                         to_old += 1;

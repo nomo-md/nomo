@@ -57,6 +57,26 @@ pub(crate) fn confirm_save(title: UiMessage, window: &mut Window, cx: &mut App)
     }
 }
 
+pub(crate) fn confirm_document_close(title: UiMessage, failed: bool, window: &mut Window, cx: &mut App)
+    -> impl Future<Output = SaveChoice> + use<>
+{
+    let normal = (!failed).then(|| confirm_save(title.clone(), window, cx));
+    let response = if failed && !window.has_active_prompt() {
+        let locale = ToolbarLocale::current(cx);
+        Some(window.prompt(PromptLevel::Warning, &title.render(locale), Some(locale.app_text("host.failedCloseMessage")), &[
+            PromptButton::cancel(locale.text("cancel")),
+            PromptButton::new(locale.app_text("host.discardAndClose")),
+        ], cx))
+    } else { None };
+    async move {
+        if let Some(normal) = normal { return normal.await; }
+        match response {
+            Some(response) => match response.await { Ok(1) => SaveChoice::Discard, _ => SaveChoice::Cancel },
+            None => SaveChoice::Cancel,
+        }
+    }
+}
+
 pub(crate) fn confirm_delete(path: &Path, dirty: Vec<String>, window: &mut Window, cx: &mut App)
     -> impl Future<Output = DeleteChoice> + use<>
 {

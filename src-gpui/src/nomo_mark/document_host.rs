@@ -64,6 +64,7 @@ pub struct DocumentHost {
     queries: workspace_queries::Queries,
     control: Entity<NomoMark>,
     message: String,
+    edit_failure_details_expanded: bool,
     hidden: bool,
     close_prompt: bool,
     saving: bool,
@@ -140,6 +141,7 @@ impl DocumentHost {
             port,
             control: control.clone(),
             message: crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text("host.connected").into(),
+            edit_failure_details_expanded: false,
             hidden: false,
             close_prompt: false,
             saving: false,
@@ -381,7 +383,10 @@ impl DocumentHost {
             }
             ControlEvent::Failure(message) | ControlEvent::NeedsContext(message) => {
                 self.message = message.clone();
-                cx.emit(DocumentEvent::Failure(message.clone()));
+                // 正式页面的提交失败已有可展开横幅，避免 Toast 再次暴露原始错误。
+                if matches!(event, ControlEvent::NeedsContext(_)) || !self.embedded || self.control.read(cx).host.failure().is_none() {
+                    cx.emit(DocumentEvent::Failure(message.clone()));
+                }
             }
             ControlEvent::OpenLink(url) => {
                 use super::link_target::{self, LinkTarget};
@@ -514,7 +519,8 @@ impl DocumentHost {
         if self.close_prompt || self.saving || self.navigating || window.has_active_prompt() {
             return false;
         }
-        if let Err(error) = self.control.read(cx).prepare_unmount() {
+        let failed = self.has_failed_input(cx);
+        if let Err(error) = self.ready_for_close(failed, cx) {
             self.message = error.to_string();
             cx.notify();
             return false;
@@ -527,7 +533,7 @@ impl DocumentHost {
                 return false;
             }
         };
-        if !status.dirty {
+        if !status.dirty && !failed {
             match self.port.close(false) {
                 Ok(()) => {
                     let _ = self.control.update(cx, |view, cx| view.detach(false, cx));
@@ -543,7 +549,7 @@ impl DocumentHost {
         self.close_prompt = true;
         self.control
             .update(cx, |view, _| view.host.set_readonly(true));
-        let response = crate::ui::dialogs::confirm_save(self.title_message(), window, cx);
+        let response = crate::ui::dialogs::confirm_document_close(self.title_message(), failed, window, cx);
         cx.spawn_in(window, async move |this, cx| {
             let choice = response.await;
             let _ = this.update_in(cx, |host, window, cx| {

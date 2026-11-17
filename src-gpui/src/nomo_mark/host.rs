@@ -133,6 +133,13 @@ impl WindowHostAdapter {
     ) -> Result<(), ControlError> {
         self.queue_template_edit(edits, after, history_group, None)
     }
+    fn validate_loaded_boundary(&self, at: u64) -> Result<(), ControlError> {
+        let base = self.parsed.identity.from_byte;
+        if at >= base && at - base <= self.parsed.source.len() as u64 {
+            local_range(&self.parsed.source, base, at..at)?;
+        }
+        Ok(())
+    }
     pub(crate) fn projected_window_bytes(&self, edits: &[SourceEdit]) -> Result<usize, ControlError> {
         let mut bytes = self.parsed.source.len() as i128;
         for edit in edits {
@@ -154,9 +161,16 @@ impl WindowHostAdapter {
         }
         if let Some(error) = &self.failure { return Err(ControlError::HostFailure(error.clone())); }
         if edits.is_empty() { return Ok(()); }
+        self.validate_loaded_boundary(self.selection.anchor_byte)?;
+        self.validate_loaded_boundary(self.selection.head_byte)?;
         for (index, edit) in edits.iter().enumerate() {
-            if edit.from_byte > edit.to_byte || (index > 0 && edit.from_byte < edits[index - 1].to_byte) {
+            if edit.from_byte > edit.to_byte || (index > 0
+                && (edit.from_byte < edits[index - 1].to_byte || edit.from_byte == edits[index - 1].from_byte)) {
                 return Err(ControlError::InvalidRange);
+            }
+            // 屏外端点仍由主会话校验；已加载的端点必须在入队前验证。
+            for at in [edit.from_byte, edit.to_byte] {
+                self.validate_loaded_boundary(at)?;
             }
         }
         self.serial += 1;
@@ -194,11 +208,14 @@ impl WindowHostAdapter {
         }
         let base = self.parsed.identity.from_byte;
         let source = &self.parsed.source;
+        self.validate_loaded_boundary(self.selection.anchor_byte)?;
+        self.validate_loaded_boundary(self.selection.head_byte)?;
         let mut last_end = 0;
         let mut ranges = Vec::new();
         for edit in &edits {
             let range = local_range(source, base, edit.from_byte..edit.to_byte)?;
-            if !ranges.is_empty() && range.start < last_end {
+            if !ranges.is_empty() && (range.start < last_end
+                || ranges.last().is_some_and(|previous: &std::ops::Range<usize>| previous.start == range.start)) {
                 return Err(ControlError::InvalidRange);
             }
             last_end = range.end;

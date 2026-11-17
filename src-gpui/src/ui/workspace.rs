@@ -1065,7 +1065,7 @@ impl Workspace {
         if !self.leave_mini(window,cx) {return;}
         if !document.read(cx).is_dirty(cx) {self.remove_tab(&document,false,window,cx);return;}
         self.close_prompt=true;
-        let response=dialogs::confirm_save(document.read(cx).title_message(),window,cx);
+        let response=dialogs::confirm_document_close(document.read(cx).title_message(),document.read(cx).has_failed_input(cx),window,cx);
         cx.spawn_in(window,async move |this,cx| {
             let choice=response.await;
             let _=this.update_in(cx,|workspace,window,cx| {
@@ -1109,6 +1109,9 @@ impl Workspace {
     }
     fn after_tabs_removed(&mut self,window:&mut Window,cx:&mut Context<Self>) {
         if self.tabs.is_empty() {
+            // 文档已全部关闭，不把历史提示带到空页面；新产生的待显示错误仍由 render 处理。
+            self.last_notice=None;
+            self.toast=None;
             self.sync_tree_selection(false,cx);
             self.toolbar_popup=None;
             self.tab_menu_open=false;
@@ -1191,14 +1194,13 @@ impl Workspace {
         }).detach();
     }
     fn request_manual_save(&mut self, document: &Entity<DocumentHost>, save_as: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_pair().is_some() {
-            let target = document.downgrade();
-            if !self.prepare_document_transition(document, false, window, cx, move |workspace, window, cx| {
-                if let Some(document) = target.upgrade().filter(|doc|workspace.tabs.iter().any(|tab|tab.document==*doc)) {
-                    workspace.save_document(&document,save_as,false,window,cx);
-                }
-            }) { return; }
-        }
+        // 单标签及 Mini 也必须收尾输入；重试成功仅确认事务，不代表交互保护已结束。
+        let target = document.downgrade();
+        if !self.prepare_document_transition(document, false, window, cx, move |workspace, window, cx| {
+            if let Some(document) = target.upgrade().filter(|doc|workspace.tabs.iter().any(|tab|tab.document==*doc)) {
+                workspace.save_document(&document,save_as,false,window,cx);
+            }
+        }) { return; }
         self.save_document(document,save_as,false,window,cx);
     }
     fn save_document(&mut self,document:&Entity<DocumentHost>,save_as:bool,close_after:bool,window:&mut Window,cx:&mut Context<Self>) {

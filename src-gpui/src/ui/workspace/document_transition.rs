@@ -22,6 +22,10 @@ impl Workspace {
         if self.pending_document_transition.take().is_some_and(|pending| pending.closing) && !closing {
             self.cancel_close(cx);
         }
+        // 失败事务无法通过收尾门禁，关闭须先进入明确的放弃确认；此处不清理任何输入。
+        if closing && document.read(cx).has_failed_input(cx) {
+            return true;
+        }
         #[cfg(target_os = "windows")]
         if document.read(cx).has_composition(cx) {
             if let Some(handle) = native_composition(window) {
@@ -68,7 +72,10 @@ impl Workspace {
                 false
             }
             Err(error) => {
-                self.failure_notice = Some(error.to_string().into());
+                // 提交失败由文档横幅说明；原始错误仅在用户展开详情后显示。
+                if !document.read(cx).has_failed_input(cx) {
+                    self.failure_notice = Some(error.to_string().into());
+                }
                 self.cancel_close(cx);
                 cx.notify();
                 false
@@ -93,7 +100,10 @@ impl Workspace {
             }
             Err(error) => {
                 self.pending_document_transition = None;
-                self.failure_notice = Some(error.to_string().into());
+                // 提交失败由文档横幅说明；原始错误仅在用户展开详情后显示。
+                if !document.read(cx).has_failed_input(cx) {
+                    self.failure_notice = Some(error.to_string().into());
+                }
                 self.cancel_close(cx);
                 cx.notify();
             }

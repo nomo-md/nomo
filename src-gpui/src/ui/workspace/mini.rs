@@ -259,8 +259,16 @@ impl Workspace {
 
     fn switch_mini_target(&mut self, target: MiniTarget, window: &mut Window, cx: &mut Context<Self>) {
         if window.has_active_prompt() || self.closing_window { return; }
-        if target == MiniTarget::Main && let Some(document) = self.document() && let Err(error) = document.read(cx).ready(cx) {
-            self.notice = Some(ToolbarLocale::current(cx).error(&error).into()); cx.notify(); return;
+        if target == MiniTarget::Main && self.document().is_some_and(|document| document.read(cx).has_failed_input(cx)) {
+            // 失败输入不能切换编辑模式；直接恢复窗框，保留当前控件以供取消或关闭确认。
+            self.leave_mini(window, cx);
+            return;
+        }
+        if target == MiniTarget::Main && let Some(document) = self.document() {
+            // 与关闭入口共用收尾和异步确认，避免重试后的输入保护让返回永久停在 Busy。
+            if !self.prepare_document_transition(&document, false, window, cx, |workspace, window, cx| {
+                workspace.switch_mini_target(MiniTarget::Main, window, cx);
+            }) { return; }
         }
         let Some(session) = &mut self.mini.session else { return; };
         match session.window.transition_to(target, !cx.global::<MotionPreference>().reduced, window) {
@@ -454,11 +462,14 @@ impl Workspace {
     pub(super) fn leave_mini(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(session) = self.mini.session.as_ref() else { return true; };
         let Some(document) = self.document() else { return false; };
-        let previous_mode = session.previous_mode;
+        let failed = document.read(cx).has_failed_input(cx);
+        let previous_mode = if failed { self.tabs[self.active].mode } else { session.previous_mode };
         let was_mini = session.paper_mini;
         if was_mini {
-            if let Err(error) = document.read(cx).ready(cx) { self.notice = Some(ToolbarLocale::current(cx).error(&error).into()); cx.notify(); return false; }
-            if let Err(error) = set_document_layout(&document, previous_mode, false, cx) {
+            if let Err(error) = document.read(cx).ready_for_close(failed, cx) { self.notice = Some(ToolbarLocale::current(cx).error(&error).into()); cx.notify(); return false; }
+            let layout = if failed { document.update(cx, |host, cx| host.set_mini_layout(false, cx)); Ok(()) }
+                else { set_document_layout(&document, previous_mode, false, cx) };
+            if let Err(error) = layout {
                 self.failure_notice = Some(ToolbarLocale::current(cx).error(&error).into()); cx.notify(); return false;
             }
         }
@@ -468,7 +479,8 @@ impl Workspace {
             Ok(restored) => restored,
             Err(error) => {
             window.bounds_changed(cx);
-            let rollback = if was_mini { set_document_layout(&document, previous_mode, true, cx) } else { Ok(()) };
+            let rollback = if was_mini && failed { document.update(cx, |host, cx| host.set_mini_layout(true, cx)); Ok(()) }
+                else if was_mini { set_document_layout(&document, previous_mode, true, cx) } else { Ok(()) };
             self.failure_notice = Some(match rollback { Ok(()) => error.render(ToolbarLocale::current(cx)), Err(restore) => ToolbarLocale::current(cx).app_format("mini.editorRollbackFailed", &[("error", &error.render(ToolbarLocale::current(cx))), ("restore", &ToolbarLocale::current(cx).error(&restore))]) }.into());
             cx.notify(); return false;
             }

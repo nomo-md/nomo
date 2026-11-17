@@ -98,7 +98,7 @@ impl Workspace {
                 return;
             }
             self.close_prompt = true;
-            let response = dialogs::confirm_save(doc.read(cx).title_message(), window, cx);
+            let response = dialogs::confirm_document_close(doc.read(cx).title_message(), doc.read(cx).has_failed_input(cx), window, cx);
             cx.spawn_in(window, async move |this, cx| {
                 let choice = response.await;
                 let _ = this.update_in(cx, |w, win, cx| {
@@ -140,7 +140,7 @@ impl Workspace {
             };
             let host = doc.read(cx);
             if host.status().revision != revision
-                || host.ready(cx).is_err()
+                || host.ready_for_close(discard, cx).is_err()
                 || (!discard && host.is_dirty(cx))
             {
                 self.failure_notice =

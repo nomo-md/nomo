@@ -36,7 +36,17 @@ pub fn local_range(
     if !text.is_char_boundary(range.start) || !text.is_char_boundary(range.end) {
         return Err(ControlError::InvalidUtf8Boundary);
     }
+    if !edit_boundary(text, range.start) || !edit_boundary(text, range.end) {
+        return Err(ControlError::InvalidRange);
+    }
     Ok(range)
+}
+
+/// 与文档会话一致：UTF-8 字符及 CRLF 都不能被事务端点切开。
+pub(super) fn edit_boundary(text: &str, at: usize) -> bool {
+    text.is_char_boundary(at)
+        && !(at > 0 && text.as_bytes().get(at - 1) == Some(&b'\r')
+            && text.as_bytes().get(at) == Some(&b'\n'))
 }
 
 /// 一个可见片段对应的真实源码区间。实体、转义、原子对象不是线性字节映射。

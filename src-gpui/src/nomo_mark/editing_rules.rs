@@ -270,7 +270,7 @@ pub(super) fn triple_selection(parsed: &ParsedWindow, at: usize) -> Range<usize>
         }
         return node.source.clone();
     }
-    commands::line_start(&parsed.source, at)..parsed.source[at..].find('\n').map_or(parsed.source.len(), |p| at + p)
+    commands::line_start(&parsed.source, at)..parsed.source[at..].find(['\r', '\n']).map_or(parsed.source.len(), |p| at + p)
 }
 
 pub(super) fn text_block_selection(

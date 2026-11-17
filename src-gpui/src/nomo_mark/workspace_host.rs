@@ -83,6 +83,7 @@ impl DocumentHost {
             retained_resources: Default::default(),
             control: control.clone(),
             message: String::new(),
+            edit_failure_details_expanded: false,
             hidden: false,
             close_prompt: false,
             saving: false,
@@ -179,10 +180,12 @@ impl DocumentHost {
         else { crate::ui::toolbar_i18n::UiMessage::raw(self.title()) }
     }
     pub(crate) fn is_dirty(&self, cx: &App) -> bool {
-        self.status().dirty || self.control.read(cx).host.pending_count() > 0
+        self.status().dirty || self.control.read(cx).host.pending_count() > 0 || self.has_failed_input(cx)
     }
     pub(crate) fn has_failed_input(&self, cx: &App) -> bool {
         self.control.read(cx).host.failure().is_some()
+            || self.panes.iter().flat_map(|pane| &pane.viewport.mounts)
+                .any(|mount| mount.view.read(cx).host.failure().is_some())
     }
     pub(crate) fn selection(&self, cx: &App) -> DocumentSelection {
         self.control.read(cx).host.selection
@@ -203,11 +206,18 @@ impl DocumentHost {
         .unwrap_or_default()
     }
     pub(crate) fn ready(&self, cx: &App) -> Result<(), ControlError> {
+        self.ready_for_close(false, cx)
+    }
+    pub(crate) fn ready_for_close(&self, discard: bool, cx: &App) -> Result<(), ControlError> {
         if self.closed || self.saving || self.navigating || self.close_prompt || self.deletion_pending {
             return Err(ControlError::Busy);
         }
-        for mount in self.panes.iter().flat_map(|pane|&pane.viewport.mounts) {
-            mount.view.read(cx).prepare_unmount()?;
+        for view in std::iter::once(&self.control).chain(self.panes.iter().flat_map(|pane| &pane.viewport.mounts).map(|mount| &mount.view)) {
+            let view = view.read(cx);
+            // 仅明确放弃时允许释放失败队列；保存、切换及正常待确认输入仍受原门禁保护。
+            if !(discard && view.host.failure().is_some()) {
+                view.prepare_unmount()?;
+            }
         }
         Ok(())
     }
@@ -324,7 +334,7 @@ impl DocumentHost {
     ) -> Result<(), ControlError> {
         self.quick.cancel();
         self.metadata.front_matter_entry = None;
-        self.ready(cx)?;
+        self.ready_for_close(discard, cx)?;
         self.pause_viewport(cx);
         self.request.cancel();
         self.cancel_toc();
@@ -574,40 +584,47 @@ impl Render for DocumentHost {
             window.focus(&self.control.focus_handle(cx), cx);
         }
         let animate_theme = Theme::ui_transition_active(cx);
-        let failure = self.control.read(cx).host.failure().map(str::to_string);
-        let error_bar = failure.map(|failure| {
+        let failed = self.control.read(cx).host.failure().is_some();
+        if !failed { self.edit_failure_details_expanded = false; }
+        let error_bar = failed.then(|| {
             let theme = Theme::ui(cx);
+            let locale = ToolbarLocale::current(cx);
+            // 只在展开时准备错误文本；操作区始终置于有高度限制的详情区之前。
+            let details = self.edit_failure_details_expanded.then(|| {
+                self.control.read(cx).host.failure().unwrap_or_default().to_owned()
+            });
             div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .px_4()
-                .py_2()
-                .border_b_1()
-                .border_color(theme.border)
-                .child(
-                    div()
-                        .flex_1()
-                        .text_color(theme.fg)
-                        .child(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_format("host.editPending", &[("error", &failure)])),
-                )
-                .child(
-                    crate::ui::components::button(
-                        "retry-document-edit",
-                        crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text("host.retryEdit"),
-                        None,
-                        crate::ui::components::ButtonKind::Secondary,
-                        &theme,
-                    )
-                    .on_click(cx.listener(|host, _, _, cx| {
+                .w_full().min_w_0().flex_none()
+                .flex().flex_col().items_start().gap_2()
+                .px_4().py_2().border_b_1().border_color(theme.border)
+                .child(div().w_full().min_w_0().whitespace_normal().text_color(theme.fg)
+                    .child(locale.app_text("host.editPending")))
+                .child(div().w_full().min_w_0().flex().flex_wrap().gap_2()
+                    .child(crate::ui::components::button(
+                        "retry-document-edit", locale.app_text("host.retryEdit"), None,
+                        crate::ui::components::ButtonKind::Secondary, &theme,
+                    ).flex_none().on_click(cx.listener(|host, _, _, cx| {
+                        host.edit_failure_details_expanded = false;
                         if let Err(error) = host.control.update(cx, |view, cx| view.retry(cx)) {
                             host.report(error, cx);
                         }
-                    })),
-                )
+                        cx.notify();
+                    })))
+                    .child(crate::ui::components::button(
+                        "document-edit-details",
+                        locale.app_text(if self.edit_failure_details_expanded { "host.hideEditDetails" } else { "host.showEditDetails" }),
+                        None, crate::ui::components::ButtonKind::Ghost, &theme,
+                    ).flex_none().on_click(cx.listener(|host, _, _, cx| {
+                        host.edit_failure_details_expanded = !host.edit_failure_details_expanded;
+                        cx.notify();
+                    }))))
+                .children(details.map(|details| div().id("document-edit-error-details")
+                    .w_full().min_w_0().max_h((window.viewport_size().height * 0.25).min(px(120.0)))
+                    .overflow_y_scroll().text_size(px(12.0)).text_color(theme.muted)
+                    .child(div().w_full().min_w_0().whitespace_normal().child(details))))
         });
         let overlay=self.quick_insert_overlay(cx);
-        div().size_full().relative().flex().flex_col().bg(Theme::ui(cx).surface)
+        div().size_full().min_w_0().relative().flex().flex_col().bg(Theme::ui(cx).surface)
             .children(animate_theme.then(crate::ui::motion::theme_frame))
             .children(error_bar).child(self.render_panes(window,cx)).children(overlay).into_any_element()
     }
