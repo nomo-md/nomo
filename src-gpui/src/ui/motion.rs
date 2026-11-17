@@ -1,5 +1,5 @@
 //! 外壳动效共用的系统偏好与短时插值，不持有文档或视图。
-use gpui::{Div, Global, Hsla, Rgba, Styled, px};
+use gpui::{Div, Global, Hsla, ParentElement, Rgba, Styled, div, px};
 use std::time::{Duration, Instant};
 
 /// 拖拽和纸片保留速度，只改变目标；四个子步限制掉帧后的积分误差。
@@ -41,7 +41,7 @@ impl<const N: usize> Spring<N> {
     }
 }
 
-/// 两页侧栏共用布局占位和视觉位移。宽度一次到位，正文与侧栏共享视觉进度。
+/// 两页侧栏使用相同的裁剪几何。回弹只移动栏内内容，避免网格跨过已到达的宽度阈值。
 #[derive(Clone, Copy, Default)]
 pub(super) struct SidebarFrame {
     pub full_width: f32,
@@ -51,52 +51,13 @@ pub(super) struct SidebarFrame {
 
 impl SidebarFrame {
     pub fn occupied_width(self) -> f32 {
-        if self.target_visible { self.full_width } else { 0.0 }
+        self.full_width * self.progress.clamp(0.0, 1.0)
     }
 
-    pub fn should_render(self) -> bool {
-        self.target_visible || self.progress > 0.0
-    }
-
-    fn visual_offset(self) -> f32 {
-        self.full_width * (self.progress.clamp(0.0, 1.0) - 1.0)
-    }
-
-    pub fn content_offset(self) -> f32 {
-        let target = if self.target_visible { 1.0 } else { 0.0 };
-        self.full_width * (self.progress.clamp(0.0, 1.0) - target)
-    }
-
-    pub fn overlay(self, panel: Div) -> Div {
-        panel.absolute().top_0().bottom_0().left(px(self.visual_offset()))
-            .w(px(self.full_width))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::SidebarFrame;
-
-    #[test]
-    fn sidebar_and_content_share_visual_boundary() {
-        let opening = SidebarFrame { full_width: 240.0, progress: 0.25, target_visible: true };
-        assert_eq!(opening.occupied_width(), 240.0);
-        assert_eq!(opening.visual_offset(), -180.0);
-        assert_eq!(opening.content_offset(), -180.0);
-        assert_eq!(opening.visual_offset() + opening.full_width, opening.occupied_width() + opening.content_offset());
-        assert!(opening.should_render());
-
-        let closing = SidebarFrame { full_width: 240.0, progress: 0.75, target_visible: false };
-        assert_eq!(closing.occupied_width(), 0.0);
-        assert_eq!(closing.visual_offset(), -60.0);
-        assert_eq!(closing.content_offset(), 180.0);
-        assert_eq!(closing.visual_offset() + closing.full_width, closing.occupied_width() + closing.content_offset());
-        assert!(closing.should_render());
-
-        let hidden = SidebarFrame { full_width: 240.0, progress: 0.0, target_visible: false };
-        assert_eq!(hidden.occupied_width(), 0.0);
-        assert_eq!(hidden.content_offset(), 0.0);
-        assert!(!hidden.should_render());
+    pub fn clip(self, panel: Div) -> Div {
+        div().relative().w(px(self.occupied_width())).h_full().flex_none().overflow_hidden()
+            .child(panel.absolute().top_0().left(px(self.full_width * (self.progress - 1.0)))
+                .w(px(self.full_width)).h_full())
     }
 }
 

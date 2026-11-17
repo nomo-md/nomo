@@ -244,7 +244,7 @@ pub struct Workspace {
     focus: FocusHandle,
     home_visible: bool,
     rendered_home_visible: bool,
-    sidebar_motion: Option<(motion::Spring<1>, Instant, f32)>,
+    sidebar_motion: Option<(motion::Spring<1>, Instant)>,
     page_title_started: Option<Instant>,
     link_modifier: bool,
     home: Entity<Home>,
@@ -1802,24 +1802,19 @@ impl Workspace {
     fn sidebar_frame(&mut self, visible: bool, full_width: f32, window: &Window) -> motion::SidebarFrame {
         let now = Instant::now();
         let target = if visible { 1.0 } else { 0.0 };
-        let (spring, last, motion_width) = self.sidebar_motion.get_or_insert_with(|| {
-            (motion::Spring::new([target], 420.0, 31.0), now, full_width)
+        let (spring, last) = self.sidebar_motion.get_or_insert_with(|| {
+            (motion::Spring::new([target], 420.0, 31.0), now)
         });
         let elapsed = now.saturating_duration_since(std::mem::replace(last, now));
-        let width_changed = (*motion_width - full_width).abs() >= 0.5;
-        *motion_width = full_width;
-        if width_changed {
-            // 窗口或分隔线拖动优先于开合动画，直接按新的用户宽度进入最终布局。
-            spring.target = [target];
-            spring.snap();
-        } else if spring.target != [target] {
+        let reduced = self.explorer.reduce_motion;
+        if spring.target != [target] {
             // 以最后绘制的位置反向，取消旧方向的速度和剩余进度。
             spring.target = [target];
             spring.v = [0.0];
-        } else if !self.explorer.reduce_motion && spring.running() {
+        } else if !reduced && spring.running() {
             spring.step(elapsed.as_secs_f32());
         }
-        if self.explorer.reduce_motion || (!visible && spring.p[0] <= 0.0) {
+        if reduced || (!visible && spring.p[0] <= 0.0) {
             spring.snap();
         }
         if spring.running() {
@@ -2087,13 +2082,6 @@ impl Render for Workspace {
         } else {
             self.render_workspace_sidebar(sidebar_frame, &theme, window, cx)
         };
-        let (sidebar_layout, sidebar_overlay) = if mini_frame.is_some() {
-            (sidebar, None)
-        } else {
-            let spacer = (sidebar_frame.occupied_width() > 0.0)
-                .then(|| div().w(px(sidebar_frame.occupied_width())).h_full().flex_none().into_any_element());
-            (spacer, sidebar)
-        };
         let main: AnyElement = if self.home_visible {
             let count = self.tabs.len();
             let offer_restore = count==0 && self.has_saved_layout(cx);
@@ -2307,15 +2295,13 @@ impl Render for Workspace {
             .child(
                 if self.home_visible { main } else {
                 div()
-                    .relative()
                     .flex_1()
                     .min_h(px(0.0))
                     .flex()
-                    .children(sidebar_layout)
+                    .children(sidebar)
                     .child(
                         div()
                             .relative()
-                            .left(px(sidebar_frame.content_offset()))
                             .flex_1()
                             .min_w(px(0.0))
                             .min_h(px(0.0))
@@ -2336,9 +2322,7 @@ impl Render for Workspace {
                             )
                             .when(shell_visible, |el| el.child(mini::surface_layer(self.surface.outline(theme), shell_visibility)))
                             .children(status),
-                    )
-                    .children(sidebar_overlay)
-                    .into_any_element()
+                    ).into_any_element()
                 },
             )
             // 帧采样终点：作为根节点最后一个子元素在常规绘制末尾执行（延迟弹层除外）。
