@@ -157,7 +157,7 @@ bash scripts/package-linux.sh
 
 同仓库分支的 PR 在创建、重新打开或有新提交时，由 `pr-preview.yml` 构建六类资产，并用 `pre-<源分支名>` 标签创建或更新 Pre-release；同名预览始终对应该 PR 的最新成功构建。Fork PR 只执行构建和测试，不发布 Release。预览标签不匹配 `v*.*.*`，不会触发正式发布流程。
 
-PR 合并到 `master` 后，`pr-merged.yml` 检查根 Cargo 版本：版本标签已存在时只清理预览；存在新的稳定 `major.minor.patch` 版本且发布说明齐全时，在合并提交上推送对应版本标签，由 `release.yml` 正式发布。正式发布成功后清理该 PR 的预览 Release、预览标签及预览工作流构建产物；正式发布未完成时保留预览。未合并直接关闭的同仓库 PR 也会立即清理自己的预览，但不触发正式发布；其他 PR 的预览不受影响。清理脚本为 `scripts/cleanup-pr-preview.sh`。
+同仓库 PR 合并或未合并关闭后，`pr-merged.yml` 都会调用 `scripts/cleanup-pr-preview.sh`，清理自己的预览 Release、预览标签及预览工作流构建产物；其他 PR 的预览不受影响。PR 合并不创建正式版本标签，也不触发正式发布。正式发布只能由用户推送匹配 Cargo 版本且发布说明齐全的 `v*.*.*` 标签启动。
 
 发布说明位于 `.github/release-notes/vVERSION.md`，GitHub Release 保留完整正文。应用的更新详情和更新成功弹窗优先显示 `<!-- nomo-update-summary:start -->` 与 `<!-- nomo-update-summary:end -->` 之间的简短 Markdown 总结，并附上该 Release 的完整发布日志链接；角落通知取总结中的首条列表项。没有摘要标记的旧版本仍显示安装包标题之前的内容。
 
