@@ -37,10 +37,10 @@ impl Workspace {
                     .opacity(mini_frame.visibility).child(sidebar))
                 .child(div().absolute().inset_0().occlude()).into_any_element());
         }
-        if frame.occupied_width() <= 0.0 { return None; }
+        if !frame.should_render() { return None; }
         if self.explorer.drag.running() { window.request_animation_frame(); }
         let sidebar = self.render_navigation_sidebar(frame.full_width, theme, window, cx);
-        Some(frame.clip(sidebar).into_any_element())
+        Some(frame.overlay(sidebar).into_any_element())
     }
 
     pub(super) fn render_explorer_tree(&mut self, width: f32, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {

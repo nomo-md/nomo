@@ -97,8 +97,8 @@ impl GridLayout {
         let columns_with_sidebar = columns_that_fit(width_with_sidebar, MIN_CARD_WIDTH);
         let card_width = ((width_with_sidebar - (columns_with_sidebar - 1) as f32 * GRID_GAP)
             / columns_with_sidebar as f32).min(300.0);
-        // 展开前先腾出位置。完全收起后才用新空间增加整列。
-        let columns = if sidebar.target_visible || sidebar.progress > 0.0 {
+        // 网格只按目标状态重排一次，后续帧由外壳位移保持空间连续。
+        let columns = if sidebar.target_visible {
             columns_with_sidebar
         } else {
             columns_that_fit(available, card_width).max(columns_with_sidebar)
@@ -483,15 +483,16 @@ impl Render for Home {
         let count = layout.len(grid.len());
         let rows = count.div_ceil(columns);
         let reflow = self.update_grid_layout(grid_layout, rows, row_height);
-        let sidebar = (sidebar_width > 0.0).then(|| {
+        let sidebar = self.sidebar_frame.should_render().then(|| {
             let mut sidebar_theme = theme.clone();
             sidebar_theme.hover = gpui::rgba(0x80808014).into();
             let list = self.sidebar(self.sidebar_frame.full_width - 16.0, &sidebar_theme, cx);
             let panel = div().flex().flex_col()
                 .child(div().id("home-sidebar-list-region").w_full().flex_1().min_h(px(0.0)).px(px(8.0)).pt(px(6.0)).pb(px(10.0))
                     .overflow_hidden().child(list));
-            self.sidebar_frame.clip(panel)
+            self.sidebar_frame.overlay(panel)
         });
+        let sidebar_spacer = (sidebar_width > 0.0).then(|| div().w(px(sidebar_width)).h_full().flex_none());
         let library = self.library.read(cx);
         let error = self.browser.error.as_ref().or(library.error.as_ref()).map(|message| message.render(ToolbarLocale::current(cx)));
         let loading = !library.loaded;
@@ -588,14 +589,15 @@ impl Render for Home {
                     }
                 })).into_any_element()
         };
-        div().id("document-home").track_focus(&self.focus).w_full().flex_1().min_h(px(0.0)).flex().bg(theme.rail_bg)
+        div().id("document-home").track_focus(&self.focus).relative().w_full().flex_1().min_h(px(0.0)).flex().bg(theme.rail_bg)
             .on_key_down(cx.listener(|home, event: &gpui::KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" && cx.has_active_drag() {
                     home.release_drag(cx); cx.stop_active_drag(window); cx.notify();
                 }
             }))
-            .children(sidebar)
-            .child(div().relative().flex_1().min_w(px(0.0)).min_h(px(0.0)).h_full().flex().flex_col()
+            .children(sidebar_spacer)
+            .child(div().relative().left(px(self.sidebar_frame.content_offset()))
+                .flex_1().min_w(px(0.0)).min_h(px(0.0)).h_full().flex().flex_col()
                 .child(div().flex_1().min_w(px(0.0)).min_h(px(0.0)).bg(theme.surface).overflow_hidden()
                     .rounded_tl(px(12.0)).border_t_1().border_l_1().border_color(theme.workspace_edge)
                     .px(px(content_padding)).pt(px(14.0)).flex().flex_col().gap(px(12.0))
@@ -622,6 +624,7 @@ impl Render for Home {
                                 .on_click(cx.listener(|_, _, _, cx| cx.emit(HomeEvent::NewFile))))))
                     .children(error.map(|error| div().text_size(px(12.0)).text_color(theme.danger).child(error)))
                     .child(div().flex_1().min_h(px(0.0)).overflow_hidden().child(content))))
+            .children(sidebar)
     }
 }
 
