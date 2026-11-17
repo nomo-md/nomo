@@ -1,4 +1,5 @@
 name: PR preview packages
+run-name: "PR preview packages #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
 
 on:
   pull_request:
