@@ -32,7 +32,7 @@ else
   echo "Preview tag $preview_tag does not exist; skipping."
 fi
 
-if ! run_ids="$(gh api --paginate "repos/$GH_REPO/actions/runs" \
+if ! run_ids="$(gh api --method GET --paginate "repos/$GH_REPO/actions/runs" \
   -f event=pull_request -f branch="$head_ref" -f per_page=100 \
   --jq '.workflow_runs[] | select(.path == ".github/workflows/pr-preview.yml") | .id')"; then
   echo "::error::Failed to list preview runs for branch $head_ref."
@@ -40,7 +40,7 @@ if ! run_ids="$(gh api --paginate "repos/$GH_REPO/actions/runs" \
 fi
 for run_id in $run_ids; do
   echo "Cleaning artifacts from preview run $run_id."
-  if ! artifact_ids="$(gh api --paginate "repos/$GH_REPO/actions/runs/$run_id/artifacts" \
+  if ! artifact_ids="$(gh api --method GET --paginate "repos/$GH_REPO/actions/runs/$run_id/artifacts" \
     -f per_page=100 --jq '.artifacts[].id')"; then
     if ! gh api "repos/$GH_REPO/actions/runs/$run_id" >/dev/null 2>&1; then
       echo "Preview run $run_id no longer exists; skipping its artifacts."
