@@ -2358,6 +2358,19 @@ impl NomoMark {
             .map(|range| utf16_to_utf8(source, range.start)..utf16_to_utf8(source, range.end))
             .or(self.host.interaction.marked.clone())
             .unwrap_or(selected_range);
+        if text == "`" && !mark && !self.keyboard_protected() && !self.auxiliary_input
+            && self.effective_mode() == ViewMode::Semantic && range.is_empty()
+            && self.host.selection == DocumentSelection::caret(base + range.start as u64)
+            && let Some(result) = super::code_blocks::complete_opening(
+                &self.host.parsed, range.start, &cx.global::<Settings>().default_code_language,
+            )
+        {
+            self.dismiss_quick_insert(cx);
+            self.history_serial += 1;
+            let group = format!("{}:code-block:{}", self.host.parsed.identity.window_id, self.history_serial);
+            if let Err(error) = self.queue_result(result, &group, cx) { self.error(error, cx); }
+            return;
+        }
         #[cfg(target_os = "macos")]
         let initial_ime_caret = if mark && !self.host.interaction.composing && !text.is_empty() {
             self.document_caret_bounds(base + range.start as u64)

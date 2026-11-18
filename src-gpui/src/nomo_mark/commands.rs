@@ -938,6 +938,14 @@ fn insert_details(parsed: &ParsedWindow, range: Range<usize>) -> Result<EditResu
     Ok(EditResult { edits: vec![SourceEdit { from_byte: parsed.identity.from_byte + range.start as u64, to_byte: parsed.identity.from_byte + range.end as u64, inserted_text: inserted }], selection: DocumentSelection::caret(caret), template_update: None })
 }
 
+pub(super) fn fence_language(language: &str) -> &str {
+    if language.len() <= 32 && language.bytes().all(|b| b.is_ascii_alphanumeric() || b"_+#.-".contains(&b)) {
+        language
+    } else {
+        ""
+    }
+}
+
 /// 保留选区原文和方向，围栏长度根据正文计算，避免内容中的反引号提前结束代码块。
 fn insert_wrapped_block(
     parsed: &ParsedWindow,
@@ -990,7 +998,7 @@ fn insert_wrapped_block(
     let (opening, closing) = if let Some(language) = language {
         let ticks = body.split(|ch| ch != '`').map(str::len).max().unwrap_or(0).saturating_add(1).max(3);
         let fence = "`".repeat(ticks);
-        let language = if language.len() <= 32 && language.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_+#.-".contains(&byte)) { language } else { "" };
+        let language = fence_language(language);
         (format!("{fence}{language}{eol}"), fence)
     } else {
         (format!("$${eol}"), "$$".to_string())

@@ -316,16 +316,15 @@ impl DocumentHost {
                 }
             }
             ControlEvent::SelectAll => {
-                let length=self.control.read(cx).host.projected_document_length(self.total_bytes);
-                    self.control.update(cx, |view, cx| {
-                        view.select(
-                            DocumentSelection {
-                                anchor_byte: 0,
-                                head_byte: length,
-                            },
-                            cx,
-                        )
-                    });
+                self.control.update(cx, |view, cx| {
+                    let body = if view.effective_mode() == ViewMode::Semantic {
+                        super::code_blocks::body_selection(&view.host.parsed, view.host.selection)
+                    } else { None };
+                    view.select(body.unwrap_or_else(|| DocumentSelection {
+                        anchor_byte: 0,
+                        head_byte: view.host.projected_document_length(self.total_bytes),
+                    }), cx);
+                });
             }
             ControlEvent::EmojiCatalogRequested { identity } => {
                 if self.control.read(cx).host.parsed.identity.document_id != identity.document_id {

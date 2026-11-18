@@ -107,6 +107,68 @@ pub(super) fn input_prefix<'a>(parsed: &'a ParsedWindow, range: &Range<usize>) -
         .map_or("", |code| &parsed.source[code.container])
 }
 
+pub(super) fn body_selection(parsed: &ParsedWindow, selection: DocumentSelection) -> Option<DocumentSelection> {
+    use pulldown_cmark::{CodeBlockKind, Event, Tag};
+    let base = parsed.identity.from_byte;
+    let range = local_range(&parsed.source, base, selection.range()).ok()?;
+    let body = if let Some((_, span)) = parsed.events.iter().find(|(event, span)|
+        matches!(event, Event::Start(Tag::CodeBlock(CodeBlockKind::Indented)))
+            && span.start <= range.start && range.end <= span.end)
+    {
+        // 缩进代码的事件从首行正文开始，末行的换行属于块与后文之间的分隔。
+        let raw = &parsed.source[span.clone()];
+        let text = raw.strip_suffix("\r\n").or_else(|| raw.strip_suffix('\n')).unwrap_or(raw);
+        span.start..span.start + text.len()
+    } else {
+        let code = FencedCode::at(parsed, range.start)?;
+        if !code.contains(&range) { return None; }
+        code.body
+    };
+    (range.end <= body.end).then(|| DocumentSelection {
+        anchor_byte: base + body.start as u64,
+        head_byte: base + body.end as u64,
+    })
+}
+
+/// 普通文本行开头的第三个反引号建块。保留已有的两字符与后续原文，只插入缺少的部分。
+pub(super) fn complete_opening(parsed: &ParsedWindow, at: usize, language: &str) -> Option<EditResult> {
+    let source = &parsed.source;
+    let start = at.checked_sub(2)?;
+    if source.get(start..at) != Some("``") { return None; }
+    let prefix = &source[commands::line_start(source, start)..start];
+    let mut rest = prefix;
+    while let Some(length) = commands::structural_prefix_len(rest) {
+        rest = &rest[length..];
+    }
+    if !rest.bytes().all(|b| b == b' ') || prefix.contains('[') { return None; }
+    if rest.len() > 3 && !parsed.nodes.iter().any(|node| node.kind == "item" && node.source.contains(&start)) {
+        return None;
+    }
+    // 围栏、表格、HTML、公式及行内代码中的反引号属于其内容。
+    if parsed.nodes.iter().any(|node| node.source.contains(&start)
+        && !matches!(node.kind, "paragraph" | "quote" | "list" | "item"))
+        || !parsed.events.iter().any(|(event, span)| matches!(event, pulldown_cmark::Event::Text(_))
+            && span.start <= start && at <= span.end)
+    { return None; }
+
+    let continuation: String = prefix.chars().map(|ch| if ch == '>' || ch.is_whitespace() { ch } else { ' ' }).collect();
+    let eol = commands::line_ending(source, at);
+    let language = commands::fence_language(language);
+    let opening = format!("`{language}{eol}{continuation}");
+    let position = parsed.identity.from_byte + at as u64;
+    let caret = position + opening.len() as u64;
+    let mut inserted_text = format!("{opening}{eol}{continuation}```");
+    if !source[at..].is_empty() && !source[at..].starts_with(['\r', '\n']) {
+        inserted_text.push_str(eol);
+        inserted_text.push_str(&continuation);
+    }
+    Some(EditResult {
+        edits: vec![SourceEdit { from_byte: position, to_byte: position, inserted_text }],
+        selection: DocumentSelection::caret(caret),
+        template_update: None,
+    })
+}
+
 /// 输入和键盘命令共用围栏保护；仅扫描本次变化的行，不复制整块正文。
 /// 返回开围栏增长的字节数，供 IME 同步标记区间。
 pub(super) fn protect_input(parsed: &ParsedWindow, result: &mut EditResult) -> usize {

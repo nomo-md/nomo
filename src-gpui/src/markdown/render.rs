@@ -951,8 +951,12 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                     while let Some((event, inner)) = events.next() {
                         match event {
                             Event::Text(chunk) => {
-                                text_start.get_or_insert(inner.start);
-                                for segment in crate::nomo_mark::mapping::text_segments(&chunk,&source[inner.clone()],inner.start) {
+                                // 解析器可能把 CRLF 的 LF 单独发为文本事件，空代码行的落点应在 CR 前。
+                                let start = if chunk.starts_with('\n') && source[..inner.start].ends_with('\r') {
+                                    inner.start - 1
+                                } else { inner.start };
+                                text_start.get_or_insert(start);
+                                for segment in crate::nomo_mark::mapping::text_segments(&chunk, &source[start..inner.end], start) {
                                     text_map.push(MapSeg{text:text.len()+segment.display.start..text.len()+segment.display.end,source:segment.source.start,source_end:segment.source.end,exact:segment.exact});
                                 }
                                 text.push_str(&chunk);
