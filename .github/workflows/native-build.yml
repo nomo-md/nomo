@@ -53,7 +53,7 @@ jobs:
             libwayland-dev libxcb1-dev libxcb-xkb-dev libxcb-randr0-dev \
             libxcb-xinput-dev libxcb-cursor-dev libvulkan-dev libegl1-mesa-dev \
             libasound2-dev libudev-dev fonts-noto-cjk xdg-desktop-portal \
-            dpkg-dev rpm desktop-file-utils jq
+            dpkg-dev rpm desktop-file-utils jq binutils
       - name: Initialize Windows SDK and MSVC
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
@@ -115,9 +115,12 @@ jobs:
       - name: Package macOS (rebuild default features)
         if: runner.os == 'macOS' && inputs.packages
         run: bash scripts/package-macos.sh
-      - name: Package Linux (rebuild default features)
+      - name: Package Linux DEB (rebuild default features)
         if: runner.os == 'Linux' && inputs.packages
-        run: bash scripts/package-linux.sh
+        run: bash scripts/package-linux.sh deb
+      - name: Package Linux RPM (reuse default build)
+        if: runner.os == 'Linux' && inputs.packages
+        run: bash scripts/package-linux.sh rpm --skip-build
       - uses: actions/upload-artifact@v4
         if: inputs.packages
         with:
