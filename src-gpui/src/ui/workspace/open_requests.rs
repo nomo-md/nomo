@@ -12,6 +12,7 @@ pub(super) struct OpenRequest {
     pub choose_window: bool,
     pub newly_created: bool,
     pub document_only: bool,
+    pub favorite_folder: bool,
     pub generation: u64,
 }
 
@@ -31,6 +32,7 @@ pub(super) struct OpenRequests {
 
 impl Workspace {
     pub(super) fn next_open_intent(&mut self) -> u64 {
+        self.explorer.clear_folder_reveal();
         self.open_requests.generation = self.open_requests.generation.wrapping_add(1);
         self.open_requests.generation
     }

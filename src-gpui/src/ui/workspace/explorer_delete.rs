@@ -266,6 +266,13 @@ impl DeleteRequest {
 
         cx.update(|app| {
             if let Ok(report) = &result {
+                let library = crate::ui::home::library::shared(app);
+                library.update(app, |library, cx| {
+                    library.change(crate::ui::home::library::Change::RemoveDeletedFavorites {
+                        target: target.clone(),
+                        complete: report.failure.is_none(),
+                    }, cx);
+                });
                 for handle in workspaces(app) {
                     let _ = handle.update(app, |workspace, window, cx| {
                         workspace.apply_deleted_tabs(&target, report, window, cx);

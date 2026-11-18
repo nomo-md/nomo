@@ -1,7 +1,7 @@
 //! 主页只持久化目录入口、收藏、最近路径和可再生缩略图；不保存正文或编辑会话。
 use crate::ui::toolbar_i18n::UiMessage;
 use gpui::{App, AppContext, Context, Entity, Global, Task};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::{collections::VecDeque, path::{Path, PathBuf}, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
 #[path = "library_order.rs"]
 mod order;
@@ -22,18 +22,29 @@ pub(crate) struct Entry {
     pub revision: u64,
 }
 
+#[derive(Clone)]
+pub(crate) struct FavoriteEntry {
+    pub path: PathBuf,
+    pub directory: bool,
+    added: i64,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct Snapshot {
     pub folders: Vec<Entry>,
     pub recent: Vec<Entry>,
-    pub favorites: Vec<Entry>,
+    pub favorites: Vec<FavoriteEntry>,
     pub order: Arc<TreeOrder>,
     home_order_opened: Option<u64>,
 }
 
 impl Snapshot {
     pub(in crate::ui) fn is_favorite(&self, path: &Path) -> bool {
-        self.favorites.iter().any(|entry| entry.path == path)
+        self.favorites.iter().any(|entry| !entry.directory && entry.path == path)
+    }
+
+    pub(in crate::ui) fn is_folder_favorite(&self, path: &Path) -> bool {
+        self.favorites.iter().any(|entry| entry.directory && entry.path == path)
     }
 
     pub(super) fn home_entries(&self) -> Vec<(&Entry, bool)> {
@@ -54,11 +65,13 @@ pub(crate) enum Change {
     Opened(PathBuf),
     Saved(PathBuf),
     SetFavorite { path: PathBuf, favorite: bool },
+    SetFolderFavorite { path: PathBuf, favorite: bool },
     AddFolder(PathBuf),
     Remove { path: PathBuf, folder: bool },
     ClearRecent,
     ClearHome,
     Rename(Vec<(PathBuf, PathBuf)>),
+    RemoveDeletedFavorites { target: PathBuf, complete: bool },
     Place { placement: crate::ui::tree_drag::Placement, path: PathBuf },
 }
 
@@ -176,12 +189,29 @@ fn connect() -> Result<Connection, UiMessage> {
 fn initialize(connection: &Connection) -> Result<(), UiMessage> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS entries (path TEXT NOT NULL, folder INTEGER NOT NULL, opened INTEGER NOT NULL, PRIMARY KEY(path, folder));
-         CREATE TABLE IF NOT EXISTS favorites (path TEXT PRIMARY KEY, added INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS favorites (path TEXT PRIMARY KEY, added INTEGER NOT NULL, folder INTEGER NOT NULL DEFAULT 0);
          CREATE TABLE IF NOT EXISTS thumbnails (path TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, png BLOB NOT NULL, touched INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS tree_order (parent TEXT PRIMARY KEY, paths TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS home_order (id INTEGER PRIMARY KEY CHECK (id=1), opened INTEGER NOT NULL);"
     ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn upgrade_favorites(connection: &Connection) -> Result<(), UiMessage> {
+    let has_favorite_kind = |db: &Connection| -> Result<bool, UiMessage> {
+        db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('favorites') WHERE name='folder')", [], |row| row.get(0))
+            .map_err(|error| error.to_string().into())
+    };
+    if !has_favorite_kind(connection)? {
+        // 检查与升级共用写锁，旧库中的收藏默认仍为文档。
+        let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+        if !has_favorite_kind(&transaction)? {
+            transaction.execute("ALTER TABLE favorites ADD COLUMN folder INTEGER NOT NULL DEFAULT 0", [])
+                .map_err(|error| error.to_string())?;
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -194,12 +224,33 @@ fn read_entries(connection: &Connection, folder: bool) -> Result<Vec<Entry>, Str
     entries.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
-fn read_favorites(connection: &Connection) -> Result<Vec<Entry>, UiMessage> {
-    let mut query = connection.prepare("SELECT path, added FROM favorites ORDER BY added DESC, path LIMIT ?1").map_err(|e| e.to_string())?;
+fn read_favorites(connection: &Connection) -> Result<Vec<FavoriteEntry>, UiMessage> {
+    let mut query = connection.prepare("SELECT path, added, folder FROM favorites ORDER BY added DESC, path LIMIT ?1").map_err(|e| e.to_string())?;
     let entries = query.query_map([FAVORITE_LIMIT as i64], |row| {
-        Ok(Entry { path: PathBuf::from(row.get::<_, String>(0)?), opened: row.get::<_, i64>(1)?.max(0) as u64, revision: 0 })
+        Ok(FavoriteEntry { path: PathBuf::from(row.get::<_, String>(0)?), added: row.get(1)?, directory: row.get(2)? })
     }).map_err(|e| e.to_string())?;
     Ok(entries.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?)
+}
+
+fn set_favorite(connection: &Connection, path: &Path, folder: bool, favorite: bool) -> Result<(), UiMessage> {
+    let key = path_key_message(path)?;
+    if favorite {
+        let count: i64 = connection.query_row("SELECT count(*) FROM favorites WHERE path<>?1", [&key], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if count >= FAVORITE_LIMIT as i64 {
+            return Err(UiMessage::new("home.favoriteLimit").arg("count", FAVORITE_LIMIT));
+        }
+        // 一个路径只指向一种项目。显式收藏可替换外部文件变化留下的同路径旧类型。
+        connection.execute(
+            "INSERT INTO favorites(path,added,folder) VALUES (?1,?2,?3)
+             ON CONFLICT(path) DO UPDATE SET added=excluded.added,folder=excluded.folder WHERE folder<>excluded.folder",
+            params![key, now() as i64, folder],
+        ).map_err(|error| error.to_string())?;
+    } else {
+        connection.execute("DELETE FROM favorites WHERE path=?1 AND folder=?2", params![key, folder])
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn read_snapshot(connection: &Connection) -> Result<Snapshot, UiMessage> {
@@ -265,6 +316,7 @@ fn apply(change: Change) -> Result<(Snapshot, Option<UiMessage>), UiMessage> {
 }
 
 fn apply_with_connection(connection: &mut Connection, change: Change) -> Result<(Snapshot, Option<UiMessage>), UiMessage> {
+    upgrade_favorites(connection)?;
     let mut transaction = connection.transaction().map_err(|e| e.to_string())?;
     // 升级兼容失败只回滚导入，不阻止正常打开、保存或清除原生记录。
     let warning = if matches!(&change, Change::Refresh) {
@@ -290,16 +342,8 @@ fn apply_with_connection(connection: &mut Connection, change: Change) -> Result<
                 transaction.execute("DELETE FROM thumbnails WHERE path=?1", params![key]).map_err(|e| e.to_string())?;
                 transaction.execute("DELETE FROM entries WHERE folder=0 AND path NOT IN (SELECT path FROM entries WHERE folder=0 ORDER BY opened DESC,path LIMIT ?1)", params![RECENT_LIMIT as i64]).map_err(|e| e.to_string())?;
             },
-            Change::SetFavorite { path, favorite } => {
-                let key = path_key_message(&path)?;
-                if favorite {
-                    let count: i64 = transaction.query_row("SELECT count(*) FROM favorites WHERE path<>?1", params![key], |row| row.get(0)).map_err(|e| e.to_string())?;
-                    if count >= FAVORITE_LIMIT as i64 { return Err(UiMessage::new("home.favoriteLimit").arg("count", FAVORITE_LIMIT)); }
-                    transaction.execute("INSERT OR IGNORE INTO favorites(path,added) VALUES (?1,?2)", params![key, now() as i64]).map_err(|e| e.to_string())?;
-                } else {
-                    transaction.execute("DELETE FROM favorites WHERE path=?1", params![key]).map_err(|e| e.to_string())?;
-                }
-            },
+            Change::SetFavorite { path, favorite } => set_favorite(&transaction, &path, false, favorite)?,
+            Change::SetFolderFavorite { path, favorite } => set_favorite(&transaction, &path, true, favorite)?,
             Change::AddFolder(path) => {
                 let key = path_key_message(&path)?;
                 let count: i64 = transaction.query_row("SELECT count(*) FROM entries WHERE folder=1 AND path<>?1", params![key], |row| row.get(0)).map_err(|e| e.to_string())?;
@@ -340,15 +384,34 @@ fn apply_with_connection(connection: &mut Connection, change: Change) -> Result<
                         }
                     }
                 }
+                let mut moved_favorites = Vec::new();
                 for entry in read_favorites(&transaction)? {
                     if let Some(next) = paths.iter().find_map(|(old, new)| entry.path.strip_prefix(old).ok().map(|suffix| new.join(suffix))) {
-                        let old = path_key(&entry.path)?;
-                        let next = path_key(&next)?;
-                        transaction.execute("DELETE FROM favorites WHERE path=?1", params![old]).map_err(|e| e.to_string())?;
-                        transaction.execute("INSERT INTO favorites(path,added) VALUES (?1,?2) ON CONFLICT(path) DO UPDATE SET added=MAX(added,excluded.added)", params![next, entry.opened as i64]).map_err(|e| e.to_string())?;
+                        transaction.execute("DELETE FROM favorites WHERE path=?1", [path_key(&entry.path)?])
+                            .map_err(|error| error.to_string())?;
+                        moved_favorites.push((next, entry));
                     }
                 }
+                for (next, entry) in moved_favorites {
+                    transaction.execute(
+                        "INSERT INTO favorites(path,added,folder) VALUES (?1,?2,?3)
+                         ON CONFLICT(path) DO UPDATE SET
+                         added=CASE WHEN folder=excluded.folder THEN MAX(added,excluded.added) ELSE excluded.added END,
+                         folder=excluded.folder",
+                        params![path_key(&next)?, entry.added, entry.directory],
+                    ).map_err(|error| error.to_string())?;
+                }
             },
+            Change::RemoveDeletedFavorites { target, complete } => {
+                for entry in read_favorites(&transaction)? {
+                    if entry.path.starts_with(&target) && (complete || std::fs::symlink_metadata(&entry.path)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound))
+                    {
+                        transaction.execute("DELETE FROM favorites WHERE path=?1", [path_key(&entry.path)?])
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+            }
         }
         transaction.execute("DELETE FROM thumbnails WHERE path NOT IN (SELECT path FROM entries WHERE folder=0)", []).map_err(|e| e.to_string())?;
         Ok(())

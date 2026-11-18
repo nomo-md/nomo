@@ -337,6 +337,11 @@ impl Workspace {
                 if let Some(root) = root.filter(|root| workspace.tree.as_ref().is_none_or(|tree| &tree.root != root)) { workspace.replace_tree(root, cx); }
                 workspace.open_path(path, window, cx);
             },
+            HomeEvent::OpenFavoriteFolder(path) => workspace.open_batch([OpenRequest {
+                path: Some(path.clone()),
+                favorite_folder: true,
+                ..Default::default()
+            }], window, cx),
             HomeEvent::Restore => workspace.restore_last_layout(window,cx),
             HomeEvent::NewFile => workspace.new_file(window, cx),
             HomeEvent::OpenFile => workspace.prompt_open(false, window, cx),
@@ -624,7 +629,7 @@ impl Workspace {
         if metadata.is_some_and(|metadata| metadata.is_dir()) {
             self.cancel_preview_opens(None);
             let root=path.canonicalize().unwrap_or_else(|_|path.to_path_buf());
-            self.open_folder_workspace(root, window, cx);
+            self.open_folder_workspace(root, None, window, cx);
             return;
         }
         let path=path.canonicalize().unwrap_or_else(|_|path.to_path_buf());
@@ -1011,7 +1016,7 @@ impl Workspace {
         self.tab_menu_open=false;
         if let Some(position)=self.comparison.position(key) {self.tab_scroll.scroll_to_item(position);}
         self.record_layout(cx);
-        self.sync_tree_selection(!from_home,cx);
+        self.sync_tree_selection(!from_home && !self.explorer.has_folder_reveal(), cx);
         window.set_window_title(&format!("{} — Nomo",document.read(cx).display_title(cx)));
         if !window.has_active_prompt() { window.focus(&document.focus_handle(cx), cx); }
         self.last_notice=None;

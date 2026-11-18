@@ -2,14 +2,13 @@
 use super::*;
 
 const PRESS_DEPTH: f32 = 2.0;
-const HINT_DURATION: Duration = Duration::from_millis(160);
-const FAVORITE_DURATION: Duration = Duration::from_millis(360);
+const HOVER_IN: Duration = Duration::from_millis(160);
+const HOVER_OUT: Duration = Duration::from_millis(120);
 
 pub(crate) struct DocumentMotion {
     elevation: motion::Spring<1>,
     hint: motion::ScalarMotion,
     favorite: motion::Spring<1>,
-    favorite_started: Option<Instant>,
     last: Option<Instant>,
 }
 
@@ -18,8 +17,7 @@ impl Default for DocumentMotion {
         Self {
             elevation: motion::Spring::new([0.0], 800.0, 52.0),
             hint: motion::ScalarMotion::default(),
-            favorite: motion::Spring::new([1.0], 620.0, 22.0),
-            favorite_started: None,
+            favorite: motion::Spring::new([1.0], 620.0, 44.0),
             last: None,
         }
     }
@@ -36,21 +34,18 @@ impl DocumentMotion {
         }];
         if reduced {
             self.elevation.snap();
+            self.hint = motion::ScalarMotion::settled(hovered);
+        } else {
+            self.hint.set(hovered, false, if hovered { HOVER_IN } else { HOVER_OUT });
         }
-        self.hint.set(hovered, reduced, HINT_DURATION);
     }
 
-    pub(super) fn favorite(&mut self, active: bool, now: Instant, reduced: bool) {
+    pub(super) fn press_favorite(&mut self, now: Instant, reduced: bool) {
         self.advance(now, reduced);
-        if active && !reduced {
-            self.favorite.p = [0.65];
-            self.favorite.v = [1.8];
-            self.favorite_started = Some(now);
-        } else {
-            self.favorite_started = None;
+        if !reduced {
+            self.favorite.p = [0.9];
+            self.favorite.v = [0.0];
         }
-        self.favorite.target = [1.0];
-        if reduced { self.favorite.snap(); }
     }
 
     pub(crate) fn advance(&mut self, now: Instant, reduced: bool) {
@@ -59,29 +54,23 @@ impl DocumentMotion {
         if reduced {
             self.elevation.snap();
             self.favorite.snap();
-            self.favorite_started = None;
         } else {
             let dt = now.saturating_duration_since(last).as_secs_f32();
             if self.elevation.running() { self.elevation.step(dt); }
             if self.favorite.running() { self.favorite.step(dt); }
-            self.favorite_started = self.favorite_started.filter(|started| now.saturating_duration_since(*started) < FAVORITE_DURATION);
         }
-        self.hint.retime(reduced, HINT_DURATION);
     }
 
     pub(crate) fn running(&self) -> bool {
-        self.elevation.running() || self.hint.running() || self.favorite.running() || self.favorite_started.is_some()
+        self.elevation.running() || self.hint.running() || self.favorite.running()
     }
 
     pub(crate) fn values(&self) -> (f32, f32) {
         (self.elevation.p[0].clamp(0.0, 1.0), self.hint.value())
     }
 
-    pub(crate) fn favorite_values(&self, now: Instant) -> (f32, f32) {
-        let progress = self.favorite_started.map_or(1.0, |started| {
-            (now.saturating_duration_since(started).as_secs_f32() / FAVORITE_DURATION.as_secs_f32()).min(1.0)
-        });
-        (self.favorite.p[0].clamp(0.6, 1.3), progress)
+    pub(super) fn favorite_scale(&self) -> f32 {
+        self.favorite.p[0]
     }
 }
 
@@ -95,7 +84,6 @@ pub(crate) struct FavoriteVisual {
     pub active: bool,
     pub visible: bool,
     pub scale: f32,
-    pub burst: f32,
 }
 
 pub(crate) fn favorite_icon(favorite: FavoriteVisual, theme: &Theme) -> gpui::Div {
@@ -104,11 +92,6 @@ pub(crate) fn favorite_icon(favorite: FavoriteVisual, theme: &Theme) -> gpui::Di
         .with_transformation(gpui::Transformation::scale(gpui::size(favorite.scale, favorite.scale)));
     div().size(px(FAVORITE_SIZE)).flex().items_center().justify_center()
         .child(star)
-        .when(favorite.burst < 1.0, |element| element.child(
-            icon(IconName::StarBurst, FAVORITE_SIZE, theme.accent).absolute().inset_0()
-                .opacity((1.0 - favorite.burst) * 0.85)
-                .with_transformation(gpui::Transformation::scale(gpui::size(0.65 + favorite.burst * 0.75, 0.65 + favorite.burst * 0.75)))
-        ))
 }
 
 #[derive(Clone)]

@@ -1,8 +1,17 @@
 //! 主页分组入口、文件夹卡片和拖放反馈；文件夹点击直接打开工作区。
 use super::*;
 use crate::ui::components::{SIDEBAR_ROW_CONTENT_HEIGHT, SIDEBAR_ROW_HEIGHT, SIDEBAR_ROW_ICON_SIZE, sidebar_section_style};
+use library::FavoriteEntry;
 
 const REFLOW_ARRIVAL_DURATION: Duration = Duration::from_millis(150);
+
+fn favorite_base_name(entry: &FavoriteEntry) -> &std::ffi::OsStr {
+    if entry.directory {
+        entry.path.file_name().unwrap_or_else(|| entry.path.as_os_str())
+    } else {
+        document_file_name(&entry.path)
+    }
+}
 
 impl Home {
     pub(super) fn draggable(&self, element: gpui::Stateful<gpui::Div>, node: &Node, size: Option<(f32, f32)>, document: Option<document_card::DocumentCover>, row_width: f32, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
@@ -78,26 +87,36 @@ impl Home {
         row.into_any_element()
     }
 
-    fn favorite_row(&self, entry: &Entry, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn favorite_row(&self, entry: &FavoriteEntry, width: f32, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let path = entry.path.clone();
-        let open = path.clone();
         let remove_path = path.clone();
-        let title = document_name(&path);
+        let directory = entry.directory;
+        let title = if directory { entry_name(&path) } else { document_name(&path) };
+        let icon_name = if directory { IconName::Folder } else { IconName::FileText };
+        let open = if directory { HomeEvent::OpenFavoriteFolder(path.clone()) } else { HomeEvent::Open(path.clone()) };
+        let base_name = favorite_base_name(entry);
+        let duplicate = self.snapshot.favorites.iter().any(|other| other.path != path && favorite_base_name(other) == base_name);
+        let parent_hint = path.parent().filter(|_| duplicate).map(entry_name);
         sidebar_row().id((gpui::ElementId::Path(path.as_path().into()), "home-favorite-row")).group("home-favorite-row")
             .relative().px(px(12.0)).cursor_pointer().hover(|element| element.bg(theme.hover))
-            .text_color(theme.fg).tooltip(tooltip(title.clone()))
-            .child(icon(IconName::StarFilled, SIDEBAR_ROW_ICON_SIZE, theme.accent))
-            .child(div().flex_1().min_w(px(0.0)).truncate().child(title))
+            .text_color(theme.fg).tooltip(tooltip(path.display().to_string()))
+            .child(icon(icon_name, SIDEBAR_ROW_ICON_SIZE, theme.accent))
+            .child(div().flex_1().min_w(px(0.0)).flex().items_center().gap(px(6.0)).pr(px(16.0))
+                .child(div().min_w(px(0.0)).truncate().child(title))
+                .children(parent_hint.map(|parent| {
+                    div().flex_none().max_w(px(width * 0.35)).truncate()
+                        .text_size(px(11.0)).text_color(theme.muted).child(parent)
+                })))
             .child(small_icon_button((gpui::ElementId::Path(remove_path.as_path().into()), "home-unfavorite"), IconName::Close, false, theme)
                 .absolute().right(px(4.0)).top(px(3.0)).bg(theme.hover)
                 .invisible().group_hover("home-favorite-row", |element| element.visible())
-                .tooltip(tooltip(ToolbarLocale::current(cx).app_text("home.unfavorite")))
+                .tooltip(tooltip(ToolbarLocale::current(cx).app_text(if directory { "home.unfavoriteFolder" } else { "home.unfavorite" })))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |home, _, _, cx| {
                     cx.stop_propagation();
-                    home.library.update(cx, |library, cx| library.change(Change::SetFavorite { path: remove_path.clone(), favorite: false }, cx));
+                    home.set_favorite(remove_path.clone(), directory, false, cx);
                 })))
-            .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Open(open.clone()))))
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(open.clone())))
             .into_any_element()
     }
 
@@ -136,11 +155,20 @@ impl Home {
         fx.hover(state.hovered && self.dragging.is_none() && !reduced);
         let pose = fx.pose(self.grid_time, reduced);
         drop(fx);
+        let hovered = state.hovered;
         let height = card_height(width);
         let cover = self.folder_cover(node, cx);
         let placeholder = self.dragging.as_ref() == Some(&path) && !self.grid_drag.committing && !self.tree_drag.committing;
+        let favorite = self.card_favorite(&path, true);
+        let reveal = if favorite.active { 1.0 } else if reduced { f32::from(hovered) } else { pose.open.clamp(0.0, 1.0) };
+        let favorite_button = (!placeholder && (hovered || reveal > 0.0)).then(|| {
+            Self::favorite_button(hover_path.clone(), true, favorite, reveal, theme, cx)
+                .right(px(document_card::FAVORITE_RIGHT)).top(px(document_card::FAVORITE_TOP))
+                .into_any_element()
+        });
         let paper = div().absolute().left_0().top(px(CARD_LIFT))
-            .child(cover.render(width, height, pose, theme)).when(placeholder, |el| el.opacity(0.0));
+            .child(cover.render_with_favorite(width, height, pose, favorite_button, theme))
+            .when(placeholder, |el| el.opacity(0.0));
         let card = div().id((gpui::ElementId::Path(path.as_path().into()), "home-folder-card"))
             .relative().w(px(width)).h(px(height + CARD_LIFT)).flex_none().cursor_pointer()
             .tooltip(tooltip(cover.title)).when(placeholder, |el| el.bg(theme.hover).rounded(px(14.0))).child(paper)
@@ -235,32 +263,28 @@ impl Home {
         self.tree_drag.begin_frame(reduced_motion(cx));
         let layout = self.tree_drag.layout();
         let landing = self.tree_drag.landing_index();
-        let folders = self.tree_drag.folder_section_end().unwrap_or(0);
-        let favorite_block = if snapshot.favorites.is_empty() { 0 } else { snapshot.favorites.len() + 1 };
-        let favorite_heading = folders + 1;
-        let recent_heading = favorite_heading + favorite_block;
-        let count = layout.len(rows.len()) + 2 + favorite_block;
+        let (folder_heading, recent_heading) = self.tree_drag.home_section_headings().expect("home sections initialized");
+        let count = layout.len(rows.len()) + 2 + folder_heading;
         let scroll = f32::from(self.sidebar_scroll.0.borrow().base_handle.offset().y);
         let backdrop = self.tree_drag.backdrop(scroll, 0.0, theme);
         let feedback = self.tree_drag.feedback(scroll, 0.0, theme);
         let theme = theme.clone();
         let list = uniform_list("home-sidebar-tree", count, cx.processor(move |home, range: std::ops::Range<usize>, window, cx| {
             let items = range.map(|index| {
-                if index == 0 || index == recent_heading || (favorite_block > 0 && index == favorite_heading) {
-                    let heading = if index == 0 { "home.folders" } else if index == favorite_heading && favorite_block > 0 { "home.favoriteDocuments" } else { "home.recentDocuments" };
+                if index == folder_heading || index == recent_heading || index == 0 {
+                    let heading = if index == folder_heading { "home.folders" } else if index == recent_heading { "home.recentDocuments" } else { "home.favorites" };
                     let offset = if index == recent_heading { home.tree_drag.section_offset(index, reduced_motion(cx)) } else { 0.0 };
                     return div().w_full().h(px(SIDEBAR_ROW_HEIGHT)).child(sidebar_section_style(
                         div().relative().top(px(offset)).size_full().px(px(12.0)).flex().items_center().justify_between(), &theme)
                         .child(ToolbarLocale::current(cx).app_text(heading)))
                         .into_any_element();
                 }
-                if favorite_block > 0 && index > favorite_heading && index < recent_heading {
-                    let entry = &snapshot.favorites[index - favorite_heading - 1];
+                if index < folder_heading {
+                    let entry = &snapshot.favorites[index - 1];
                     return div().w_full().h(px(SIDEBAR_ROW_HEIGHT)).flex().items_center()
-                        .child(div().w_full().h(px(SIDEBAR_ROW_CONTENT_HEIGHT)).child(home.favorite_row(entry, &theme, cx))).into_any_element();
+                        .child(div().w_full().h(px(SIDEBAR_ROW_CONTENT_HEIGHT)).child(home.favorite_row(entry, width, &theme, cx))).into_any_element();
                 }
-                let logical = index - 1 - usize::from(index > recent_heading)
-                    - if index > recent_heading { favorite_block } else { 0 };
+                let logical = index - folder_heading - 1 - usize::from(index > recent_heading);
                 let Some(original) = layout.original(logical).or(landing) else { return home.tree_drag.gap_row(&theme); };
                 let node = &rows[original];
                 let row = home.tree_row(node, width, &theme, cx);

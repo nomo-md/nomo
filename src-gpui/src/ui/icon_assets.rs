@@ -105,7 +105,6 @@ pub fn icon_bytes(path: &str) -> Option<&'static [u8]> {
         "icons/zoom-out.svg" => Some(include_bytes!("../../assets/icons/zoom-out.svg")),
         "icons/star.svg" => Some(include_bytes!("../../assets/icons/star.svg")),
         "icons/star-filled.svg" => Some(include_bytes!("../../assets/icons/star-filled.svg")),
-        "icons/star-burst.svg" => Some(include_bytes!("../../assets/icons/star-burst.svg")),
         "icons/smile.svg" => Some(include_bytes!("../../assets/icons/smile.svg")),
         "icons/message-square.svg" => Some(include_bytes!("../../assets/icons/message-square.svg")),
         "icons/panel-top-close.svg" => Some(include_bytes!("../../assets/icons/panel-top-close.svg")),
@@ -253,5 +252,4 @@ pub const ICON_PATHS: &[&str] = &[
     "icons/zoom-out.svg",
     "icons/star.svg",
     "icons/star-filled.svg",
-    "icons/star-burst.svg",
 ];

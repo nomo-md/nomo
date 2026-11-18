@@ -21,6 +21,7 @@ impl Workspace {
     }
 
     pub(super) fn focus_tree_search(&mut self, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        self.explorer.clear_folder_reveal();
         self.clear_tree_search(cx);
         self.explorer.search_focused = path;
         if let Some(field) = &self.explorer.search_field { window.focus(&field.focus_handle(cx), cx); }

@@ -78,9 +78,10 @@ impl Workspace {
         let hovered = self.explorer.hovered.clone();
         let edit = self.explorer.edit.as_ref().map(|edit| (edit.kind, edit.path.clone(), edit.field.clone()));
         let insert_index = self.tree_create_insertion(&rows);
-        let search_path = self.explorer.search_matches.get(self.explorer.search_index)
+        let highlighted_path = self.explorer.search_matches.get(self.explorer.search_index)
             .and_then(|index| rows.get(*index)).map(|row| row.entry.path.clone())
-            .or_else(|| self.explorer.search_keyboard_nav.then(|| self.explorer.search_focused.clone()).flatten());
+            .or_else(|| self.explorer.search_keyboard_nav.then(|| self.explorer.search_focused.clone()).flatten())
+            .or_else(|| self.explorer.located_folder().map(Path::to_path_buf));
         let search_query = self.explorer.search_query.clone();
         let count = drag_layout.len(rows.len() + 1) + usize::from(insert_index.is_some());
         let row_hover = gpui::rgba(TREE_ROW_HOVER);
@@ -99,7 +100,7 @@ impl Workspace {
                         let mut root = tree_root_row().id("tree-root").relative().mx(px(TREE_ROW_PADDING))
                             .text_color(theme.fg).cursor_pointer()
                             .when(!target, |el| el.hover(|style| style.bg(row_hover)))
-                            .when(search_path.as_ref() == path.as_ref() && search_path.is_some(), |el| el.bg(theme.sidebar_active))
+                            .when(highlighted_path.as_ref() == path.as_ref() && highlighted_path.is_some(), |el| el.bg(theme.sidebar_active))
                             .when(target, |el| el.bg(theme.sidebar_active).rounded(px(9.0)))
                             .child(div().flex_1().min_w(px(0.0)).overflow_hidden().child(TreeLabel::new(root_name.clone(), "", theme.search_match)))
                             .children(root_loading.then(|| tree_spinner("tree-root-spinner", theme.accent, reduce_motion)))
@@ -188,7 +189,7 @@ impl Workspace {
                     let button = tree_row(if is_dir { indent - TREE_CHEVRON_SLOT - TREE_ROW_GAP } else { indent })
                         .id(("tree", index)).relative().cursor_pointer().text_color(if active { theme.accent } else { theme.fg })
                         .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
-                        .when((active || search_path.as_ref() == Some(&path)) && !target, |el| el.bg(theme.sidebar_active))
+                        .when((active || highlighted_path.as_ref() == Some(&path)) && !target, |el| el.bg(theme.sidebar_active))
                         .when(target, |el| el.child(div().absolute().left(px(row.depth as f32 * 12.0 + 3.0)).right(px(3.0)).top_0().bottom_0().rounded(px(9.0)).bg(theme.sidebar_active)))
                         .when(!target, |el| el.hover(|style| style.bg(row_hover)))
                         .children(chevron).child(file_icon)

@@ -5,7 +5,7 @@ use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
 use std::io::Write;
 
 #[derive(Clone, Copy)]
-pub(super) enum TreeAction { NewFile, NewFolder, Refresh, Collapse, Open, Pin, Rename, CopyFile, CopyPath, Reveal, Delete }
+pub(super) enum TreeAction { NewFile, NewFolder, Refresh, Collapse, Open, Pin, FolderFavorite(bool), Rename, CopyFile, CopyPath, Reveal, Delete }
 
 pub(super) struct TreeMenu {
     path: PathBuf,
@@ -75,6 +75,7 @@ impl Workspace {
     }
 
     pub(super) fn open_tree_menu(&mut self, path: PathBuf, directory: bool, root: bool, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        self.explorer.clear_folder_reveal();
         self.explorer.menu = Some(TreeMenu { path, directory, root, position });
         cx.stop_propagation();
         cx.notify();
@@ -86,6 +87,9 @@ impl Workspace {
         let mut items = Vec::new();
         if menu.directory {
             items.extend([(TreeAction::NewFile, "tree.newFile"), (TreeAction::NewFolder, "tree.newFolder")]);
+            let favorite = self.library.read(cx).snapshot.is_folder_favorite(&menu.path);
+            let label = if favorite { "home.unfavoriteFolder" } else { "home.favoriteFolder" };
+            items.push((TreeAction::FolderFavorite(!favorite), label));
         } else {
             items.extend([(TreeAction::Open, "tree.preview"), (TreeAction::Pin, "tree.pin")]);
         }
@@ -136,6 +140,9 @@ impl Workspace {
             }
             TreeAction::Open => self.open_path_with_preview(&path, true, window, cx),
             TreeAction::Pin => self.open_path_with_preview(&path, false, window, cx),
+            TreeAction::FolderFavorite(favorite) => {
+                self.library.update(cx, |library, cx| library.change(LibraryChange::SetFolderFavorite { path, favorite }, cx));
+            }
             TreeAction::CopyPath => cx.write_to_clipboard(gpui::ClipboardItem::new_string(display_tree_path(&path))),
             TreeAction::Reveal => Self::reveal_in_file_manager(path, cx),
             TreeAction::Delete => self.confirm_tree_delete(path, window, cx),

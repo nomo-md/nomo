@@ -121,9 +121,14 @@ impl Workspace {
 
     pub(super) fn route_open_request(&mut self,mut request:OpenRequest,window:&mut Window,cx:&mut Context<Self>) {
         let Some(path)=request.path.take() else {self.open_request_here(request,window,cx);return;};
+        let foreground = request.generation == self.open_requests.generation;
+        if request.favorite_folder {
+            self.open_favorite_folder(path, foreground, window, cx);
+            return;
+        }
         let path=path.canonicalize().unwrap_or(path);
         request.path=Some(path.clone());
-        if path.is_dir() && self.reuse_open_folder(&request, window, cx) {return;}
+        if path.is_dir() && self.reuse_open_folder(&path, None, foreground, window, cx) {return;}
         if self.reuse_open_document(&request,window,cx) {return;}
         let current=window.window_handle();
         let mut directory_windows=Vec::new();

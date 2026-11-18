@@ -57,6 +57,12 @@ impl FolderFx {
 
 impl FolderCover {
     pub fn render(&self, width: f32, height: f32, pose: FolderPose, theme: &Theme) -> AnyElement {
+        self.render_with_favorite(width, height, pose, None, theme)
+    }
+
+    pub(super) fn render_with_favorite(
+        &self, width: f32, height: f32, pose: FolderPose, favorite: Option<AnyElement>, theme: &Theme,
+    ) -> AnyElement {
         let (w, h) = (width, height);
         // 背板以 240×268 为基准，前套静止时占下方 80。
         let (sx, sy) = (w / 240.0, h / 268.0);
@@ -172,7 +178,10 @@ impl FolderCover {
         }).absolute().inset_0();
         div().relative().w(px(w)).h(px(h)).child(back_canvas).children(content).child(front_canvas)
             .child(div().absolute().left(px(21.0 * sx)).right(px(19.0 * sx)).bottom(px(20.0 * sy - lift)).flex().flex_col().gap(px(4.0))
-                .child(div().text_size(px(14.0)).line_height(px(20.0)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(title_ink).truncate().child(self.title.clone()))
+                .child(div().relative()
+                    .child(div().pr(px(24.0)).text_size(px(14.0)).line_height(px(20.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD).text_color(title_ink).truncate().child(self.title.clone()))
+                    .children(favorite))
                 .child(div().text_size(px(11.0)).line_height(px(16.0)).text_color(heading).child(self.summary.clone())))
             .into_any_element()
     }

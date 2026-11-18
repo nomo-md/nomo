@@ -17,6 +17,11 @@ impl Drop for TreeScan {
     }
 }
 
+enum FolderReveal {
+    Waiting { target: PathBuf, directory: PathBuf },
+    Located(PathBuf),
+}
+
 #[derive(Default)]
 pub(super) struct ExplorerState {
     pub(super) drag: crate::ui::tree_drag::TreeDrag,
@@ -26,6 +31,7 @@ pub(super) struct ExplorerState {
     queue: VecDeque<PathBuf>,
     scan_again: HashSet<PathBuf>,
     failed: HashSet<PathBuf>,
+    folder_reveal: Option<FolderReveal>,
     refresh_task: Option<Task<()>>,
     pub(super) hovered: Option<PathBuf>,
     pub(super) scroll_visible: bool,
@@ -58,6 +64,19 @@ pub(super) struct ExplorerState {
 impl ExplorerState {
     pub(super) fn generation(&self) -> u64 { self.generation }
 
+    pub(super) fn has_folder_reveal(&self) -> bool { self.folder_reveal.is_some() }
+
+    pub(super) fn located_folder(&self) -> Option<&Path> {
+        match &self.folder_reveal {
+            Some(FolderReveal::Located(path)) => Some(path),
+            _ => None,
+        }
+    }
+
+    pub(super) fn clear_folder_reveal(&mut self) {
+        self.folder_reveal = None;
+    }
+
     pub(super) fn sidebar_visible(&self, settings: &Settings) -> bool {
         self.sidebar_temporarily_visible || settings.show_sidebar
     }
@@ -80,6 +99,7 @@ impl Workspace {
         self.explorer.hovered = None;
         self.explorer.menu = None;
         self.explorer.edit = None;
+        self.explorer.clear_folder_reveal();
         if let Some(tree) = &mut self.tree { tree.cancel_all_loads(); }
     }
 
@@ -99,6 +119,7 @@ impl Workspace {
         self.explorer.hovered = None;
         self.explorer.menu = None;
         self.explorer.edit = None;
+        self.explorer.clear_folder_reveal();
         self.clear_tree_search(cx);
         self.explorer.search_focused = None;
         self.explorer.scroll_dragging = false;
@@ -109,6 +130,68 @@ impl Workspace {
         self.sync_tree_selection(false, cx);
         self.queue_tree_scan(root, false, cx);
         self.ensure_tree_refresh_task(cx);
+    }
+
+    pub(super) fn reveal_tree_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.explorer.clear_folder_reveal();
+        self.clear_tree_search(cx);
+        self.explorer.sidebar_temporarily_visible = !cx.global::<Settings>().show_sidebar;
+        let settings = cx.global::<Settings>();
+        if settings.document_navigation_layout == DocumentNavigationLayout::LeftTabs
+            && settings.string("documentNavigationTab") == "outline"
+        {
+            Settings::set(cx, "documentNavigationTab", serde_json::json!("files"));
+        }
+        self.advance_folder_reveal(path, None, cx);
+        self.ensure_tree_refresh_task(cx);
+    }
+
+    fn advance_folder_reveal(&mut self, target: PathBuf, scanned: Option<&Path>, cx: &mut Context<Self>) {
+        let Some(tree) = self.tree.as_mut().filter(|tree| target.starts_with(&tree.root)) else { return; };
+        let ancestors: Vec<_> = target.ancestors().take_while(|path| path.starts_with(&tree.root)).collect();
+        let mut directory_to_scan = None;
+        for directory in ancestors.into_iter().rev() {
+            // 只展开已经在父目录快照中出现的路径，沿用忽略规则和既有扫描预算。
+            let expand = if directory == tree.root {
+                true
+            } else if let Some(entry) = tree.cached_folder(directory) {
+                directory != target || entry.has_children
+            } else {
+                directory_to_scan = directory.parent().map(Path::to_path_buf);
+                break;
+            };
+            if expand && let Err(error) = tree.expand_message(directory) {
+                self.notice = Some(error.render(ToolbarLocale::current(cx)).into());
+                self.sync_tree_selection(false, cx);
+                cx.notify();
+                return;
+            }
+        }
+        self.sync_tree_selection(false, cx);
+        if let Some(directory) = directory_to_scan {
+            if scanned == Some(directory.as_path()) {
+                let path = explorer_actions::display_tree_path(&target);
+                self.notice = Some(ToolbarLocale::current(cx).app_format("tree.folderNotVisible", &[("path", &path)]).into());
+            } else {
+                self.explorer.folder_reveal = Some(FolderReveal::Waiting { target, directory: directory.clone() });
+                if self.explorer.queue.contains(&directory) {
+                    self.start_next_tree_scan(cx);
+                } else if !self.explorer.scan.as_ref().is_some_and(|scan| scan.path == directory) {
+                    self.queue_tree_scan(directory, true, cx);
+                }
+            }
+        } else if let Some(tree) = &self.tree {
+            let rows = tree.rows();
+            let index = if target == tree.root { Some(0) }
+                else { rows.iter().position(|row| row.entry.path == target).map(|index| index + 1) };
+            if let Some(index) = index {
+                let index = index + usize::from(self.tree_create_insertion(&rows).is_some_and(|insert| insert <= index));
+                self.tree_scroll.scroll_to_item(index, ScrollStrategy::Top);
+                self.explorer.folder_reveal = Some(FolderReveal::Located(target.clone()));
+                self.queue_tree_scan(target, false, cx);
+            }
+        }
+        cx.notify();
     }
 
     pub(super) fn show_tree_scrollbar(&mut self, delay: Duration, cx: &mut Context<Self>) {
@@ -180,6 +263,7 @@ impl Workspace {
         self.explorer.queue.clear();
         self.explorer.scan_again.clear();
         self.explorer.failed.clear();
+        self.explorer.clear_folder_reveal();
         if let Some(tree) = &mut self.tree {
             tree.cancel_all_loads();
             for (old, new) in paths { tree.rename_subtree(old, new); }
@@ -262,6 +346,13 @@ impl Workspace {
                 }
                 if failed { workspace.explorer.failed.insert(path.clone()); workspace.explorer.drag.end(workspace.explorer.reduce_motion); }
                 else { workspace.explorer.failed.remove(&path); }
+                if matches!(&workspace.explorer.folder_reveal, Some(FolderReveal::Waiting { directory, .. }) if *directory == path) {
+                    if let Some(FolderReveal::Waiting { target, .. }) = workspace.explorer.folder_reveal.take()
+                        && !failed
+                    {
+                        workspace.advance_folder_reveal(target, (!cancelled).then_some(path.as_path()), cx);
+                    }
+                }
                 let again = workspace.explorer.scan_again.remove(&path);
                 let needed = workspace.tree.as_ref().map(|tree| {
                     tree.refresh_paths().into_iter().filter(|candidate| !workspace.explorer.failed.contains(candidate) && tree.needs_load(candidate)).collect::<Vec<_>>()

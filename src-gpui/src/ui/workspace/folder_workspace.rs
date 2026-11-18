@@ -3,6 +3,7 @@ use super::*;
 
 pub(super) struct FolderOpen {
     root: PathBuf,
+    reveal: Option<PathBuf>,
     closing: bool,
 }
 
@@ -29,20 +30,28 @@ impl Workspace {
     }
 
     pub(in crate::ui::workspace) fn reuse_open_folder(
-        &mut self, request: &OpenRequest, window: &mut Window, cx: &mut Context<Self>,
+        &mut self, root: &Path, reveal: Option<&Path>, foreground: bool,
+        window: &mut Window, cx: &mut Context<Self>,
     ) -> bool {
-        let Some(root) = &request.path else { return false; };
         let current = window.window_handle();
         for handle in cx.windows().into_iter().filter_map(|handle| handle.downcast::<Workspace>()) {
             if gpui::AnyWindowHandle::from(handle) == current { continue; }
             let reused = handle.update(cx, |target, target_window, cx| {
                 if target.folder_open_pending() || target.closing_window
-                    || !target.tree.as_ref().is_some_and(|tree| matches_folder(&tree.root, root)) {
+                    || !target.tree.as_ref().is_some_and(|tree| {
+                        matches_folder(&tree.root, root) && reveal.is_none_or(|path| path.starts_with(&tree.root))
+                    }) {
                     return false;
                 }
-                if request.generation == self.open_requests.generation {
-                    if !target.tab_interaction_busy(target_window) {
-                        target.library.update(cx, |library, cx| library.change(LibraryChange::AddFolder(root.clone()), cx));
+                if foreground {
+                    if let Some(path) = reveal {
+                        target.open_batch([OpenRequest {
+                            path: Some(path.to_path_buf()),
+                            favorite_folder: true,
+                            ..Default::default()
+                        }], target_window, cx);
+                    } else if !target.tab_interaction_busy(target_window) {
+                        target.library.update(cx, |library, cx| library.change(LibraryChange::AddFolder(root.to_path_buf()), cx));
                         target.show_folder_workspace(target_window, cx);
                     }
                     target.reveal_window(target_window, cx);
@@ -54,17 +63,53 @@ impl Workspace {
         false
     }
 
+    pub(in crate::ui::workspace) fn open_favorite_folder(
+        &mut self, path: PathBuf, foreground: bool, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if !foreground { return; }
+        if !path.is_dir() {
+            self.failure_notice = Some(favorite_folder_unavailable(&path, cx).into());
+            cx.notify();
+            return;
+        }
+        if self.explorer.mutating.iter().any(|busy| path.starts_with(busy)) {
+            self.notice = Some(ToolbarLocale::current(cx).app_text("workspace.fileBusy").into());
+            cx.notify();
+            return;
+        }
+        if let Some(tree) = self.tree.as_ref().filter(|tree| path.starts_with(&tree.root)) {
+            let root = tree.root.clone();
+            if self.leave_mini(window, cx) { self.open_folder_workspace(root, Some(path), window, cx); }
+            return;
+        }
+        // 文件树使用目录项原路径；链接目录在所属工作区中按链接位置显示。
+        let root = self.library.read(cx).snapshot.folders.iter()
+            .filter(|entry| path.starts_with(&entry.path))
+            .max_by_key(|entry| entry.path.components().count())
+            .map(|entry| entry.path.clone());
+        let (root, reveal) = if let Some(root) = root {
+            (root, path)
+        } else {
+            let root = path.canonicalize().unwrap_or(path);
+            (root.clone(), root)
+        };
+        if !self.reuse_open_folder(&root, Some(&reveal), true, window, cx) && self.leave_mini(window, cx) {
+            self.open_folder_workspace(root, Some(reveal), window, cx);
+        }
+    }
+
     pub(in crate::ui::workspace) fn open_folder_workspace(
-        &mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>,
+        &mut self, root: PathBuf, reveal: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>,
     ) {
         if self.tab_interaction_busy(window) { return; }
         if self.tree.as_ref().is_some_and(|tree| matches_folder(&tree.root, &root)) {
             self.library.update(cx, |library, cx| library.change(LibraryChange::AddFolder(root), cx));
             self.show_folder_workspace(window, cx);
+            if let Some(path) = reveal { self.reveal_tree_folder(path, cx); }
             self.resume_folder_requests(window, cx);
             return;
         }
-        self.comparison.layout.folder_open = Some(FolderOpen { root, closing: false });
+        self.comparison.layout.folder_open = Some(FolderOpen { root, reveal, closing: false });
         self.start_recovery_catalog(cx);
         self.continue_folder_open(window, cx);
     }
@@ -82,6 +127,8 @@ impl Workspace {
         let root = pending.root.clone();
         let error = if !root.is_dir() {
             Some(ToolbarLocale::current(cx).app_text("layout.folderUnavailable").to_owned())
+        } else if let Some(path) = pending.reveal.as_ref().filter(|path| !path.is_dir()) {
+            Some(favorite_folder_unavailable(path, cx))
         } else {
             cx.try_global::<Store>().and_then(|store| store.error.as_ref())
                 .map(|error| error.render(ToolbarLocale::current(cx)))
@@ -140,6 +187,7 @@ impl Workspace {
             self.show_folder_workspace(window, cx);
         }
         self.explorer.sidebar_temporarily_visible = !cx.global::<Settings>().show_sidebar;
+        if let Some(path) = pending.reveal { self.reveal_tree_folder(path, cx); }
         self.resume_folder_requests(window, cx);
         cx.notify();
     }
@@ -169,4 +217,9 @@ impl Workspace {
             cx.notify();
         }
     }
+}
+
+fn favorite_folder_unavailable(path: &Path, cx: &App) -> String {
+    let path = super::super::explorer_actions::display_tree_path(path);
+    ToolbarLocale::current(cx).app_format("home.favoriteFolderUnavailable", &[("path", &path)])
 }

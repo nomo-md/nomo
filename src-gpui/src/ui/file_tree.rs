@@ -112,6 +112,15 @@ impl FileTree {
         self.children.get(path).map(|directory| directory.entries.clone())
     }
 
+    pub(crate) fn cached_folder(&self, path: &Path) -> Option<&Entry> {
+        let directory = self.children.get(path.parent()?)?;
+        let name: String = path.file_name()?.to_string_lossy().to_lowercase().nfc().collect();
+        let start = directory.entries.partition_point(|entry| entry.is_dir && entry.search_name < name);
+        directory.entries[start..].iter()
+            .take_while(|entry| entry.is_dir && entry.search_name == name)
+            .find(|entry| entry.path == path).map(Arc::as_ref)
+    }
+
     pub fn root_expanded(&self) -> bool {
         self.expanded.contains(&self.root)
     }
@@ -196,12 +205,7 @@ impl FileTree {
         while cursor != self.root {
             let Some(parent) = cursor.parent() else { return false; };
             if !self.expanded.contains(parent) { return false; }
-            let Some(directory) = self.children.get(parent) else { return false; };
-            let Some(name) = cursor.file_name() else { return false; };
-            let name: String = name.to_string_lossy().to_lowercase().nfc().collect();
-            let start = directory.entries.partition_point(|entry| entry.is_dir && entry.search_name < name);
-            if !directory.entries[start..].iter().take_while(|entry| entry.is_dir && entry.search_name == name)
-                .any(|entry| entry.path == cursor) { return false; }
+            if self.cached_folder(cursor).is_none() { return false; }
             cursor = parent;
         }
         true
