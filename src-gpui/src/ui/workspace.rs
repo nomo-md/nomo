@@ -106,7 +106,6 @@ struct OpeningDocument {
 const TREE_ROW_PADDING: f32 = 8.0;
 const TREE_ROW_INDENT: f32 = 12.0;
 const TREE_LIST_TOP_PADDING: f32 = 4.0;
-const TREE_ROOT_LIFT: f32 = 4.0;
 const TREE_CHEVRON_SLOT: f32 = 16.0;
 const TREE_CHEVRON_SIZE: f32 = 12.0;
 const TREE_SELECTION_DURATION: Duration = Duration::from_millis(180);

@@ -34,10 +34,8 @@ impl OutlineRowStyle {
         if self.docked { TREE_LIST_TOP_PADDING } else { 0.0 }
     }
 
-    fn top(self, level: u8, position: usize) -> f32 {
-        if !self.docked { return 0.0; }
-        let centered = (self.height - self.content_height) * 0.5;
-        if level == 1 && position == 0 { centered - TREE_ROOT_LIFT } else { centered }
+    fn row_top(self) -> f32 {
+        if self.docked { (self.height - self.content_height) * 0.5 } else { 0.0 }
     }
 
     fn row(self, level: u8) -> gpui::Div {
@@ -547,7 +545,7 @@ impl Workspace {
                 let keys: Vec<String> = (start..end).filter_map(|index| snapshot.row(index)).map(Heading::key).collect();
                 animation.before.rows.iter().filter(|row| !keys.contains(&row.key)).filter_map(|row| {
                     let y = row.position as f32 * row_style.height + row_style.list_top_padding()
-                        + row_style.top(row.level, row.position) + animation.before.offset_y - 3.0 * progress;
+                        + row_style.row_top() + animation.before.offset_y - 3.0 * progress;
                     (y > -row_style.height && y < list_height).then(|| div().absolute().left_0().right_0().top(px(y))
                         .opacity(1.0 - progress).child(fading_outline_row(row, row_style, &theme)).into_any_element())
                 }).collect()
@@ -600,7 +598,7 @@ impl Workspace {
                                 .into_any_element())
                         } else { Some(row_style.chevron_slot().into_any_element()) };
                         let row = row_style.row(heading.level).id(("outline-row", index)).relative()
-                            .top(px(row_style.top(heading.level, index) + offset))
+                            .top(px(row_style.row_top() + offset))
                             .when(editable, |row| row.cursor(outline_drag_cursor(false)))
                             .when(!editable, |row| row.cursor_pointer())
                             .text_color(color).opacity(opacity)
