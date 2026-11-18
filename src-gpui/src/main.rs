@@ -340,6 +340,7 @@ fn set_menus(cx: &mut App) {
                 MenuItem::action(locale.app_text("menu.exportHtml"), ExportHtml),
                 MenuItem::action(locale.app_text("menu.exportPdf"), ExportPdf),
                 MenuItem::action(locale.app_text("menu.exportWord"), ExportWord),
+                MenuItem::action(locale.app_text("menu.print"), PrintDocument),
                 MenuItem::separator(),
                 MenuItem::action(locale.app_text("menu.closeTab"), CloseTab),
             ],

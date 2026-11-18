@@ -42,7 +42,7 @@ pub(crate) struct ExportPermit;
 impl ExportPermit {
     pub(crate) fn acquire() -> Result<Self, String> {
         EXPORT_ACTIVE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| Self).map_err(|_| "已有导出任务，请等待完成或关闭该文档取消。".into())
+            .map(|_| Self).map_err(|_| "已有导出或打印任务，请等待完成或关闭该文档取消。".into())
     }
 }
 impl Drop for ExportPermit { fn drop(&mut self) { EXPORT_ACTIVE.store(false, Ordering::Release); } }
@@ -95,6 +95,7 @@ impl Drop for Snapshot {
 }
 
 pub(crate) struct Appearance {
+    pub(crate) print_sheet: Option<PrintSheet>,
     theme: Theme,
     font: String,
     mono: String,
@@ -105,15 +106,29 @@ pub(crate) struct Appearance {
     line_numbers: bool,
 }
 impl Appearance {
+    pub(crate) fn for_print(mut self) -> Self {
+        self.theme = Theme::light();
+        self
+    }
     pub(crate) fn capture(cx: &App) -> Self {
         let settings = cx.global::<Settings>();
-        Self { theme: cx.global::<Theme>().clone(),
+        Self { print_sheet: None, theme: cx.global::<Theme>().clone(),
             font: theme::font_for(Family::Text, false, false).family.to_string(),
             mono: theme::font_for(Family::Code, false, false).family.to_string(),
             size: settings.font_size, line_height: settings.line_height,
             width: settings.content_width_percent, justify: settings.typography,
             line_numbers: settings.code_line_numbers }
     }
+}
+
+/// System print-to-file backends consume a finished PDF. Ranges refer to the original A4 pages.
+pub(crate) struct PrintSheet {
+    pub width: f32,
+    pub height: f32,
+    pub upside_down: bool,
+    pub ranges: Vec<std::ops::RangeInclusive<usize>>,
+    pub even_pages: Option<bool>,
+    pub reverse_order: bool,
 }
 
 #[derive(Default)]

@@ -287,6 +287,9 @@ dependencies = [
  "serde",
  "serde_repr",
  "url",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "zbus",
 ]
 
@@ -3909,8 +3912,11 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
  "url",
+ "wayland-client",
  "web_atoms",
  "windows 0.62.2",
+ "windows-core 0.62.2",
+ "windows-future 0.3.2",
  "windows-registry",
  "windows-sys 0.61.2",
  "wl-clipboard-rs",

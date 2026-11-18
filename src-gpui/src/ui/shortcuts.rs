@@ -58,6 +58,7 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     shortcut!("export-html", "shortcuts.exportHtml", "files", Workspace, action::ExportHtml, &["Ctrl+Shift+E"], &["Command+Shift+E"]),
     shortcut!("export-pdf", "shortcuts.exportPdf", "files", Workspace, action::ExportPdf, &["Ctrl+Shift+P"], &["Command+Shift+P"]),
     shortcut!("export-word", "menu.exportWord", "files", Workspace, action::ExportWord, &[], &[]),
+    shortcut!("print", "menu.print", "files", Workspace, action::PrintDocument, &["Ctrl+P"], &["Command+P"]),
     shortcut!("undo", "menu.undo", "editing", History, editor::Undo, &["Ctrl+Z"], &["Command+Z"]),
     shortcut!("redo", "menu.redo", "editing", History, editor::Redo, &["Ctrl+Y", "Ctrl+Shift+Z"], &["Command+Shift+Z"]),
     shortcut!("cut", "menu.cut", "editing", Editor, editor::Cut, &["Ctrl+X"], &["Command+X"]),

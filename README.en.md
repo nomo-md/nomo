@@ -35,7 +35,7 @@
 - **Fine typography and themes:** optional Knuth–Plass line breaking, English hyphenation, and hanging punctuation; four built-in themes, light and dark palettes, installed fonts, and theme import/export. Display-only hyphens never alter the source.
 - **A local document workspace:** a file tree, recent files, tabs, outlines, and full-document search and replace, with autosave, local snapshots, and workspace restoration. Documents stay in your own folders.
 - **Mini and document comparison:** keep the current document in a compact Markdown Mini window, with pinning on Windows. Windows comparison tabs can place two documents side by side.
-- **Exports and system integration:** export HTML, PDF, and Word, retaining editable body text and tables in Word. Use macOS Quick Look, local image management, and optional PicGo uploads.
+- **Printing, exports and system integration:** choose **File → Print…** to print the current document, including unsaved edits. On Windows and macOS, preview pages, paper size, and orientation in the system print dialog. Linux uses the desktop print service, with preview availability depending on the desktop and installed previewer. Export HTML, PDF, and Word, retaining editable body text and tables in Word. Use macOS Quick Look, local image management, and optional PicGo uploads.
 
 Nomo also includes Markdown linting, custom shortcuts, word counts, reading-time estimates, and four interface languages: Simplified Chinese, Traditional Chinese, English, and Japanese.
 

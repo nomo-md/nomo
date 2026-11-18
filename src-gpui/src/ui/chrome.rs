@@ -22,7 +22,7 @@ const MENU_WIDTH: f32 = 278.0;
 /// 只有宿主已经实现并订阅的业务能力才能启用菜单项。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChromeCapability {
-    NewWindow, Recent, ExportHtml, ExportPdf, ExportWord, TablePicker, LinkPicker,
+    NewWindow, Recent, ExportHtml, ExportPdf, ExportWord, Print, TablePicker, LinkPicker,
     HeadingLevels, HeadingAdjustment, MathInline, Callout, Details, BlockComment,
     InlineComment, Diagrams, Footnote, Toc, FrontMatter, ClearFormatting,
     Mini, SoftwareUpdate, UnavailableNotice,
@@ -209,7 +209,8 @@ impl Chrome {
                 action(locale.app_text("chrome.recover"), "", || Box::new(action::RecoverDocuments), true), separator(),
                 action(locale.app_text("shortcuts.save"), "Ctrl + S", || Box::new(action::Save), doc),
                 action(locale.app_text("menu.saveAs"), "Ctrl + Shift + S", || Box::new(action::SaveAs), doc), separator(),
-                MenuItem::submenu(Menu::Export, locale), separator(),
+                MenuItem::submenu(Menu::Export, locale),
+                action(locale.app_text("menu.print"), "", || Box::new(action::PrintDocument), doc && self.capable(C::Print)), separator(),
                 action(locale.app_text("chrome.closeFile"), "Ctrl + W", || Box::new(action::CloseTab), doc),
                 MenuItem::new(locale.app_text("settings.closeWindowBehavior.choice.close-window"), "Alt + F4", A::Emit(E::CloseWindow), true), separator(),
                 MenuItem::new(locale.app_text("chrome.quit"), "", A::Emit(E::Quit), true),

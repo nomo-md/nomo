@@ -49,6 +49,7 @@ mod document_transition;
 mod open_requests;
 mod recovery_ui;
 mod export;
+mod print;
 mod comparison;
 #[cfg(feature = "automation")]
 mod automation;
@@ -59,7 +60,7 @@ use explorer::ExplorerState;
 actions!(
     workspace,
     [
-        NewFile, NewWindow, OpenFile, OpenFolder, Save, SaveAs, ExportHtml, ExportPdf, ExportWord, CloseTab, NextTab, PrevTab, Find, FindReplace, ToggleFind, ToggleReplace, FindNext,
+        NewFile, NewWindow, OpenFile, OpenFolder, Save, SaveAs, ExportHtml, ExportPdf, ExportWord, PrintDocument, CloseTab, NextTab, PrevTab, Find, FindReplace, ToggleFind, ToggleReplace, FindNext,
         FindPrev, ToggleSource, ModeSemantic, ModeSource, ModeSplit, ToggleEditLock, ToggleOutline, ToggleSidebar, ToggleToolbar,
         ResetOutlinePosition, ToggleSplitGuide, ToggleCodeLineNumbers, ToggleZoomControl, ToggleWritingStats, ToggleLintIndicator, ToggleEditLockButton,
         ToggleTheme, FollowSystemTheme, ToggleTypography, Underline, Highlight, ZoomIn, ZoomOut, ZoomReset, Bold, Italic, Strike, InlineCode, Link,
@@ -2060,7 +2061,7 @@ impl Render for Workspace {
             can_redo:status.as_ref().is_some_and(|s|s.can_redo && !s.editing_locked),
             recent, update:crate::ui::updates::chrome_state(cx),
             capabilities:vec![ChromeCapability::Recent,ChromeCapability::NewWindow,ChromeCapability::HeadingLevels,ChromeCapability::HeadingAdjustment,ChromeCapability::ClearFormatting,ChromeCapability::LinkPicker,ChromeCapability::TablePicker,ChromeCapability::MathInline,ChromeCapability::Callout,ChromeCapability::Details,ChromeCapability::InlineComment,ChromeCapability::BlockComment,ChromeCapability::FrontMatter,ChromeCapability::Diagrams,ChromeCapability::Footnote,ChromeCapability::Toc,ChromeCapability::UnavailableNotice]
-                .into_iter().chain([ChromeCapability::SoftwareUpdate]).chain([ChromeCapability::ExportHtml, ChromeCapability::ExportPdf, ChromeCapability::ExportWord].into_iter().filter(|_| self.export_job.is_none())).chain((self.active_pair().is_none() && status.is_some() && crate::ui::mini::unavailable_reason(window).is_none()).then_some(ChromeCapability::Mini)).collect(),
+                .into_iter().chain([ChromeCapability::SoftwareUpdate]).chain([ChromeCapability::ExportHtml, ChromeCapability::ExportPdf, ChromeCapability::ExportWord, ChromeCapability::Print].into_iter().filter(|_| self.export_job.is_none())).chain((self.active_pair().is_none() && status.is_some() && crate::ui::mini::unavailable_reason(window).is_none()).then_some(ChromeCapability::Mini)).collect(),
             ..Default::default()
         },cx));
         let chrome = shell_visible.then(|| mini::shell_row(self.chrome.clone().into_any_element(), px(crate::ui::chrome::TITLEBAR_HEIGHT), shell_visibility));
@@ -2191,6 +2192,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &ExportHtml, window, cx| w.export_document(crate::document_export::Format::Html, window, cx)))
             .on_action(cx.listener(|w, _: &ExportPdf, window, cx| w.export_document(crate::document_export::Format::Pdf, window, cx)))
             .on_action(cx.listener(|w, _: &ExportWord, window, cx| w.export_document(crate::document_export::Format::Word, window, cx)))
+            .on_action(cx.listener(|w, _: &PrintDocument, window, cx| w.print_document(window, cx)))
             .on_action(cx.listener(|w, _: &SaveAs, window, cx| {
                 if let Some(buffer) = w.document() {
                     w.request_manual_save(&buffer,true,window,cx);

@@ -42,7 +42,7 @@
 | 配置与设置窗口 | `src-gpui/src/settings.rs`、`ui/settings_schema.rs`、`ui/settings_window.rs`、`ui/settings_pages.rs`、`ui/settings_fonts.rs` | 九个分区（快捷键独立）、文档导航布局、主题导入／导出、从本机字体中搜索选用或恢复主题、图片策略；按原有配置原子保存 |
 | 文件管理器定位 | `src-gpui/src/ui/file_manager.rs` | 文件树、文档标签和本地图片共用定位入口。Windows 在后台线程解析路径并选中条目，失败时通过界面提示 |
 | Windows 文件集成 | `src-gpui/src/windows_integration.rs`、`ui/settings_pages.rs`、`src-gpui/windows-shell-extension/`、`scripts/msix/`、`scripts/packaging/{open-with.nsh,msix/}` | NSIS／ZIP 的当前用户默认应用候选与经典右键菜单；MSIX 的原生 IExplorerCommand、新式菜单与包内启停标记；注册／卸载按副本或包身份核对 |
-| 自定义快捷键 | `src-gpui/src/ui/shortcuts.rs`、`ui/settings_shortcuts.rs`、`ui/mod.rs` | 73 项命令、轻量分组列表、固定搜索筛选与按需编辑浮层，每命令最多 3 个键位及作用域冲突校验；保留旧配置，平台覆盖独立保存；提交后替换有限键表，菜单、右键与工具栏共用实际提示 |
+| 自定义快捷键 | `src-gpui/src/ui/shortcuts.rs`、`ui/settings_shortcuts.rs`、`ui/mod.rs` | 74 项命令、轻量分组列表、固定搜索筛选与按需编辑浮层，每命令最多 3 个键位及作用域冲突校验；保留旧配置，平台覆盖独立保存；提交后替换有限键表，菜单、右键与工具栏共用实际提示 |
 | UI 原件与图标 | `src-gpui/src/ui/components.rs`、`popup.rs`、`icon_assets.rs`、`text_field.rs` | 静态 SVG 内嵌、按钮、菜单、输入框；弹层按触发边界测量、翻转、限高和入场动画 |
 | 确认框与短提示 | `src-gpui/src/ui/dialogs.rs`、`dialogs/secondary.rs`、`toast.rs` | 保存、删除、外部变更、恢复、打开位置与关闭选择的旧版布局；焦点与短动效、单条有界 Toast，不接管系统文件选择器 |
 | 应用弹窗业务与更新 | `src-gpui/src/ui/workspace/application_dialogs.rs`、`open_requests.rs`、`recovery_ui.rs`、`ui/tray.rs`、`ui/tray/windows.rs`、`ui/updates.rs`、`ui/updates/{notice,installer,install_ui}.rs` | 有界打开队列、跨窗口归属和恢复列表；Windows 应用级托盘、macOS／X11 关闭到托盘（原生 Wayland 暂不支持）、官方 Release、MSIX Store 入口、安装版下载校验与保存确认后的重启安装 |
@@ -63,7 +63,7 @@
 | 应用界面语言 | `src-gpui/src/ui/toolbar_i18n.rs`、`resources/app-locales.json`、`resources/markdown-lint-locales.json`、`main.rs`、`settings.rs` | 四种语言与系统语言、稳定消息键及延迟解析；菜单、托盘与已缓存提示跟随界面语言，用户内容及底层错误原文不翻译 |
 | 工具栏文档命令与语言 | `src-gpui/src/nomo_mark/toolbar_commands.rs`、`toolbar_global.rs`、`semantic_selection.rs`、`semantic_global.rs`、`toc_update.rs`、`src-gpui/src/ui/toolbar_i18n.rs`、`src-gpui/resources/toolbar-locales.json` | 脚注和目录分页、派生事务、跨窗口语义补丁、四种界面语言；按需和预算内处理 |
 | 开发界面 | `src-gpui/src/nomo_mark/demo.rs`、`development_ui.rs` | feature 只控制开发入口和调试工具条 |
-| 文档导出 | `src-gpui/src/document_export.rs`、`document_export/{html,resources,remote,model,media,pdf,pdf_fonts,word}.rs`、`ui/workspace/export.rs` | 固定修订及单个可取消任务；HTTP(S) 图片有界下载并内嵌，HTML 流式输出，PDF 与 Word 逐张编码并复用图片，每处引用独立排版；PDF 嵌入字体分页、Word 原生 OOXML，原子发布前复核取消 |
+| 文档导出与打印 | `src-gpui/src/document_export.rs`、`document_export/{html,resources,remote,model,media,pdf,pdf_fonts,word}.rs`、`ui/workspace/{export,print}.rs`、`ui/workspace/print/` | 固定修订及单个可取消任务。打印按浅色 PDF 分页。Windows 的 PrintManager 按需请求预览页，预览与输出共用纸张和可打印区域布局。macOS 由 PDFKit 打印任务在文档窗口内显示 AppKit 预览。Linux 通过 X11／Wayland 父窗口调用打印 portal，按 PDF 文件输出设置生成所选页面；HTTP(S) 图片有界下载并内嵌，HTML 流式输出，PDF 与 Word 逐张编码并复用图片，每处引用独立排版；PDF 嵌入字体分页、Word 原生 OOXML，原子发布前复核取消 |
 | 外部文件变更策略 | `src-gpui/src/ui/workspace/application_dialogs.rs`、`text_document/markdown_session/external.rs` | 干净文档按偏好自动重载／覆盖／忽略；本地修改和删除仍显式选择，忽略继续阻止普通保存，覆盖校验检测令牌；Mini 返回后处理延迟冲突 |
 | 文档会话与保存 | `src-gpui/src/text_document/mod.rs`、`markdown_session.rs`、`markdown_session/rename.rs`、`markdown_session/external.rs`、`markdown_session/recovery.rs`、`markdown_history.rs` | PieceTree、磁盘正文与历史、快照、保存及重命名事务；会话编辑锁保护正文事务、历史、批量替换和章节移动；外部身份复核、进程租约和原会话按需恢复 |
 | 结构索引／搜索／统计 | `src-gpui/src/text_document/structure_index/`、`markdown_search/`、`writing_stats/` | 唯一结构索引、分页查询和有界统计；关闭时撤销索引归属，`structure_index/reclaim.rs` 分批回收派生页 |

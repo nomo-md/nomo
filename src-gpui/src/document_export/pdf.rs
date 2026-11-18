@@ -41,7 +41,7 @@ pub(super) fn render(model: &Model, mut media: PreparedMedia, title: &str, appea
             layout.paragraph(&p)?; layout.blocks(blocks)?;
         }
     }
-    let Layout { fonts, pages, destinations, headings, mut image_uses, .. } = layout;
+    let Layout { fonts, mut pages, destinations, headings, mut image_uses, .. } = layout;
     job.check()?;
     let mut images = vec![None; media.image_count()];
     let mut doc = Document::new(); doc.set_metadata(Metadata::new().title(title.into()));
@@ -59,13 +59,42 @@ pub(super) fn render(model: &Model, mut media: PreparedMedia, title: &str, appea
         }
         result
     }
-    for node in nodes(&headings, &mut 0, 0) { outline.push_child(node); } doc.set_outline(outline);
+    let mut paper = (PAGE_W, PAGE_H);
+    let mut sheet_transform = None;
+    if let Some(sheet) = &appearance.print_sheet {
+        // Keep source pagination stable. Omit excluded text, links and outline titles from the file.
+        let mut index = 0;
+        pages.retain(|draws| {
+            let selected = (sheet.ranges.is_empty() || sheet.ranges.iter().any(|r| r.contains(&index)))
+                && sheet.even_pages.is_none_or(|even| even == (index % 2 == 1));
+            index += 1;
+            if !selected {
+                for draw in draws {
+                    if let Draw::Item { item: Item { kind: ItemKind::Image(id), .. }, .. } = draw {
+                        image_uses[*id] -= 1;
+                    }
+                }
+            }
+            selected
+        });
+        if pages.is_empty() { return Err("选定的页码范围内没有可打印的页面。".into()); }
+        if sheet.reverse_order { pages.reverse(); }
+        paper = (sheet.width, sheet.height);
+        let scale = (paper.0 / PAGE_W).min(paper.1 / PAGE_H);
+        let scale = if sheet.upside_down { -scale } else { scale };
+        sheet_transform = Some(Transform::from_row(scale, 0.0, 0.0, scale,
+            (paper.0 - PAGE_W * scale) / 2.0, (paper.1 - PAGE_H * scale) / 2.0));
+    } else {
+        for node in nodes(&headings, &mut 0, 0) { outline.push_child(node); }
+        doc.set_outline(outline);
+    }
     for draws in pages {
         job.check()?;
-        let mut page = doc.start_page_with(PageSettings::from_wh(PAGE_W, PAGE_H).ok_or("PDF 页面尺寸无效")?);
+        let mut page = doc.start_page_with(PageSettings::from_wh(paper.0, paper.1).ok_or("PDF 页面尺寸无效")?);
         let mut annotations = Vec::new();
         {
             let mut surface = page.surface();
+            if let Some(transform) = &sheet_transform { surface.push_transform(transform); }
             rectangle(&mut surface, 0.0, 0.0, PAGE_W, PAGE_H, rgb_bytes(appearance.theme.document_bg));
             for draw in draws {
                 job.check()?;
@@ -97,7 +126,7 @@ pub(super) fn render(model: &Model, mut media: PreparedMedia, title: &str, appea
                             surface.draw_glyphs(Point::from_xy(x, baseline), &glyphs, fonts.faces[font].font.clone(), &text, size, false);
                             if style.underline || style.link.is_some() { rectangle(&mut surface, x, baseline + size * 0.12, item.width, 0.55, color); }
                             if style.strike { rectangle(&mut surface, x, baseline - size * 0.28, item.width, 0.55, color); }
-                            if let Some(url) = style.link.as_deref().and_then(|url| media::link(url, path)) {
+                            if sheet_transform.is_none() && let Some(url) = style.link.as_deref().and_then(|url| media::link(url, path)) {
                                 let target = if let Some(id) = url.strip_prefix('#') {
                                     let id = percent_decode(id);
                                     destinations.get(&id).map(|(p, y)| Target::Destination(XyzDestination::new(*p, Point::from_xy(MARGIN, *y)).into()))
@@ -110,6 +139,7 @@ pub(super) fn render(model: &Model, mut media: PreparedMedia, title: &str, appea
                     }
                 }
             }
+            if sheet_transform.is_some() { surface.pop(); }
             surface.finish();
         }
         for annotation in annotations { page.add_annotation(annotation); } page.finish();

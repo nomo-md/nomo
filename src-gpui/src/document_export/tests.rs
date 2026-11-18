@@ -14,7 +14,7 @@ impl Folder {
     }
 }
 impl Drop for Folder { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
-fn appearance() -> Appearance { Appearance { theme: Theme::light(), font: "Microsoft YaHei".into(), mono: "Consolas".into(), size: 16.0,
+fn appearance() -> Appearance { Appearance { print_sheet: None, theme: Theme::light(), font: "Microsoft YaHei".into(), mono: "Consolas".into(), size: 16.0,
     line_height: 1.5, width: 0.8, justify: false, line_numbers: true } }
 fn contents(bytes: &[u8], name: &str) -> String {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
