@@ -18,7 +18,8 @@ pub(super) async fn document(
     let appearance = appearance.for_print();
     #[cfg(target_os = "linux")]
     let (appearance, portal) = {
-        let parent = cx.update(linux::parent_window).map_err(|e| e.to_string())??;
+        let pending_parent = cx.update(|window, _| linux::parent_window(window)).map_err(|e| e.to_string())??;
+        let parent = linux::resolve_parent(pending_parent).await;
         let Some((portal, sheet)) = linux::prepare(parent, &title).await? else { return Ok(None) };
         request.check().map_err(|e| e.to_string())?;
         let mut appearance = appearance;
