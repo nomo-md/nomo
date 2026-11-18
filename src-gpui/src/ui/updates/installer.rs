@@ -9,13 +9,15 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     time::{Duration, Instant},
 };
 
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(windows)]
+// 在宿主测试 Windows 缓存文件名和启动命令，不执行安装器。
+#[cfg(any(windows, test))]
 mod windows;
 #[cfg(target_os = "macos")]
 use macos as platform;
@@ -97,7 +99,9 @@ enum DownloadSource {
 }
 
 impl DownloadSource {
-    fn file_suffix(self) -> &'static str {
+    const ALL: [Self; 2] = [Self::Official, Self::GhProxy];
+
+    fn file_tag(self) -> &'static str {
         match self {
             Self::Official => "official",
             Self::GhProxy => "gh-proxy",
@@ -150,7 +154,18 @@ fn is_link(metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn cache_lease(directory: &Path) -> Result<Option<Arc<File>>, UiMessage> {
+struct CacheLease(File);
+
+impl Drop for CacheLease {
+    fn drop(&mut self) {
+        // 最后一个使用者主动解锁，不依赖系统何时关闭最后一份文件描述符。
+        if let Err(error) = self.0.unlock() {
+            crate::app_logger::warn("UpdateCache", &format!("释放更新缓存租约失败：{error}"));
+        }
+    }
+}
+
+fn cache_lease(directory: &Path) -> Result<Option<Arc<CacheLease>>, UiMessage> {
     let path = directory.join(".active");
     match fs::symlink_metadata(&path) {
         Ok(metadata) if !metadata.is_file() || is_link(&metadata) => {
@@ -171,7 +186,7 @@ fn cache_lease(directory: &Path) -> Result<Option<Arc<File>>, UiMessage> {
     }
     let lease = options.open(path).map_err(UiMessage::raw)?;
     match lease.try_lock() {
-        Ok(()) => Ok(Some(Arc::new(lease))),
+        Ok(()) => Ok(Some(Arc::new(CacheLease(lease)))),
         Err(fs::TryLockError::WouldBlock) => Ok(None),
         Err(error) => Err(UiMessage::raw(error)),
     }
@@ -220,11 +235,23 @@ pub(super) fn clean_stale() -> Result<(), UiMessage> {
 
 struct StagedPath {
     path: PathBuf,
-    _lease: Arc<File>,
+    _lease: Arc<CacheLease>,
+}
+
+// Windows 下先释放读锁，StagedPath 才能删除对应文件。
+struct VerifiedDownload {
+    _lock: File,
+    staged: StagedPath,
+}
+
+impl VerifiedDownload {
+    fn path(&self) -> &Path {
+        &self.staged.path
+    }
 }
 
 impl StagedPath {
-    fn new(path: PathBuf, lease: Arc<File>) -> Self {
+    fn new(path: PathBuf, lease: Arc<CacheLease>) -> Self {
         Self {
             path,
             _lease: lease,
@@ -276,6 +303,7 @@ fn open_read_locked(path: &Path) -> io::Result<File> {
 }
 
 pub(super) struct DownloadCancel {
+    official_activity: std::sync::Mutex<Instant>,
     cancelled: AtomicBool,
     stopped: AtomicBool,
     wake: tokio::sync::watch::Sender<u8>,
@@ -284,6 +312,7 @@ pub(super) struct DownloadCancel {
 impl Default for DownloadCancel {
     fn default() -> Self {
         Self {
+            official_activity: std::sync::Mutex::new(Instant::now()),
             cancelled: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             wake: tokio::sync::watch::channel(0).0,
@@ -311,6 +340,16 @@ impl DownloadCancel {
     pub(super) fn cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
+    fn record_activity(&self, source: DownloadSource, now: Instant) {
+        if matches!(source, DownloadSource::Official) {
+            *self.official_activity.lock().unwrap() = now;
+        }
+    }
+
+    fn hedge_remaining(&self, delay: Duration, now: Instant) -> Duration {
+        delay.saturating_sub(now.saturating_duration_since(*self.official_activity.lock().unwrap()))
+    }
+
     fn stopped(&self) -> bool {
         self.cancelled() || self.stopped.load(Ordering::Acquire)
     }
@@ -324,6 +363,7 @@ impl DownloadCancel {
     }
 }
 
+#[derive(Debug)]
 struct AttemptError {
     message: UiMessage,
     retryable: bool,
@@ -344,9 +384,11 @@ impl AttemptError {
     }
 }
 
+type AttemptResult = Result<VerifiedDownload, AttemptError>;
+
 enum AttemptEvent {
     Progress(u8),
-    Finished(DownloadSource, Result<Verified, AttemptError>),
+    Finished(DownloadSource, AttemptResult),
 }
 
 pub(super) use platform::Verified;
@@ -409,24 +451,48 @@ pub(super) fn download(
     let directory = cache_directory(true)?.expect("created cache directory");
     let lease = cache_lease(&directory)?
         .ok_or_else(|| UiMessage::raw("另一进程正在使用更新缓存，请稍后重试"))?;
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::scope(|scope| {
+    let attempt = |source, events: &mpsc::Sender<_>| {
+        download_attempt(
+            &candidate,
+            source,
+            &directory,
+            lease.clone(),
+            cancel,
+            events,
+        )
+    };
+    race_and_prepare(cancel, progress, HEDGE_DELAY, attempt, |download| {
+        #[cfg(target_os = "macos")]
+        return platform::finish(&candidate, download, cancel);
+        #[cfg(windows)]
+        platform::finish(&candidate, download)
+    })
+}
+
+fn race_and_prepare<T>(
+    cancel: &DownloadCancel,
+    progress: impl Fn(u8),
+    hedge_delay: Duration,
+    attempt: impl Fn(DownloadSource, &mpsc::Sender<AttemptEvent>) -> AttemptResult + Sync,
+    prepare: impl FnOnce(VerifiedDownload) -> Result<T, UiMessage>,
+) -> Result<T, UiMessage> {
+    let winner = std::thread::scope(|scope| {
+        let (sender, receiver) = mpsc::channel();
         let spawn = |source: DownloadSource| {
             let sender = sender.clone();
-            let lease = lease.clone();
-            let candidate = &candidate;
-            let directory = &directory;
+            let attempt = &attempt;
             scope.spawn(move || {
-                let result = download_attempt(candidate, source, directory, lease, cancel, &sender);
+                let result = attempt(source, &sender);
                 let _ = sender.send(AttemptEvent::Finished(source, result));
             });
         };
+        cancel.record_activity(DownloadSource::Official, Instant::now());
         spawn(DownloadSource::Official);
         let mut state = RaceState::default();
         let mut official_error = None;
         let mut mirror_error = None;
         let mut display = DisplayProgress::default();
-        let mut last_activity = Instant::now();
+
         loop {
             if cancel.cancelled() {
                 return Err(UiMessage::new("installer.cancelled"));
@@ -439,71 +505,70 @@ pub(super) fn download(
             let wait = if state.mirror_started || state.official_done {
                 Duration::from_secs(300)
             } else {
-                HEDGE_DELAY.saturating_sub(last_activity.elapsed())
+                cancel.hedge_remaining(hedge_delay, Instant::now())
             };
             match receiver.recv_timeout(wait) {
                 Ok(AttemptEvent::Progress(percent)) => {
-                    last_activity = Instant::now();
                     if let Some(percent) = display.update(percent) {
                         progress(percent);
                     }
                 }
-                Ok(AttemptEvent::Finished(source, result)) => {
-                    last_activity = Instant::now();
-                    match result {
-                        Ok(verified) => {
-                            cancel.stop();
-                            return Ok(verified);
+                Ok(AttemptEvent::Finished(source, result)) => match result {
+                    Ok(verified) => {
+                        cancel.stop();
+                        return Ok(verified);
+                    }
+                    Err(error) => {
+                        if cancel.cancelled() {
+                            return Err(UiMessage::new("installer.cancelled"));
                         }
-                        Err(error) => {
-                            if cancel.cancelled() {
-                                return Err(UiMessage::new("installer.cancelled"));
-                            }
-                            let retryable = error.retryable;
-                            match source {
-                                DownloadSource::Official => official_error = Some(error.message),
-                                DownloadSource::GhProxy => mirror_error = Some(error.message),
-                            }
-                            if state.failed(source, retryable) {
-                                spawn(DownloadSource::GhProxy);
-                            }
+                        let retryable = error.retryable;
+                        match source {
+                            DownloadSource::Official => official_error = Some(error.message),
+                            DownloadSource::GhProxy => mirror_error = Some(error.message),
+                        }
+                        if state.failed(source, retryable) {
+                            spawn(DownloadSource::GhProxy);
                         }
                     }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-                    if !state.official_done && state.start_mirror() =>
+                },
+                Err(mpsc::RecvTimeoutError::Timeout)
+                    if !state.official_done && !state.mirror_started =>
                 {
-                    spawn(DownloadSource::GhProxy);
+                    if cancel
+                        .hedge_remaining(hedge_delay, Instant::now())
+                        .is_zero()
+                    {
+                        state.start_mirror();
+                        spawn(DownloadSource::GhProxy);
+                    }
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    cancel.stop();
                     return Err(UiMessage::new("installer.response"));
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(UiMessage::new("installer.response"));
                 }
             }
         }
-    })
+    })?;
+    // 两路均已退出，队列里的另一份包也已释放。停止竞速不等于用户取消。
+    if cancel.cancelled() {
+        return Err(UiMessage::new("installer.cancelled"));
+    }
+    prepare(winner)
 }
 
 fn download_attempt(
     candidate: &Candidate,
     source: DownloadSource,
     directory: &Path,
-    lease: Arc<File>,
+    lease: Arc<CacheLease>,
     cancel: &DownloadCancel,
-    events: &std::sync::mpsc::Sender<AttemptEvent>,
-) -> Result<Verified, AttemptError> {
+    events: &mpsc::Sender<AttemptEvent>,
+) -> AttemptResult {
     cancel.check().map_err(AttemptError::terminal)?;
-    let path = directory.join(format!(
-        "{}.{}",
-        platform::download_name(),
-        source.file_suffix()
-    ));
-    remove_existing(&path).map_err(AttemptError::terminal)?;
-    let mut writer =
-        open_new(&path).map_err(|error| AttemptError::terminal(UiMessage::raw(error)))?;
-    let staged = StagedPath::new(path, lease);
     let url = match source {
         DownloadSource::Official => candidate.url.clone(),
         DownloadSource::GhProxy => proxy_url(&candidate.url)
@@ -513,6 +578,11 @@ fn download_attempt(
         .enable_all()
         .build()
         .map_err(|error| AttemptError::terminal(UiMessage::raw(error)))?;
+    let path = platform::download_path(directory, source);
+    remove_existing(&path).map_err(AttemptError::terminal)?;
+    let mut writer =
+        open_new(&path).map_err(|error| AttemptError::terminal(UiMessage::raw(error)))?;
+    let staged = StagedPath::new(path, lease);
     let transfer = async {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -563,6 +633,9 @@ fn download_attempt(
         let mut previous = 0u8;
         while let Some(chunk) = response.chunk().await.map_err(request_error)? {
             cancel.check().map_err(AttemptError::terminal)?;
+            if !chunk.is_empty() {
+                cancel.record_activity(source, Instant::now());
+            }
             total += chunk.len() as u64;
             if total > candidate.size {
                 return Err(AttemptError::retryable(UiMessage::new(
@@ -609,6 +682,14 @@ fn download_attempt(
     });
     drop(writer);
     result?;
+    verify_download(candidate, staged, cancel)
+}
+
+fn verify_download(
+    candidate: &Candidate,
+    staged: StagedPath,
+    cancel: &DownloadCancel,
+) -> AttemptResult {
     let mut lock = open_read_locked(&staged.path)
         .map_err(|error| AttemptError::terminal(UiMessage::raw(error)))?;
     if lock
@@ -638,7 +719,10 @@ fn download_attempt(
             "installer.digestFailed",
         )));
     }
-    platform::finish(candidate, lock, staged).map_err(AttemptError::terminal)
+    Ok(VerifiedDownload {
+        _lock: lock,
+        staged,
+    })
 }
 
 fn request_error(error: reqwest::Error) -> AttemptError {
@@ -672,6 +756,110 @@ fn download_error(error: reqwest::Error) -> UiMessage {
 mod tests {
     use super::*;
 
+    const TEST_BYTES: &[u8] = b"verified installer fixture";
+
+    pub(super) fn test_candidate() -> Candidate {
+        Candidate {
+            version: "0.8.0".into(),
+            url: String::new(),
+            size: TEST_BYTES.len() as u64,
+            digest: Sha256::digest(TEST_BYTES).into(),
+        }
+    }
+
+    pub(super) fn test_download(
+        path: PathBuf,
+        lease: Arc<CacheLease>,
+        candidate: &Candidate,
+        cancel: &DownloadCancel,
+    ) -> VerifiedDownload {
+        open_new(&path).unwrap().write_all(TEST_BYTES).unwrap();
+        verify_download(candidate, StagedPath::new(path, lease), cancel).unwrap()
+    }
+
+    #[test]
+    fn two_verified_sources_prepare_only_the_winner_after_loser_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path();
+        let lease = cache_lease(directory).unwrap().unwrap();
+        let candidate = test_candidate();
+        let cancel = DownloadCancel::default();
+        let verified = std::sync::Barrier::new(2);
+        let winner = race_and_prepare(
+            &cancel,
+            |_| {},
+            Duration::ZERO,
+            |source, _| {
+                let download = test_download(
+                    platform::download_path(directory, source),
+                    lease.clone(),
+                    &candidate,
+                    &cancel,
+                );
+                verified.wait(); // 两份文件都已通过真实校验，才允许任一来源报告胜出。
+                Ok(download)
+            },
+            |winner| {
+                let paths: Vec<_> = DownloadSource::ALL
+                    .into_iter()
+                    .map(|source| platform::download_path(directory, source))
+                    .filter(|path| path.exists())
+                    .collect();
+                assert_eq!(paths, [winner.path()]);
+                assert!(cancel.stopped() && !cancel.cancelled());
+                assert!(cache_lease(directory).unwrap().is_none());
+                Ok(winner)
+            },
+        )
+        .unwrap();
+        drop(lease);
+        assert!(cache_lease(directory).unwrap().is_none());
+        let path = winner.path().to_owned();
+        drop(winner);
+        assert!(!path.exists());
+        assert!(cache_lease(directory).unwrap().is_some());
+    }
+
+    #[test]
+    fn user_cancel_during_loser_shutdown_skips_preparation() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path();
+        let lease = cache_lease(directory).unwrap().unwrap();
+        let cancel = DownloadCancel::default();
+        let verified = std::sync::Barrier::new(2);
+        let result = race_and_prepare(
+            &cancel,
+            |_| {},
+            Duration::ZERO,
+            |source, _| {
+                let download = test_download(
+                    platform::download_path(directory, source),
+                    lease.clone(),
+                    &test_candidate(),
+                    &cancel,
+                );
+                let mut wake = cancel.wake.subscribe();
+                verified.wait();
+                if source == DownloadSource::GhProxy {
+                    tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .unwrap()
+                        .block_on(wake.changed())
+                        .unwrap(); // 等胜者已停止竞速，再模拟用户取消。
+                    cancel.cancel();
+                }
+                Ok(download)
+            },
+            |_| -> Result<(), _> { panic!("cancelled winner must not be prepared") },
+        );
+        assert!(result.is_err() && cancel.cancelled());
+        assert!(
+            DownloadSource::ALL
+                .into_iter()
+                .all(|source| !platform::download_path(directory, source).exists())
+        );
+    }
+
     #[test]
     fn proxy_only_accepts_canonical_release_downloads() {
         let official =
@@ -689,6 +877,28 @@ mod tests {
         assert!(
             proxy_url("https://github.com/nomo-md/nomo/releases/download/v0.8.0/a.exe?x=1")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn sub_percent_activity_defers_mirror_until_actual_stall() {
+        let cancel = DownloadCancel::default();
+        let start = Instant::now();
+        let mut display = DisplayProgress::default();
+        for second in 1..=16 {
+            let now = start + Duration::from_secs(second);
+            cancel.record_activity(DownloadSource::Official, now);
+            assert!(display.update(1).is_none());
+            assert!(
+                !cancel
+                    .hedge_remaining(HEDGE_DELAY, now + Duration::from_secs(1))
+                    .is_zero()
+            );
+        }
+        assert!(
+            cancel
+                .hedge_remaining(HEDGE_DELAY, start + Duration::from_secs(24))
+                .is_zero()
         );
     }
 

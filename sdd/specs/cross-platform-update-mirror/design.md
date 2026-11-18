@@ -60,7 +60,8 @@ installation() -> 当前安装身份；不支持时给出便携/手动更新原�
 candidate(release) -> 平台固定版本、架构和资产约束
 cache_lease() -> 一个进程内两路尝试共享的跨进程租约
 prepare_attempt(source) -> 独立临时文件
-finish_attempt(path) -> 平台复核并生成 Verified
+verify_download(...) -> 大小和 SHA-256 校验后保留文件读句柄和缓存租约
+finish(candidate, winner) -> 两路任务退出后仅对胜者做平台准备，生成 Verified
 Verified::launch() -> 启动 NSIS 或 macOS 退出后辅助命令
 ```
 
@@ -72,7 +73,7 @@ Verified::launch() -> 启动 NSIS 或 macOS 退出后辅助命令
 
 - 官方请求正常连接并持续产生数据时，不创建镜像请求。
 - 官方连接失败、可重试 HTTP 错误、读取失败或校验失败时立即启动镜像；若官方任务已结束，则退化为单路镜像。
-- 官方连接或读取持续停滞达到内部超时时，启动镜像但不主动取消仍在运行的官方任务。
+- 按官方源最近收到数据的时间（独立于界面百分比）判断停滞。官方连接或读取持续停滞达到内部超时时，启动镜像但不主动取消仍在运行的官方任务。
 - 每个任务仍受连接、读取、总时长和平台包大小上限约束。
 - 两路写不同临时文件；首个字节数精确匹配且 SHA-256 正确的任务获胜。
 - 获胜后取消另一任务并清理其文件；失败或校验错误不覆盖另一任务的结果。
@@ -93,9 +94,9 @@ Verified::launch() -> 启动 NSIS 或 macOS 退出后辅助命令
 3. 官方下载开始；仅在失败或停滞时启动 gh-proxy。
 4. 共享下载器汇报单任务进度；首个完整校验成功包进入平台 `Verified`。
 5. 用户点击“重启并安装”，复用 `can_quit_to_install` 和正常文档关闭流程；取消关闭时保留已验证包。
-6. Windows 继续启动 `/NOMOUPDATE=<PID> /P /R` 的 NSIS 流程。
+6. Windows 持有胜者的文件读锁，从校验时的同一绝对路径启动 NSIS，保留 `/NOMOUPDATE=<PID> /P /R` 参数；缓存文件名以 `.official.exe` 或 `.gh-proxy.exe` 结尾。
 7. macOS 启动复制到更新缓存中的辅助可执行文件，旧进程正常退出。
-8. macOS 辅助命令等待旧 PID，复核原 bundle 身份，在目标父目录同卷 staging 新 bundle，执行旧版备份、新版就位和 `open` 重启。
+8. macOS 辅助命令等待旧 PID 退出，自行定位 `native-updates` 并加锁，再读取固定的 `macos-staging/Nomo.app`。暂存路径不接受命令行输入；拒绝链接目录。复核新旧 bundle 后在目标父目录同卷复制、备份、替换和重启。
 9. 替换或启动失败时尽量恢复旧 bundle 并重新打开；不删除用户文档或应用数据。
 10. 新版启动沿用 `nativeReleaseNotesVersion` 显示更新成功和 Release Notes。
 
@@ -103,8 +104,8 @@ Verified::launch() -> 启动 NSIS 或 macOS 退出后辅助命令
 
 - 仅接受正式 `com.nomo.desktop`、arm64、严格更高版本的 `Nomo_aarch64.app.tar.gz`。
 - 当前可执行文件必须位于规范化 `<Nomo.app>/Contents/MacOS/nomo`；拒绝 side-by-side 测试 bundle、App Translocation、DMG/只读位置、符号链接身份和父目录不可写位置。
-- 使用 macOS 自带 `/usr/bin/tar` 解压到空 staging；在写入前拒绝绝对路径、`..`、链接及其他非普通目录/文件条目，解压后再次核对单一 `Nomo.app` 根和路径包含关系。
-- 解压后核对 `Info.plist` 的 bundle 标识和版本、主可执行文件架构，并运行 `/usr/bin/codesign --verify --deep --strict`。这里验证现有 ad-hoc 签名完整性，不要求 Developer ID 或公证。
+- 使用 macOS 系统 libarchive 单遍流式读取，逐条目检查 4096 项／1 GiB 预算并支持取消，只向空 staging 写入；在写入前拒绝绝对路径、`..`、链接及其他非普通目录/文件条目，解压后再次核对单一 `Nomo.app` 根和路径包含关系。
+- 解压后核对 `Info.plist` 的 bundle 标识和版本，读取主程序的 32 字节 Mach-O 头确认其为单架构 arm64 可执行文件（不依赖运行时 `lipo`），再运行 `/usr/bin/codesign --verify --deep --strict`。这里验证现有 ad-hoc 签名完整性，不要求 Developer ID 或公证。
 - 替换 staging 必须位于原应用父目录，保证 rename 同卷；只有经过全部校验后才启动退出安装流程。
 
 ## 4. Error Handling
