@@ -96,8 +96,8 @@ impl Workspace {
                         let controls = path.as_ref().filter(|path| hovered.as_ref() == Some(*path))
                             .map(|path| tree_controls(path, true, &theme, cx));
                         let target = path.as_deref().is_some_and(|path| workspace.explorer.drag.is_target(path));
-                        let mut root = tree_root_row().id("tree-root").relative().top(px(-TREE_ROOT_LIFT)).mx(px(TREE_ROW_PADDING))
-                            .cursor_pointer().text_color(theme.fg)
+                        let mut root = tree_row(TREE_ROW_INDENT).id("tree-root").relative().mx(px(TREE_ROW_PADDING))
+                            .font_weight(FontWeight::SEMIBOLD).text_color(theme.muted).cursor_pointer()
                             .when(!target, |el| el.hover(|style| style.bg(row_hover)))
                             .when(search_path.as_ref() == path.as_ref() && search_path.is_some(), |el| el.bg(theme.sidebar_active))
                             .when(target, |el| el.bg(theme.sidebar_active).rounded(px(9.0)))
@@ -160,7 +160,11 @@ impl Workspace {
                             }))
                             .into_any_element()
                     });
-                    let kind = if is_dir { IconName::FolderOpen } else { IconName::FileText };
+                    let kind = match (is_dir, expanded) {
+                        (true, true) => IconName::FolderOpen,
+                        (true, false) => IconName::Folder,
+                        (false, _) => IconName::FileText,
+                    };
                     let target = workspace.explorer.drag.is_target(&path);
                     let file_icon = if target { tree_drag::receiving_icon(&theme) } else if row.loading { tree_spinner(("tree-spinner", index), theme.muted, reduce_motion) }
                         else { icon(kind, TREE_ROW_ICON_SIZE, if active { theme.accent } else { theme.muted }).into_any_element() };

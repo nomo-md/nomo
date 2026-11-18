@@ -1,4 +1,4 @@
-//! 主页只持久化目录入口、最近路径和可再生缩略图；不保存正文或编辑会话。
+//! 主页只持久化目录入口、收藏、最近路径和可再生缩略图；不保存正文或编辑会话。
 use crate::ui::toolbar_i18n::UiMessage;
 use gpui::{App, AppContext, Context, Entity, Global, Task};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -8,6 +8,7 @@ mod order;
 pub(crate) use order::TreeOrder;
 
 pub(super) const RECENT_LIMIT: usize = 200;
+pub(super) const FAVORITE_LIMIT: usize = 200;
 const FOLDER_LIMIT: usize = 64;
 const PATH_LIMIT: usize = 8192;
 const DISK_CACHE_BYTES: usize = 32 * 1024 * 1024;
@@ -25,11 +26,16 @@ pub(crate) struct Entry {
 pub(crate) struct Snapshot {
     pub folders: Vec<Entry>,
     pub recent: Vec<Entry>,
+    pub favorites: Vec<Entry>,
     pub order: Arc<TreeOrder>,
     home_order_opened: Option<u64>,
 }
 
 impl Snapshot {
+    pub(in crate::ui) fn is_favorite(&self, path: &Path) -> bool {
+        self.favorites.iter().any(|entry| entry.path == path)
+    }
+
     pub(super) fn home_entries(&self) -> Vec<(&Entry, bool)> {
         let mut entries: Vec<_> = self.folders.iter().map(|entry| (entry, true))
             .chain(self.recent.iter().map(|entry| (entry, false))).collect();
@@ -47,6 +53,7 @@ pub(crate) enum Change {
     Refresh,
     Opened(PathBuf),
     Saved(PathBuf),
+    SetFavorite { path: PathBuf, favorite: bool },
     AddFolder(PathBuf),
     Remove { path: PathBuf, folder: bool },
     ClearRecent,
@@ -162,14 +169,20 @@ fn connect() -> Result<Connection, UiMessage> {
     // 结构索引已经设置进程级 SQLite 堆上限；主页连接只使用很小的页缓存。
     connection.execute_batch("PRAGMA cache_size=-128; PRAGMA mmap_size=0; PRAGMA temp_store=FILE;").map_err(|e| e.to_string())?;
     if new { connection.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;").map_err(|e| e.to_string())?; }
+    initialize(&connection)?;
+    Ok(connection)
+}
+
+fn initialize(connection: &Connection) -> Result<(), UiMessage> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS entries (path TEXT NOT NULL, folder INTEGER NOT NULL, opened INTEGER NOT NULL, PRIMARY KEY(path, folder));
+         CREATE TABLE IF NOT EXISTS favorites (path TEXT PRIMARY KEY, added INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS thumbnails (path TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, png BLOB NOT NULL, touched INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS tree_order (parent TEXT PRIMARY KEY, paths TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS home_order (id INTEGER PRIMARY KEY CHECK (id=1), opened INTEGER NOT NULL);"
     ).map_err(|e| e.to_string())?;
-    Ok(connection)
+    Ok(())
 }
 
 fn read_entries(connection: &Connection, folder: bool) -> Result<Vec<Entry>, String> {
@@ -181,12 +194,21 @@ fn read_entries(connection: &Connection, folder: bool) -> Result<Vec<Entry>, Str
     entries.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
+fn read_favorites(connection: &Connection) -> Result<Vec<Entry>, UiMessage> {
+    let mut query = connection.prepare("SELECT path, added FROM favorites ORDER BY added DESC, path LIMIT ?1").map_err(|e| e.to_string())?;
+    let entries = query.query_map([FAVORITE_LIMIT as i64], |row| {
+        Ok(Entry { path: PathBuf::from(row.get::<_, String>(0)?), opened: row.get::<_, i64>(1)?.max(0) as u64, revision: 0 })
+    }).map_err(|e| e.to_string())?;
+    Ok(entries.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?)
+}
+
 fn read_snapshot(connection: &Connection) -> Result<Snapshot, UiMessage> {
     let home_order_opened: Option<i64> = connection.query_row("SELECT opened FROM home_order WHERE id=1", [], |row| row.get(0))
         .optional().map_err(|e| e.to_string())?;
     Ok(Snapshot {
         folders: read_entries(connection, true)?,
         recent: read_entries(connection, false)?,
+        favorites: read_favorites(connection)?,
         order: Arc::new(order::read(connection)?),
         home_order_opened: home_order_opened.map(|opened| opened.max(0) as u64),
     })
@@ -239,6 +261,10 @@ fn import_legacy_recent(connection: &Connection) -> Result<(), String> {
 
 fn apply(change: Change) -> Result<(Snapshot, Option<UiMessage>), UiMessage> {
     let mut connection = connect()?;
+    apply_with_connection(&mut connection, change)
+}
+
+fn apply_with_connection(connection: &mut Connection, change: Change) -> Result<(Snapshot, Option<UiMessage>), UiMessage> {
     let mut transaction = connection.transaction().map_err(|e| e.to_string())?;
     // 升级兼容失败只回滚导入，不阻止正常打开、保存或清除原生记录。
     let warning = if matches!(&change, Change::Refresh) {
@@ -263,6 +289,16 @@ fn apply(change: Change) -> Result<(Snapshot, Option<UiMessage>), UiMessage> {
                 transaction.execute("INSERT OR IGNORE INTO entries(path,folder,opened) VALUES (?1,0,?2)", params![key, now() as i64]).map_err(|e| e.to_string())?;
                 transaction.execute("DELETE FROM thumbnails WHERE path=?1", params![key]).map_err(|e| e.to_string())?;
                 transaction.execute("DELETE FROM entries WHERE folder=0 AND path NOT IN (SELECT path FROM entries WHERE folder=0 ORDER BY opened DESC,path LIMIT ?1)", params![RECENT_LIMIT as i64]).map_err(|e| e.to_string())?;
+            },
+            Change::SetFavorite { path, favorite } => {
+                let key = path_key_message(&path)?;
+                if favorite {
+                    let count: i64 = transaction.query_row("SELECT count(*) FROM favorites WHERE path<>?1", params![key], |row| row.get(0)).map_err(|e| e.to_string())?;
+                    if count >= FAVORITE_LIMIT as i64 { return Err(UiMessage::new("home.favoriteLimit").arg("count", FAVORITE_LIMIT)); }
+                    transaction.execute("INSERT OR IGNORE INTO favorites(path,added) VALUES (?1,?2)", params![key, now() as i64]).map_err(|e| e.to_string())?;
+                } else {
+                    transaction.execute("DELETE FROM favorites WHERE path=?1", params![key]).map_err(|e| e.to_string())?;
+                }
             },
             Change::AddFolder(path) => {
                 let key = path_key_message(&path)?;
@@ -302,6 +338,14 @@ fn apply(change: Change) -> Result<(Snapshot, Option<UiMessage>), UiMessage> {
                             transaction.execute("DELETE FROM entries WHERE path=?1 AND folder=?2", params![old, folder]).map_err(|e| e.to_string())?;
                             transaction.execute("INSERT INTO entries(path,folder,opened) VALUES (?1,?2,?3) ON CONFLICT(path,folder) DO UPDATE SET opened=MAX(opened,excluded.opened)", params![next, folder, entry.opened as i64]).map_err(|e| e.to_string())?;
                         }
+                    }
+                }
+                for entry in read_favorites(&transaction)? {
+                    if let Some(next) = paths.iter().find_map(|(old, new)| entry.path.strip_prefix(old).ok().map(|suffix| new.join(suffix))) {
+                        let old = path_key(&entry.path)?;
+                        let next = path_key(&next)?;
+                        transaction.execute("DELETE FROM favorites WHERE path=?1", params![old]).map_err(|e| e.to_string())?;
+                        transaction.execute("INSERT INTO favorites(path,added) VALUES (?1,?2) ON CONFLICT(path) DO UPDATE SET added=MAX(added,excluded.added)", params![next, entry.opened as i64]).map_err(|e| e.to_string())?;
                     }
                 }
             },
@@ -345,4 +389,51 @@ pub(super) fn store_thumbnail(path: &Path, fingerprint: &str, png: &[u8]) -> Res
     transaction.commit().map_err(|e| e.to_string())?;
     connection.execute_batch("PRAGMA incremental_vacuum(64);").map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn database() -> Connection {
+        let connection = Connection::open_in_memory().expect("open test database");
+        initialize(&connection).expect("initialize test database");
+        connection
+    }
+
+    fn change(connection: &mut Connection, change: Change) -> Snapshot {
+        apply_with_connection(connection, change).expect("apply library change").0
+    }
+
+    #[test]
+    fn favorites_survive_home_clear_and_can_be_removed() {
+        let mut connection = database();
+        let path = PathBuf::from("notes/a.md");
+        change(&mut connection, Change::Opened(path.clone()));
+        let snapshot = change(&mut connection, Change::SetFavorite { path: path.clone(), favorite: true });
+        assert!(snapshot.is_favorite(&path));
+
+        let snapshot = change(&mut connection, Change::ClearHome);
+        assert!(snapshot.recent.is_empty());
+        assert!(snapshot.is_favorite(&path));
+
+        let snapshot = change(&mut connection, Change::SetFavorite { path: path.clone(), favorite: false });
+        assert!(!snapshot.is_favorite(&path));
+        assert!(snapshot.favorites.is_empty());
+    }
+
+    #[test]
+    fn renaming_a_document_updates_its_favorite_path() {
+        let mut connection = database();
+        let old = PathBuf::from("notes/a.md");
+        let new = PathBuf::from("notes/b.md");
+        change(&mut connection, Change::Opened(old.clone()));
+        change(&mut connection, Change::SetFavorite { path: old.clone(), favorite: true });
+
+        let snapshot = change(&mut connection, Change::Rename(vec![(old.clone(), new.clone())]));
+
+        assert!(!snapshot.is_favorite(&old));
+        assert!(snapshot.is_favorite(&new));
+        assert_eq!(snapshot.favorites.len(), 1);
+    }
 }

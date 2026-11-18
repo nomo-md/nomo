@@ -2,6 +2,10 @@
 
 use gpui::Window;
 
+pub(super) const TITLEBAR_BUTTON_HEIGHT: f32 = 32.0;
+pub(super) const TITLEBAR_BUTTON_RADIUS: f32 = 4.0;
+pub(super) const TITLEBAR_HOVER: u32 = 0x80808026;
+
 /// GPUI 0.2.2 的 Windows `zoom_window` 只会最大化，不会还原。
 pub(crate) fn toggle_maximize(window: &Window) {
     #[cfg(target_os = "windows")]
@@ -32,12 +36,13 @@ pub(crate) fn toggle_maximize(window: &Window) {
 
 #[cfg(target_os = "windows")]
 mod windows {
+    use super::{TITLEBAR_BUTTON_HEIGHT, TITLEBAR_BUTTON_RADIUS, TITLEBAR_HOVER};
     use super::super::components::tooltip;
     use crate::theme::Theme;
     use gpui::{
         AnyElement, App, ClickEvent, Div, FocusHandle, InteractiveElement, IntoElement, MouseButton,
         ParentElement, Stateful, StatefulInteractiveElement, Styled, Window, WindowControlArea,
-        div, point, prelude::*, px, rgb,
+        div, point, prelude::*, px, rgba,
     };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use std::rc::Rc;
@@ -171,22 +176,20 @@ mod windows {
         theme: &Theme,
         window: &Window,
         focus: &CaptionFocus,
+        button_width: f32,
         on_action: impl Fn(CaptionAction, &mut Window, &mut App) + 'static,
     ) -> Div {
         let on_action = Rc::new(on_action);
-        let button = |id, action, glyph, area, label, focus: &FocusHandle| {
+        let button = |id: &'static str, action, glyph, area, label, focus: &FocusHandle| {
             let on_action = on_action.clone();
-            let foreground = theme.fg;
-            div().id(id).relative().w(px(46.0)).h_full().flex_none()
-                .flex().items_center().justify_center().text_color(foreground).occlude().track_focus(focus).tab_index(0)
-                .when(focus.is_focused(window), |el| el.border_2().border_color(theme.accent))
-                .hover(move |style| if action == CaptionAction::Close {
-                    style.bg(rgb(0xc42b1c)).text_color(rgb(0xffffff))
-                } else { style.bg(foreground.opacity(0.12)) })
-                .active(move |style| if action == CaptionAction::Close {
-                    style.bg(rgb(0xa3261b)).text_color(rgb(0xffffff))
-                } else { style.bg(foreground.opacity(0.18)) })
-                .child(window_glyph(glyph))
+            div().id(id).group(id).relative().w(px(button_width)).h_full().flex_none()
+                .flex().items_center().justify_center().text_color(theme.fg).occlude().track_focus(focus).tab_index(0)
+                .child(div().id("caption-button-surface").w_full().h(px(TITLEBAR_BUTTON_HEIGHT))
+                    .flex().items_center().justify_center().rounded(px(TITLEBAR_BUTTON_RADIUS))
+                    .when(focus.is_focused(window), |el| el.border_2().border_color(theme.accent))
+                    .group_hover(id, |style| style.bg(rgba(TITLEBAR_HOVER)))
+                    .group_active(id, |style| style.bg(rgba(0x80808033)))
+                    .child(window_glyph(glyph)))
                 // 保留 Windows 对最大化按钮的命中信息；动作仍只由下方点击处理一次。
                 .child(div().absolute().top_0().right_0().bottom_0().left_0().window_control_area(area))
                 .tooltip(move |window, cx| tooltip(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_text(label))(window, cx))

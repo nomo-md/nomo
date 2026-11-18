@@ -5,6 +5,7 @@
 
 use super::toolbar_i18n::ToolbarLocale;
 use super::components::{IconName, icon, tooltip};
+use super::window_chrome::{TITLEBAR_BUTTON_HEIGHT, TITLEBAR_BUTTON_RADIUS, TITLEBAR_HOVER};
 use super::{window_chrome, workspace as action};
 use super::popup::{popup, reduced_motion, PopupAnchor, PopupPlacement};
 use crate::{editor, settings::EditorMode, theme::Theme};
@@ -17,6 +18,7 @@ use gpui::{
 use std::path::PathBuf;
 
 pub const TITLEBAR_HEIGHT: f32 = 42.0;
+const TITLEBAR_EDGE_INSET: f32 = 8.0;
 const MENU_WIDTH: f32 = 278.0;
 
 /// 只有宿主已经实现并订阅的业务能力才能启用菜单项。
@@ -475,8 +477,8 @@ impl Chrome {
     }
 
     fn basic_button(&self, id: &'static str, theme: &Theme) -> Stateful<Div> {
-        div().id(id).size(px(32.0)).flex_none().flex().items_center().justify_center().rounded(px(4.0))
-            .cursor_pointer().text_color(theme.fg).hover(|style| style.bg(gpui::rgba(0x80808026)))
+        div().id(id).size(px(TITLEBAR_BUTTON_HEIGHT)).flex_none().flex().items_center().justify_center().rounded(px(TITLEBAR_BUTTON_RADIUS))
+            .cursor_pointer().text_color(theme.fg).hover(|style| style.bg(gpui::rgba(TITLEBAR_HOVER)))
             .when(cfg!(target_os = "windows"), |el| el.occlude())
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
@@ -496,7 +498,7 @@ impl Render for Chrome {
         let viewport = window.viewport_size();
         let mut root = div().id("nomo-chrome").track_focus(&self.focus).key_context("NomoChrome")
             .relative().children(animate_theme.then(crate::ui::motion::theme_frame))
-            .h(px(TITLEBAR_HEIGHT)).w_full().flex_none().flex().items_center().gap(px(6.0)).pl(px(8.0))
+            .h(px(TITLEBAR_HEIGHT)).w_full().flex_none().flex().items_center().gap(px(6.0)).pl(px(TITLEBAR_EDGE_INSET))
             .bg(theme.titlebar_bg).text_color(theme.titlebar_fg).text_size(px(13.0)).occlude()
             .when(cfg!(target_os = "macos") && !window.is_fullscreen(), |el| el.pl(px(88.0)))
             .on_key_down(cx.listener(Self::on_key))
@@ -523,10 +525,10 @@ impl Render for Chrome {
             let mut nav = div().flex().items_center().gap(px(1.0)).flex_none();
             for menu in [Menu::File, Menu::Edit, Menu::Paragraph, Menu::Format, Menu::View] {
                 let open = self.menu == Some(menu);
-                let trigger = div().id(("chrome-menu-trigger", menu.index())).h(px(32.0)).px(px(8.0))
-                    .flex().items_center().rounded(px(4.0)).cursor_pointer()
+                let trigger = div().id(("chrome-menu-trigger", menu.index())).h(px(TITLEBAR_BUTTON_HEIGHT)).px(px(8.0))
+                    .flex().items_center().rounded(px(TITLEBAR_BUTTON_RADIUS)).cursor_pointer()
                     .when(cfg!(target_os = "windows"), |el| el.occlude())
-                    .when(open, |el| el.bg(gpui::rgba(0x80808026))).hover(|style| style.bg(gpui::rgba(0x80808026))).child(menu.label(locale))
+                    .when(open, |el| el.bg(gpui::rgba(TITLEBAR_HOVER))).hover(|style| style.bg(gpui::rgba(TITLEBAR_HOVER))).child(menu.label(locale))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -543,8 +545,10 @@ impl Render for Chrome {
                 }
                 nav = nav.child(item);
             }
-            root = root.child(nav.child(div().id("chrome-settings").h(px(32.0)).px(px(8.0)).flex().items_center()
-                .rounded(px(4.0)).cursor_pointer().hover(|style| style.bg(theme.hover)).child(locale.app_text("chrome.settings"))
+            root = root.child(nav.child(div().id("chrome-settings").h(px(TITLEBAR_BUTTON_HEIGHT)).px(px(8.0)).flex().items_center()
+                .rounded(px(TITLEBAR_BUTTON_RADIUS)).cursor_pointer()
+                .hover(|style| if cfg!(target_os = "windows") { style.bg(gpui::rgba(TITLEBAR_HOVER)) } else { style.bg(theme.hover) })
+                .child(locale.app_text("chrome.settings"))
                 .when(cfg!(target_os = "windows"), |el| el.occlude())
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
@@ -574,7 +578,6 @@ impl Render for Chrome {
         right = right.child(self.icon_button("chrome-theme", if theme.dark { IconName::Sun } else { IconName::Moon }, &theme)
                 .tooltip(tooltip(locale.app_text("chrome.switchTheme")))
                 .on_click(cx.listener(|this, _, window, cx| { this.dismiss(window, cx); window.dispatch_action(Box::new(action::ToggleTheme), cx); })));
-        root = root.child(right);
         #[cfg(target_os = "windows")]
         {
             use window_chrome::CaptionAction;
@@ -586,8 +589,11 @@ impl Render for Chrome {
                     CaptionAction::Close => cx.emit(ChromeEvent::CloseWindow),
                 }
             });
-            root = root.child(window_chrome::caption_controls(&theme, window, &self.caption_focus, move |action, window, cx| on_action(&action, window, cx)));
+            let controls = window_chrome::caption_controls(&theme, window, &self.caption_focus, TITLEBAR_BUTTON_HEIGHT,
+                move |action, window, cx| on_action(&action, window, cx));
+            right = right.pr(px(TITLEBAR_EDGE_INSET)).child(controls.h(px(TITLEBAR_BUTTON_HEIGHT)));
         }
+        root = root.child(right);
         if self.menu.is_some() {
             root = root.child(deferred(anchored().position(point(px(0.0), px(TITLEBAR_HEIGHT))).child(
                 div().id("chrome-dismiss-overlay").w(viewport.width).h((viewport.height - px(TITLEBAR_HEIGHT)).max(px(0.0))).occlude()
