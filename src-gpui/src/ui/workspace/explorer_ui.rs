@@ -96,8 +96,8 @@ impl Workspace {
                         let controls = path.as_ref().filter(|path| hovered.as_ref() == Some(*path))
                             .map(|path| tree_controls(path, true, &theme, cx));
                         let target = path.as_deref().is_some_and(|path| workspace.explorer.drag.is_target(path));
-                        let mut root = tree_row(TREE_ROW_INDENT).id("tree-root").relative().mx(px(TREE_ROW_PADDING))
-                            .font_weight(FontWeight::SEMIBOLD).text_color(theme.muted).cursor_pointer()
+                        let mut root = tree_root_row().id("tree-root").relative().mx(px(TREE_ROW_PADDING))
+                            .text_color(theme.fg).cursor_pointer()
                             .when(!target, |el| el.hover(|style| style.bg(row_hover)))
                             .when(search_path.as_ref() == path.as_ref() && search_path.is_some(), |el| el.bg(theme.sidebar_active))
                             .when(target, |el| el.bg(theme.sidebar_active).rounded(px(9.0)))
