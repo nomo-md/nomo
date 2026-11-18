@@ -335,6 +335,52 @@ impl BlockLayout {
             .sum::<usize>() + self.items.capacity()*std::mem::size_of::<DisplayItem>()
     }
 
+    /// 方向键只考虑当前行之外的落点。段距和卡片留白本身不占一行。
+    pub(crate) fn adjacent_row(&self, x: f32, edge: f32, down: bool) -> Option<(usize, f32)> {
+        let mut best = None;
+        for item in &self.items {
+            let (at, center, left, right) = match item {
+                DisplayItem::Text { x: left, y, layout, map } => {
+                    let h = layout.line_height;
+                    let relative = (edge - y) / h - 0.5;
+                    let Some(last) = layout.lines.len().checked_sub(1) else { continue; };
+                    let last = last as f32;
+                    let row = if down { relative.ceil().max(0.0) } else { relative.floor().min(last) };
+                    if row < 0.0 || row > last { continue; }
+                    let local_y = (row + 0.5) * h;
+                    let right = left + layout.max_hit_width();
+                    let rank = ((y + local_y - edge).abs(), (left - x).max(x - right).max(0.0));
+                    if best.is_some_and(|(prior, _, _)| prior <= rank) { continue; }
+                    let offset = layout.offset_at(x - left, local_y);
+                    let Some(at) = map_to_source(map, offset) else { continue; };
+                    (at, y + local_y, *left, right)
+                }
+                DisplayItem::Horizontal { x: left, y, w, offset, layout, .. } => {
+                    let Some((at, center)) = layout.adjacent_row((x-left).clamp(0.0, *w) + offset.get(), edge-y, down) else { continue; };
+                    (at, y + center, *left, left + w)
+                }
+                DisplayItem::CodeBody { x: left, y, w, h, body, .. } => {
+                    let (width, height) = body.viewport(*w, *h);
+                    let (sx, sy) = body.offset.get();
+                    let local_y = if down { 0.0 } else { (height - 0.5).max(0.0) };
+                    let Some(at) = body.code.source_at((x-left-body.gutter).clamp(0.0, width)+sx, local_y+sy) else { continue; };
+                    (at, y + local_y, *left, left + w)
+                }
+                DisplayItem::Image { x: left, y, w, h, source, .. } => {
+                    let at = if x < left + w / 2.0 { source.start } else { source.end };
+                    (at, y + h / 2.0, *left, left + w)
+                }
+                DisplayItem::Embed { x: left, y, w, h, source, .. } => (*source, y + h / 2.0, *left, left + w),
+                _ => continue,
+            };
+            let distance = if down { center - edge } else { edge - center };
+            if distance < 0.0 { continue; }
+            let rank = (distance, (left - x).max(x - right).max(0.0));
+            if best.is_none_or(|(prior, _, _)| rank < prior) { best = Some((rank, at, center)); }
+        }
+        best.map(|(_, at, center)| (at, center))
+    }
+
     /// 先匹配纵向最近的文本项，再比较横向距离，避免点击短行右侧时跳到其他段落。
     pub fn source_at(&self, x: f32, y: f32) -> Option<usize> {
         let mut best: Option<((f32, f32), usize)> = None;

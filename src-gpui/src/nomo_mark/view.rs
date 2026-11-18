@@ -867,23 +867,18 @@ impl NomoMark {
         };
         let x = self.preferred_x.unwrap_or(x);
         self.preferred_x = Some(x);
-        let target = y + if down { h * 1.5 } else { -h * 0.5 };
-        if target < 0.0 || target >= layout.height {
-            if !self.windowed_navigation {
-                cx.emit(ControlEvent::WindowBoundary { forward: down, identity: self.host.parsed.identity.clone(), extend_selection: extend });
-                return;
-            }
+        if let Some((at, target)) = layout.adjacent_row(x, if down { y + h } else { y }, down) {
+            if !extend && self.enter_block_at(at, !down, window, cx) { return; }
+            self.move_to_row(at, target, extend, cx);
+        } else if self.windowed_navigation {
             cx.emit(ControlEvent::VerticalNavigation {
                 down,
                 identity: self.host.parsed.identity.clone(),
                 extend_selection: extend,
                 page: false,
             });
-            return;
-        }
-        if let Some(at) = layout.source_at(x, target) {
-            if !extend && self.enter_block_at(at, !down, window, cx) { return; }
-            self.move_to_row(at, target, extend, cx);
+        } else {
+            cx.emit(ControlEvent::WindowBoundary { forward: down, identity: self.host.parsed.identity.clone(), extend_selection: extend });
         }
     }
     fn home_end(&mut self, end: bool, extend: bool, cx: &mut Context<Self>) {

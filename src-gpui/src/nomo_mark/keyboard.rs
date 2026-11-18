@@ -90,10 +90,20 @@ impl NomoMark {
     pub(super) fn resolve_page_cursor(&mut self, cx: &mut Context<Self>) {
         let Some((x, fraction, anchor)) = self.pending_page.take() else { return; };
         let Some(layout) = &self.layout else { return; };
-        if let Some(at) = layout.source_at(x, (layout.height * fraction).clamp(0.0, (layout.height - 1.0).max(0.0))) {
+        let target = if fraction == 0.0 {
+            layout.adjacent_row(x, 0.0, true)
+        } else if fraction == 1.0 {
+            layout.adjacent_row(x, layout.height, false)
+        } else {
+            let y = (layout.height * fraction).clamp(0.0, (layout.height - 1.0).max(0.0));
+            layout.source_at(x, y).map(|at| (at, y))
+        };
+        if let Some((at, y)) = target {
+            let upstream = layout.caret_at(at).is_some_and(|(_, top, _)| y < top);
             let head_byte = self.host.parsed.identity.from_byte + at as u64;
             self.preferred_x = Some(x);
             self.select(DocumentSelection { anchor_byte: anchor.unwrap_or(head_byte), head_byte }, cx);
+            self.upstream_caret = upstream.then_some(head_byte);
         }
     }
 
