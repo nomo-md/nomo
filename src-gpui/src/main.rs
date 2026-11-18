@@ -60,7 +60,7 @@ use ui::workspace::{self, Workspace};
 use window_placement::WindowPlacement;
 
 #[derive(Clone, Copy)]
-enum QuitReason { Normal, Reset(app_data::Scope), #[cfg(windows)] Install }
+enum QuitReason { Normal, Reset(app_data::Scope), #[cfg(any(windows, target_os = "macos"))] Install }
 #[derive(Clone, Copy)]
 struct PendingQuit {
     reason: QuitReason,
@@ -82,7 +82,7 @@ pub(crate) fn quit_to_reset(scope: app_data::Scope, cx: &mut App) {
     }
     request_quit(QuitReason::Reset(scope), cx);
 }
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn quit_to_install(cx:&mut App){
     for handle in cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()) {
         if !handle.update(cx,|workspace,window,cx| workspace.can_quit_to_install(window,cx)).unwrap_or(false) { return; }
@@ -118,11 +118,11 @@ fn finish_quit(cx:&mut App){
         open_workspace(Vec::new(), cx);
         return;
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     if matches!(_reason, QuitReason::Install) && let Err(error)=ui::updates::launch_after_close(cx) {
         match try_open_workspace(Vec::new(),cx) {
             Ok(handle)=>{ let _=handle.update(cx,|_,window,cx|ui::updates::show_error(error,window,cx)); }
-            Err(e)=>open_instance::show_error(&format!("{error}\n{e}")),
+            Err(e)=>app_data::show_error(&format!("{error}\n{e}")),
         }
         return;
     }
@@ -145,6 +145,8 @@ fn save_closing_workspace_placement(workspace: &Workspace, window: &gpui::Window
 
 fn main() {
     if let Some(code) = app_data::run_command() { std::process::exit(code); }
+    #[cfg(target_os = "macos")]
+    if let Some(code) = ui::updates::run_install_command() { std::process::exit(code); }
     #[cfg(feature = "nomo-mark-demo")]
     let nomo_mark_demo = std::env::args().any(|argument| matches!(argument.as_str(), "--nomo-mark-demo" | "--editor-control-demo"));
     #[cfg(feature = "nomo-mark-demo")]

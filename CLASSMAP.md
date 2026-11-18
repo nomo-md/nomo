@@ -45,7 +45,7 @@
 | 自定义快捷键 | `src-gpui/src/ui/shortcuts.rs`、`ui/settings_shortcuts.rs`、`ui/mod.rs` | 74 项命令、轻量分组列表、固定搜索筛选与按需编辑浮层，每命令最多 3 个键位及作用域冲突校验；保留旧配置，平台覆盖独立保存；提交后替换有限键表，菜单、右键与工具栏共用实际提示 |
 | UI 原件与图标 | `src-gpui/src/ui/components.rs`、`popup.rs`、`icon_assets.rs`、`text_field.rs` | 静态 SVG 内嵌、按钮、菜单、输入框；弹层按触发边界测量、翻转、限高和入场动画 |
 | 确认框与短提示 | `src-gpui/src/ui/dialogs.rs`、`dialogs/secondary.rs`、`toast.rs` | 保存、删除、外部变更、恢复、打开位置与关闭选择的旧版布局；焦点与短动效、单条有界 Toast，不接管系统文件选择器 |
-| 应用弹窗业务与更新 | `src-gpui/src/ui/workspace/application_dialogs.rs`、`open_requests.rs`、`recovery_ui.rs`、`ui/tray.rs`、`ui/tray/windows.rs`、`ui/updates.rs`、`ui/updates/{notice,installer,install_ui}.rs` | 有界打开队列、跨窗口归属和恢复列表；Windows 应用级托盘、macOS／X11 关闭到托盘（原生 Wayland 暂不支持）、官方 Release、MSIX Store 入口、安装版下载校验与保存确认后的重启安装 |
+| 应用弹窗业务与更新 | `src-gpui/src/ui/workspace/application_dialogs.rs`、`open_requests.rs`、`recovery_ui.rs`、`ui/tray.rs`、`ui/tray/windows.rs`、`ui/updates.rs`、`ui/updates/{notice,installer,install_ui}.rs`、`ui/updates/installer/{windows,macos}.rs` | 有界打开队列、跨窗口归属和恢复列表；Windows 应用级托盘、macOS／X11 关闭到托盘（原生 Wayland 暂不支持）、官方优先且 gh-proxy 回退的 Release 元数据、MSIX Store 入口；共享安装包延迟竞速、SHA-256、进度和取消，Windows NSIS 与 macOS 退出后同卷替换分别适配，保存确认后重启安装 |
 | 快捷插入 | `src-gpui/src/nomo_mark/quick_insert.rs`、`quick_insert_view.rs`、`quick_insert_host.rs`、`src-gpui/src/ui/quick_insert.rs` | 语义区真实输入触发；14 类／41 种样式，宿主浮层、原子局部事务和过期选择器保护；不持有全文 |
 | 图片导入与上传 | `src-gpui/src/image_import.rs`、`image_upload.rs`、`src-gpui/src/nomo_mark/image_properties.rs` | 文件选择、粘贴及拖放共用本地三种复制策略／PicGo Server／Core；有界串行预检、临时文件清理、取消、超时及过期落点保护；沿用共享解码与缓存预算 |
 | NomoMark 协议与局部状态 | `src-gpui/src/nomo_mark/protocol.rs`、`host.rs`、`interaction.rs` | 窗口事务、乐观确认、组字和回收门禁 |
