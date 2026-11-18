@@ -676,7 +676,8 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
             let left = glyphs[first].x;
             let right = glyphs.get(last).map_or(natural_width, |glyph| glyph.x);
             let columns = cluster.width();
-            let fallback = columns > 1 || cluster.chars().any(|ch| matches!(ch as u32, 0x2500..=0x259f | 0x2e80..=0xffff));
+            // 箱线字符 U+2500–U+257F 沿用塑形字宽，与正文一致。等宽字体可将它们设计为一格或两格。
+            let fallback = columns > 1 || cluster.chars().any(|ch| matches!(ch as u32, 0x2580..=0x259f | 0x2e80..=0xffff));
             let mono = style.font_family.is_none() && (style.mono || matches!(spec.family, Family::Mono | Family::Code));
             let delta = if mono && fallback && columns > 0 { cell * columns as f32 - (right - left) } else { 0.0 };
             for glyph in &mut glyphs[first..last] { glyph.x += shift; glyph.ink_offset += delta * 0.5; }
