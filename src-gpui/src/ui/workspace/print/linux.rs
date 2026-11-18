@@ -1,6 +1,6 @@
 use crate::document_export::PrintSheet;
 use ashpd::{desktop::{print::{Orientation, PreparePrint, PrintProxy}, ResponseError}, Error, WindowIdentifier};
-use gpui::{App, Window};
+use gpui::Window;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use std::{fs::File, ops::RangeInclusive, path::Path};
 use wayland_client::{backend::{Backend, ObjectId}, protocol::wl_surface::WlSurface, Connection, Proxy};
@@ -11,29 +11,51 @@ pub(super) struct Parent {
     _connection: Option<Connection>,
 }
 
-pub(super) fn parent_window(window: &mut Window, cx: &mut App) -> Result<Parent, String> {
+pub(super) struct PendingParent {
+    id: Option<WindowIdentifier>,
+    connection: Option<Connection>,
+    surface: Option<WlSurface>,
+}
+
+pub(super) fn parent_window(window: &mut Window) -> Result<PendingParent, String> {
     let handle = HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?;
-    let mut connection = None;
-    let id = match handle.as_raw() {
-        RawWindowHandle::Xcb(raw) => Some(WindowIdentifier::from_xid(raw.window.get().into())),
-        RawWindowHandle::Xlib(raw) => Some(WindowIdentifier::from_xid(raw.window)),
+    let pending = match handle.as_raw() {
+        RawWindowHandle::Xcb(raw) => PendingParent {
+            id: Some(WindowIdentifier::from_xid(raw.window.get().into())),
+            connection: None,
+            surface: None,
+        },
+        RawWindowHandle::Xlib(raw) => PendingParent {
+            id: Some(WindowIdentifier::from_xid(raw.window)),
+            connection: None,
+            surface: None,
+        },
         RawWindowHandle::Wayland(raw) => {
             let display = window.display_handle().map_err(|e| e.to_string())?;
             let RawDisplayHandle::Wayland(display) = display.as_raw() else { return Err("Wayland 显示连接不可用".into()) };
             // The borrowed GPUI window keeps wl_surface valid throughout the xdg-foreign handshake.
             // Its display is owned by the application. The foreign backend never disconnects it.
             let backend = unsafe { Backend::from_foreign_display(display.display.as_ptr().cast()) };
-            let conn = Connection::from_backend(backend);
+            let connection = Connection::from_backend(backend);
             let object = unsafe { ObjectId::from_ptr(WlSurface::interface(), raw.surface.as_ptr().cast()) }.map_err(|e| e.to_string())?;
-            let surface = WlSurface::from_id(&conn, object).map_err(|e| e.to_string())?;
-            let id = cx.background_executor().block_on(WindowIdentifier::from_wayland(&surface));
-            if id.is_none() { eprintln!("Wayland 合成器未导出打印父窗口，系统面板将独立打开"); }
-            connection = Some(conn);
-            id
+            let surface = WlSurface::from_id(&connection, object).map_err(|e| e.to_string())?;
+            PendingParent { id: None, connection: Some(connection), surface: Some(surface) }
         }
-        _ => None,
+        _ => PendingParent { id: None, connection: None, surface: None },
     };
-    Ok(Parent { id, _connection: connection })
+    Ok(pending)
+}
+
+pub(super) async fn resolve_parent(pending: PendingParent) -> Parent {
+    let PendingParent { id, connection, surface } = pending;
+    let id = if let Some(surface) = surface.as_ref() {
+        let id = WindowIdentifier::from_wayland(surface).await;
+        if id.is_none() { eprintln!("Wayland 合成器未导出打印父窗口，系统面板将独立打开"); }
+        id
+    } else {
+        id
+    };
+    Parent { id, _connection: connection }
 }
 
 pub(super) struct PortalPrint {
