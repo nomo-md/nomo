@@ -178,8 +178,8 @@ impl NomoMark {
                 .h(px(32.0 * zoom)).flex().justify_end()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(div().id(("diagram-fullscreen", range.start)).size(px(32.0 * zoom)).flex_shrink_0()
-                    .flex().items_center().justify_center().rounded(px(3.0 * zoom)).border_1().border_color(theme.border)
-                    .bg(theme.surface).hover(|s| s.bg(theme.hover)).cursor_pointer().tooltip(tooltip("放大查看"))
+                    .flex().items_center().justify_center().rounded(px(3.0 * zoom))
+                    .hover(|s| s.bg(theme.hover)).cursor_pointer().tooltip(tooltip("放大查看"))
                     .child(gpui::svg().path("icons/maximize.svg").size(px(16.0 * zoom)).text_color(theme.muted))
                     .on_click(cx.listener(move |view, _, window, cx| view.open_diagram_viewer(range.clone(), window, cx)))));
         }
@@ -187,6 +187,9 @@ impl NomoMark {
             let DisplayItem::BlockControls { x, y, w, source, kind, .. } = item else { continue; };
             if matches!(*kind, "rule" | "diagram-toolbar") { continue; }
             let mut buttons = div().absolute().left(px(x + w - 62.0)).top(px(y + 8.0)).flex().gap(px(4.0));
+            if *kind == "comment" && !source.contains(&at) {
+                buttons = buttons.opacity(0.45).hover(|s| s.opacity(1.0));
+            }
             for (action, label, glyph) in [(0, "编辑", IconName::SquarePen), (1, "删除", IconName::Trash2)] {
                 if *kind == "toc" && action == 0 { continue; }
                 let identity = parsed.identity.clone(); let source = source.clone();

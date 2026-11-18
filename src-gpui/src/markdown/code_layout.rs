@@ -97,7 +97,7 @@ impl Builder<'_> {
             y += height;
             offset += line.len()+1;
         }
-        let content_height = (y-pad).max(3.0*line_height)+pad*2.0;
+        let content_height = (y-pad).max(line_height)+pad*2.0;
         let limit = (24.0*line_height+pad*2.0).min(f32::from(self.window.viewport_size().height)*0.6).max(3.0*line_height+pad*2.0);
         // 按实际限高提供入口；展开后保留收起按钮，避免窗口变大或删行后无法复位。
         let can_toggle = content_height > limit || expanded;
@@ -110,7 +110,6 @@ impl Builder<'_> {
         // 展开时只取消纵向限制，横向滚动条仍占自己的空间。
         let body_height = body_height + if content_width > body_width-gutter { viewport.scrollbar } else { 0.0 };
         self.items.push(DisplayItem::Rect { x, y: top, w: width, h: header+body_height+2.0*border, paint: Paint::CodeBg, radius: 8.0*zoom, border: Some(Paint::CodeBorder) });
-        self.items.push(DisplayItem::Rect { x: x+border, y: top+header, w: body_width, h: border, paint: Paint::CodeBorder, radius: 0.0, border: None });
         let source_end = text_map.iter().map(|seg| seg.source_end).max().unwrap_or(text_start).max(text_start);
         self.items.push(DisplayItem::CodeBody { x: x+border, y: top+header+border, w: body_width, h: body_height, source: block_start..source_end.saturating_add(1), body: Box::new(viewport) });
         let label = if lang == "mermaid" { failure.map_or_else(|| "Mermaid".into(), |reason| format!("Mermaid · {reason}")) }

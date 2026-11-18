@@ -47,8 +47,8 @@ impl RenderOnce for TableEdgeButton {
             .font_family(self.font)
             .font_weight(gpui::FontWeight::BOLD).text_size(px(if self.delete { 11.0 } else { 13.0 } * zoom))
             .line_height(relative(1.0)).text_color(foreground).opacity(progress)
-            .shadow(vec![BoxShadow { color: gpui::rgba(0x0f172a1a).into(), offset: point(px(0.0), px(2.0 * zoom)),
-                blur_radius: px(6.0 * zoom), spread_radius: px(0.0), inset: false }])
+            .shadow(vec![BoxShadow { color: gpui::rgba(0x0f172a14).into(), offset: point(px(0.0), px(1.0 * zoom)),
+                blur_radius: px(3.0 * zoom), spread_radius: px(0.0), inset: false }])
             .child(if self.delete { "−" } else { "+" });
         self.hitbox.child(visual).on_hover(move |hovered, window, cx| {
             let mut animation = state.get();
@@ -161,8 +161,8 @@ impl NomoMark {
             .flex().items_center().gap(px(3.0 * zoom)).overflow_x_scroll()
             .px(px(4.0 * zoom)).py(px(3.0 * zoom)).rounded(px(8.0 * zoom)).border(px(zoom))
             .border_color(theme.table_border.opacity(0.58)).bg(theme.surface.opacity(0.98))
-            .shadow(vec![BoxShadow { color: gpui::rgba(0x0f172a1a).into(), offset: point(px(0.0), px(10.0 * zoom)),
-                blur_radius: px(24.0 * zoom), spread_radius: px(0.0), inset: false }]);
+            .shadow(vec![BoxShadow { color: gpui::rgba(0x0f172a14).into(), offset: point(px(0.0), px(3.0 * zoom)),
+                blur_radius: px(10.0 * zoom), spread_radius: px(0.0), inset: false }]);
         for (index, (label, action)) in [
             ("insertRowBeforeFirst", Action::Edit(TableIntent::InsertRowBefore { row: 0 })),
             ("insertColumnBeforeFirst", Action::Edit(TableIntent::InsertColumn { at: 0 })),

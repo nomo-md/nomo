@@ -75,7 +75,7 @@ impl NomoMark {
         let metrics = cx.global::<Settings>().metrics();
         if let Some((input, preview)) = self.embed_edit_heights(window, cx) {
             let spacing = if object.draft.kind == ObjectKind::Mermaid { 54.0 } else { 8.0 };
-            return Some(input + preview + (spacing + 4.0) * metrics.zoom + 4.0);
+            return Some(input + preview + (spacing + 4.0) * metrics.zoom + 2.0);
         }
         let input = (object.draft.text.lines().count().max(2).min(8) as f32 * metrics.source_line_height()).clamp(64.0, 220.0);
         Some(input + 112.0 + if object.preview_key.is_some() { 190.0 } else { 0.0 })
@@ -1205,23 +1205,23 @@ impl NomoMark {
         let diagram = object.draft.kind == ObjectKind::Mermaid;
         let zoom = cx.global::<Settings>().metrics().zoom;
         let theme = cx.global::<Theme>().clone();
-        let inset = 2.0 + 2.0 * zoom;
+        let inset = 1.0 + 2.0 * zoom;
         let input_padding = if diagram { 12.0 } else { 10.0 } * zoom;
         let content_width = (width - inset * 2.0).max(1.0);
-        object.child.update(cx, |view, cx| view.prepare_layout((content_width - input_padding * 2.0 - 2.0).max(1.0), window, cx));
+        object.child.update(cx, |view, cx| view.prepare_layout((content_width - input_padding * 2.0).max(1.0), window, cx));
         let input = div().id("embed-source-scroll").h(px(input_height)).flex_shrink_0()
             .px(px(input_padding)).py(px(if diagram { 10.0 } else { 8.0 } * zoom))
-            .overflow_y_scroll().bg(theme.surface).border_1().border_color(theme.accent).rounded(px(3.0 * zoom))
+            .overflow_y_scroll().bg(theme.surface).rounded(px(3.0 * zoom))
             .child(object.child.clone());
         let mut panel = div().id("embed-editor").absolute().left(px(left)).top(px(top)).w(px(width)).h(px(height))
-            .flex().flex_col().p(px(2.0 * zoom)).border_2().border_color(theme.accent).rounded(px(3.0 * zoom))
+            .flex().flex_col().p(px(2.0 * zoom)).border_1().border_color(theme.accent).rounded(px(3.0 * zoom))
             .bg(theme.hover).text_color(theme.fg)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(input);
         if diagram {
             let label = match object.preview_mode { 0 => "适应窗口", 2 => "原始大小", _ => "易读" };
             let mut mode = div().id("embed-preview-mode").relative().h(px(32.0 * zoom)).px(px(8.0 * zoom))
-                .flex().items_center().gap(px(4.0 * zoom)).bg(theme.surface).border_1().border_color(theme.border)
+                .flex().items_center().gap(px(4.0 * zoom)).hover(|s| s.bg(theme.surface))
                 .rounded(px(3.0 * zoom)).cursor_pointer().text_size(px(12.0 * zoom))
                 .child(label).child(icon(IconName::ChevronDown, 14.0 * zoom, theme.muted))
                 .on_click(cx.listener(|view, _, _, cx| {
@@ -1245,7 +1245,7 @@ impl NomoMark {
             panel = panel.child(div().h(px(40.0 * zoom)).mt(px(14.0 * zoom)).pb(px(8.0 * zoom)).flex_shrink_0()
                 .flex().justify_end().gap(px(8.0 * zoom)).child(mode)
                 .child(div().id("draft-diagram-fullscreen").size(px(32.0 * zoom)).flex().items_center().justify_center()
-                    .bg(theme.surface).border_1().border_color(theme.border).rounded(px(3.0 * zoom)).cursor_pointer()
+                    .rounded(px(3.0 * zoom)).hover(|s| s.bg(theme.surface)).cursor_pointer()
                     .tooltip(tooltip("放大查看")).child(gpui::svg().path("icons/maximize.svg").size(px(16.0 * zoom)).text_color(theme.muted))
                     .on_click(cx.listener(move |view, _, window, cx| view.open_diagram_viewer(range.clone(), window, cx)))));
         }

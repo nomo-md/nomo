@@ -264,14 +264,13 @@ impl NomoMark {
             let identity = self.host.parsed.identity.clone();
             let feedback = self.code_copy.as_ref().filter(|state| state.source == source && state.identity == identity);
             let color = feedback.map_or(theme.code_fg, |state| if state.success { theme.accent } else { theme.danger });
-            let border = feedback.map_or(theme.code_border, |state| if state.success { theme.accent.opacity(0.7) } else { theme.danger });
-            let background = if feedback.is_some_and(|state| state.success) { crate::ui::motion::color(theme.code_bg, theme.accent, 0.16) }
-                else { crate::ui::motion::color(theme.code_bg, theme.surface, 0.18) };
+            let background = feedback.map_or(theme.code_bg, |state| crate::ui::motion::color(theme.code_bg, if state.success { theme.accent } else { theme.danger }, 0.16));
             let hint = match feedback { Some(state) if state.success => "code_copied", Some(_) => "code_copy_failed", None => "code_copy" };
             let text = text.clone();
             let button = div().id(("code-copy", source)).absolute().left(px(*x)).top(px(*y)).w(px(*w)).h(px(*h))
-                .flex().items_center().justify_center().border_1().border_color(border).rounded(px(4.0*zoom)).bg(background)
+                .flex().items_center().justify_center().rounded(px(4.0*zoom)).bg(background)
                 .cursor_pointer().tooltip(tooltip(locale.text(hint)))
+                .hover(|button| button.bg(if feedback.is_some() { background } else { crate::ui::motion::color(theme.code_bg, theme.accent, 0.12) }))
                 .child(icon(if feedback.is_some_and(|state| state.success) { IconName::Check } else { IconName::Copy }, 16.0*zoom, color))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |view, _, _, cx| {
@@ -284,11 +283,10 @@ impl NomoMark {
             let identity = self.host.parsed.identity.clone();
             let wrap_x = x - (w + 6.0*zoom) * if expanded.is_some() { 2.0 } else { 1.0 };
             overlay = overlay.child(div().id(("code-wrap", source)).absolute().left(px(wrap_x)).top(px(*y)).w(px(*w)).h(px(*h))
-                .flex().items_center().justify_center().border_1().rounded(px(4.0*zoom))
-                .border_color(if wrapped { theme.accent } else { theme.code_border })
-                .bg(crate::ui::motion::color(theme.code_bg, if wrapped { theme.accent } else { theme.surface }, if wrapped { 0.16 } else { 0.18 }))
+                .flex().items_center().justify_center().rounded(px(4.0*zoom))
+                .bg(if wrapped { crate::ui::motion::color(theme.code_bg, theme.accent, 0.16) } else { theme.code_bg })
                 .cursor_pointer().tooltip(tooltip(locale.text(if wrapped { "code_wrap_off" } else { "code_wrap_on" })))
-                .hover(|button| button.border_color(theme.accent).bg(crate::ui::motion::color(theme.code_bg, theme.accent, 0.12)))
+                .hover(|button| button.bg(crate::ui::motion::color(theme.code_bg, theme.accent, if wrapped { 0.22 } else { 0.12 })))
                 .child(icon(IconName::WrapText, 16.0*zoom, if wrapped { theme.accent } else { theme.code_fg }))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |view, _, _, cx| {
@@ -299,10 +297,9 @@ impl NomoMark {
                 let open = *open;
                 let identity = self.host.parsed.identity.clone();
                 overlay = overlay.child(div().id(("code-expand", source)).absolute().left(px(x-w-6.0*zoom)).top(px(*y)).w(px(*w)).h(px(*h))
-                    .flex().items_center().justify_center().border_1().border_color(theme.code_border).rounded(px(4.0*zoom))
-                    .bg(crate::ui::motion::color(theme.code_bg, theme.surface, 0.18))
+                    .flex().items_center().justify_center().rounded(px(4.0*zoom)).bg(theme.code_bg)
                     .cursor_pointer().tooltip(tooltip(locale.text(if open { "code_collapse" } else { "code_expand" })))
-                    .hover(|button| button.border_color(crate::ui::motion::color(theme.code_border, theme.accent, 0.55)).bg(crate::ui::motion::color(theme.code_bg, theme.accent, 0.12)))
+                    .hover(|button| button.bg(crate::ui::motion::color(theme.code_bg, theme.accent, 0.12)))
                     .child(gpui::svg().path(if open { "icons/chevrons-up.svg" } else { "icons/chevrons-down.svg" }).size(px(14.0*zoom)).text_color(theme.code_fg))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |view, _, _, cx| {

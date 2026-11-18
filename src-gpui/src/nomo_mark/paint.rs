@@ -213,6 +213,7 @@ fn paint_layer(
     let resolve = |paint: Paint| -> Hsla {
         match paint {
             Paint::Border => theme.border,
+            Paint::SubtleBorder => theme.border.opacity(0.55),
             Paint::CodeBg => theme.code_bg,
             Paint::TocCard => theme.surface,
             Paint::CodeBorder => theme.code_border,
@@ -257,10 +258,6 @@ fn paint_layer(
                     window.with_content_mask(Some(gpui::ContentMask { bounds: Bounds::new(left, size(px(body.gutter), px(height))) }), |window| {
                         paint_layer(&body.numbers, left-point(px(0.0), px(dy)), local_clip.clone(), background, theme, store, window, cx);
                     });
-                    if background {
-                        let border = body.scrollbar/13.0;
-                        paint_box(Bounds::new(left+point(px(body.gutter-border), px(0.0)), size(px(border), px(*h))), theme.code_border, 0.0, None, window);
-                    }
                 }
                 let content = left + point(px(body.gutter), px(0.0));
                 window.with_content_mask(Some(gpui::ContentMask { bounds: Bounds::new(content, size(px(width), px(height))) }), |window| {

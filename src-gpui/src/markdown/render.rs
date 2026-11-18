@@ -41,6 +41,7 @@ impl MapSeg {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Paint {
     Border,
+    SubtleBorder,
     CodeBg,
     TocCard,
     CodeBorder,
@@ -1869,7 +1870,7 @@ impl Builder<'_> {
         let (key, state) = (self.env.embed)(EmbedKind::Mermaid, text);
         if self.controlled && !matches!(&state, EmbedState::Failed(_)) {
             // 工具栏属于节点容器，不随位图居中或横向滚动移动，也不遮住图表内容。
-            let height = 40.0 * metrics.zoom;
+            let height = 32.0 * metrics.zoom;
             self.items.push(DisplayItem::BlockControls { x: self.indent, y: self.y, w: width, h: height,
                 source: block_start..source + text.len(), kind: "diagram-toolbar" });
             self.y += height;
@@ -1936,7 +1937,7 @@ impl Builder<'_> {
                     let top = self.y;
                     self.details_frames.push((self.items.len(), top));
                     self.items.push(DisplayItem::Rect { x: self.indent, y: top, w: self.width - self.indent, h: 0.0,
-                        paint: Paint::Surface, radius: 6.0 * self.env.metrics.zoom, border: Some(Paint::Border) });
+                        paint: Paint::Surface, radius: 6.0 * self.env.metrics.zoom, border: Some(Paint::SubtleBorder) });
                     self.details.push(source);
                     self.indent += em * 0.8 + 18.0 * self.env.metrics.zoom;
                     self.width -= em * 0.8;
@@ -2092,7 +2093,7 @@ impl Builder<'_> {
         let pad = 12.0 * self.env.metrics.zoom;
         if fragment.card {
             self.items.push(DisplayItem::Rect { x: self.indent, y: top, w: self.width - self.indent, h: 0.0,
-                paint: Paint::Surface, radius: 6.0 * self.env.metrics.zoom, border: Some(Paint::Border) });
+                paint: Paint::Surface, radius: 6.0 * self.env.metrics.zoom, border: Some(Paint::SubtleBorder) });
             self.indent += pad; self.width -= pad; self.y += pad;
             let label = self.note_layout(&fragment.label, ColorRole::Muted, self.width - self.indent);
             let h = label.height();
@@ -2202,7 +2203,7 @@ impl Builder<'_> {
             Family::Text, self.font_size * 0.9, self.line_height, Wrap::Greedy);
         let layout = self.env.layout(&spec, (width - label_width - pad * 2.0 - 60.0 * zoom).max(32.0), self.window);
         let height = layout.height().max(label.height()) + pad * 2.0;
-        self.items.push(DisplayItem::Rect { x: self.indent, y: top, w: width, h: height, paint: Paint::CodeBg, radius: 6.0 * zoom, border: Some(Paint::Border) });
+        self.items.push(DisplayItem::Rect { x: self.indent, y: top, w: width, h: height, paint: Paint::CodeBg, radius: 6.0 * zoom, border: None });
         self.items.push(DisplayItem::Text { x: self.indent + pad, y: top + pad, layout: label, map: Vec::new() });
         self.items.push(DisplayItem::Text { x: self.indent + pad + label_width, y: top + pad, layout,
             map: vec![MapSeg { text: 0..text.len(), source: range.start, source_end: range.end, exact: false }] });
@@ -2224,7 +2225,7 @@ impl Builder<'_> {
         self.items.push(DisplayItem::Text { x: self.indent + pad, y: top + pad, layout: heading, map: Vec::new() });
         if let Some(layout) = status_layout {
             let x = self.indent + width - pad - 64.0 * zoom - status_w;
-            self.items.push(DisplayItem::Rect { x, y: top + pad, w: status_w, h: layout.height(), paint: Paint::Surface, radius: 4.0 * zoom, border: Some(Paint::Border) });
+            self.items.push(DisplayItem::Rect { x, y: top + pad, w: status_w, h: layout.height(), paint: Paint::Surface, radius: 4.0 * zoom, border: None });
             self.items.push(DisplayItem::Text { x: x + pad * 0.5, y: top + pad, layout, map: Vec::new() });
         }
         self.y += pad + row_h;
@@ -2240,7 +2241,7 @@ impl Builder<'_> {
                 let layout = Rc::new(self.note_layout(tag, ColorRole::Muted, (width - pad * 3.0).max(20.0)));
                 let w = layout.max_line_width() + pad; let h = layout.height() + 4.0 * zoom;
                 if x > self.indent + pad && x + w > self.width - pad { self.y += row + 6.0 * zoom; x = self.indent + pad; row = 0.0; }
-                self.items.push(DisplayItem::Rect { x, y: self.y, w, h, paint: Paint::Surface, radius: 4.0 * zoom, border: Some(Paint::Border) });
+                self.items.push(DisplayItem::Rect { x, y: self.y, w, h, paint: Paint::Surface, radius: 4.0 * zoom, border: None });
                 self.items.push(DisplayItem::Text { x: x + pad * 0.5, y: self.y + 2.0 * zoom, layout, map: Vec::new() });
                 x += w + 6.0 * zoom; row = row.max(h);
             }
@@ -2266,12 +2267,10 @@ impl Builder<'_> {
         let width = self.width - self.indent;
         let mut content = Vec::new();
         let title = ParaSpec::plain("目录".into(), InlineStyle { bold: true, color: ColorRole::Heading, ..Default::default() },
-            Family::Text, 19.0 * zoom, 28.0 * zoom, Wrap::Greedy);
+            Family::Text, 17.0 * zoom, 24.0 * zoom, Wrap::Greedy);
         let title = self.env.layout(&title, width, self.window);
         content.push(DisplayItem::Text { x: self.indent + pad, y: top + top_pad, layout: title.clone(), map: Vec::new() });
         self.y = top + top_pad + title.height() + 8.0 * zoom;
-        content.push(DisplayItem::Rect { x: self.indent + pad, y: self.y, w: (width - pad * 2.0).max(0.0), h: 1.0, paint: Paint::Border, radius: 0.0, border: None });
-        self.y += 10.0 * zoom;
         let mut entries = Parser::new(&self.source[range.clone()]).into_offset_iter();
         let mut number = 0;
         while let Some((event, span)) = entries.next() {
@@ -2289,27 +2288,28 @@ impl Builder<'_> {
                 Family::Text, 17.0 * zoom, 17.0 * 1.45 * zoom, Wrap::Greedy);
             let label = self.env.layout(&spec, (self.width - x - 54.0).max(20.0), self.window);
             let y = self.y;
-            let h = label.height().max(30.0 * zoom);
+            let h = label.height().max(26.0 * zoom);
             content.push(DisplayItem::Text { x, y, layout: label, map: vec![MapSeg { text: 0..spec.text.len(), source, source_end: range.start + span.end, exact: false }] });
             let number_spec = ParaSpec::plain(number.to_string(), InlineStyle { color: ColorRole::Muted, ..Default::default() },
                 Family::Text, 13.0 * zoom, 17.0 * 1.45 * zoom, Wrap::Greedy);
             let number_layout = self.env.layout(&number_spec, 36.0 * zoom, self.window);
             content.push(DisplayItem::Text { x: self.width - pad - number_layout.max_line_width(), y, layout: number_layout, map: Vec::new() });
             content.push(DisplayItem::TocLink { x, y, w: self.width - x - pad, h, source, target: dest_url.to_string() });
-            self.y += h + 8.0 * zoom;
+            self.y += h + 4.0 * zoom;
         }
         if number == 0 {
             let spec = ParaSpec::plain("文档暂无标题".into(), InlineStyle { color: ColorRole::Muted, ..Default::default() },
                 Family::Text, self.env.metrics.body_size() * 0.9, self.line_height, Wrap::Greedy);
             let label = self.env.layout(&spec, width - pad * 2.0, self.window);
+            let y = self.y;
             self.y += label.height();
-            content.push(DisplayItem::Text { x: self.indent + pad, y: top + pad + title.height() + 8.0, layout: label, map: Vec::new() });
+            content.push(DisplayItem::Text { x: self.indent + pad, y, layout: label, map: Vec::new() });
         }
         self.y += 16.0 * zoom;
         self.items.push(DisplayItem::Rect { x: self.indent, y: top, w: width, h: self.y - top, paint: Paint::TocCard, radius: 8.0 * zoom, border: Some(Paint::Border) });
         self.items.extend(content);
         self.items.push(DisplayItem::BlockControls { x: self.indent, y: top, w: width, h: 30.0, source: range, kind: "toc" });
-        self.gap(34.0 * zoom);
+        self.gap(20.0 * zoom);
     }
 
     fn html_table(&mut self,table:&crate::nomo_mark::html_table::HtmlTable,revealed:&[Range<usize>]) {
