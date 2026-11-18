@@ -98,6 +98,7 @@ impl DocumentHost {
             quick: Default::default(),
 
         };
+        host.panes[0].reveal_selection = host.selection(cx).head_byte != 0;
         host.reset_viewport(cx);
         host.schedule_metadata(cx);
         host.schedule_toc(300, false, cx);

@@ -280,6 +280,24 @@ impl NativeWindowPort {
         let index = self.wait_index(revision, Some(policy().group_bytes), request)?;
         self.group_from_index(revision, 0, None, request, index)
     }
+
+    pub(crate) fn load_first_line_end(&self, revision: u64, request: &WindowRequest) -> Result<(LoadedWindow, u64), ControlError> {
+        let initial = self.load_initial_group(revision, request)?;
+        let total = initial.total_bytes;
+        let mut end = initial.input.text.find(['\r', '\n']).map(|at| at as u64);
+        let mut from = initial.input.to_byte;
+        // 超长首行可能跨原文片段，后台逐段找换行，不拼接正文。
+        while end.is_none() && from < total {
+            request.check()?;
+            let part = self.read_window(revision, from..(from + policy().group_bytes).min(total))?;
+            end = part.text.find(['\r', '\n']).map(|at| part.from_byte + at as u64);
+            from = part.to_byte;
+        }
+        let end = end.unwrap_or(total);
+        if end <= initial.input.to_byte { return Ok((initial, end)); }
+        let index = self.wait_index(revision, Some(end.saturating_add(1).min(total)), request)?;
+        Ok((self.group_from_index(revision, end, None, request, index)?, end))
+    }
     /// byte/limit 属于宿主需求；语义窗口保留完整结构，超大结构返回有界原文窗口。
     pub fn load_group(
         &self,

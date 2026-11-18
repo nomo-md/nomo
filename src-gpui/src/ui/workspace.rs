@@ -751,6 +751,8 @@ impl Workspace {
         let id=comparison::next_tab_key();
         let layout_doc=self.saved_open_document(&source);
         let owner=match &source { application_dialogs::OpenSource::Reload(document,_) | application_dialogs::OpenSource::DiskRecovery(_,Some(document),_) | application_dialogs::OpenSource::Recovery(_,false,Some(document),_) => document.read(cx).port().owner, _ => format!("{}:document-{}",self.owner,id) };
+        let first_file_open = path.is_some() && anchor.is_none()
+            && matches!(&source, application_dialogs::OpenSource::File | application_dialogs::OpenSource::NewFile);
         self.opening.push(OpeningDocument {id,generation,path:path.clone(),request:request.clone(),preview,anchor});
         let requested=path.clone();
         let recovery=match &source {application_dialogs::OpenSource::Recovery(candidate,copy,_,_)=>Some((candidate.clone(),*copy)),application_dialogs::OpenSource::Layout(_,Some(candidate))=>Some((candidate.clone(),false)),_=>None};
@@ -771,9 +773,17 @@ impl Workspace {
                     saved.byte=byte;
                     if saved.selection==crate::nomo_mark::protocol::DocumentSelection::default() {saved.selection=crate::nomo_mark::protocol::DocumentSelection::caret(byte);}
                 }}
-                port.status().and_then(|status|match restored_layout.as_ref().map(|doc|doc.byte) {Some(byte) if byte>0=>port.load_group(status.revision,byte.min(status.byte_length),None,&request),_=>port.load_initial_group(status.revision,&request)})
+                let status = port.status()?;
+                if first_file_open {
+                    return port.load_first_line_end(status.revision, &request).map(|(loaded, byte)| (loaded, Some(byte)));
+                }
+                let loaded = match restored_layout.as_ref().map(|doc| doc.byte) {
+                    Some(byte) if byte > 0 => port.load_group(status.revision, byte.min(status.byte_length), None, &request)?,
+                    _ => port.load_initial_group(status.revision, &request)?,
+                };
+                Ok((loaded, None))
             })();
-            if let (Some(profile),Ok(loaded))=(&loading_profile,&loaded) {
+            if let (Some(profile),Ok((loaded, _)))=(&loading_profile,&loaded) {
                 profile.stage("window_ready_ms");
                 if let Ok(progress)=port.manager.query_structure(&port.owner,loaded.index.clone(),crate::text_document::StructureQuery::Progress) {
                     profile.value("indexed_bytes_at_window",progress.indexed_bytes);
@@ -796,7 +806,7 @@ impl Workspace {
                 let anchor=opening.anchor.clone();
                 let generation=opening.generation;
                 match result {
-                    Ok((port,loaded))=> {
+                    Ok((port,(loaded, first_line_end)))=> {
                         let mode=match &source {application_dialogs::OpenSource::Layout(_,_)=>layout_doc.as_ref().map(|doc|doc.mode).unwrap_or(EditorMode::Semantic),application_dialogs::OpenSource::Reload(previous,_)|application_dialogs::OpenSource::DiskRecovery(_,Some(previous),_)|application_dialogs::OpenSource::Recovery(_,false,Some(previous),_)=>workspace.tabs.iter().find(|tab|tab.document==*previous).map(|tab|tab.mode).unwrap_or(cx.global::<Settings>().default_mode),_=>cx.global::<Settings>().default_mode};
                         let mut status=match port.status(){Ok(status)=>status,Err(e)=>{workspace.notice=Some(e.to_string().into());return false;}};
                         let lock_on_open = match &source {
@@ -814,9 +824,12 @@ impl Workspace {
                             }
                             status.editing_locked = true;
                         }
-                        let adapter=match crate::nomo_mark::host::WindowHostAdapter::new(loaded.input,format!("workspace-window-{id}"),0,loaded.context) {
+                        let mut adapter=match crate::nomo_mark::host::WindowHostAdapter::new(loaded.input,format!("workspace-window-{id}"),0,loaded.context) {
                             Ok(adapter)=>adapter,Err(e)=>{workspace.notice=Some(e.to_string().into());return false;}
                         };
+                        if let Some(byte) = first_line_end.filter(|_| anchor.is_none()) {
+                            adapter.selection = crate::nomo_mark::protocol::DocumentSelection::caret(byte);
+                        }
                         let focus_before_open=workspace.tab().map(|tab|tab.key);
                         let mut reload_selection=None;
                         let mut tab_key=match &source {application_dialogs::OpenSource::Layout(key,_)=>*key,_=>id};

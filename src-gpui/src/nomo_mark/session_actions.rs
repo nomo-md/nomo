@@ -301,7 +301,7 @@ impl DocumentHost {
                 Some(path),
                 None,
             )?;
-            match port.load_initial_group(port.status()?.revision, &request) {
+            match port.load_first_line_end(port.status()?.revision, &request) {
                 Ok(loaded) => Ok((port, loaded)),
                 Err(error) => {
                     let _ = port.close(false);
@@ -314,8 +314,7 @@ impl DocumentHost {
             let _ = this.update(cx, |host, cx| {
                 host.navigating = false;
                 match result {
-                    Ok((port, loaded)) => {
-                        let from = loaded.input.from_byte;
+                    Ok((port, (loaded, first_line_end))) => {
                         let total = loaded.total_bytes;
                         let adapter = match WindowHostAdapter::new(
                             loaded.input,
@@ -350,10 +349,11 @@ impl DocumentHost {
                                             let mut v = NomoMark::new(adapter, cx); v.code_view_port = Some(host.port.clone());
                                             v.windowed_navigation = host.production;
                                             v.base_dir = base_dir;
-                                            v.host.selection = DocumentSelection::caret(from);
+                                            v.host.selection = DocumentSelection::caret(first_line_end);
                                             v
                                         });
                                         host.reset_viewport(cx);
+                                        host.panes[host.active_pane].reveal_selection = true;
                                         host.focus_pending = true;
                                         host.panes[host.active_pane].scroll.set_offset(gpui::point(px(0.0), px(0.0)));
                                         host.message = "真实文件已连接原版窗口会话".into();
