@@ -6,7 +6,7 @@
 |---|---|---|
 | 根构建、版本、锁文件 | `Cargo.toml`、`Cargo.lock` | 单成员 workspace；唯一产品版本；根 target |
 | 启动、菜单、平台打开事件 | `src-gpui/src/main.rs`、`open_instance.rs`、`window_placement.rs` | 默认 Workspace 与 feature 开发入口；首个主窗口恢复上次的位置、大小与最大化状态；系统打开路由、Windows 同数据目录／会话的有界实例消息转交，无参数再次启动在原进程新建窗口 |
-| 文档主页、收藏与最近记录 | `src-gpui/src/ui/home.rs`、`home/browser.rs`、`home/navigation.rs`、`home/folder_card.rs`、`home/document_card.rs`、`home/library.rs`、`home/library_order.rs`、`home/thumbnail.rs` | 无文件启动进入主页；左侧收藏／文件夹／最近文档分组，右侧文件与文件夹卡片，点击目录直接打开工作区；卡片悬停时星标淡入、移出时淡出，指向星标时显示底色；文档与文件夹卡片可切换收藏，文件树目录右键支持收藏，主页收藏按项目类型显示图标；目录收藏定位到所属工作区的文件树，收藏路径独立于最近记录持久化且随应用内重命名更新；路径规范化去重，有界封面快照，灰白档案套仅前页使用正文缩略图、背页绘制线条；纸页同向错层与低前套独立弹簧，卡片和排序浮层共用封面 |
+| 文档主页、收藏与最近记录 | `src-gpui/src/ui/home.rs`、`home/browser.rs`、`home/navigation.rs`、`home/folder_card.rs`、`home/document_card.rs`、`home/library.rs`、`home/library_order.rs`、`home/thumbnail.rs` | 无文件启动进入主页；左侧收藏／文件夹／最近文档分组，右侧文件与文件夹卡片，点击目录直接打开工作区；卡片悬停时星标淡入、移出时淡出，指向星标时显示底色，点亮时星标回弹并向外散开彩点，减少动态效果时直接切换；文档与文件夹卡片可切换收藏，文件树目录右键支持收藏，主页收藏按项目类型显示图标；目录收藏定位到所属工作区的文件树，收藏路径独立于最近记录持久化且随应用内重命名更新；路径规范化去重，有界封面快照，灰白档案套仅前页使用正文缩略图、背页绘制线条；纸页同向错层与低前套独立弹簧，卡片和排序浮层共用封面 |
 | 旧版记录兼容 | `src-gpui/src/legacy_records.rs`、`text_document/markdown_session/legacy.rs`、`ui/workspace/comparison_legacy.rs` | 只读旧配置和草稿；最近记录与标签一次性合并，草稿按需转为原生会话；原记录保留，处理标记防止重复恢复 |
 | 旧派生缓存回收 | `src-gpui/src/text_document/markdown_session/{recovery,cache_cleanup}.rs`、`ui/updates/installer.rs` | 后台扫描已退出且可独占租约的旧会话，只回收结构／统计索引；保留正文、历史和草稿，拒绝链接目录；更新缓存租约覆盖下载至安装准备，启动清理超过 24 小时且未占用的残留安装包 |
 | 应用数据清理 | `src-gpui/src/app_data.rs`、`main.rs`、`ui/settings_window.rs`、`scripts/packaging/windows.nsi` | 设置分别恢复偏好／清除使用数据，卸载可全清；共享／独占锁、退出后按原范围清理和失败重试，不删除外部文档 |

@@ -5,10 +5,13 @@ const PRESS_DEPTH: f32 = 2.0;
 const HOVER_IN: Duration = Duration::from_millis(160);
 const HOVER_OUT: Duration = Duration::from_millis(120);
 
+const BURST_DURATION: Duration = Duration::from_millis(420);
+
 pub(crate) struct DocumentMotion {
     elevation: motion::Spring<1>,
     hint: motion::ScalarMotion,
     favorite: motion::Spring<1>,
+    burst_started: Option<Instant>,
     last: Option<Instant>,
 }
 
@@ -17,7 +20,8 @@ impl Default for DocumentMotion {
         Self {
             elevation: motion::Spring::new([0.0], 800.0, 52.0),
             hint: motion::ScalarMotion::default(),
-            favorite: motion::Spring::new([1.0], 620.0, 44.0),
+            favorite: motion::Spring::new([1.0], 780.0, 34.0),
+            burst_started: None,
             last: None,
         }
     }
@@ -40,17 +44,21 @@ impl DocumentMotion {
         }
     }
 
-    pub(super) fn press_favorite(&mut self, now: Instant, reduced: bool) {
+    pub(super) fn press_favorite(&mut self, active: bool, now: Instant, reduced: bool) {
         self.advance(now, reduced);
+        self.burst_started = (active && !reduced).then_some(now);
         if !reduced {
-            self.favorite.p = [0.9];
-            self.favorite.v = [0.0];
+            // 从当前大小施加一次速度，连点时就地转向，不叠加动画。
+            self.favorite.v = [if active { 14.0 } else { -8.5 }];
         }
     }
 
     pub(crate) fn advance(&mut self, now: Instant, reduced: bool) {
         let last = self.last.unwrap_or(now);
         self.last = Some(last.max(now));
+        if reduced || self.burst_started.is_some_and(|start| now.saturating_duration_since(start) >= BURST_DURATION) {
+            self.burst_started = None;
+        }
         if reduced {
             self.elevation.snap();
             self.favorite.snap();
@@ -62,15 +70,16 @@ impl DocumentMotion {
     }
 
     pub(crate) fn running(&self) -> bool {
-        self.elevation.running() || self.hint.running() || self.favorite.running()
+        self.elevation.running() || self.hint.running() || self.favorite.running() || self.burst_started.is_some()
     }
 
     pub(crate) fn values(&self) -> (f32, f32) {
         (self.elevation.p[0].clamp(0.0, 1.0), self.hint.value())
     }
 
-    pub(super) fn favorite_scale(&self) -> f32 {
-        self.favorite.p[0]
+    pub(super) fn favorite_frame(&self, now: Instant) -> (f32, Option<f32>) {
+        let burst = self.burst_started.map(|start| now.saturating_duration_since(start).as_secs_f32() / BURST_DURATION.as_secs_f32());
+        (self.favorite.p[0], burst)
     }
 }
 
@@ -84,6 +93,7 @@ pub(crate) struct FavoriteVisual {
     pub active: bool,
     pub visible: bool,
     pub scale: f32,
+    pub burst: Option<f32>,
 }
 
 pub(crate) fn favorite_icon(favorite: FavoriteVisual, theme: &Theme) -> gpui::Div {
@@ -92,6 +102,32 @@ pub(crate) fn favorite_icon(favorite: FavoriteVisual, theme: &Theme) -> gpui::Di
         .with_transformation(gpui::Transformation::scale(gpui::size(favorite.scale, favorite.scale)));
     div().size(px(FAVORITE_SIZE)).flex().items_center().justify_center()
         .child(star)
+}
+
+/// 仅在点亮星标时绘制；固定轨迹避免逐帧随机抖动，不增加粒子实体或计时器。
+pub(super) fn favorite_burst(t: f32, theme: &Theme) -> impl IntoElement {
+    let colors = [theme.accent, theme.warning, theme.success, theme.code_keyword];
+    // 方向、飞行距离、初始直径；长短交错，避免看起来像旋转的加载指示器。
+    const SPARKS: [(f32, f32, f32, f32); 8] = [
+        (-0.14, -0.99, 17.0, 3.6), (0.62, -0.78, 13.0, 2.8),
+        (0.99, -0.12, 15.0, 3.4), (0.76, 0.65, 12.0, 2.6),
+        (0.12, 0.99, 16.0, 3.2), (-0.59, 0.81, 12.0, 2.8),
+        (-0.99, 0.14, 15.0, 3.6), (-0.78, -0.63, 13.0, 2.8),
+    ];
+    let travel = 1.0 - (1.0 - t).powi(3);
+    let opacity = (1.0 - t * t).clamp(0.0, 1.0);
+    let extent = 54.0;
+    let offset = (FAVORITE_SIZE - extent) / 2.0;
+    gpui::canvas(|_, _, _| (), move |bounds, _, window, _| {
+        let center = bounds.center();
+        for (i, (dx, dy, reach, diameter)) in SPARKS.iter().copied().enumerate() {
+            let distance = 7.0 + reach * travel;
+            let diameter = diameter * (1.0 - 0.55 * t);
+            let origin = center + gpui::point(px(dx * distance - diameter / 2.0), px(dy * distance - diameter / 2.0));
+            let bounds = gpui::Bounds::new(origin, gpui::size(px(diameter), px(diameter)));
+            window.paint_quad(gpui::fill(bounds, colors[i % colors.len()].opacity(opacity)).corner_radii(px(diameter / 2.0)));
+        }
+    }).absolute().top(px(offset)).left(px(offset)).size(px(extent))
 }
 
 #[derive(Clone)]
@@ -150,5 +186,33 @@ impl DocumentCover {
                     .child(icon(IconName::ArrowUp, 13.0, theme.muted)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::FRAC_PI_4))))))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn favorite_burst_expires_and_respects_cancel_and_reduced_motion() {
+        let mut motion = DocumentMotion::default();
+        let start = Instant::now();
+        let mid = start + BURST_DURATION / 2;
+        let end = start + BURST_DURATION;
+        motion.press_favorite(true, start, false);
+        motion.advance(mid, false);
+        assert_eq!(motion.favorite_frame(mid).1, Some(0.5));
+        motion.press_favorite(false, mid, false);
+        assert_eq!(motion.favorite_frame(mid).1, None);
+        motion.press_favorite(true, mid, false);
+        assert_eq!(motion.favorite_frame(mid).1, Some(0.0));
+        motion.advance(mid + BURST_DURATION, false);
+        assert_eq!(motion.favorite_frame(mid + BURST_DURATION).1, None);
+
+        motion.press_favorite(true, end + BURST_DURATION, false);
+        motion.advance(end + BURST_DURATION, true);
+        assert!(!motion.running());
+        motion.press_favorite(true, end + BURST_DURATION, true);
+        assert_eq!(motion.favorite_frame(end + BURST_DURATION), (1.0, None));
     }
 }

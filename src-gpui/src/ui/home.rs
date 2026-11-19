@@ -439,9 +439,9 @@ impl Home {
         let active = state.and_then(|state| state.favorite).unwrap_or_else(|| {
             if directory { self.snapshot.is_folder_favorite(path) } else { self.snapshot.is_favorite(path) }
         });
-        let scale = state.and_then(|state| state.document.as_ref())
-            .map_or(1.0, |motion| motion.borrow().favorite_scale());
-        document_card::FavoriteVisual { active, visible: false, scale }
+        let (scale, burst) = state.and_then(|state| state.document.as_ref())
+            .map_or((1.0, None), |motion| motion.borrow().favorite_frame(self.grid_time));
+        document_card::FavoriteVisual { active, visible: false, scale, burst }
     }
 
     fn set_favorite(&mut self, path: PathBuf, directory: bool, favorite: bool, cx: &mut Context<Self>) {
@@ -458,7 +458,7 @@ impl Home {
         let reduced = reduced_motion(cx);
         let state = self.card_motion.entry(path.clone()).or_default();
         state.favorite = Some(favorite);
-        state.document.get_or_insert_with(Default::default).borrow_mut().press_favorite(Instant::now(), reduced);
+        state.document.get_or_insert_with(Default::default).borrow_mut().press_favorite(favorite, Instant::now(), reduced);
         self.set_favorite(path.to_path_buf(), directory, favorite, cx);
         cx.notify();
     }
@@ -477,6 +477,7 @@ impl Home {
             .absolute().size(px(document_card::FAVORITE_SIZE))
             .cursor_pointer().rounded(px(6.0)).opacity(reveal)
             .hover(|style| style.bg(theme.hover))
+            .when_some(favorite.burst, |button, t| button.child(document_card::favorite_burst(t, theme)))
             .child(document_card::favorite_icon(favorite, theme))
             .tooltip(tooltip(ToolbarLocale::current(cx).app_text(tooltip_key)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
