@@ -563,7 +563,10 @@ impl Render for Chrome {
             .when(cfg!(target_os = "macos"), |el| el.pr(px(14.0)));
         if let Some(update) = self.state.update {
             let enabled = self.capable(ChromeCapability::SoftwareUpdate);
-            right = right.child(self.icon_button("chrome-update", IconName::ArrowDown, &theme).relative()
+            right = right.child(self.basic_button("chrome-update", &theme).relative()
+                .child(if matches!(update, ChromeUpdateState::Downloading(_)) {
+                    super::components::DownloadingArrow.into_any_element()
+                } else { icon(IconName::ArrowDown, 15.0, theme.fg).into_any_element() })
                 .when(!enabled, |el| el.opacity(0.5)).tooltip(tooltip(locale.app_text("chrome.softwareUpdate")))
                 .child(div().absolute().right_0().top_0().text_size(px(8.0)).text_color(theme.accent)
                     .child(match update { ChromeUpdateState::Available => "●".to_owned(), ChromeUpdateState::Downloading(percent) => percent.min(100).to_string(), ChromeUpdateState::Downloaded => "✓".to_owned() }))
