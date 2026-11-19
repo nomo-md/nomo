@@ -278,59 +278,6 @@ fn scan(lines: &impl Lines, start: usize, emit: &mut impl FnMut(Block) -> bool) 
     }
 }
 
-/// 大纲条目：标题级别、所在行与纯文本标题。
-#[derive(Clone, Debug, PartialEq)]
-pub struct Heading {
-    pub level: u8,
-    pub line: usize,
-    pub text: String,
-}
-
-pub fn heading_text(line: &str) -> String {
-    let rest = line.trim_start().trim_start_matches('#').trim();
-    let rest = rest.trim_end_matches('#').trim_end();
-    strip_inline_markers(rest)
-}
-
-/// 去掉常见行内标记，供大纲和标签标题显示。
-pub fn strip_inline_markers(text: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '*' | '_' | '`' | '~' => {}
-            '[' => {}
-            ']' => {
-                // 跳过链接目标 (url)。
-                if chars.peek() == Some(&'(') {
-                    for next in chars.by_ref() {
-                        if next == ')' {
-                            break;
-                        }
-                    }
-                }
-            }
-            _ => output.push(ch),
-        }
-    }
-    output
-}
-
-impl BlockIndex {
-    pub fn headings(&self, lines: &impl Lines) -> Vec<Heading> {
-        self.blocks
-            .iter()
-            .filter_map(|block| match block.kind {
-                BlockKind::Heading(level) => {
-                    let text = if block.lines == 2 { strip_inline_markers(lines.line(block.start).trim()) } else { heading_text(&lines.line(block.start)) };
-                    Some(Heading { level, line: block.start, text })
-                }
-                _ => None,
-            })
-            .collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

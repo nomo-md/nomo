@@ -98,14 +98,6 @@ impl BlockFrame {
     pub fn language(&self) -> &str {
         self.prefix.trim().trim_start_matches(['`', '~']).trim()
     }
-    pub fn set_language(&mut self, language: &str) {
-        if let Some((marker, count)) = self.marker {
-            if let Some(start) = self.prefix.find(marker) {
-                let end = self.prefix.trim_end_matches(['\r', '\n']).len();
-                self.prefix.replace_range(start + count..end, language);
-            }
-        }
-    }
     pub fn estimated_bytes(&self) -> usize { self.prefix.capacity() + self.suffix.capacity() }
     pub fn join(&self, body: &str) -> Result<String, ControlError> {
         let mut prefix = self.prefix.clone();
@@ -183,9 +175,6 @@ impl ObjectDraft {
             text: source.into(),
             original: source.into(),
         })
-    }
-    pub fn changed(&self) -> bool {
-        self.text != self.original
     }
     pub fn estimated_bytes(&self) -> usize {
         std::mem::size_of::<Self>()

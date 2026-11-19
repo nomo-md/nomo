@@ -1175,13 +1175,6 @@ impl NomoMark {
             if dragging { window.set_window_cursor_style(gpui::CursorStyle::ClosedHand); }
         }).absolute().inset_0()).with_priority(10).into_any_element())
     }
-    pub(super) fn show_image_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(object) = &mut self.object {
-            object.image_preview = false;
-            if let Some(form) = &object.image { window.focus(&form.fields[0].focus_handle(cx), cx); }
-            cx.notify();
-        }
-    }
     pub(super) fn image_range_at(&self, at: usize) -> Option<Range<usize>> {
         if let Some(run) = super::super::table_inline::atom_at(&self.host.parsed, at) {
             if matches!(run.atom, Some(super::super::html_table::InlineAtom::Image { .. })) { return Some(run.source); }

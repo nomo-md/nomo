@@ -1967,9 +1967,6 @@ fn insert_code_block(buffer: &mut DocumentHost, cx: &mut Context<DocumentHost>) 
     buffer.command(crate::nomo_mark::commands::EditIntent::InsertCodeBlock(language), cx);
 }
 
-fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::frame_profile::frame_begin();

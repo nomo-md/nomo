@@ -11,7 +11,7 @@ use crate::theme::{Family, Metrics};
 use crate::nomo_mark::parse::ParsedWindow;
 use crate::nomo_mark::image_properties::{self, ImageWidth};
 use gpui::{Bounds, Pixels, Point, Window, point, px, size};
-use pulldown_cmark::{Alignment, BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, BlockQuoteKind, CodeBlockKind, Event, Parser, Tag, TagEnd};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -438,9 +438,6 @@ impl BlockLayout {
     }
 
     /// 块内源码区间在各文本项上的覆盖矩形（块坐标）。
-    pub fn source_rects(&self, range: Range<usize>) -> Vec<(f32, f32, f32, f32)> {
-        self.source_rects_clipped(range, f32::NEG_INFINITY..f32::INFINITY)
-    }
     pub fn source_rects_clipped(&self, range: Range<usize>, clip: Range<f32>) -> Vec<(f32, f32, f32, f32)> {
         let mut rects = Vec::new();
         if range.is_empty() { return rects; }
@@ -907,14 +904,6 @@ struct PendingImage {
     align: Option<String>,
     width: Option<ImageWidth>,
     source:Range<usize>,
-}
-
-/// 布局一个顶层块。`source` 为块的完整源码（含块内换行）。
-pub fn layout_block(source: &str, width: f32, env: &RenderEnv, window: &Window) -> BlockLayout {
-    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS |
-        Options::ENABLE_FOOTNOTES | Options::ENABLE_MATH | Options::ENABLE_GFM |
-        Options::ENABLE_SUPERSCRIPT | Options::ENABLE_SUBSCRIPT;
-    layout_events(source, width, env, window, Parser::new_ext(source, options).into_offset_iter(), &[],None,&[],&[],&[])
 }
 
 /// 控件入口：解析已在适配层完成，此处不创建解析器或读取正文。
@@ -2564,38 +2553,6 @@ pub(crate) fn percent_decode(url: &str) -> String {
         index += 1;
     }
     String::from_utf8(output).unwrap_or_else(|_| url.to_string())
-}
-
-/// 把 Markdown 转为纯文本（设置“复制时保留 Markdown 语法”关闭时用于复制）：
-/// 保留文字、行内代码与公式内容，块之间以换行分隔，去掉所有标记。
-pub fn plain_text(markdown: &str) -> String {
-    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_MATH | Options::ENABLE_GFM;
-    let mut output = String::with_capacity(markdown.len());
-    for event in Parser::new_ext(markdown, options) {
-        match event {
-            Event::Text(text) | Event::Code(text) | Event::InlineMath(text) | Event::DisplayMath(text) => output.push_str(&text),
-            Event::SoftBreak => output.push(' '),
-            Event::HardBreak => output.push('\n'),
-            Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item | TagEnd::CodeBlock | TagEnd::TableRow | TagEnd::TableHead) => output.push('\n'),
-            Event::End(TagEnd::TableCell) => output.push('\t'),
-            _ => {}
-        }
-    }
-    output.trim_end_matches('\n').to_string()
-}
-
-/// 源码行的语法高亮段落规格，供源码视图与语义视图的活动块共用。
-pub fn source_line_spec(line: &str, context: highlight::LineContext, lang: &str, family: Family, font_size: f32, line_height: f32) -> ParaSpec {
-    ParaSpec {
-        text: line.to_string(),
-        spans: highlight::markdown_line(line, context, lang),
-        base: InlineStyle::default(),
-        family,
-        font_size,
-        line_height,
-        wrap: Wrap::Greedy,
-        objects: Vec::new(),
-    }
 }
 
 #[cfg(test)]

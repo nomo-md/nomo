@@ -284,23 +284,6 @@ pub(super) fn sidebar_section_style(row: Div, theme: &Theme) -> Div {
     row.text_size(px(12.0)).font_weight(FontWeight::MEDIUM).text_color(theme.muted)
 }
 
-/// 工具栏图标按钮：28×28，悬停底色，激活态使用强调色底。
-pub fn icon_button(id: impl Into<ElementId>, name: IconName, active: bool, theme: &Theme) -> Stateful<Div> {
-    let color = if active { theme.accent_strong } else { theme.fg };
-    div()
-        .id(id)
-        .size(px(28.0))
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.0))
-        .when(active, |el| el.bg(theme.sidebar_active))
-        .hover(|style| style.bg(theme.hover))
-        .cursor_pointer()
-        .child(icon(name, 16.0, color))
-}
-
 /// 小号图标按钮（搜索面板、标签关闭等）。
 pub fn small_icon_button(id: impl Into<ElementId>, name: IconName, active: bool, theme: &Theme) -> Stateful<Div> {
     div()
@@ -364,36 +347,6 @@ pub(super) fn button_shell(id: impl Into<ElementId>, kind: ButtonKind, theme: &T
         .when_some(border, |el, color| el.border_1().border_color(color))
         .when(kind != ButtonKind::Disabled, |el| el.hover(move |style| style.bg(hover)).cursor_pointer())
         .when(kind == ButtonKind::Disabled, |el| el.opacity(0.55).cursor(gpui::CursorStyle::OperationNotAllowed))
-}
-
-/// 竖向分隔线（工具栏分组）。
-pub fn vertical_divider(theme: &Theme) -> Div {
-    div().w(px(1.0)).h(px(16.0)).mx(px(4.0)).flex_none().bg(theme.border)
-}
-
-/// 分段控件的一个选项：图标 + 文字；选中态为强调色底。
-pub fn segment(id: impl Into<ElementId>, name: IconName, label: &'static str, active: bool, theme: &Theme) -> Stateful<Div> {
-    let color = if active { theme.on_accent } else { theme.muted };
-    div()
-        .id(id)
-        .h(px(24.0))
-        .px(px(8.0))
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .rounded(px(5.0))
-        .text_size(px(12.0))
-        .text_color(color)
-        .when(active, |el| el.bg(theme.accent_fill))
-        .when(!active, |el| el.hover(|style| style.bg(theme.hover)))
-        .cursor_pointer()
-        .child(icon(name, 14.0, color))
-        .child(label)
-}
-
-/// 分段控件容器。
-pub fn segmented(theme: &Theme) -> Div {
-    div().flex().p(px(2.0)).gap(px(2.0)).rounded(px(7.0)).bg(theme.app_bg).border_1().border_color(theme.border)
 }
 
 /// 浮层卡片（大纲、搜索面板等）：表面色、细边框、圆角与阴影。

@@ -5,7 +5,6 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions), not(test)), windows_subsystem = "windows")]
 
 mod snapshots;
-mod cache;
 mod clipboard;
 #[cfg(test)]
 mod document;

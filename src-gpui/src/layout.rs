@@ -324,9 +324,6 @@ impl TextLayout {
     }
 
     /// 行内对象的绘制矩形（相对段落左上角）：(key, x, y, 宽, 高)，按基线对齐。
-    pub fn object_rects(&self) -> Vec<(&InlineAsset, f32, f32, f32, f32)> {
-        self.object_rects_clipped(f32::NEG_INFINITY..f32::INFINITY)
-    }
     pub fn object_rects_clipped(&self, clip: Range<f32>) -> Vec<(&InlineAsset, f32, f32, f32, f32)> {
         self.object_rects_with_offsets(clip).map(|(_, key, x, y, w, h)| (key, x, y, w, h)).collect()
     }
