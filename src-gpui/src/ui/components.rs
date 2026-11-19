@@ -226,6 +226,51 @@ pub fn icon(name: IconName, size: f32, color: Hsla) -> Svg {
     svg().path(name.path()).size(px(size)).flex_none().text_color(color)
 }
 
+/// 仅绘制下载中的箭头；两份相同的 SVG 在固定裁剪区首尾相接，数字和点击区域不移动。
+/// 帧通知归属图标子视图，不为每帧进度装配整页设置；离开下载状态即释放。
+#[derive(IntoElement)]
+pub(super) struct DownloadingArrow;
+
+impl gpui::RenderOnce for DownloadingArrow {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let color = window.text_style().color;
+        if super::popup::reduced_motion(cx) || !window.is_window_active() {
+            return icon(IconName::ArrowDown, 15.0, color).into_any_element();
+        }
+        window.with_global_id("download-arrow".into(), |id, window| {
+            window.with_element_state(id, |view: Option<gpui::Entity<ArrowLoop>>, _| {
+                let view = view.unwrap_or_else(|| cx.new(|_| ArrowLoop(std::time::Instant::now())));
+                (view.clone().into_any_element(), view)
+            })
+        })
+    }
+}
+
+struct ArrowLoop(std::time::Instant);
+
+impl Render for ArrowLoop {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let start = self.0;
+        gpui::canvas(|_, _, _| (), move |bounds, _, window, cx| {
+            if !bounds.intersects(&window.content_mask().bounds) { return; }
+            let color = window.text_style().color;
+            let offset = if window.is_window_active() && !super::popup::reduced_motion(cx) {
+                window.request_animation_frame();
+                let t = (start.elapsed().as_secs_f32() / 1.15).fract();
+                t * t * (3.0 - 2.0 * t)
+            } else { 0.0 };
+            window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                for phase in [offset, offset - 1.0] {
+                    if phase <= -1.0 { continue; }
+                    let mut frame = bounds;
+                    frame.origin.y += frame.size.height * phase;
+                    let _ = window.paint_svg(frame, IconName::ArrowDown.path().into(), None, Default::default(), color, cx);
+                }
+            });
+        }).size(px(15.0)).flex_none()
+    }
+}
+
 pub(super) const SIDEBAR_ROW_HEIGHT: f32 = 30.0;
 pub(super) const SIDEBAR_ROW_CONTENT_HEIGHT: f32 = 28.0;
 pub(super) const SIDEBAR_ROW_GAP: f32 = 6.0;
@@ -286,10 +331,21 @@ pub enum ButtonKind {
 
 /// 文字按钮，可带前置图标。
 pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, leading: Option<IconName>, kind: ButtonKind, theme: &Theme) -> Stateful<Div> {
-    let (background, foreground, border) = match kind {
-        ButtonKind::Primary => (theme.accent_fill, theme.on_accent, None),
-        ButtonKind::Secondary | ButtonKind::Disabled => (theme.surface, theme.fg, Some(theme.border)),
-        ButtonKind::Ghost => (gpui::transparent_black(), theme.fg, None),
+    let foreground = button_foreground(kind, theme);
+    button_shell(id, kind, theme)
+        .when_some(leading, |el, name| el.child(icon(name, 15.0, foreground)))
+        .child(label.into())
+}
+
+fn button_foreground(kind: ButtonKind, theme: &Theme) -> Hsla {
+    if kind == ButtonKind::Primary { theme.on_accent } else { theme.fg }
+}
+
+pub(super) fn button_shell(id: impl Into<ElementId>, kind: ButtonKind, theme: &Theme) -> Stateful<Div> {
+    let (background, border) = match kind {
+        ButtonKind::Primary => (theme.accent_fill, None),
+        ButtonKind::Secondary | ButtonKind::Disabled => (theme.surface, Some(theme.border)),
+        ButtonKind::Ghost => (gpui::transparent_black(), None),
     };
     let hover = match kind {
         ButtonKind::Primary => super::motion::color(theme.accent_fill, theme.fg, 0.12),
@@ -304,14 +360,12 @@ pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, leading:
         .gap(px(6.0))
         .rounded(px(7.0))
         .bg(background)
-        .text_color(foreground)
+        .text_color(button_foreground(kind, theme))
         .text_size(px(13.0))
         .font_weight(FontWeight::SEMIBOLD)
         .when_some(border, |el, color| el.border_1().border_color(color))
         .when(kind != ButtonKind::Disabled, |el| el.hover(move |style| style.bg(hover)).cursor_pointer())
         .when(kind == ButtonKind::Disabled, |el| el.opacity(0.55).cursor(gpui::CursorStyle::OperationNotAllowed))
-        .when_some(leading, |el, name| el.child(icon(name, 15.0, foreground)))
-        .child(label.into())
 }
 
 /// 竖向分隔线（工具栏分组）。

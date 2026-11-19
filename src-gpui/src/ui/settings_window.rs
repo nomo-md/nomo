@@ -18,7 +18,7 @@ use gpui::{
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[path = "settings_pages.rs"]
 mod pages;
@@ -27,6 +27,10 @@ mod fonts;
 #[path = "settings_shortcuts.rs"]
 mod shortcut_fields;
 use pages::{display_value, item_is_visible, readonly_input, section_heading, unavailable_action};
+
+const NAV_ROW: f32 = 38.0;
+const NAV_GAP: f32 = 4.0;
+const NAV_MARK: f32 = 16.0;
 
 const COMPACT_WIDTH: f32 = 760.0;
 
@@ -117,6 +121,7 @@ pub struct SettingsWindow {
     #[cfg(target_os = "windows")]
     caption_focus: window_chrome::CaptionFocus,
     category: usize,
+    category_transition: Option<(Instant, f32)>,
     title_locale: ToolbarLocale,
     // 原生窗口后端在窗口生命周期内不变；仅保存静态翻译键，不保留平台句柄。
     tray_unavailable: Option<&'static str>,
@@ -192,7 +197,7 @@ impl SettingsWindow {
             #[cfg(target_os = "windows")]
             caption_focus: window_chrome::CaptionFocus::new(cx, false),
             title_locale: ToolbarLocale::current(cx),
-            category: 0, open_select: None, font_picker: None, dragging: None,
+            category: 0, category_transition: None, open_select: None, font_picker: None, dragging: None,
             tray_unavailable: crate::ui::tray::unavailable_reason_key(window),
             toggles: HashMap::new(), fields: HashMap::new(), field_errors: HashMap::new(), shortcut_errors: HashMap::new(),
             shortcut_recording: None, shortcut_popup: None, shortcut_return_focus: None, shortcut_popup_focus: cx.focus_handle(), shortcut_filter: 0, shortcut_reset_confirm: false,
@@ -201,6 +206,14 @@ impl SettingsWindow {
             #[cfg(windows)]
             shell: ShellControls::default(),
         }
+    }
+
+    // 快速连点时从标记当前位置接续，不保留旧页面或旧控件。
+    fn category_frame(&self, now: Instant) -> (f32, f32) {
+        let target = self.category as f32;
+        let Some((start, from)) = self.category_transition else { return (target, 1.0) };
+        let t = super::motion::ease(now.duration_since(start).as_secs_f32() / 0.16);
+        (from + (target - from) * t, t)
     }
 
     fn field(&mut self, item: &'static Item, placeholder: &'static str, cx: &mut Context<Self>) -> Entity<TextField> {
@@ -355,12 +368,16 @@ impl SettingsWindow {
             },
             Control::Action(label) if key=="updateCheck" => {
                 let busy=super::updates::busy(cx);
-                let label = match super::updates::chrome_state(cx) {
+                let state = super::updates::chrome_state(cx);
+                let label = match state {
                     Some(super::chrome::ChromeUpdateState::Downloading(p)) => locale.app_format("settings.downloading", &[("progress", &p.to_string())]),
                     Some(super::chrome::ChromeUpdateState::Downloaded) => locale.app_text("settings.restartInstall").into(),
                     _ if busy => locale.app_text("settings.checking").into(), _ => locale.app_text(label).into(),
                 };
-                button("update-check",label,None,ButtonKind::Secondary,theme)
+                super::components::button_shell("update-check", ButtonKind::Secondary, theme)
+                    .when(matches!(state, Some(super::chrome::ChromeUpdateState::Downloading(_))), |el| {
+                        el.min_w(px(142.0)).justify_center().child(div().size(px(15.0)).flex_none().text_color(theme.accent_strong).child(super::components::DownloadingArrow))
+                    }).child(label)
                     .when(!busy,|el|el.on_click(cx.listener(|_,_,window,cx|super::updates::action(window,cx))))
                     .when(busy,|el|el.opacity(0.55)).into_any_element()
             },
@@ -457,6 +474,9 @@ impl Render for SettingsWindow {
         let ui_font = if ui_font.trim().is_empty() { crate::theme::ui_font_family().to_string() } else { ui_font };
         let category = &CATEGORIES[self.category];
         let category_title = if matches!(category.page, Page::About) { locale.app_text("settings.aboutTitle") } else { locale.app_text(category.title) };
+        if super::popup::reduced_motion(cx) || !window.is_window_active() { self.category_transition = None; }
+        let (mark, reveal) = self.category_frame(Instant::now());
+        if reveal < 1.0 { window.request_animation_frame(); } else { self.category_transition = None; }
         let nav: Vec<AnyElement> = CATEGORIES
             .iter()
             .enumerate()
@@ -464,7 +484,7 @@ impl Render for SettingsWindow {
                 let active = index == self.category;
                 div()
                     .id(("category", index))
-                    .h(px(38.0))
+                    .h(px(NAV_ROW)).flex_none()
                     .px(px(10.0))
                     .flex()
                     .items_center()
@@ -480,7 +500,11 @@ impl Render for SettingsWindow {
                     .child(icon(entry.icon, 16.0, if active { theme.accent_strong } else { theme.muted }))
                     .when(!compact, |el| el.child(locale.app_text(entry.title)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.category = index;
+                        if this.category != index {
+                            let now = Instant::now();
+                            this.category_transition = (!super::popup::reduced_motion(cx)).then(|| (now, this.category_frame(now).0));
+                            this.category = index;
+                        }
                         this.shortcut_recording = None;
                         this.shortcut_popup = None;
                         this.shortcut_return_focus = None;
@@ -567,7 +591,10 @@ impl Render for SettingsWindow {
                     .border_color(theme.border)
                     .child(nav_drag)
                     .child(div().id("settings-nav-list").flex_1().min_h(px(0.0)).overflow_y_scroll()
-                        .flex().flex_col().gap(px(4.0)).py(px(12.0)).px(px(10.0)).children(nav)),
+                        .py(px(12.0)).px(px(10.0))
+                        .child(div().relative().flex().flex_col().gap(px(NAV_GAP)).children(nav)
+                            .child(div().absolute().left_0().top(px((NAV_ROW - NAV_MARK) * 0.5 + mark * (NAV_ROW + NAV_GAP)))
+                                .w(px(2.0)).h(px(NAV_MARK)).rounded_full().bg(theme.accent_strong)))),
             )
             .child(
                 div()
@@ -577,7 +604,8 @@ impl Render for SettingsWindow {
                     .flex()
                     .flex_col()
                     .child(header)
-                    .child(body),
+                    .child(div().flex_1().min_h(px(0.0)).flex().flex_col()
+                        .when(reveal < 1.0, |el| el.opacity(0.82 + 0.18 * reveal)).child(body)),
             );
         #[cfg(target_os = "windows")]
         if !window.is_maximized() && !window.is_fullscreen() {

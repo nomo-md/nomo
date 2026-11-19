@@ -193,8 +193,14 @@ fn metadata_proxy_url(endpoint:&str)->Option<String> {
     let valid=allowed&&url.username().is_empty()&&url.password().is_none()&&url.port().is_none()&&url.query().is_none()&&url.fragment().is_none();
     valid.then(||format!("https://gh-proxy.com/{endpoint}"))
 }
+fn metadata_status_allows_mirror(status:reqwest::StatusCode)->bool {
+    use reqwest::StatusCode as S;
+    // A known-good, fixed Release GET can receive an HTML 400 on the official route.
+    // Try the allowlisted mirror once; do not resend the rejected request to GitHub.
+    matches!(status,S::BAD_REQUEST|S::FORBIDDEN|S::REQUEST_TIMEOUT|S::TOO_MANY_REQUESTS)||status.is_server_error()
+}
 fn metadata_error(error:reqwest::Error)->FetchError {
-    let retryable=error.status().map(|status|status==reqwest::StatusCode::FORBIDDEN||status==reqwest::StatusCode::REQUEST_TIMEOUT||status==reqwest::StatusCode::TOO_MANY_REQUESTS||status.is_server_error()).unwrap_or_else(||!error.is_builder());
+    let retryable=error.status().map(metadata_status_allows_mirror).unwrap_or_else(||!error.is_builder());
     FetchError{message:UiMessage::raw(error.without_url()),retryable}
 }
 async fn fetch_once(client:&reqwest::Client,endpoint:&str)->Result<Release,FetchError> {
@@ -240,6 +246,19 @@ pub(crate) fn app_mark(dark:bool)->Arc<gpui::RenderImage> {
 #[cfg(test)]
 mod tests {
     use super::metadata_proxy_url;
+
+    #[test]
+    fn bad_request_allows_mirror_but_missing_release_does_not() {
+        assert!(super::metadata_status_allows_mirror(reqwest::StatusCode::BAD_REQUEST));
+        assert!(!super::metadata_status_allows_mirror(reqwest::StatusCode::NOT_FOUND));
+    }
+
+    #[test]
+    #[ignore = "queries the public release service"]
+    fn live_latest_release_metadata() {
+        let release=super::fetch("https://api.github.com/repos/nomo-md/nomo/releases/latest").unwrap();
+        println!("Latest release: {} ({} assets)",release.tag_name,release.assets.len());
+    }
 
     #[test]
     fn metadata_proxy_is_limited_to_nomos_release_endpoints() {
