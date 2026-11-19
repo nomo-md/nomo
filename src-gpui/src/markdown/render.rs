@@ -643,6 +643,17 @@ impl ParaBuilder {
         }
     }
 
+    /// 精细排版沿用中英文连接规则，折叠后的空格仍对应完整源码换行。
+    fn push_joined_soft_break(&mut self, source: &str, range: Range<usize>, style: InlineStyle) {
+        let left = self.text.chars().last();
+        let right = source[range.end..].chars().find(|ch| !ch.is_whitespace());
+        if !left.is_some_and(is_cjk) && !right.is_some_and(is_cjk) {
+            self.push(" ", style, Some((range.start, false)));
+            // 一个可见空格对应整个软换行，不能把 CRLF 右端映射到两个字节之间。
+            if let Some(map) = self.map.last_mut() { map.source_end = range.end; }
+        }
+    }
+
     /// 延后输出源码空白，遇到下一段内容才在同一视觉行内插入一个空格。
     fn push_html_literal(&mut self, text: &str, source: usize, style: InlineStyle,
         space: &mut Option<(Range<usize>, InlineStyle)>) {
@@ -1241,11 +1252,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                     builder.line_break(range);
                     continue;
                 }
-                let left = builder.para.text.chars().last();
-                let right = source[range.end..].chars().find(|ch| !ch.is_whitespace());
-                if !left.is_some_and(is_cjk) && !right.is_some_and(is_cjk) {
-                    builder.para.push(" ", builder.inline.style(&builder.base), Some((range.start, false)));
-                }
+                builder.para.push_joined_soft_break(source, range, builder.inline.style(&builder.base));
             }
             Event::HardBreak => builder.line_break(range),
             Event::Rule => builder.rule(range),
@@ -2593,8 +2600,62 @@ pub fn source_line_spec(line: &str, context: highlight::LineContext, lang: &str,
 
 #[cfg(test)]
 mod tests {
-    use super::{Container, paragraph_end_gap};
+    use super::{Container, ParaBuilder, map_to_source, paragraph_end_gap};
     use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+    #[test]
+    fn enter_after_crlf_soft_break_space_preserves_source_boundaries() {
+        use crate::nomo_mark::{commands::{apply_semantic, EditIntent}, host::WindowHostAdapter, protocol::*};
+
+        let first = r"C:\资料\first.txt";
+        let second = r"D:\资料\second.txt";
+        // LF 是对照；非零窗口起点及中文路径同时检查局部、全文与 UTF-8 字节坐标。
+        for eol in ["\r\n", "\n"] {
+            let source = format!("{first}{eol}{second}{eol}");
+            let base = 100;
+            let mut host = WindowHostAdapter::new(DocumentWindow {
+                document_id: "soft-break".into(), revision: 1, from_byte: base,
+                to_byte: base + source.len() as u64, text: source.clone(), inline_templates: Vec::new(),
+            }, "view", 0, WindowContext::Complete).unwrap();
+            let mut para = ParaBuilder::new();
+            for (event, range) in host.parsed.with_blank_paragraphs(host.parsed.display_events(&[])) {
+                match event {
+                    Event::Text(text) => {
+                        assert_eq!(source.get(range.clone()), Some(text.as_ref()));
+                        para.push(&text, Default::default(), Some((range.start, true)));
+                    }
+                    Event::SoftBreak => para.push_joined_soft_break(&source, range, Default::default()),
+                    Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) => {}
+                    other => panic!("unexpected path event: {other:?}"),
+                }
+            }
+            assert_eq!(para.text, format!("{first} {second}"));
+            let at = map_to_source(&para.map, first.len() + 1).unwrap();
+            assert_eq!(at, source.find(second).unwrap(), "right edge of the soft-break space, eol={eol:?}");
+            let selection = DocumentSelection::caret(base + at as u64);
+            host.selection = selection;
+            host.mark_layout_ready(LayoutStamp {
+                identity: host.parsed.identity.clone(), width: 600.0, font_generation: 0,
+                resource_generation: 0, zoom: 1.0,
+            }, 24.0).unwrap();
+
+            // 与语义编辑区的 Enter 相同，使用命中结果生成并校验事务。
+            let result = apply_semantic(&host.parsed, selection, EditIntent::ParagraphBreak).unwrap();
+            let after = DocumentSelection::caret(base + (at + 2 * eol.len()) as u64);
+            assert_eq!(result.selection, after);
+            assert_eq!(result.edits, vec![SourceEdit {
+                from_byte: selection.head_byte, to_byte: selection.head_byte,
+                inserted_text: eol.repeat(2),
+            }]);
+            host.queue_edit(result.edits, result.selection, "enter").unwrap();
+            assert_eq!(&*host.parsed.source, format!("{first}{eol}{eol}{eol}{second}{eol}"));
+            let ControlEvent::Submit(transaction) = host.next_submission().unwrap() else {
+                panic!("Enter must produce a submit-ready transaction");
+            };
+            assert_eq!(transaction.selection_before, selection);
+            assert_eq!(transaction.selection_after, after);
+        }
+    }
 
     #[test]
     fn adding_a_loose_or_empty_list_item_does_not_add_paragraph_gaps_to_its_peers() {

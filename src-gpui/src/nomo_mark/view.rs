@@ -1543,7 +1543,7 @@ impl NomoMark {
             layout.source_at(f32::from(position.x - bounds.origin.x), y)
         }?;
         let mut at = at.min(self.host.parsed.source.len());
-        while !self.host.parsed.source.is_char_boundary(at) {
+        while !super::mapping::edit_boundary(&self.host.parsed.source, at) {
             at -= 1;
         }
         Some(at)
