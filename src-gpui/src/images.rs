@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod animation;
 mod gif;
+mod source;
+pub use source::{ImageKey, ImageRequest, ImageSource};
+pub(crate) use source::{image_label, is_data_source, resolve_image};
 
 /// 解码宽度上限：2× 视网膜屏下约 1200 逻辑像素，足够正文宽度使用。
 const MAX_DECODE_WIDTH: u32 = 2400;
@@ -60,16 +63,18 @@ enum Entry {
 
 #[derive(Default)]
 pub struct ImageStore {
-    entries: HashMap<PathBuf, Entry>,
+    entries: HashMap<ImageKey, Entry>,
     bytes: usize,
     clock: Cell<u64>,
     metadata_bytes: usize,
-    queued: VecDeque<PathBuf>,
+    queued: VecDeque<ImageRequest>,
+    // Only queued or running requests own encoded data; ready entries retain the digest and bitmap.
+    pending_data_bytes: usize,
     running: usize,
     next_request: u64,
-    animations: HashMap<PathBuf, animation::Playback>,
+    animations: HashMap<ImageKey, animation::Playback>,
     animation_bytes: Arc<AtomicUsize>,
-    animation_queue: RefCell<VecDeque<(PathBuf, u64)>>,
+    animation_queue: RefCell<VecDeque<(ImageKey, u64)>>,
     animation_scheduled: Cell<bool>,
     retired_animations: Vec<Arc<RenderImage>>,
     failures: HashMap<u64, (Failure, u64)>,
@@ -84,18 +89,27 @@ impl ImageStore {
     pub(crate) fn automation_state(&self) -> serde_json::Value {
         serde_json::json!({"entries":self.entries.len(),"decodedBytes":self.bytes,"metadataBytes":self.metadata_bytes,
             "animationReservedBytes":self.animation_bytes.load(Ordering::Relaxed),"animations":self.animations.len(),
+            "pendingDataBytes":self.pending_data_bytes,
             "pending":self.running+self.queued.len(),"failed":self.entries.values().filter(|e|matches!(e,Entry::Failed{..})).count(),
             "scope":"process CPU cache; decodedBytes is static/poster bitmaps; animationReservedBytes includes bounded working sets and compressed sources; excludes GPU"})
     }
     fn cache_bytes(&self) -> usize { self.bytes + self.animation_bytes.load(Ordering::Relaxed) }
-    fn metadata_cost(path: &Path) -> usize { (path.as_os_str().len() + 256).saturating_mul(4) }
-    fn path_key(path: &Path) -> u64 {
+    pub(crate) fn pending_data_capacity(&self) -> usize {
+        source::MAX_PENDING_DATA_BYTES.saturating_sub(self.pending_data_bytes)
+    }
+    pub(crate) fn can_request(&self, key: &ImageKey, encoded_len: usize) -> bool {
+        !self.is_pending_or_known(key)
+            && self.queued.len() + self.animation_queue.borrow().len() < MAX_QUEUED
+            && encoded_len <= self.pending_data_capacity()
+    }
+    fn metadata_cost(path: &ImageKey) -> usize { (path.estimated_bytes() + 256).saturating_mul(4) }
+    fn path_key(path: &ImageKey) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         path.hash(&mut hash);
         hash.finish()
     }
-    fn remember_failure(&mut self, path: &Path, failure: Failure) {
+    fn remember_failure(&mut self, path: &ImageKey, failure: Failure) {
         let key = Self::path_key(path);
         if let Some((stored,version)) = self.failures.get_mut(&key) {
             if *version == self.generation { *stored = failure; return; }
@@ -109,7 +123,7 @@ impl ImageStore {
         self.failure_order.push_back((key,self.generation));
     }
 
-    pub fn version(&self, path: &Path) -> (u8, u64) {
+    pub fn version(&self, path: &ImageKey) -> (u8, u64) {
         if Self::metadata_cost(path) > MAX_METADATA_BYTES { return (2,0); }
         match self.entries.get(path) {
             Some(Entry::Ready { version, .. }) => (1, *version),
@@ -118,20 +132,20 @@ impl ImageStore {
             None => self.failures.get(&Self::path_key(path)).map_or((3,self.generation), |(_,version)| (2,*version)),
         }
     }
-    pub fn failure(&self, path: &Path) -> Option<&'static str> {
+    pub fn failure(&self, path: &ImageKey) -> Option<&'static str> {
         if Self::metadata_cost(path) > MAX_METADATA_BYTES { return Some(Failure::Budget.message()); }
         match self.entries.get(path) { Some(Entry::Failed { reason, .. }) => Some(reason.message()), Some(_) => None,
             None => self.failures.get(&Self::path_key(path)).map(|(reason,_)| reason.message()) }
     }
     /// 已解码图片的原始像素尺寸（缩放前）；未就绪返回 None。
-    pub fn size(&self, path: &Path) -> Option<(u32, u32)> {
+    pub fn size(&self, path: &ImageKey) -> Option<(u32, u32)> {
         match self.entries.get(path) {
             Some(Entry::Ready { width, height, .. }) => Some((*width, *height)),
             _ => None,
         }
     }
 
-    pub fn image(&self, path: &Path) -> Option<Arc<RenderImage>> {
+    pub fn image(&self, path: &ImageKey) -> Option<Arc<RenderImage>> {
         self.clock.set(self.clock.get() + 1);
         match self.entries.get(path) {
             Some(Entry::Ready { image, used, .. }) => {
@@ -143,7 +157,7 @@ impl ImageStore {
     }
 
     /// 仅实际可见绘制调用；尺寸／复制等查询继续使用 image() 的静态首帧。
-    pub fn frame_image(&self, path: &Path, window: &gpui::Window, cx: &App) -> Option<Arc<RenderImage>> {
+    pub fn frame_image(&self, path: &ImageKey, window: &gpui::Window, cx: &App) -> Option<Arc<RenderImage>> {
         let poster = self.image(path)?;
         let Some(Entry::Ready { version, .. }) = self.entries.get(path) else { return None; };
         Some(match self.animations.get(path) {
@@ -152,7 +166,7 @@ impl ImageStore {
         })
     }
 
-    pub fn notice(&self, path: &Path) -> Option<&'static str> {
+    pub fn notice(&self, path: &ImageKey) -> Option<&'static str> {
         match self.entries.get(path) {
             Some(Entry::Ready { notice: Some(Failure::Budget), .. }) => Some("动画超出预算，已显示静态预览"),
             Some(Entry::Ready { notice: Some(_), .. }) => Some("动画后续帧无法解码，已显示静态预览"),
@@ -160,11 +174,11 @@ impl ImageStore {
         }
     }
 
-    pub fn is_pending_or_known(&self, path: &Path) -> bool {
+    pub fn is_pending_or_known(&self, path: &ImageKey) -> bool {
         self.entries.contains_key(path) || Self::metadata_cost(path) > MAX_METADATA_BYTES || self.failures.contains_key(&Self::path_key(path))
     }
 
-    fn remove(&mut self, path: &Path) -> Option<Entry> {
+    fn remove(&mut self, path: &ImageKey) -> Option<Entry> {
         let entry = self.entries.remove(path)?;
         if let Some(playback) = self.animations.remove(path) {
             let current = playback.current();
@@ -176,20 +190,26 @@ impl ImageStore {
         Some(entry)
     }
     /// 关闭文档时移除无主资源，同时使排队和运行中的旧请求失效。
-    pub(crate) fn retain(&mut self, keep: impl Fn(&Path) -> bool) -> Vec<Arc<RenderImage>> {
+    pub(crate) fn retain(&mut self, keep: impl Fn(&ImageKey) -> bool) -> Vec<Arc<RenderImage>> {
         let paths: Vec<_> = self.entries.keys().filter(|path| !keep(path)).cloned().collect();
         if paths.is_empty() { return Vec::new(); }
         let mut retired = Vec::new();
         for path in paths {
             if let Some(Entry::Ready { image, .. }) = self.remove(&path) { retired.push(image); }
         }
-        self.queued.retain(|path| matches!(self.entries.get(path), Some(Entry::Queued)));
+        let mut released = 0;
+        self.queued.retain(|request| {
+            let keep = matches!(self.entries.get(&request.key), Some(Entry::Queued));
+            if !keep { released += request.encoded_len(); }
+            keep
+        });
+        self.pending_data_bytes -= released;
         if self.entries.is_empty() { self.failures.clear(); self.failure_order.clear(); }
         self.generation = self.generation.wrapping_add(1);
         retired.append(&mut self.retired_animations);
         retired
     }
-    fn complete_loaded(&mut self, path: PathBuf, request: u64, loaded: Result<Loaded, Failure>) -> Vec<Arc<RenderImage>> {
+    fn complete_loaded(&mut self, path: ImageKey, request: u64, loaded: Result<Loaded, Failure>) -> Vec<Arc<RenderImage>> {
         if !matches!(self.entries.get(&path), Some(Entry::Loading(current)) if *current == request) { return Vec::new(); }
         let loaded = match loaded { Ok(loaded) => loaded, Err(error) => return self.complete(path, request, Err(error)) };
         let mut retired = self.complete(path.clone(), request, Ok(loaded.bitmap));
@@ -205,7 +225,7 @@ impl ImageStore {
         retired.append(&mut self.retired_animations);
         retired
     }
-    fn complete(&mut self, path: PathBuf, request: u64, decoded: Result<Decoded, Failure>) -> Vec<Arc<RenderImage>> {
+    fn complete(&mut self, path: ImageKey, request: u64, decoded: Result<Decoded, Failure>) -> Vec<Arc<RenderImage>> {
         if !matches!(self.entries.get(&path), Some(Entry::Loading(current)) if *current == request) { return Vec::new(); }
         let failure = decoded.as_ref().err().copied();
         let retired = self.insert(path.clone(), decoded.ok());
@@ -222,20 +242,22 @@ impl ImageStore {
         if let Some(Entry::Ready { image, .. }) = self.remove(&path) { retired.push(image); }
         true
     }
-    fn enqueue(&mut self, path: PathBuf, retired: &mut Vec<Arc<RenderImage>>) {
-        if self.is_pending_or_known(&path) || self.queued.len() + self.animation_queue.borrow().len() >= MAX_QUEUED { return; }
-        let cost = Self::metadata_cost(&path);
+    fn enqueue(&mut self, request: ImageRequest, retired: &mut Vec<Arc<RenderImage>>) {
+        let path = &request.key;
+        if !self.can_request(path, request.encoded_len()) { return; }
+        let cost = Self::metadata_cost(path);
         if cost > MAX_METADATA_BYTES { return; }
         while self.entries.len() >= MAX_ENTRIES || self.metadata_bytes + cost > MAX_METADATA_BYTES {
             if !self.evict_oldest(retired) { return; }
         }
         self.metadata_bytes += cost;
         self.entries.insert(path.clone(), Entry::Queued);
-        self.queued.push_back(path);
+        self.pending_data_bytes += request.encoded_len();
+        self.queued.push_back(request);
     }
 
     /// 返回已淘汰位图，由调用方同时释放各窗口的 GPU atlas 条目。
-    fn insert(&mut self, path: PathBuf, decoded: Option<Decoded>) -> Vec<Arc<RenderImage>> {
+    fn insert(&mut self, path: ImageKey, decoded: Option<Decoded>) -> Vec<Arc<RenderImage>> {
         let mut retired = Vec::new();
         if let Some(Entry::Ready { image, .. }) = self.remove(&path) {
             retired.push(image);
@@ -266,7 +288,7 @@ impl ImageStore {
 }
 
 /// 请求解码一批图片；已在缓存或正在解码的路径会被跳过。
-pub fn request(paths: Vec<PathBuf>, cx: &mut App) {
+pub fn request(paths: Vec<ImageRequest>, cx: &mut App) {
     let mut retired = Vec::new();
     for path in paths {
         cx.global_mut::<ImageStore>().enqueue(path, &mut retired);
@@ -280,21 +302,23 @@ fn start_pending(cx: &mut App) {
     loop {
         let store = cx.global_mut::<ImageStore>();
         if store.running >= MAX_DECODERS { break; }
-        let Some(path) = store.queued.pop_front() else {
+        let Some(image) = store.queued.pop_front() else {
             if animation::start_pending(cx) { continue; }
             break;
         };
+        let path = image.key.clone();
+        let encoded_bytes = image.encoded_len();
         store.next_request = store.next_request.wrapping_add(1);
         let request = store.next_request;
         store.entries.insert(path.clone(), Entry::Loading(request));
         store.running += 1;
-        let decode_path = path.clone();
-        let task = cx.background_executor().spawn(async move { decode(&decode_path) });
+        let task = cx.background_executor().spawn(async move { decode(&image) });
         cx.spawn(async move |cx| {
             let decoded = task.await;
             cx.update(|cx| {
                 let store = cx.global_mut::<ImageStore>();
                 store.running -= 1;
+                store.pending_data_bytes -= encoded_bytes;
                 let retired = store.complete_loaded(path, request, decoded);
                 // 此处在 App 任务中，所有窗口都在 App 内，可完整移除纹理。
                 for image in retired { cx.drop_image(image, None); }
@@ -307,11 +331,12 @@ fn start_pending(cx: &mut App) {
 }
 
 pub(crate) fn resolve_source(source: &str, base: Option<&Path>) -> Option<PathBuf> {
+    if is_data_source(source) { return None; } // Embedded data has no local or remote file location.
     if let Ok(url) = url::Url::parse(source) {
         if matches!(url.scheme(), "http" | "https") { return Some(PathBuf::from(url.as_str())); }
         if url.scheme() == "file" { return url.to_file_path().ok(); }
     }
-    if source.contains("://") || source.starts_with("data:") { return None; }
+    if source.contains("://") { return None; }
     let decoded = crate::markdown::render::percent_decode(source);
     let path = Path::new(&decoded);
     if path.is_absolute() { Some(path.into()) } else { base.map(|base| base.join(path)) }
@@ -332,7 +357,20 @@ async fn download(source: &str) -> Result<Vec<u8>, Failure> {
     Ok(bytes)
 }
 
-fn decode(path: &Path) -> Result<Loaded, Failure> {
+fn decode(request: &ImageRequest) -> Result<Loaded, Failure> {
+    let encoded = match &request.key {
+        ImageKey::Location(path) => read_encoded(path)?,
+        ImageKey::Embedded(_) => {
+            use base64::Engine;
+            let data = request.encoded.as_deref().ok_or(Failure::Decode)?;
+            if data.len() > source::MAX_ENCODED_DATA_BYTES { return Err(Failure::Budget); }
+            base64::engine::general_purpose::STANDARD.decode(data).map_err(|_| Failure::Decode)?
+        }
+    };
+    decode_encoded(encoded)
+}
+
+fn read_encoded(path: &Path) -> Result<Vec<u8>, Failure> {
     let source = path.to_string_lossy();
     let encoded = if source.starts_with("http://") || source.starts_with("https://") {
         tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| Failure::Read)?
@@ -344,6 +382,10 @@ fn decode(path: &Path) -> Result<Loaded, Failure> {
         file.take(MAX_INPUT_BYTES + 1).read_to_end(&mut bytes).map_err(|_| Failure::Read)?;
         bytes
     };
+    Ok(encoded)
+}
+
+fn decode_encoded(encoded: Vec<u8>) -> Result<Loaded, Failure> {
     if encoded.len() as u64 > MAX_INPUT_BYTES { return Err(Failure::Budget); }
     if encoded.starts_with(b"GIF87a") || encoded.starts_with(b"GIF89a") {
         return decode_gif(encoded);
@@ -420,6 +462,8 @@ fn decode_svg(encoded: &[u8]) -> Result<Decoded, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn key(path: &str) -> ImageKey { ImageKey::Location(path.into()) }
+    fn local_request(path: &str) -> ImageRequest { ImageRequest { key: key(path), encoded: None } }
 
     fn bitmap() -> Arc<RenderImage> {
         Arc::new(RenderImage::new(vec![Frame::new(image::RgbaImage::new(1, 1))]))
@@ -428,23 +472,23 @@ mod tests {
     #[test]
     fn closed_resources_release_textures_and_ignore_late_decode() {
         let mut store = ImageStore::default();
-        store.insert("shared".into(), Some((bitmap(), 1, 1, 4)));
-        store.insert("closed".into(), Some((bitmap(), 1, 1, 4)));
-        store.enqueue("pending".into(), &mut Vec::new());
-        store.entries.insert("pending".into(), Entry::Loading(1));
+        store.insert(key("shared"), Some((bitmap(), 1, 1, 4)));
+        store.insert(key("closed"), Some((bitmap(), 1, 1, 4)));
+        store.enqueue(local_request("pending"), &mut Vec::new());
+        store.entries.insert(key("pending"), Entry::Loading(1));
         store.queued.clear();
-        store.enqueue("queued".into(), &mut Vec::new());
-        assert_eq!(store.retain(|path| path == Path::new("shared")).len(), 1);
+        store.enqueue(local_request("queued"), &mut Vec::new());
+        assert_eq!(store.retain(|path| path == &key("shared")).len(), 1);
         assert!(store.queued.is_empty());
         assert_eq!(store.bytes, 4);
-        assert_eq!(store.metadata_bytes, ImageStore::metadata_cost(Path::new("shared")));
-        store.complete("pending".into(), 1, Ok((bitmap(), 1, 1, 4)));
-        assert!(!store.is_pending_or_known(Path::new("pending")));
-        store.enqueue("pending".into(), &mut Vec::new());
-        store.entries.insert("pending".into(), Entry::Loading(2));
-        store.complete("pending".into(), 1, Err(Failure::Read));
-        assert!(matches!(store.entries.get(Path::new("pending")), Some(Entry::Loading(2))));
-        store.complete("pending".into(), 2, Ok((bitmap(), 1, 1, 4)));
+        assert_eq!(store.metadata_bytes, ImageStore::metadata_cost(&key("shared")));
+        store.complete(key("pending"), 1, Ok((bitmap(), 1, 1, 4)));
+        assert!(!store.is_pending_or_known(&key("pending")));
+        store.enqueue(local_request("pending"), &mut Vec::new());
+        store.entries.insert(key("pending"), Entry::Loading(2));
+        store.complete(key("pending"), 1, Err(Failure::Read));
+        assert!(matches!(store.entries.get(&key("pending")), Some(Entry::Loading(2))));
+        store.complete(key("pending"), 2, Ok((bitmap(), 1, 1, 4)));
         assert_eq!(store.bytes, 8);
         assert_eq!(store.retain(|_| false).len(), 2);
         assert_eq!((store.bytes, store.metadata_bytes, store.entries.len()), (0, 0, 0));
@@ -455,18 +499,18 @@ mod tests {
         let mut store = ImageStore::default();
         let images = [bitmap(), bitmap(), bitmap()];
         let bytes = MAX_CACHE_BYTES / 2;
-        assert!(store.insert("a".into(), Some((images[0].clone(), 1, 1, bytes))).is_empty());
-        assert!(store.insert("b".into(), Some((images[1].clone(), 1, 1, bytes))).is_empty());
-        store.image(Path::new("a"));
-        let retired = store.insert("c".into(), Some((images[2].clone(), 1, 1, bytes)));
+        assert!(store.insert(key("a"), Some((images[0].clone(), 1, 1, bytes))).is_empty());
+        assert!(store.insert(key("b"), Some((images[1].clone(), 1, 1, bytes))).is_empty());
+        store.image(&key("a"));
+        let retired = store.insert(key("c"), Some((images[2].clone(), 1, 1, bytes)));
         assert_eq!(retired.len(), 1);
         assert!(Arc::ptr_eq(&retired[0], &images[1]));
-        assert!(!store.is_pending_or_known(Path::new("b")));
-        assert!(store.image(Path::new("a")).is_some());
+        assert!(!store.is_pending_or_known(&key("b")));
+        assert!(store.image(&key("a")).is_some());
         assert_eq!(store.bytes, MAX_CACHE_BYTES);
-        let retired = store.insert("b".into(), Some((images[1].clone(), 1, 1, bytes)));
+        let retired = store.insert(key("b"), Some((images[1].clone(), 1, 1, bytes)));
         assert_eq!(retired.len(), 1);
-        assert!(store.image(Path::new("b")).is_some());
+        assert!(store.image(&key("b")).is_some());
         assert_eq!(store.bytes, MAX_CACHE_BYTES);
     }
 
@@ -475,15 +519,93 @@ mod tests {
         let mut store = ImageStore::default();
         let old = bitmap();
         let new = bitmap();
-        store.insert("a".into(), Some((old.clone(), 1, 1, 4)));
-        let retired = store.insert("a".into(), Some((new.clone(), 1, 1, 4)));
+        store.insert(key("a"), Some((old.clone(), 1, 1, 4)));
+        let retired = store.insert(key("a"), Some((new.clone(), 1, 1, 4)));
         assert_eq!(retired.len(), 1);
         assert!(Arc::ptr_eq(&retired[0], &old));
         assert_eq!(store.bytes, 4);
-        let retired = store.insert("a".into(), None);
+        let retired = store.insert(key("a"), None);
         assert_eq!(retired.len(), 1);
         assert!(Arc::ptr_eq(&retired[0], &new));
         assert_eq!(store.bytes, 0);
-        assert!(store.insert("a".into(), None).is_empty());
+        assert!(store.insert(key("a"), None).is_empty());
+    }
+
+    #[test]
+    fn embedded_images_decode_with_small_keys_and_release_pending_data() {
+        use base64::Engine;
+        use image::ImageEncoder;
+        // A real PNG larger than the old per-key metadata budget.
+        let (width, height) = (256, 256);
+        let mut state = 123456789u32;
+        let pixels: Vec<u8> = (0..width * height * 4).map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        }).collect();
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&pixels, width, height, image::ExtendedColorType::Rgba8).unwrap();
+        let data = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png));
+        assert!(data.len() * 4 > MAX_METADATA_BYTES);
+        let source = resolve_image(&data, None).unwrap();
+        assert!(matches!(source.key, ImageKey::Embedded(_)));
+        assert!(resolve_source(&data, None).is_none());
+        assert_eq!(ImageStore::metadata_cost(&source.key), (32 + 256) * 4);
+        let markdown = format!("<img alt=\"diagram\" src=\"{data}\" />\n\nNext paragraph.\n\n![]({data})\n");
+        let parsed = crate::nomo_mark::parse::fixture(&markdown);
+        assert_eq!(&*parsed.source, markdown);
+        let mut found = 0;
+        for (event, range) in &parsed.events {
+            use pulldown_cmark::{Event, Tag};
+            let key = match event {
+                Event::Html(_) | Event::InlineHtml(_) => {
+                    let Some((_, tag)) = crate::nomo_mark::image_properties::html_image_tag(&markdown, range.clone()) else { continue };
+                    resolve_image(&tag.attrs["src"], None).unwrap().key
+                }
+                Event::Start(Tag::Image { dest_url, .. }) => resolve_image(dest_url, None).unwrap().key,
+                Event::Text(text) => { assert!(text.len() < 100); continue; }
+                _ => continue,
+            };
+            assert_eq!(key, source.key);
+            found += 1;
+        }
+        assert_eq!(found, 2);
+        let request = source.request();
+        let loaded = decode(&request).unwrap();
+        assert_eq!((loaded.bitmap.1, loaded.bitmap.2), (width, height));
+        assert_eq!(loaded.bitmap.0.as_bytes(0).unwrap()[..4], [pixels[2], pixels[1], pixels[0], pixels[3]]);
+
+        let mut store = ImageStore::default();
+        store.enqueue(request.clone(), &mut Vec::new());
+        store.enqueue(request, &mut Vec::new()); // same content shares one request
+        assert_eq!(store.queued.len(), 1);
+        assert_eq!(store.pending_data_bytes, source.encoded_len());
+        assert!(store.retain(|_| false).is_empty());
+        assert_eq!(store.pending_data_bytes, 0);
+        assert!(store.queued.is_empty());
+
+        store.pending_data_bytes = source::MAX_PENDING_DATA_BYTES;
+        store.enqueue(source.request(), &mut Vec::new());
+        assert!(store.queued.is_empty());
+        store.pending_data_bytes = 0;
+        assert!(store.insert(source.key.clone(), Some(loaded.bitmap)).is_empty());
+        assert_eq!(store.size(&source.key), Some((width, height)));
+        assert_eq!(store.retain(|_| false).len(), 1);
+    }
+
+    #[test]
+    fn invalid_embedded_images_never_become_paths_or_payload_labels() {
+        for data in ["data:text/plain;base64,AAAA", "DATA:image/png,AAAA", "data:image/png;base64,"] {
+            assert!(resolve_image(data, None).is_err());
+            assert!(resolve_source(data, Some(Path::new("."))).is_none());
+        }
+        let bad = resolve_image("data:image/png;base64,%%%%", None).unwrap();
+        assert!(matches!(decode(&bad.request()), Err(Failure::Decode)));
+        let huge = format!("data:image/png;base64,{}", "A".repeat(20_000));
+        assert_eq!(image_label(&huge, ""), "内嵌图片");
+        assert_eq!(image_label(&huge, "diagram"), "diagram");
+        assert_eq!(image_label(&"a".repeat(1000), "").chars().count(), 121);
     }
 }

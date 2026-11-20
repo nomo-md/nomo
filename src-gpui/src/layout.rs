@@ -170,7 +170,7 @@ impl Hash for CommentLabel { fn hash<H: Hasher>(&self, state: &mut H) { self.0.c
 pub enum InlineAsset {
     MathInput,
     Embed(u64),
-    Image(std::path::PathBuf),
+    Image(crate::images::ImageKey),
     Comment { label: Option<CommentLabel>, font_size: u32, zoom: u32 },
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -353,7 +353,7 @@ impl TextLayout {
             + self.styles.capacity() * std::mem::size_of::<(Range<usize>, InlineStyle)>()
             + self.styles.iter().map(|(_, style)| style.font_family.as_ref().map_or(0, |name| name.len())).sum::<usize>()
             + self.objects.capacity() * std::mem::size_of::<InlineObject>()
-            + self.objects.iter().map(|o| match &o.key { InlineAsset::Image(path) => path.as_os_str().len(), InlineAsset::Comment { label: Some(label), .. } => label.0.estimated_bytes(), _ => 0 }).sum::<usize>()
+            + self.objects.iter().map(|o| match &o.key { InlineAsset::Image(path) => path.estimated_bytes(), InlineAsset::Comment { label: Some(label), .. } => label.0.estimated_bytes(), _ => 0 }).sum::<usize>()
     }
 
     /// 最宽视觉行的宽度，用于表格列宽和行内元素对齐。

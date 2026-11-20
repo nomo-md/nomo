@@ -476,7 +476,7 @@ mod tests {
         use crate::nomo_mark::resources::ResourceAdapter;
         fn adapter<'a>(store: &'a EmbedStore, images: &'a crate::images::ImageStore, spec: &EmbedSpec, palette: MermaidPalette) -> ResourceAdapter<'a> {
             ResourceAdapter { images, embeds: store, em_px: spec.em_px, dark: false,
-                mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default() }
+                mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), requested_data_bytes: Default::default(), dependencies: Default::default() }
         }
         for zoom in [1.0, 1.4] {
             let mut store = EmbedStore::default();
@@ -567,6 +567,48 @@ mod tests {
     }
 
     #[test]
+    fn middle_delimiters_share_the_body_extent() {
+        use latex_rust::{BoxContent, MathFont, MathStyle, MathBox, parse, layout};
+        let font = MathFont::stix_two_math().unwrap();
+        let small = layout(&parse(r"\left|x\middle|y\right|").unwrap(), &font, MathStyle::Display).unwrap();
+        let tex = r"\left|x\middle|\dfrac{x}{y}\middle|z\right|";
+        let ast = parse(tex).unwrap();
+        assert_eq!(ast.clone(), ast);
+        assert_eq!(parse(&ast.to_latex()).unwrap(), ast);
+        let tall = layout(&ast, &font, MathStyle::Display).unwrap();
+        let BoxContent::HList(small_parts) = &small.content else { panic!("small group") };
+        let BoxContent::HList(tall_parts) = &tall.content else { panic!("tall group") };
+        let span = |b: &MathBox| &b.height + &b.depth;
+        assert_eq!(tall_parts.len(), 7);
+        assert!(span(&tall_parts[2]).cmp(&span(&small_parts[2])).is_some_and(|order| order.is_gt()));
+        for index in [2, 4, 6] {
+            assert_eq!(span(&tall_parts[0]), span(&tall_parts[index]));
+            assert_eq!(tall_parts[0].shift, tall_parts[index].shift);
+        }
+        assert!(parse(r"\middle|").is_err());
+        assert!(parse(r"\left(x\middle|y").is_err());
+        let nested = parse(r"\mathrm{\left(\left|a\middle|b\right|\middle.\frac{c}{d}\right)}").unwrap();
+        assert!(layout(&nested, &font, MathStyle::Text).is_ok());
+    }
+
+    #[test]
+    fn renders_middle_fences_blank_underlines_and_modulo() {
+        for source in [
+            r"\displaystyle\left\{(x_1,\ldots,x_n)\,\middle|\,\overline{X}>1+\frac{2}{\sqrt n}Z_\alpha\right\}",
+            r"\underline{\qquad\qquad}",
+            r"a_n\pmod{30}",
+            r"a\bmod\prod_{p\in\mathcal P}p",
+        ] {
+            let ast = latex_rust::parse(source).unwrap();
+            assert_eq!(latex_rust::parse(&ast.to_latex()).unwrap(), ast, "{source}");
+            let spec = EmbedSpec { kind: EmbedKind::Math { display: false }, source: source.into(), em_px: 16.0, color: [0; 3], dark: false };
+            let (info, image, _) = render(&spec).unwrap_or_else(|error| panic!("{source}: {error}"));
+            assert!(info.width > 0.0 && info.height > 0.0, "{source}: {info:?}");
+            assert!(image.as_bytes(0).unwrap().chunks_exact(4).any(|pixel| pixel[3] != 0), "{source}");
+        }
+    }
+
+    #[test]
     fn renders_mermaid_flowchart_with_text() {
         let svg = mermaid_svg("flowchart TD\n  A[开始] --> B{判断}\n  B --> C[结束]", false).expect("svg");
         assert!(!svg.contains("<foreignObject"), "resvg 管线不应保留 foreignObject");
@@ -592,7 +634,7 @@ mod tests {
         for em_px in [9.6, 22.4, 32.0, 12.8, 16.0] {
             let spec = EmbedSpec { em_px, ..base.clone() };
             let resources = ResourceAdapter { images: &images, embeds: &store, em_px, dark: false,
-                mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default() };
+                mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), requested_data_bytes: Default::default(), dependencies: Default::default() };
             let (key, state) = resources.embed(EmbedKind::Mermaid, &base.source);
             assert_eq!(key, base_key);
             let EmbedState::Ready(info) = state else { panic!("缩放不应退回加载占位"); };
@@ -605,7 +647,7 @@ mod tests {
         store.specs.insert(key, target.clone());
         store.entries.insert(key, Entry::Loading(7));
         let resources = ResourceAdapter { images: &images, embeds: &store, em_px: target.em_px, dark: false,
-            mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default() };
+            mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), requested_data_bytes: Default::default(), dependencies: Default::default() };
         assert_eq!(resources.embed(EmbedKind::Mermaid, &base.source).0, base_key);
         assert!(resources.demands.borrow().is_empty());
         let dependencies = resources.dependencies.into_inner();
@@ -613,7 +655,7 @@ mod tests {
         store.complete(key, 7, render(&target));
         assert_ne!(dependencies.generation(&images, &store), generation);
         let resources = ResourceAdapter { images: &images, embeds: &store, em_px: target.em_px, dark: false,
-            mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default() };
+            mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), requested_data_bytes: Default::default(), dependencies: Default::default() };
         assert_eq!(resources.embed(EmbedKind::Mermaid, &base.source).0, key);
         for different in [EmbedSpec { source: "flowchart TD\n A --> C".into(), ..target.clone() },
             EmbedSpec { dark: true, ..target.clone() }, EmbedSpec { color: [255; 3], ..target.clone() },

@@ -27,7 +27,7 @@ pub fn symbol_atom_kind(name: &str) -> AtomKind {
         | "rtimes" | "leftthreetimes" | "rightthreetimes" | "circledcirc" | "circledast"
         | "circleddash" | "boxplus" | "boxminus" | "boxtimes" | "boxdot" | "intercal"
         | "divideontimes" | "curlyvee" | "curlywedge" | "barwedge" | "veebar"
-        | "doublebarwedge" | "Cap" | "Cup" | "centerdot" | "diamond" | "dag" | "ddag" => {
+        | "doublebarwedge" | "Cap" | "Cup" | "centerdot" | "diamond" | "dag" | "ddag" | "bmod" => {
             AtomKind::Bin
         }
 

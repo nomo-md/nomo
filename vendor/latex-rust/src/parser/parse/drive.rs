@@ -15,7 +15,7 @@ use crate::dim::Dim;
 use crate::error::ParseError;
 use crate::parser::ast::{
     AccentKind, AtomKind, ColSpec, Delimiter, EnvRow, EqNumber, FracStyle, IntegralKind, MathNode,
-    MatrixStyle, PhantomKind, SpaceKind, TextStyle,
+    MatrixStyle, PhantomKind, SpaceKind, TextRun, TextStyle,
 };
 use crate::parser::token::Token;
 
@@ -245,6 +245,10 @@ enum Cmd {
     },
     Delim {
         open: Delimiter,
+        parts: Vec<(MathNode, Delimiter)>,
+        phase: One,
+    },
+    Pmod {
         phase: One,
     },
     Tail {
@@ -1002,7 +1006,8 @@ fn step_cmd(
         Cmd::Accent { kind, phase } => match one_call(phase, ready, true, Kind::arg)? {
             OneOut::Step(step) => Ok(step),
             OneOut::Node(body) => {
-                if is_empty_node(&body) {
+                // Rules can underline/overline an explicit horizontal skip (e.g. a blank in a test).
+                if is_empty_node(&body) && !matches!(kind, AccentKind::Underline | AccentKind::Overline) {
                     return Err(ParseError::Malformed("empty accent base".into()));
                 }
                 Ok(Step::Done(MathNode::Accent(Box::new(body), *kind)))
@@ -1051,7 +1056,18 @@ fn step_cmd(
             under,
             phase,
         } => step_xarrow(parser, arrow, under, phase, ready),
-        Cmd::Delim { open, phase } => step_delim(parser, open, phase, ready),
+        Cmd::Delim { open, parts, phase } => step_delim(parser, open, parts, phase, ready),
+        Cmd::Pmod { phase } => match one_call(phase, ready, true, Kind::arg)? {
+            OneOut::Step(step) => Ok(step),
+            OneOut::Node(body) => Ok(Step::Done(MathNode::Row(vec![
+                MathNode::Space(SpaceKind::Quad),
+                MathNode::Atom('(', AtomKind::Open),
+                MathNode::Text(TextRun::plain("mod"), TextStyle::Rm),
+                MathNode::Space(SpaceKind::Medium),
+                body,
+                MathNode::Atom(')', AtomKind::Close),
+            ]))),
+        },
         Cmd::Substack(st) => step_substack(parser, st, ready),
         Cmd::Begin(st) => step_begin(parser, st, ready),
     }
@@ -1135,6 +1151,7 @@ fn step_xarrow(
 fn step_delim(
     parser: &mut super::Parser,
     open: &mut Delimiter,
+    parts: &mut Vec<(MathNode, Delimiter)>,
     phase: &mut One,
     ready: &mut Option<MathNode>,
 ) -> Result<Step, ParseError> {
@@ -1142,12 +1159,22 @@ fn step_delim(
         OneOut::Step(step) => Ok(step),
         OneOut::Node(body) => {
             match parser.bump() {
+                Some(Token::Command(n)) if n == "middle" => {
+                    parts.push((body, parser.parse_delimiter()?));
+                    *phase = One::Need;
+                    return Ok(Step::Again);
+                }
                 Some(Token::Command(n)) if n == "right" => {}
                 _ => return Err(ParseError::UnmatchedDelimiter),
             }
             let close = parser.parse_delimiter()?;
             let open = mem::replace(open, Delimiter::Empty);
-            Ok(Step::Done(MathNode::Delimited(open, Box::new(body), close)))
+            let node = if parts.is_empty() {
+                MathNode::Delimited(open, Box::new(body), close)
+            } else {
+                MathNode::DelimitedWithMiddle(open, mem::take(parts), Box::new(body), close)
+            };
+            Ok(Step::Done(node))
         }
     }
 }
@@ -1366,10 +1393,14 @@ fn classify(parser: &mut super::Parser, name: &str) -> Result<Classified, ParseE
             let open = parser.parse_delimiter()?;
             Ok(Classified::Cmd(Cmd::Delim {
                 open,
+                parts: Vec::new(),
                 phase: One::Need,
             }))
         }
         "right" => Err(ParseError::UnmatchedDelimiter),
+        "middle" => Err(ParseError::Malformed("\\middle outside \\left ... \\right".into())),
+        "bmod" => Ok(Classified::Node(MathNode::Symbol("bmod".into()))),
+        "pmod" => Ok(Classified::Cmd(Cmd::Pmod { phase: One::Need })),
         "begin" => start_begin(parser),
         "end" => Err(ParseError::Malformed("unexpected \\end".into())),
         "over" => Err(ParseError::Malformed("\\over outside a group".into())),

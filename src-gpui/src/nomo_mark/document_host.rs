@@ -383,7 +383,7 @@ impl DocumentHost {
                 let mut embeds = Vec::new();
                 for demand in demands {
                     match demand {
-                        ResourceRequest::Image(path) => { self.retained_resources.image(path); images.push(path.clone()); }
+                        ResourceRequest::Image(request) => { self.retained_resources.image(&request.key); images.push(request.clone()); }
                         ResourceRequest::Embed(spec) => { self.retained_resources.embed(spec.key()); embeds.push(spec.clone()); }
                     }
                 }

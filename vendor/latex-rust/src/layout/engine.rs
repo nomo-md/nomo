@@ -354,6 +354,11 @@ impl Engine<'_> {
                     class: Some(*k),
                 })
             }
+            MathNode::Symbol(name) if name == "bmod" => {
+                let mut item = self.text_run("mod", TextStyle::Rm, style)?;
+                item.class = Some(AtomKind::Bin);
+                Ok(item)
+            }
             MathNode::Symbol(name) => {
                 let ch = math_italic(symbol_char(name)?);
                 let bx = self.glyph(ch, style)?;
@@ -371,6 +376,9 @@ impl Engine<'_> {
             MathNode::Subscript(base, sub) => self.scripts(base, Some(sub), None, style),
             MathNode::SubSup(base, sub, exp) => self.scripts(base, Some(sub), Some(exp), style),
             MathNode::Delimited(open, body, close) => self.delimited(open, body, close, style),
+            MathNode::DelimitedWithMiddle(open, parts, _, close) => {
+                self.delimited_with_middle(open, parts, close, style)
+            }
             MathNode::SizedDelim(d, size, k) => {
                 let needed = self.explicit_delim_span(*size, style);
                 Ok(Item {
@@ -1028,6 +1036,44 @@ impl Engine<'_> {
         })
     }
 
+    fn delimited_with_middle(
+        &self,
+        open: &Delimiter,
+        parts: &[(MathNode, Delimiter)],
+        close: &Delimiter,
+        style: MathStyle,
+    ) -> Result<Item, Error> {
+        // Measure the bodies first. All fence glyphs use the same target;
+        // the middle fences themselves must not increase that target.
+        let mut bodies = Vec::with_capacity(parts.len() + 1);
+        let (mut height, mut depth) = (Dim::zero(), Dim::zero());
+        for _ in 0..=parts.len() {
+            let body = self.take_box()?;
+            height = height.max(&body.height);
+            depth = depth.max(&body.depth);
+            bodies.push(body);
+        }
+        let axis = &self.params.axis_height * &self.params.scale(style);
+        let needed = self.delimiter_target(&height, &depth, &axis);
+        let fence = |delimiter: &Delimiter| {
+            self.delim_box(delimiter, &needed, style)
+                .map(|bx| self.center_delimiter(bx, &axis))
+        };
+        let mut children = Vec::with_capacity(2 * parts.len() + 3);
+        children.push(fence(open)?);
+        for (index, body) in bodies.into_iter().enumerate() {
+            children.push(body);
+            if let Some((_, middle)) = parts.get(index) {
+                children.push(fence(middle)?);
+            }
+        }
+        children.push(fence(close)?);
+        Ok(Item {
+            class: Some(AtomKind::Inner),
+            bx: shifted_hpack(children),
+        })
+    }
+
     fn delimiter_target(&self, height: &Dim, depth: &Dim, axis: &Dim) -> Dim {
         let above = (height - axis).clamp_nonneg();
         let below = depth + axis;
@@ -1060,14 +1106,22 @@ impl Engine<'_> {
     }
 
     fn delim_box(&self, d: &Delimiter, needed: &Dim, style: MathStyle) -> Result<MathBox, Error> {
-        match d {
-            Delimiter::Empty => Ok(MathBox::empty()),
-            Delimiter::Char(c) => self.sized_glyph(*c, needed, style),
-            Delimiter::Named(n) => {
-                let ch = named_delim(n)?;
-                self.sized_glyph(ch, needed, style)
+        let ch = match d {
+            Delimiter::Empty => return Ok(MathBox::empty()),
+            Delimiter::Char(c) => *c,
+            Delimiter::Named(n) => named_delim(n)?,
+        };
+        let best = self.sized_glyph(ch, needed, style)?;
+        let span = &best.height + &best.depth;
+        if span.cmp(needed) == Some(Ordering::Less) {
+            let gid = self.font.glyph(ch)?.glyph_id;
+            if let Some(assembled) = self.assemble_v(ch, gid, needed, style) {
+                if (&assembled.height + &assembled.depth).cmp(&span) == Some(Ordering::Greater) {
+                    return Ok(assembled);
+                }
             }
         }
+        Ok(best)
     }
 
     fn sized_glyph(&self, ch: char, needed: &Dim, style: MathStyle) -> Result<MathBox, Error> {
@@ -1087,6 +1141,71 @@ impl Engine<'_> {
             }
         }
         Ok(best)
+    }
+
+    fn assemble_v(&self, ch: char, gid: u16, needed: &Dim, style: MathStyle) -> Option<MathBox> {
+        // MATH vertical recipes are ordered bottom to top. STIX's | and ‖
+        // have an extender recipe but no taller precomposed variants.
+        let parts = self.font.vertical_assembly_parts(gid);
+        if parts.is_empty() { return None; }
+        let scale = self.params.scale(style);
+        let fu = |n: u16| Dim::from_font_units(i64::from(n), self.params.units_per_em) * &scale;
+        let minimum = self.font.min_connector_overlap();
+        let mut chosen = Vec::new();
+        let (mut smallest, mut flexibility) = (Dim::zero(), Dim::zero());
+        // As for horizontal assembly, cap extender count to protect layout resources.
+        for copies in 0..=64 {
+            let sequence: Vec<_> = parts.iter().flat_map(|part| {
+                std::iter::repeat_n(*part, if part.4 { copies } else { 1 })
+            }).collect();
+            if sequence.is_empty() { continue; }
+            smallest = Dim::zero();
+            flexibility = Dim::zero();
+            for (i, &(_, start, _, advance, _)) in sequence.iter().enumerate() {
+                smallest = &smallest + &fu(advance);
+                if i > 0 {
+                    let overlap = sequence[i - 1].2.min(start);
+                    smallest = &smallest - &fu(overlap);
+                    flexibility = &flexibility + &fu(overlap.saturating_sub(minimum));
+                }
+            }
+            chosen = sequence;
+            if (&smallest + &flexibility).cmp(needed) != Some(Ordering::Less) { break; }
+            if !parts.iter().any(|part| part.4) { break; }
+        }
+        if chosen.is_empty() { return None; }
+        let growth = (needed - &smallest).clamp_nonneg().min(&flexibility);
+        let fraction = if flexibility.is_zero() { Dim::zero() } else { &growth / &flexibility };
+        let mut origin = Dim::zero();
+        let (mut width, mut height, mut depth) = (Dim::zero(), Dim::zero(), Dim::zero());
+        let mut children = Vec::with_capacity(chosen.len());
+        for (i, &(id, start, _, advance, _)) in chosen.iter().enumerate() {
+            if i > 0 {
+                let max_overlap = chosen[i - 1].2.min(start);
+                let overlap = &fu(max_overlap) - &(&fu(max_overlap.saturating_sub(minimum)) * &fraction);
+                origin = &origin - &overlap;
+            }
+            let mut glyph = self.glyph_id(ch, id, style).ok()?;
+            let actual_id = match &glyph.content {
+                BoxContent::Glyph { glyph_id, .. } => *glyph_id,
+                _ => id,
+            };
+            let (bottom, top) = self.font.vertical_ink_bounds(actual_id);
+            glyph.shift = &origin - &(&bottom * &scale);
+            height = height.max(&(&origin + &((&top - &bottom) * &scale)));
+            depth = depth.max(&(-origin.clone()));
+            width = width.max(&glyph.width);
+            children.push(glyph);
+            origin = &origin + &fu(advance);
+        }
+        Some(MathBox {
+            width,
+            height: height.max(&origin),
+            depth,
+            italic: Dim::zero(),
+            shift: Dim::zero(),
+            content: BoxContent::Overlap(children),
+        })
     }
 
     fn stretch_h(&self, base: MathBox, needed: &Dim, style: MathStyle) -> Result<MathBox, Error> {
@@ -3031,7 +3150,8 @@ fn class_of(n: &MathNode) -> Option<AtomKind> {
             | MathNode::Radical(_, _)
             | MathNode::Matrix(_, _, _)
             | MathNode::Substack(_)
-            | MathNode::Delimited(_, _, _) => return Some(AtomKind::Inner),
+            | MathNode::Delimited(_, _, _)
+            | MathNode::DelimitedWithMiddle(..) => return Some(AtomKind::Inner),
             MathNode::SizedDelim(_, _, k) => return Some(*k),
             MathNode::Superscript(b, _)
             | MathNode::Subscript(b, _)

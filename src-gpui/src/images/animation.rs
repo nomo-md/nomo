@@ -1,8 +1,8 @@
 //! 可见绘制驱动的有界播放器。任务只持有资源键和解码状态，不持有文档或视图。
-use super::{Entry, ImageStore, gif::GifStream};
+use super::{Entry, ImageKey, ImageStore, gif::GifStream};
 use gpui::{AnyWindowHandle, App, RenderImage, Task, Window};
 use image::Frame;
-use std::{cell::RefCell, collections::VecDeque, path::Path, sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}}, time::{Duration, Instant}};
+use std::{cell::RefCell, collections::VecDeque, sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}}, time::{Duration, Instant}};
 
 const PREFETCH: usize = 2;
 const MAX_WINDOWS: usize = 32;
@@ -59,7 +59,7 @@ impl Playback {
 
     pub fn current(&self) -> Arc<RenderImage> { self.state.borrow().current.clone() }
 
-    pub fn image(&self, store: &ImageStore, path: &Path, version: u64, poster: &Arc<RenderImage>, window: &Window, cx: &App) -> Arc<RenderImage> {
+    pub fn image(&self, store: &ImageStore, path: &ImageKey, version: u64, poster: &Arc<RenderImage>, window: &Window, cx: &App) -> Arc<RenderImage> {
         let mut state = self.state.borrow_mut();
         if !window.is_visible() { return poster.clone(); }
         if crate::ui::popup::reduced_motion(cx) {
@@ -135,7 +135,7 @@ fn schedule(store: &ImageStore, cx: &App) {
     }).detach();
 }
 
-fn wake(path: &Path, version: u64, cx: &mut App) {
+fn wake(path: &ImageKey, version: u64, cx: &mut App) {
     let store = cx.global::<ImageStore>();
     if store.version(path) != (1, version) { return; }
     let Some(playback) = store.animations.get(path) else { return; };
