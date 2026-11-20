@@ -2,6 +2,7 @@
 use super::*;
 use super::{context_menu::MenuAction, context_menu_ui::{panel, positioned}};
 use crate::nomo_mark::image_properties::{ImageProperties, ImageWidth, markdown_attributes};
+use crate::images::{ImageKey, is_data_source, resolve_image};
 use crate::ui::{text_field::{TextField, FieldEvent}, toolbar_i18n::ToolbarLocale};
 
 pub(super) struct ImageForm {
@@ -96,13 +97,13 @@ impl NomoMark {
 
     pub(super) fn context_image_action(&mut self, action: MenuAction, range: Range<usize>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut properties) = self.context_image_properties(&range) else { self.error(ControlError::InvalidRange, cx); return; };
-        let resolved = crate::images::resolve_source(&properties.src, self.base_dir.as_deref());
+        let resolved = resolve_image(&properties.src, self.base_dir.as_deref()).ok();
         match action {
             MenuAction::ImageAlign(align) => { properties.align = align.into(); self.context_write_image(range, properties, cx); }
             MenuAction::ImageOriginal => { properties.width.clear(); self.context_write_image(range, properties, cx); }
             MenuAction::ImageSize | MenuAction::ImageAlt => {
                 let size = matches!(action, MenuAction::ImageSize);
-                let natural_width = resolved.as_deref().and_then(|path| cx.global::<ImageStore>().size(path)).map(|(w, _)| w);
+                let natural_width = resolved.as_ref().and_then(|source| cx.global::<ImageStore>().size(&source.key)).map(|(w, _)| w);
                 let percent = properties.width.ends_with('%');
                 let text = if !size { properties.alt } else if properties.width.is_empty() { natural_width.map_or(String::new(), |w| w.to_string()) }
                     else { properties.width.trim_end_matches('%').trim_end_matches("px").into() };
@@ -121,18 +122,29 @@ impl NomoMark {
             }
             MenuAction::ImageLocation => {
                 if properties.src.starts_with("http://") || properties.src.starts_with("https://") { cx.open_url(&properties.src); }
-                else if let Some(path) = resolved {
+                else if is_data_source(&properties.src) {
+                    self.error(ControlError::Unsupported("内嵌图片没有独立文件位置".into()), cx);
+                }
+                else if let Some(ImageKey::Location(path)) = resolved.map(|source| source.key) {
                     crate::ui::file_manager::reveal(path, cx, |_, message, cx| {
                         cx.emit(ControlEvent::Failure(message));
                     });
                 }
                 else { self.error(ControlError::Unsupported("无法解析图片路径；请先保存文档".into()), cx); }
             }
-            MenuAction::ImagePath => self.context_copy_text(&resolved.map_or(properties.src, |path| path.to_string_lossy().into_owned()), cx),
+            MenuAction::ImagePath => {
+                if let Some(ImageKey::Location(path)) = resolved.map(|source| source.key) {
+                    self.context_copy_text(&path.to_string_lossy(), cx);
+                } else {
+                    self.context_copy_text(&properties.src, cx);
+                }
+            }
             MenuAction::ImageCopy => {
-                let Some(path) = resolved else { self.error(ControlError::Unsupported("无法解析图片路径".into()), cx); return; };
-                let Some(image) = cx.global::<ImageStore>().image(&path) else {
-                    crate::images::request(vec![path], cx);
+                let Some(source) = resolved else { self.error(ControlError::Unsupported("无法解析图片路径".into()), cx); return; };
+                let Some(image) = cx.global::<ImageStore>().image(&source.key) else {
+                    if cx.global::<ImageStore>().can_request(&source.key, source.encoded_len()) {
+                        crate::images::request(vec![source.request()], cx);
+                    }
                     self.error(ControlError::NeedsContext("图片尚未加载完成，请稍后重试复制".into()), cx); return;
                 };
                 // 复用已解码首帧；显式复制最多产生 64 MiB 临时像素，编码离开输入线程。

@@ -1,4 +1,4 @@
-# Nomo glyph fallback patch
+# Nomo latex-rust patches
 
 This directory contains the production sources, data, font and notices from
 `latex-rust` 3.0.1, crates.io checksum
@@ -19,9 +19,16 @@ Nomo's changes (2026-10-29):
 - Keep host caches outside this crate, scoped to one formula. No system fonts,
   document text, callbacks or new global cache are retained here.
 
+Additional TeX compatibility fixes (2026-11-21):
+
+- Parse `\middle` inside a `\left ... \right` group and size all its
+  delimiters from the same body extent, including nested groups. Use vertical
+  OpenType MATH assemblies when precomposed delimiter sizes are insufficient.
+- Support `\bmod`, `\pmod` and underlining horizontal space.
+
 The small manifest omits upstream development dependencies, examples and benches;
 production dependency versions and features are unchanged. The root Cargo patch
 pins this copy, and it is excluded from workspace members. Keep the upstream
 licenses, font OFL, data headers and NOTICE with this source. Before updating the
-dependency, review the six patched source files and remove this extension if the
-upstream library supplies a compatible fallback API.
+dependency, review the local patches and remove extensions supplied by the
+upstream library.

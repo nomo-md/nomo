@@ -673,6 +673,8 @@ pub enum MathNode {
     SubSup(Box<MathNode>, Box<MathNode>, Box<MathNode>),
     /// `\left ... \right`
     Delimited(Delimiter, Box<MathNode>, Delimiter),
+    /// `\left ... \middle ... \right`: each part precedes a middle delimiter.
+    DelimitedWithMiddle(Delimiter, Vec<(MathNode, Delimiter)>, Box<MathNode>, Delimiter),
     /// `\big` / `\Big` / `\bigg` / `\Bigg` (and `l`/`r`/`m` forms).
     SizedDelim(Delimiter, DelimSize, AtomKind),
     /// Horizontal list of nodes.
@@ -784,6 +786,10 @@ impl MathNode {
                 push_box(out, body);
             }
             Self::Delimited(_, body, _) | Self::Intertext(body) => push_box(out, body),
+            Self::DelimitedWithMiddle(_, parts, tail, _) => {
+                out.extend(parts.drain(..).map(|(body, _)| body));
+                push_box(out, tail);
+            }
             Self::Row(items) | Self::Substack(items) => out.append(items),
             Self::Matrix(_, _, rows) => {
                 for row in rows {
@@ -859,6 +865,7 @@ enum Finish {
     },
     SubSup,
     Delimited(Delimiter, Delimiter),
+    DelimitedWithMiddle(Delimiter, Vec<Delimiter>, Delimiter),
     List(ListKind, usize),
     Matrix {
         style: MatrixStyle,
@@ -1007,6 +1014,17 @@ fn schedule_clone<'a>(
                 right.clone(),
             )));
             tasks.push(CloneTask::Node(body));
+        }
+        MathNode::DelimitedWithMiddle(left, parts, tail, right) => {
+            tasks.push(CloneTask::Finish(Finish::DelimitedWithMiddle(
+                left.clone(),
+                parts.iter().map(|(_, middle)| middle.clone()).collect(),
+                right.clone(),
+            )));
+            tasks.push(CloneTask::Node(tail));
+            for (body, _) in parts.iter().rev() {
+                tasks.push(CloneTask::Node(body));
+            }
         }
         MathNode::Row(items) => {
             tasks.push(CloneTask::Finish(Finish::List(ListKind::Row, items.len())));
@@ -1189,6 +1207,12 @@ fn finish_clone(finish: Finish, done: &mut Vec<MathNode>) {
         Finish::Delimited(left, right) => {
             let body = Box::new(pop_node(done));
             done.push(MathNode::Delimited(left, body, right));
+        }
+        Finish::DelimitedWithMiddle(left, middles, right) => {
+            let tail = Box::new(pop_node(done));
+            let bodies = done.split_off(done.len().saturating_sub(middles.len()));
+            let parts = bodies.into_iter().zip(middles).collect();
+            done.push(MathNode::DelimitedWithMiddle(left, parts, tail, right));
         }
         Finish::List(kind, n) => {
             let start = done.len().saturating_sub(n);
@@ -1537,6 +1561,15 @@ fn gold_expand<'a>(node: &'a MathNode, buf: &mut Vec<GoldOp<'a>>) {
             gold_node(buf, b);
             gold_text(buf, format!(" {})", r.gold()));
         }
+        MathNode::DelimitedWithMiddle(l, parts, tail, r) => {
+            gold_text(buf, format!("(delim {} ", l.gold()));
+            for (body, middle) in parts {
+                gold_node(buf, body);
+                gold_text(buf, format!(" (middle {}) ", middle.gold()));
+            }
+            gold_node(buf, tail);
+            gold_text(buf, format!(" {})", r.gold()));
+        }
         MathNode::SizedDelim(d, sz, k) => {
             gold_text(
                 buf,
@@ -1859,6 +1892,18 @@ fn write_node<'a>(out: &mut LatexBuf<'a>, node: &'a MathNode) {
                 write_cmd(out, "right");
                 write_delim(out, close);
             }
+        }
+        MathNode::DelimitedWithMiddle(open, parts, tail, close) => {
+            write_cmd(out, "left");
+            write_delim(out, open);
+            for (body, middle) in parts {
+                out.node(body);
+                write_cmd(out, "middle");
+                write_delim(out, middle);
+            }
+            out.node(tail);
+            write_cmd(out, "right");
+            write_delim(out, close);
         }
         MathNode::SizedDelim(delim, size, kind) => {
             out.push('\\');

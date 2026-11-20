@@ -61,7 +61,7 @@ pub(super) fn measure(
             // 此对象只参与字体测量，不绘制、不查询资源，也不进入显示列表。
             semantic.objects.push(InlineObject {
                 at, width, width_percent: None, ascent: 0.0, descent: 0.0,
-                key: InlineAsset::Image(Default::default()),
+                key: InlineAsset::Image(crate::images::ImageKey::Location(Default::default())),
             });
         }
         cursor = range.end;

@@ -13,7 +13,7 @@ use std::{borrow::Cow, cmp::Reverse, ops::Range};
 struct LinkSpan<'a> { source: Range<usize>, target: Cow<'a, str> }
 
 /// 静态降级仍保留图片尺寸，提示叠在图内，不让资源状态变化挤动正文。
-pub(super) fn paint_image_notice(store: &ImageStore, path: &std::path::Path, bounds: Bounds<Pixels>, theme: &Theme, window: &mut Window) {
+pub(super) fn paint_image_notice(store: &ImageStore, path: &crate::images::ImageKey, bounds: Bounds<Pixels>, theme: &Theme, window: &mut Window) {
     let Some(message) = store.notice(path) else { return; };
     paint_resource_notice(message, bounds, theme, window);
 }

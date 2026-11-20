@@ -1930,10 +1930,11 @@ impl NomoMark {
                 mermaid: theme.mermaid,
                 color: [byte(rgba.r), byte(rgba.g), byte(rgba.b)],
                 demands: RefCell::new(Vec::new()),
+                requested_data_bytes: Default::default(),
                 dependencies: Default::default(),
             };
-            let image_size = |path: &std::path::Path| resources.image_size(path);
-            let image_failure = |path: &std::path::Path| resources.images.failure(path);
+            let image_size = |source: &crate::images::ImageSource<'_>| resources.image_size(source);
+            let image_failure = |key: &crate::images::ImageKey| resources.images.failure(key);
             let embed = |kind, source: &str| resources.embed(kind, source);
             let env = RenderEnv {
                 metrics,

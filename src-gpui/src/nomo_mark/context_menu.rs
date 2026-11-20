@@ -258,7 +258,7 @@ impl NomoMark {
                     item("originalSize", "image", MenuAction::ImageOriginal).enabled(editable && ready).checked(properties.as_ref().is_some_and(|p| p.width.is_empty())),
                     item("setSize", "pencil", MenuAction::ImageSize).enabled(editable && ready),
                     item("editImageAlt", "pencil", MenuAction::ImageAlt).enabled(editable && ready), sep(),
-                    item("openImageLocation", "eye", MenuAction::ImageLocation).enabled(ready),
+                    item("openImageLocation", "eye", MenuAction::ImageLocation).enabled(ready && properties.as_ref().is_some_and(|p| !crate::images::is_data_source(&p.src))),
                     item("copyImage", "copy", MenuAction::ImageCopy).enabled(ready),
                     item("copyImagePath", "copy", MenuAction::ImagePath).enabled(ready), sep(),
                     item("deleteAction", "trash-2", MenuAction::Delete).enabled(editable).danger()]
