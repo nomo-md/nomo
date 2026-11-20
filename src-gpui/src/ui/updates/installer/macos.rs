@@ -1,7 +1,7 @@
 mod archive;
 use super::{
     AssetRule, Candidate, DownloadCancel, DownloadSource, VerifiedDownload, cache_directory,
-    cache_lease, is_link, remove_existing,
+    cache_lease, is_link,
 };
 use crate::ui::toolbar_i18n::UiMessage;
 use archive::extract_archive;
@@ -38,6 +38,9 @@ fn current_installation() -> Result<Installation, UiMessage> {
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .ok_or_else(|| UiMessage::new("installer.locationChanged"))?;
+    if executable != app.join("Contents/MacOS/nomo") {
+        return Err(UiMessage::new("installer.locationChanged"));
+    }
     validate_installation(&app)?;
     Ok(Installation { app })
 }
@@ -111,7 +114,7 @@ pub(super) fn stale_paths(directory: &Path) -> Vec<PathBuf> {
         .collect();
     paths.extend([
         directory.join(STAGING_DIR),
-        directory.join("nomo-update-helper"),
+        directory.join("nomo-update-helper"), // 仅用于回收旧版本留下的副本。
     ]);
     paths
 }
@@ -141,7 +144,7 @@ pub(crate) struct Verified {
     pub version: String,
     app: StagedApp,
     // 先释放 StagedApp，再由下载包释放缓存租约。
-    archive: VerifiedDownload,
+    _archive: VerifiedDownload,
     target: PathBuf,
 }
 
@@ -167,7 +170,7 @@ pub(super) fn finish(
     Ok(Verified {
         version: candidate.version.clone(),
         app,
-        archive,
+        _archive: archive,
         target: installation.app,
     })
 }
@@ -178,21 +181,23 @@ impl Verified {
         if installation.app != self.target {
             return Err(UiMessage::new("installer.locationChanged"));
         }
-        let cache = self.archive.path().parent().expect("cache directory");
-        let helper = cache.join("nomo-update-helper");
-        remove_existing(&helper)?;
-        fs::copy(std::env::current_exe().map_err(UiMessage::raw)?, &helper)
-            .map_err(UiMessage::raw)?;
-        Command::new(&helper)
-            .arg(COMMAND)
-            .arg(std::process::id().to_string())
-            .arg(&self.target)
-            .arg(&self.version)
+        install_command(&installation, &self.version)
             .spawn()
             .map_err(|error| UiMessage::new("installer.launchFailed").arg("error", error))?;
         self.app.keep();
         Ok(())
     }
+}
+
+fn install_command(installation: &Installation, version: &str) -> Command {
+    // 主程序的签名依赖 bundle 中的 Info.plist 和资源，不能裸拷贝到缓存执行。
+    let mut command = Command::new(installation.app.join("Contents/MacOS/nomo"));
+    command
+        .arg(COMMAND)
+        .arg(std::process::id().to_string())
+        .arg(&installation.app)
+        .arg(version);
+    command
 }
 
 fn remove_staging(path: &Path) -> Result<(), UiMessage> {
@@ -459,6 +464,7 @@ fn restore_backup(
 
 fn open_app(app: &Path) -> bool {
     Command::new("/usr/bin/open")
+        .arg("-n") // 安装进程仍在运行；显式启动替换后的实例。
         .arg(app)
         .status()
         .is_ok_and(|status| status.success())
@@ -621,6 +627,23 @@ mod tests {
         assert_eq!(
             bundle_value(&target, "CFBundleShortVersionString").unwrap(),
             "0.7.0"
+        );
+    }
+
+    #[test]
+    fn install_command_runs_inside_installed_bundle() {
+        let app = PathBuf::from("/Applications With Spaces/Nomo.app");
+        let installation = Installation { app: app.clone() };
+        let command = install_command(&installation, "0.8.0");
+        assert_eq!(
+            command.get_program(),
+            app.join("Contents/MacOS/nomo").as_os_str()
+        );
+        let mut args = command.get_args();
+        assert_eq!(args.next(), Some(OsStr::new(COMMAND)));
+        assert_eq!(
+            parse_install_args(&args.map(OsStr::to_owned).collect::<Vec<_>>()).unwrap(),
+            (std::process::id(), app.as_path(), "0.8.0")
         );
     }
 
