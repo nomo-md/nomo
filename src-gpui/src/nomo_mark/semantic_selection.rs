@@ -1,4 +1,4 @@
-//! 将局部语义选区转成块时，拆开跨边界的行内格式并保留两侧源码。
+//! 局部语义文字投影与块转换；拆开跨边界的行内格式并保留两侧源码。
 use super::{
     commands::{EditIntent, EditResult, line_ending},
     mapping::text_segments,
@@ -8,7 +8,7 @@ use super::{
 use pulldown_cmark::{Event, TagEnd};
 use std::ops::Range;
 
-fn selected_text(parsed: &ParsedWindow, selection: &Range<usize>, eol: &str) -> Result<String, ControlError> {
+pub(super) fn selected_text(parsed: &ParsedWindow, selection: &Range<usize>, eol: &str) -> Result<String, ControlError> {
     let mut output = String::new();
     for (event, source) in &parsed.events {
         if source.end <= selection.start || selection.end <= source.start { continue; }

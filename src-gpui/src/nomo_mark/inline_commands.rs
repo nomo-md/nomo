@@ -8,6 +8,14 @@ use super::{
 use pulldown_cmark::{Event, Tag};
 use std::{collections::BTreeMap, ops::Range};
 
+#[cfg(test)]
+#[path = "inline_code_tests.rs"]
+mod code_tests;
+
+#[cfg(test)]
+#[path = "inline_format_tests.rs"]
+mod format_tests;
+
 pub fn html_pair(format: InlineFormat) -> (String, String) {
     let tag = match format {
         InlineFormat::Strong => "strong",
@@ -21,6 +29,54 @@ pub fn html_pair(format: InlineFormat) -> (String, String) {
         InlineFormat::Link => "a",
     };
     (format!("<{tag}>"), format!("</{tag}>"))
+}
+
+pub(super) fn code_markers(text: &str) -> (String, String) {
+    let fence = "`".repeat(text.split(|ch| ch != '`').map(str::len).max().unwrap_or(0) + 1);
+    let padding = if text.starts_with('`') || text.ends_with('`')
+        || text.starts_with(' ') && text.ends_with(' ') && text.chars().any(|ch| ch != ' ') { " " } else { "" };
+    (format!("{fence}{padding}"), format!("{padding}{fence}"))
+}
+
+/// 连续代码片段不能直接拼接反引号。只合并紧邻的代码，不跨越空白或其它格式边界。
+pub(super) fn join_code_selection(parsed: &ParsedWindow, selection: DocumentSelection, semantic: bool) -> Result<Option<EditResult>, ControlError> {
+    let base = parsed.identity.from_byte;
+    let range = local_range(&parsed.source, base, selection.range())?;
+    if range.is_empty() || parsed.inline.iter().any(|span| span.format == InlineFormat::Code && span.intersects(&range)) {
+        return Ok(None);
+    }
+    let markdown_code = |span: &&InlineSpan| span.format == InlineFormat::Code && parsed.source[span.open.clone()].starts_with('`');
+    let left = parsed.inline.iter().filter(markdown_code).find(|span| span.close.end == range.start);
+    let right = parsed.inline.iter().filter(markdown_code).find(|span| span.open.start == range.end);
+    if left.is_none() && right.is_none() { return Ok(None); }
+    let code_text = |span: Option<&InlineSpan>| -> Result<&str, ControlError> {
+        let Some(span) = span else { return Ok(""); };
+        parsed.events.iter().find_map(|(event, range)| match event {
+            Event::Code(text) if *range == span.range() => Some(text.as_ref()),
+            _ => None,
+        }).ok_or_else(|| ControlError::NeedsContext("相邻行内代码边界不完整".into()))
+    };
+    // 取消代码格式生成的转义和实体是正文表示，不是重新加回代码时的字面字符。
+    let selected = if semantic { super::semantic_selection::selected_text(parsed, &range, " ")? }
+        else { parsed.source[range.clone()].to_string() };
+    let table = super::table_inline::markdown_cell(parsed, &range);
+    // GFM 表格在代码定界符内也先处理管道分隔；输出仍需保留这一层转义。
+    let encode = |text: &str| if table { text.replace('|', "\\|") } else { text.to_string() };
+    let left_text = encode(code_text(left)?);
+    let selected = if semantic { encode(&selected) } else { selected };
+    let text = format!("{left_text}{selected}{}", encode(code_text(right)?));
+    let (open, close) = code_markers(&text);
+    let from = left.map_or(range.start, |span| span.open.start);
+    let to = right.map_or(range.end, |span| span.close.end);
+    let start = base + (from + open.len() + left_text.len()) as u64;
+    let end = start + selected.len() as u64;
+    Ok(Some(EditResult {
+        edits: vec![SourceEdit { from_byte: base + from as u64, to_byte: base + to as u64, inserted_text: format!("{open}{text}{close}") }],
+        selection: if selection.anchor_byte <= selection.head_byte {
+            DocumentSelection { anchor_byte: start, head_byte: end }
+        } else { DocumentSelection { anchor_byte: end, head_byte: start } },
+        template_update: None,
+    }))
 }
 
 pub fn opposite(format: InlineFormat) -> Option<InlineFormat> {
@@ -381,8 +437,14 @@ pub(crate) fn selected_with_toggle(parsed: &ParsedWindow, selection: DocumentSel
                 range = range.start.min(span.open.start)..range.end.max(span.close.end);
             }
             let in_html = parsed.html_cell_at(range.start).is_some();
+            // Markdown 定界符不能与另一个格式交叉闭合，否则内层标记会成为正文。
+            let crossing = parsed.inline.iter().any(|span| {
+                (range.start <= span.open.start && span.open.end <= range.end)
+                    != (range.start <= span.close.start && span.close.end <= range.end)
+            });
             let text = &parsed.source[range.clone()];
             let pair = if in_html
+                || crossing
                 || !merged.is_empty()
                 || text.starts_with(char::is_whitespace)
                 || text.ends_with(char::is_whitespace)
@@ -508,17 +570,8 @@ pub fn release_code_selection(
             return format!("<code>{s}</code>");
         }
         let s = normalize(s);
-        let ticks = s.split(|c| c != '`').map(str::len).max().unwrap_or(0) + 1;
-        let fence = "`".repeat(ticks);
-        let padding = if s.starts_with('`')
-            || s.ends_with('`')
-            || s.starts_with(' ') && s.ends_with(' ') && s.chars().any(|c| c != ' ')
-        {
-            " "
-        } else {
-            ""
-        };
-        format!("{fence}{padding}{s}{padding}{fence}")
+        let (open, close) = code_markers(&s);
+        format!("{open}{s}{close}")
     };
     let left = code(&parsed.source[content.start..selected.start]);
     let right = code(&parsed.source[selected.end..content.end]);
