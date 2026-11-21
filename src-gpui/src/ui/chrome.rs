@@ -221,6 +221,8 @@ impl Chrome {
                 action(locale.app_text("menu.undo"), "Ctrl + Z", || Box::new(editor::Undo), doc && self.state.can_undo),
                 action(locale.app_text("menu.redo"), "Ctrl + Y", || Box::new(editor::Redo), doc && self.state.can_redo),
                 separator(),
+                action(locale.app_text("menu.copyAsMarkdown"), "", || Box::new(editor::CopyMarkdown), doc),
+                separator(),
                 self.state.view_menu.edit_lock_item(locale),
             ],
             Menu::Paragraph => vec![

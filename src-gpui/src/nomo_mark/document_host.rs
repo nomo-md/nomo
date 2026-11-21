@@ -310,9 +310,10 @@ impl DocumentHost {
                 identity,
                 selection,
                 cut,
+                format,
             } if self.production => {
                 if self.control.read(cx).host.parsed.identity == *identity {
-                    self.clipboard(*selection, *cut, cx);
+                    self.clipboard(*selection, *cut, *format, cx);
                 }
             }
             ControlEvent::SelectAll => {

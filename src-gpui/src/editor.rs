@@ -8,7 +8,7 @@ actions!(
         MoveLeft, MoveRight, MoveUp, MoveDown, SelectLeft, SelectRight, SelectUp, SelectDown, MoveWordLeft,
         MoveWordRight, SelectWordLeft, SelectWordRight, MoveLineStart, MoveLineEnd, SelectLineStart, SelectLineEnd,
         MoveDocStart, MoveDocEnd, SelectDocStart, SelectDocEnd, Backspace, Delete, DeleteWordLeft, DeleteLineLeft,
-        Newline, Indent, Outdent, SelectAll, Undo, Redo, Copy, Cut, Paste, PageUp, PageDown, CharacterPalette
+        Newline, Indent, Outdent, SelectAll, Undo, Redo, Copy, CopyMarkdown, Cut, Paste, PageUp, PageDown, CharacterPalette
     ]
 );
 

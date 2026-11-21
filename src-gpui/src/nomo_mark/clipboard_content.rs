@@ -1,17 +1,29 @@
 //! 剪贴板语义投影只处理选区所在窗口；输出按需生成，不缓存正文。
-use super::{mapping::text_segments, parse::ParsedWindow, protocol::ControlError};
+use super::{mapping::text_segments, parse::ParsedWindow, protocol::{ControlError, CopyFormat}};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 
-pub(crate) struct Payload { pub text: String, pub html: String }
+#[cfg(test)]
+#[path = "clipboard_content_tests.rs"]
+mod tests;
+
+pub(crate) struct Payload { pub text: String, pub html: String, pub source: String }
+
+impl Payload {
+    pub(super) fn write(self, format: CopyFormat, cx: &mut gpui::App) -> Result<(), String> {
+        if format == CopyFormat::MarkdownOnly { return crate::clipboard::write_text(&self.text, cx); }
+        let html = super::clipboard_fragment::encode(&self.text, &self.html, &self.source)?;
+        crate::clipboard::write_rich(&self.text, &html, cx)
+    }
+}
 
 const CLIPBOARD_MARKDOWN: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_STRIKETHROUGH)
     .union(Options::ENABLE_TASKLISTS)
     .union(Options::ENABLE_MATH);
 
-pub(super) fn from_session(port: &super::native_port::NativeWindowPort, revision: u64, range: Range<u64>, markdown: bool, request: &super::session_window::WindowRequest) -> Result<Payload, ControlError> {
-    let mut payload = Payload { text: String::new(), html: String::new() };
+pub(super) fn from_session(port: &super::native_port::NativeWindowPort, revision: u64, range: Range<u64>, format: CopyFormat, request: &super::session_window::WindowRequest) -> Result<Payload, ControlError> {
+    let mut payload = Payload { text: String::new(), html: String::new(), source: String::new() };
     let mut at = range.start;
     while at < range.end {
         request.check()?;
@@ -21,31 +33,58 @@ pub(super) fn from_session(port: &super::native_port::NativeWindowPort, revision
         let base = loaded.input.from_byte;
         let parsed = ParsedWindow::parse(loaded.input, "clipboard", 0, loaded.context)?;
         if parsed.context.source_only { return Err(ControlError::NeedsContext("选区含不完整的超大结构，请在源码模式复制以保留原文".into())); }
-        let part = selected(&parsed, (at - base) as usize..(end - base) as usize, markdown)?;
+        let part = selected(&parsed, (at - base) as usize..(end - base) as usize, format)?;
         payload.text.push_str(&part.text);
         payload.html.push_str(&part.html);
-        if payload.text.len().saturating_add(payload.html.len()) > 64 * 1024 * 1024 {
+        payload.source.push_str(&part.source);
+        if payload.text.len().saturating_add(payload.html.len()).saturating_add(payload.source.len()) > 64 * 1024 * 1024 {
             return Err(ControlError::Unsupported("复制内容超过 64 MiB 剪贴板预算；原文已保留".into()));
         }
-        if !markdown && end < range.end && !payload.text.ends_with('\n') { payload.text.push('\n'); }
+        if format == CopyFormat::Readable && end < range.end && !payload.text.ends_with('\n') { payload.text.push('\n'); }
         at = end;
     }
     Ok(payload)
 }
 
-pub(super) fn selected(parsed: &ParsedWindow, range: Range<usize>, markdown: bool) -> Result<Payload, ControlError> {
+pub(super) fn selected(parsed: &ParsedWindow, mut range: Range<usize>, format: CopyFormat) -> Result<Payload, ControlError> {
+    parsed.source.get(range.clone()).ok_or(ControlError::InvalidRange)?;
+    // 拖选隐藏格式边界时，端点可能带上相邻未选中文字的闭合/起始标记。
+    // 这些孤立标记不属于所选内容，不能写入富文本或内部 Markdown 片段。
+    while let Some(span) = parsed.inline.iter().find(|span| span.close.start == range.start && span.close.end <= range.end && !span.close.is_empty()) {
+        range.start = span.close.end;
+    }
+    while let Some(span) = parsed.inline.iter().find(|span| span.open.end == range.end && span.open.start >= range.start && !span.open.is_empty()) {
+        range.end = span.open.start;
+    }
     let raw = parsed.source.get(range.clone()).ok_or(ControlError::InvalidRange)?;
     let mut before = html_scopes(parsed, range.start).iter().map(|(_, range)| parsed.source[range.clone()].to_string()).collect::<String>();
     let mut after = html_scopes(parsed, range.end).iter().rev().map(|(name, _)| format!("</{name}>")).collect::<String>();
     let mut spans: Vec<_> = parsed.inline.iter().filter(|s| s.content.start < range.end && range.start < s.content.end).collect();
     spans.sort_by_key(|s| (s.open.start, std::cmp::Reverse(s.close.end)));
+    let code_selection = spans.iter().find(|s| s.format == super::parse::InlineFormat::Code
+        && s.content.start <= range.start && range.end <= s.content.end).copied();
+    let code_fragment = code_selection.map(|span| inline_code(&selected_code_text(&parsed.source, span.content.clone(), &range)));
     for span in spans {
+        if code_selection.is_some_and(|code| code.open == span.open) { continue; }
         if span.open.start < range.start && range.start <= span.content.end { before.push_str(&parsed.source[span.open.clone()]); }
         if span.content.start <= range.end && range.end < span.close.end { after.insert_str(0, &parsed.source[span.close.clone()]); }
     }
-    let fragment = format!("{before}{raw}{after}");
-    let text = if markdown { fragment.clone() } else { plain(parsed, &range)? };
-    Ok(Payload { text, html: html(&fragment) })
+    let mut fragment = format!("{before}{}{after}", code_fragment.as_deref().unwrap_or(raw));
+    // 代码正文里的星号、反斜线等都是内容，不能重新按普通 Markdown 解释。
+    if let Some(node) = parsed.nodes.iter().find(|n| n.kind == "code"
+        && n.source.start <= range.start && range.end <= n.source.end) {
+        if let Some(code) = super::code_blocks::FencedCode::at(parsed, node.source.start)
+            .filter(|c| c.body.start <= range.start && range.end <= c.body.end) {
+            let body = plain(parsed, &range)?;
+            let fence = "`".repeat((body.split(|c| c != '`').map(str::len).max().unwrap_or(0) + 1).max(3));
+            let eol = if body.contains("\r\n") { "\r\n" } else { "\n" };
+            let tail = if body.ends_with('\n') { "" } else { eol };
+            fragment = format!("{fence}{}{eol}{body}{tail}{fence}", &parsed.source[code.language]);
+        }
+    }
+    if format == CopyFormat::MarkdownOnly { return Ok(Payload { text: fragment, html: String::new(), source: String::new() }); }
+    let text = if format == CopyFormat::Markdown { fragment.clone() } else { plain(parsed, &range)? };
+    Ok(Payload { text, html: html(&fragment), source: fragment })
 }
 
 /// 只扫描解析器已确认的 HTML 事件，避免把代码里的标签当成选区格式。
@@ -77,6 +116,21 @@ fn html_scopes(parsed: &ParsedWindow, to: usize) -> Vec<(String, Range<usize>)> 
 }
 
 fn plain(parsed: &ParsedWindow, range: &Range<usize>) -> Result<String, ControlError> {
+    if super::code_blocks::FencedCode::at(parsed, range.start)
+        .is_some_and(|code| code.body.start <= range.start && range.end <= code.body.end) {
+        let prefix = super::code_blocks::input_prefix(parsed, range);
+        if prefix.is_empty() { return Ok(parsed.source[range.clone()].to_owned()); }
+        let mut output = String::new();
+        let mut at = range.start;
+        while at < range.end {
+            let line_start = super::commands::line_start(&parsed.source, at);
+            let end = parsed.source[at..range.end].find('\n').map_or(range.end, |n| at + n + 1);
+            let start = if parsed.source[line_start..].starts_with(prefix) { at.max(line_start + prefix.len()) } else { at };
+            if start < end { output.push_str(&parsed.source[start..end]); }
+            at = end;
+        }
+        return Ok(output);
+    }
     let mut output = String::new();
     let mut fragments = std::collections::HashSet::new();
     for (event, span) in &parsed.events {
@@ -91,7 +145,12 @@ fn plain(parsed: &ParsedWindow, range: &Range<usize>) -> Result<String, ControlE
                     output.push_str(text.get(display).ok_or(ControlError::InvalidRange)?);
                 }
             }
-            Event::Code(text) | Event::InlineMath(text) | Event::DisplayMath(text) => {
+            Event::Code(text) => {
+                if let Some(content) = parsed.inline.iter().find(|s| s.open.start == span.start && s.close.end == span.end).map(|s| s.content.clone()) {
+                    output.push_str(&selected_code_text(&parsed.source, content, range));
+                } else { output.push_str(text); }
+            }
+            Event::InlineMath(text) | Event::DisplayMath(text) => {
                 let content = parsed.inline.iter().find(|s| s.open.start == span.start && s.close.end == span.end).map(|s| s.content.clone());
                 if let Some(content) = content {
                     let start = range.start.max(content.start); let end = range.end.min(content.end);
@@ -152,6 +211,27 @@ fn plain(parsed: &ParsedWindow, range: &Range<usize>) -> Result<String, ControlE
         }
     }
     Ok(output)
+}
+
+fn selected_code_text(source: &str, mut content: Range<usize>, range: &Range<usize>) -> String {
+    let raw = &source[content.clone()];
+    // CommonMark 的两端配对空格是代码定界填充；全空格内容不去掉任何字符。
+    let normalized = raw.replace("\r\n", " ").replace(['\r', '\n'], " ");
+    if normalized.starts_with(' ') && normalized.ends_with(' ') && normalized.chars().any(|c| c != ' ') {
+        content.start += if raw.starts_with("\r\n") { 2 } else { 1 };
+        content.end -= if raw.ends_with("\r\n") { 2 } else { 1 };
+    }
+    let start = content.start.max(range.start);
+    let end = content.end.min(range.end);
+    if start >= end { return String::new(); }
+    source[start..end].replace("\r\n", " ").replace(['\r', '\n'], " ")
+}
+
+fn inline_code(text: &str) -> String {
+    let fence = "`".repeat(text.split(|c| c != '`').map(str::len).max().unwrap_or(0) + 1);
+    let pad = if text.starts_with('`') || text.ends_with('`')
+        || (text.starts_with(' ') && text.ends_with(' ') && text.chars().any(|c| c != ' ')) { " " } else { "" };
+    format!("{fence}{pad}{text}{pad}{fence}")
 }
 
 fn safe_url(value: &str) -> bool {
@@ -345,15 +425,15 @@ pub(super) fn from_html(input: &str) -> String {
                         let raw = raw.strip_prefix("<code>").and_then(|s| s.strip_suffix("</code>")).unwrap_or(raw);
                         let text = html_escape::decode_html_entities(raw);
                         let fence = "`".repeat((text.split(|c| c != '`').map(str::len).max().unwrap_or(0) + 1).max(3));
-                        output.push_str(&format!("\n\n{fence}\n{text}\n{fence}\n\n"));
+                        let tail = if text.ends_with('\n') { "" } else { "\n" };
+                        output.push_str(&format!("\n\n{fence}\n{text}{tail}{fence}\n\n"));
                         at += length + 6;
                     }
                 }
                 "code" if !tag.closing => {
                     if let Some(length) = input[at..].find("</code>") {
                         let text = html_escape::decode_html_entities(&input[at..at + length]);
-                        let fence = "`".repeat(text.split(|c| c != '`').map(str::len).max().unwrap_or(0) + 1);
-                        output.push_str(&format!("{fence} {text} {fence}"));
+                        output.push_str(&inline_code(&text));
                         at += length + 7;
                     }
                 }
@@ -385,6 +465,7 @@ fn math_sources(source: &str) -> Vec<&str> {
 }
 
 pub(super) fn from_rich_clipboard(text: &str, html: &str) -> String {
+    if let Some(source) = super::clipboard_fragment::decode(text, html) { return source; }
     let converted = from_html(html);
     if !converted.is_empty() {
         let sources = math_sources(text);

@@ -897,11 +897,12 @@ impl NomoMark {
         self.upstream_caret = end.then_some(self.host.selection.head_byte);
         self.ensure_horizontal_caret();
     }
-    fn copy(&mut self, cut: bool, cx: &mut Context<Self>) {
+    fn copy(&mut self, cut: bool, markdown: bool, cx: &mut Context<Self>) {
         if cut && self.host.editing_locked() { return; }
-        if let Some(payload) = self.copy_cells(cx.global::<Settings>().copy_markdown_syntax) {
-            match payload.map_err(|e| e.to_string()).and_then(|p| crate::clipboard::write_rich(&p.text, &p.html, cx)) {
-                Ok(()) if cut => self.command(EditIntent::Replace(String::new()), cx),
+        let format = CopyFormat::for_command(markdown, cx.global::<Settings>().copy_markdown);
+        if let Some(payload) = self.copy_cells(format != CopyFormat::Readable) {
+            match payload.map_err(|e| e.to_string()).and_then(|p| p.write(format, cx)) {
+                Ok(()) if cut => self.cut_selection(cx),
                 Ok(()) => {}
                 Err(error) => cx.emit(ControlEvent::Failure(error)),
             }
@@ -917,6 +918,7 @@ impl NomoMark {
                 identity: self.host.parsed.identity.clone(),
                 selection,
                 cut,
+                format,
             });
             return;
         };
@@ -924,14 +926,20 @@ impl NomoMark {
             return;
         }
         let result = if self.effective_mode() == ViewMode::Semantic {
-            super::clipboard_content::selected(&self.host.parsed, range, cx.global::<Settings>().copy_markdown_syntax)
-                .map_err(|e| e.to_string()).and_then(|p| crate::clipboard::write_rich(&p.text, &p.html, cx))
+            super::clipboard_content::selected(&self.host.parsed, range, format)
+                .map_err(|e| e.to_string()).and_then(|p| p.write(format, cx))
         } else { crate::clipboard::write_text(&self.host.parsed.source[range], cx) };
         match result {
-            Ok(()) if cut => self.command(EditIntent::Replace(String::new()), cx),
+            Ok(()) if cut => self.cut_selection(cx),
             Ok(()) => {}
             Err(error) => cx.emit(ControlEvent::Failure(error)),
         }
+    }
+    fn cut_selection(&mut self, cx: &mut Context<Self>) {
+        // 剪切是独立撤销步骤，不能与前一次格式操作或后续输入合并。
+        self.history_serial += 1;
+        self.command(EditIntent::Replace(String::new()), cx);
+        self.history_serial += 1;
     }
     fn paste(&mut self, plain: bool, cx: &mut Context<Self>) {
         if self.host.editing_locked() { return; }
@@ -951,9 +959,9 @@ impl NomoMark {
         let at = self.local_cursor();
         let semantic = self.effective_mode() == ViewMode::Semantic && !self.auxiliary_input;
         let html = if semantic && !plain { crate::clipboard::read_html() } else { None };
-        if semantic && !plain && self.paste_cells(&text, html.as_deref(), cx) { return; }
         let literal_context = self.host.parsed.nodes.iter().any(|n| n.kind == "code" && n.source.contains(&at))
             || self.host.parsed.inline.iter().any(|s| s.format == InlineFormat::Code && s.content.start <= at && at <= s.content.end);
+        if semantic && !plain && !literal_context && self.paste_cells(&text, html.as_deref(), cx) { return; }
         let html_cell = super::table_inline::html_cell(&self.host.parsed, &(at..at)).is_some();
         let inserted = if !semantic || literal_context || html_cell { text }
             else if plain { super::clipboard_content::literal_paragraphs(&text) }
@@ -2684,8 +2692,9 @@ impl Render for NomoMark {
             .on_action(
                 cx.listener(|_, _: &editor::SelectAll, _, cx| cx.emit(ControlEvent::SelectAll)),
             )
-            .on_action(cx.listener(|v, _: &editor::Copy, _, cx| v.copy(false, cx)))
-            .on_action(cx.listener(|v, _: &editor::Cut, _, cx| v.copy(true, cx)))
+            .on_action(cx.listener(|v, _: &editor::Copy, _, cx| v.copy(false, false, cx)))
+            .on_action(cx.listener(|v, _: &editor::CopyMarkdown, _, cx| v.copy(false, true, cx)))
+            .on_action(cx.listener(|v, _: &editor::Cut, _, cx| v.copy(true, false, cx)))
             .on_action(cx.listener(|v, _: &editor::Paste, _, cx| v.paste(false, cx)))
             .on_drop(cx.listener(|v, paths: &gpui::ExternalPaths, window, cx| {
                 // GPUI 在回调前已取走拖放载荷，文档不能靠冒泡交给工作区。

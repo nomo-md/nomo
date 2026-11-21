@@ -63,6 +63,7 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     shortcut!("redo", "menu.redo", "editing", History, editor::Redo, &["Ctrl+Y", "Ctrl+Shift+Z"], &["Command+Shift+Z"]),
     shortcut!("cut", "menu.cut", "editing", Editor, editor::Cut, &["Ctrl+X"], &["Command+X"]),
     shortcut!("copy", "menu.copy", "editing", Editor, editor::Copy, &["Ctrl+C"], &["Command+C"]),
+    shortcut!("copy-markdown", "menu.copyAsMarkdown", "editing", Editor, editor::CopyMarkdown, &["Ctrl+Shift+C"], &["Command+Shift+C"]),
     shortcut!("paste", "menu.paste", "editing", Editor, editor::Paste, &["Ctrl+V"], &["Command+V"]),
     shortcut!("paste-plain", "shortcuts.pastePlain", "editing", Editor, mark::PastePlain, &["Ctrl+Shift+V"], &["Command+Shift+V", "Command+Alt+Shift+V"]),
     shortcut!("select-all", "menu.selectAll", "editing", Editor, editor::SelectAll, &["Ctrl+A"], &["Command+A"]),
@@ -83,7 +84,7 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     shortcut!("italic", "menu.italic", "format", Document, action::Italic, &["Ctrl+I"], &["Command+I"]),
     shortcut!("underline", "chrome.underline", "format", Document, action::Underline, &["Ctrl+U"], &["Command+U"]),
     shortcut!("strike", "menu.strike", "format", Document, action::Strike, &["Alt+Shift+5"], &["Alt+Shift+5"]),
-    shortcut!("inline-code", "menu.inlineCode", "format", Document, action::InlineCode, &["Ctrl+`", "Ctrl+Shift+C"], &["Command+Shift+C"]),
+    shortcut!("inline-code", "menu.inlineCode", "format", Document, action::InlineCode, &["Ctrl+`"], &["Command+Shift+`"]),
     shortcut!("highlight", "chrome.highlight", "format", Document, action::Highlight, &[], &[]),
     shortcut!("quote", "menu.quote", "format", Document, action::Quote, &["Ctrl+Shift+Q"], &["Command+Alt+Q"]),
     shortcut!("bullet-list", "menu.bulletList", "format", Document, action::BulletList, &["Ctrl+Shift+]"], &["Command+Shift+]"]),
@@ -195,7 +196,7 @@ pub(super) fn record(key: &Keystroke) -> Result<String, UiMessage> {
     if key.modifiers.platform && !MACOS { return Err(UiMessage::new("shortcuts.systemReserved")); }
     let m = key.modifiers;
     if (!MACOS && m.alt && !m.control && key.key == "f4") || (!MACOS && m.control && m.alt && key.key == "delete")
-        || (MACOS && m.platform && (matches!(key.key.as_str(), "space" | "tab" | "`")
+        || (MACOS && m.platform && (matches!(key.key.as_str(), "space" | "tab") || (!m.shift && key.key == "`")
             || (!m.shift && !m.control && key.key == "h") || (m.shift && key.key == "q"))) {
         return Err(UiMessage::new("shortcuts.systemReserved"));
     }
@@ -299,4 +300,33 @@ pub(crate) fn bind_keys(cx: &mut App) {
     }
     cx.bind_keys(accepted);
     cx.set_global(Bindings { values, errors });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_defaults_leave_inline_code_and_code_blocks_accessible() {
+        let copy = SHORTCUTS.iter().find(|entry| entry.id == "copy-markdown").unwrap();
+        let inline = SHORTCUTS.iter().find(|entry| entry.id == "inline-code").unwrap();
+        let block = SHORTCUTS.iter().find(|entry| entry.id == "insert-code-block").unwrap();
+        assert_eq!(copy.windows, &["Ctrl+Shift+C"]);
+        assert_eq!(copy.macos, &["Command+Shift+C"]);
+        assert_eq!(inline.windows, &["Ctrl+`"]);
+        assert_eq!(inline.macos, &["Command+Shift+`"]);
+        assert_eq!(block.windows, &["Ctrl+Shift+K"]);
+        assert_eq!(block.macos, &["Command+Shift+K"]);
+        for macos in [false, true] {
+            let keys = |entry: &Shortcut| if macos { entry.macos } else { entry.windows };
+            for changed in [copy, inline] {
+                for key in keys(changed) {
+                    assert!(SHORTCUTS.iter().filter(|entry| entry.id != changed.id).all(|entry| !keys(entry).contains(key)), "conflicting default: {key}");
+                }
+            }
+        }
+        for entry in [copy, inline, block] {
+            for key in entry.defaults() { assert!(normalize(&key).is_ok()); }
+        }
+    }
 }

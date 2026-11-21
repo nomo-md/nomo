@@ -229,7 +229,7 @@ impl NomoMark {
         let text = match initial {
             Some(text) => text,
             None if range.is_empty() => crate::ui::toolbar_i18n::ToolbarLocale::current(cx).text("comment_insert").into(),
-            None => super::super::clipboard_content::selected(&self.host.parsed, range.clone(), false)?.text,
+            None => super::super::clipboard_content::selected(&self.host.parsed, range.clone(), CopyFormat::Readable)?.text,
         }.replace("-->", "-- >");
         let markup = if super::super::table_inline::markdown_cell(&self.host.parsed, &range) || super::super::table_inline::html_cell(&self.host.parsed, &range).is_some() {
             let html = super::super::html_table::InlineAtom::Comment(text.clone()).with_text(&text).unwrap();

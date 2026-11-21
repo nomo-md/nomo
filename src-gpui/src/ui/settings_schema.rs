@@ -82,7 +82,7 @@ pub const CATEGORIES: &[Category] = &[
                 item("codeBlockIndent", "settings.codeBlockIndent.label", "settings.codeBlockIndent.description", Control::Choice(&[("spaces-2", "settings.codeBlockIndent.choice.spaces-2"), ("spaces-4", "settings.codeBlockIndent.choice.spaces-4"), ("tab", "settings.codeBlockIndent.choice.tab")]), Support::Full),
                 item("codeBlockLineNumbersVisible", "settings.codeBlockLineNumbersVisible.label", "settings.codeBlockLineNumbersVisible.description", Control::Toggle, Support::Full),
                 item("inlineCodeRenderingEnabled", "settings.inlineCodeRenderingEnabled.label", "settings.inlineCodeRenderingEnabled.description", Control::Toggle, Support::Full),
-                item("copyMarkdownSyntaxEnabled", "settings.copyMarkdownSyntaxEnabled.label", "settings.copyMarkdownSyntaxEnabled.description", Control::Toggle, Support::Full),
+                item("defaultCopyFormat", "settings.defaultCopyFormat.label", "settings.defaultCopyFormat.description", Control::Choice(&[("readable", "settings.defaultCopyFormat.choice.readable"), ("markdown", "settings.defaultCopyFormat.choice.markdown")]), Support::Full),
             ]),
             group("settings.group.quickInsert", &[
                 item("quickInsertEnabled", "settings.quickInsertEnabled.label", "settings.quickInsertEnabled.description", Control::Toggle, Support::Full),

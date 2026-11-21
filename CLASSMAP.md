@@ -25,7 +25,7 @@
 | 标题栏和菜单 | `src-gpui/src/ui/chrome.rs`、`ui/chrome/view_menu.rs`、`ui/window_chrome.rs` | 应用内菜单和 macOS 系统菜单共用显示菜单分组；窗口拖动、按钮和菜单焦点恢复 |
 | NomoMark 正式文档宿主 | `src-gpui/src/nomo_mark/document_host.rs`、`workspace_host.rs`、`save_dialog.rs` | 每标签窗口生命周期、控件事件、正式错误恢复；保存框按当前目录和首个 H1 提供默认值，不持有全文 |
 | 文档元数据入口 | `src-gpui/src/nomo_mark/metadata_commands.rs`、`object_ui.rs` | 按需加载文首、已有属性原位编辑、缺少时通过主会话插入模板；复用窗口预算、取消与撤销历史 |
-| NomoMark 剪贴板 | `src-gpui/src/clipboard.rs`、`clipboard_rich.rs`、`clipboard_images.rs`、`clipboard_{native,macos,linux,x11}.rs`、`nomo_mark/clipboard_content.rs`、`nomo_mark/html_style.rs`、`session_actions.rs` | 三平台局部及跨窗口语义复制、纯文本／HTML 双格式、受限 HTML 粘贴及有界图片输入；成功写入后才删除原文，跨窗口输出限制 64 MiB；非 Windows 所有者按需创建并在退出时释放 |
+| NomoMark 剪贴板 | `src-gpui/src/clipboard.rs`、`clipboard_rich.rs`、`clipboard_images.rs`、`clipboard_{native,macos,linux,x11}.rs`、`nomo_mark/clipboard_content.rs`、`nomo_mark/clipboard_fragment.rs`、`nomo_mark/html_style.rs`、`session_actions.rs` | 三平台局部及跨窗口语义复制、可配置的可读文本／Markdown、HTML 与有界内部片段、独立 Markdown 复制、受限 HTML 粘贴及有界图片输入；成功写入后才删除原文，跨窗口输出限制 64 MiB；非 Windows 所有者按需创建并在退出时释放 |
 | 共享编辑动作与保存前快照 | `src-gpui/src/editor.rs`、`snapshots.rs` | 正式与开发入口共用动作、视图模式及快照策略；各活动控件注册自身键位，不保留旧 Buffer/EditorView |
 | 块索引测试文档 | `src-gpui/src/document/mod.rs`、`markdown/blocks.rs` | 仅在测试构建中提供内存文档夹具，保留增量结构编辑的既有验证 |
 | Markdown 渲染 | `src-gpui/src/markdown/` | 块结构、行内标记、当前窗口代码布局 |
@@ -42,7 +42,7 @@
 | 配置与设置窗口 | `src-gpui/src/settings.rs`、`ui/settings_schema.rs`、`ui/settings_window.rs`、`ui/settings_pages.rs`、`ui/settings_fonts.rs` | 九个分区（快捷键独立）、文档导航布局、主题导入／导出、从本机字体中搜索选用或恢复主题、图片策略；按原有配置原子保存 |
 | 文件管理器定位 | `src-gpui/src/ui/file_manager.rs` | 文件树、文档标签和本地图片共用定位入口。Windows 在后台线程解析路径并选中条目，失败时通过界面提示 |
 | Windows 文件集成 | `src-gpui/src/windows_integration.rs`、`ui/settings_pages.rs`、`src-gpui/windows-shell-extension/`、`scripts/msix/`、`scripts/packaging/{open-with.nsh,msix/}` | NSIS／ZIP 的当前用户默认应用候选与经典右键菜单；MSIX 的原生 IExplorerCommand、新式菜单与包内启停标记；注册／卸载按副本或包身份核对 |
-| 自定义快捷键 | `src-gpui/src/ui/shortcuts.rs`、`ui/settings_shortcuts.rs`、`ui/mod.rs` | 74 项命令、轻量分组列表、固定搜索筛选与按需编辑浮层，每命令最多 3 个键位及作用域冲突校验；保留旧配置，平台覆盖独立保存；提交后替换有限键表，菜单、右键与工具栏共用实际提示 |
+| 自定义快捷键 | `src-gpui/src/ui/shortcuts.rs`、`ui/settings_shortcuts.rs`、`ui/mod.rs` | 75 项命令、轻量分组列表、固定搜索筛选与按需编辑浮层，每命令最多 3 个键位及作用域冲突校验；保留旧配置，平台覆盖独立保存；提交后替换有限键表，菜单、右键与工具栏共用实际提示 |
 | UI 原件与图标 | `src-gpui/src/ui/components.rs`、`popup.rs`、`icon_assets.rs`、`text_field.rs` | 静态 SVG 内嵌、按钮、菜单、输入框；弹层按触发边界测量、翻转、限高和入场动画 |
 | 确认框与短提示 | `src-gpui/src/ui/dialogs.rs`、`dialogs/secondary.rs`、`toast.rs` | 保存、删除、外部变更、恢复、打开位置与关闭选择的旧版布局；焦点与短动效、单条有界 Toast，不接管系统文件选择器 |
 | 应用弹窗业务与更新 | `src-gpui/src/ui/workspace/application_dialogs.rs`、`open_requests.rs`、`recovery_ui.rs`、`ui/tray.rs`、`ui/tray/windows.rs`、`ui/updates.rs`、`ui/updates/{notice,installer,install_ui}.rs`、`ui/updates/installer/{windows,macos}.rs` | 有界打开队列、跨窗口归属和恢复列表；Windows 应用级托盘、macOS／X11 关闭到托盘（原生 Wayland 暂不支持）、官方优先且 gh-proxy 回退的 Release 元数据、MSIX Store 入口；共享安装包延迟竞速、SHA-256、进度和取消，Windows NSIS 与 macOS 退出后同卷替换分别适配，保存确认后重启安装 |

@@ -38,7 +38,7 @@ impl ContextMenu {
 
 #[derive(Clone)]
 pub(super) enum MenuAction {
-    None, Edit(EditIntent), Undo, Redo, Cut, Copy, Paste(bool), SelectAll, Find,
+    None, Edit(EditIntent), Undo, Redo, Cut, Copy, CopyMarkdown, Paste(bool), SelectAll, Find,
     LinkEdit, LinkOpen, LinkCopy, LinkRemove, InlineComment, InlineMath, ChooseImage,
     ObjectEdit, ObjectCopy, CodeLanguage, CodeParagraph, Delete,
     Table(TableIntent), DetailsDefault, DetailsUnwrap,
@@ -193,6 +193,7 @@ impl NomoMark {
                 formats.extend([sep(), edit("clearStyle", "crop", EditIntent::ClearFormatting)]);
                 vec![item("cut", "scissors", MenuAction::Cut).enabled(editable),
                     item("copy", "copy", MenuAction::Copy),
+                    item("copyAsMarkdown", "copy", MenuAction::CopyMarkdown),
                     item("paste", "clipboard", MenuAction::Paste(false)).enabled(editable),
                     item("pasteAsPlainText", "clipboard", MenuAction::Paste(true)).enabled(editable), sep(),
                     item("format", "crop", MenuAction::None).enabled(editable).children(formats),
@@ -211,6 +212,7 @@ impl NomoMark {
             Target::Heading(level) => vec![
                 item("cut", "scissors", MenuAction::Cut).enabled(editable && !menu.selection.range().is_empty()),
                 item("copy", "copy", MenuAction::Copy).enabled(!menu.selection.range().is_empty()),
+                item("copyAsMarkdown", "copy", MenuAction::CopyMarkdown).enabled(!menu.selection.range().is_empty()),
                 item("paste", "clipboard", MenuAction::Paste(false)).enabled(editable),
                 item("pasteAsPlainText", "clipboard", MenuAction::Paste(true)).enabled(editable),
                 edit("deleteAction", "trash-2", EditIntent::Replace(String::new())).enabled(editable && !menu.selection.range().is_empty()),
@@ -268,7 +270,7 @@ impl NomoMark {
             for item in items {
                 let id = match item.key {
                     "undo" => "undo", "redo" => "redo", "cut" => "cut", "copy" => "copy", "paste" => "paste",
-                    "pasteAsPlainText" => "paste-plain", "selectAll" => "select-all", "find" => "find",
+                    "copyAsMarkdown" => "copy-markdown", "pasteAsPlainText" => "paste-plain", "selectAll" => "select-all", "find" => "find",
                     "bold" => "bold", "italic" => "italic", "underline" => "underline", "strikethrough" => "strike",
                     "inlineCode" => "inline-code", "highlight" => "highlight", "clearStyle" => "menu-clear-format",
                     "createLink" | "editLink" => "menu-link", "unorderedList" => "bullet-list", "orderedList" => "ordered-list",
@@ -321,12 +323,13 @@ impl NomoMark {
         let target_at = match &menu.target { Target::Link(at) => Some(*at), Target::Block(r, _) | Target::Image(r) | Target::Details(r, _) => Some(r.start),
             Target::Table { source, row, column, .. } => self.context_table_cell(source, *row, *column), Target::Heading(_) => Some(menu.hit), _ => None };
         // 通用编辑命令保留右键打开时的选区；只有结构／对象动作重新定位到命中处。
-        let selection_action = matches!(&action, A::Cut | A::Copy | A::Paste(_) | A::SelectAll | A::Find | A::Undo | A::Redo | A::Edit(EditIntent::Replace(_)));
+        let selection_action = matches!(&action, A::Cut | A::Copy | A::CopyMarkdown | A::Paste(_) | A::SelectAll | A::Find | A::Undo | A::Redo | A::Edit(EditIntent::Replace(_)));
         if !selection_action { if let Some(at) = target_at { self.move_to(at, false, cx); } }
         match action {
             A::None => {}, A::Edit(intent) => self.command(intent, cx),
             A::Undo => cx.emit(ControlEvent::Undo), A::Redo => cx.emit(ControlEvent::Redo),
-            A::Cut => self.copy(true, cx), A::Copy => self.copy(false, cx), A::Paste(plain) => self.paste(plain, cx),
+            A::Cut => self.copy(true, false, cx), A::Copy => self.copy(false, false, cx),
+            A::CopyMarkdown => self.copy(false, true, cx), A::Paste(plain) => self.paste(plain, cx),
             A::SelectAll => cx.emit(ControlEvent::SelectAll), A::Find => window.dispatch_action(Box::new(crate::ui::workspace::Find), cx),
             A::InlineComment => { if let Err(error) = self.begin_inline_comment(window, cx) { self.error(error, cx); } },
             A::InlineMath => { if let Err(error) = self.begin_inline_math(window, cx) { self.error(error, cx); } },
