@@ -22,13 +22,13 @@ impl OutlineLayout {
     }
 
     fn for_area(self, width: f32, percent: f32, split: bool) -> Self {
-        // 用户在空间不足时点开的浮层保留到关闭或自然放得下，只影响当前文档。
+        // 留白不足时保留当前浮层，留白充足时恢复正文避让。
         let when_narrow = if self == Self::ManualOverlay { Self::ManualOverlay } else { Self::Hidden };
         if split { return if width > 900.0 { Self::CENTERED } else { when_narrow }; }
         let right_margin = (width - width * percent) / 2.0;
         let missing = Self::PANEL_WIDTH + Self::RIGHT_INSET + 12.0 - right_margin;
         let max_shift = (width * 0.03).min(48.0);
-        // 重新显示大纲时多等 8px 余量，避免调整正文或侧栏宽度时反复显隐。
+        // 恢复正文避让时多等 8px 余量，避免在临界宽度反复切换。
         let threshold = if matches!(self, Self::Visible { .. }) { max_shift } else { (max_shift - 8.0).max(0.0) };
         if missing > threshold { when_narrow } else { Self::Visible { shift_fraction: missing.max(0.0) / width } }
     }
@@ -373,7 +373,7 @@ impl DocumentHost {
     }
 
     fn outline_column_shift(&self, settings: &Settings) -> f32 {
-        if self.accepts_workspace_focus && settings.show_outline
+        if self.accepts_workspace_focus && settings.right_outline_open
             && settings.document_navigation_layout == crate::settings::DocumentNavigationLayout::RightOutline
             && let OutlineLayout::Visible { shift_fraction } = self.outline_layout { shift_fraction } else { 0.0 }
     }
@@ -1035,18 +1035,14 @@ impl DocumentHost {
             },
         ).absolute().right_0().top_0().w(px(12.0)).h_full()
     }
-    pub(crate) fn set_manual_outline_open(&mut self, open: bool, cx: &mut Context<Self>) {
-        self.outline_layout = self.outline_layout.with_manual_open(open);
-        cx.notify();
-    }
-
-    pub(crate) fn outline_can_show(&self) -> bool { self.outline_layout != OutlineLayout::Hidden }
-
     pub(crate) fn update_outline_layout(&mut self, width: f32, percent: f32, cx: &mut Context<Self>) {
         // 左栏大纲不占正文留白，也不受右侧浮层的空间阈值控制。
-        if cx.global::<Settings>().document_navigation_layout != crate::settings::DocumentNavigationLayout::RightOutline { return; }
-        let previous = if cx.global::<Settings>().show_outline { self.outline_layout } else { self.outline_layout.with_manual_open(false) };
-        let layout = previous.for_area(width, percent, self.panes.len() == 2);
+        let settings = cx.global::<Settings>();
+        if settings.document_navigation_layout != crate::settings::DocumentNavigationLayout::RightOutline { return; }
+        let layout = match self.outline_layout.for_area(width, percent, self.panes.len() == 2) {
+            narrow @ (OutlineLayout::Hidden | OutlineLayout::ManualOverlay) => narrow.with_manual_open(settings.right_outline_open),
+            visible => visible,
+        };
         if layout != self.outline_layout {
             self.outline_layout = layout;
             cx.notify();

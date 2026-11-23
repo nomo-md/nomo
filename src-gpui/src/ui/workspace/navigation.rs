@@ -133,7 +133,6 @@ impl Workspace {
     }
 
     pub(super) fn select_navigation_tab(&mut self, outline: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if outline { Settings::set(cx, "outlineVisible", serde_json::json!(true)); }
         Settings::set(cx, "documentNavigationTab", serde_json::json!(if outline { "outline" } else { "files" }));
         // 点击入口不改变正文选区；键盘焦点落到新面板的现有导航控件。
         if outline { self.outline_ui.focus(window, cx); }
@@ -242,10 +241,6 @@ impl Workspace {
             return div().p(px(14.0)).text_size(px(13.0)).text_color(theme.muted)
                 .child(ToolbarLocale::current(cx).app_text("navigation.noDocument")).into_any_element();
         }
-        if !cx.global::<Settings>().show_outline {
-            return div().p(px(10.0)).child(button("navigation-show-outline", ToolbarLocale::current(cx).app_text("settings.outlineVisible.label"),
-                Some(IconName::ListTree), ButtonKind::Ghost, theme).on_click(cx.listener(|workspace, _, _, cx| workspace.toggle_outline(cx)))).into_any_element();
-        }
         let mode = self.tab().map_or(EditorMode::Semantic, |tab| tab.mode);
         div().size_full().children(self.render_docked_outline(theme, mode, window, cx)).into_any_element()
     }
@@ -265,7 +260,7 @@ impl Workspace {
 
     fn render_navigation_split(&mut self, width: f32, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let settings = cx.global::<Settings>();
-        let outline_collapsed = settings.bool("documentNavigationOutlineCollapsed") || !settings.show_outline;
+        let outline_collapsed = settings.bool("documentNavigationOutlineCollapsed");
         // 分组标题移除后文件树始终可见；大纲仍可从显示菜单或快捷键切换，旧的文件区折叠值不再隐藏入口。
         if outline_collapsed {
             self.navigation.split_shadow.reset();

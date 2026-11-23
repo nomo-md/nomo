@@ -313,10 +313,9 @@ fn fading_outline_row(row: &OutlineVisualRow, style: OutlineRowStyle, theme: &Th
 impl Workspace {
     pub(super) fn outline_visible(&self, cx: &App) -> bool {
         let settings = cx.global::<Settings>();
-        if self.home_visible || (self.mini.active() && self.mini.shell_frame().is_none()) || !settings.show_outline || self.document().is_none() { return false; }
+        if self.home_visible || (self.mini.active() && self.mini.shell_frame().is_none()) || self.document().is_none() { return false; }
         match settings.document_navigation_layout {
-            DocumentNavigationLayout::RightOutline => self.outline_ui.bounds.get().is_some_and(|area| area.size.width > px(0.0))
-                && self.document().is_some_and(|doc| doc.read(cx).outline_can_show()),
+            DocumentNavigationLayout::RightOutline => settings.right_outline_open,
             DocumentNavigationLayout::LeftTabs => self.explorer.sidebar_visible(settings) && settings.string("documentNavigationTab") == "outline",
             DocumentNavigationLayout::LeftSplit => self.explorer.sidebar_visible(settings) && !settings.bool("documentNavigationOutlineCollapsed"),
         }
@@ -327,15 +326,13 @@ impl Workspace {
     }
 
     fn set_outline_open(&mut self, open: bool, cx: &mut Context<Self>) {
-        if self.mini.active() { return; }
-        let Some(document) = self.document() else { return; };
+        if self.mini.active() || self.document().is_none() { return; }
         match cx.global::<Settings>().document_navigation_layout {
             DocumentNavigationLayout::LeftTabs => {
                 Settings::set(cx, "documentNavigationTab", serde_json::json!(if open { "outline" } else { "files" }));
             }
             DocumentNavigationLayout::LeftSplit => Settings::set(cx, "documentNavigationOutlineCollapsed", serde_json::json!(!open)),
             DocumentNavigationLayout::RightOutline => {
-                document.update(cx, |host, cx| host.set_manual_outline_open(open, cx));
                 Settings::set(cx, "outlineVisible", serde_json::json!(open));
                 cx.notify();
                 return;
@@ -343,7 +340,6 @@ impl Workspace {
         }
         if open {
             Settings::set(cx, "sidebarHidden", serde_json::json!(false));
-            Settings::set(cx, "outlineVisible", serde_json::json!(true));
         }
         cx.notify();
     }
@@ -436,7 +432,7 @@ impl Workspace {
         let settings = cx.global::<Settings>().clone();
         let area = if docked { self.outline_ui.sidebar_bounds.get()? } else { self.outline_ui.bounds.get()? };
         let width = f32::from(area.size.width);
-        let can_show = width > 0.0 && (docked || document.read(cx).outline_can_show());
+        let can_show = width > 0.0;
         let visible = self.outline_visible(cx) && can_show;
         let reduced = self.explorer.reduce_motion;
         if visible != self.outline_ui.showing {
