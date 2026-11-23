@@ -5,7 +5,7 @@ Summary: Native Markdown editor
 License: AGPL-3.0-or-later
 URL: https://github.com/nomo-md/nomo
 BuildArch: x86_64
-Requires: fontconfig, freetype, libxkbcommon, libxkbcommon-x11, wayland-libs, vulkan-loader, libglvnd-egl, libglvnd-glx, libxcb, xcb-util-cursor, xdg-desktop-portal, xdg-utils
+Requires: fontconfig, freetype, libxkbcommon, libxkbcommon-x11, libwayland-client, libwayland-cursor, libwayland-egl, vulkan-loader, libglvnd-egl, libglvnd-glx, libxcb, xcb-util-cursor, xdg-desktop-portal, xdg-utils
 Recommends: google-noto-sans-cjk-fonts
 
 %description

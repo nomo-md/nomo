@@ -144,7 +144,7 @@ bash scripts/package-linux.sh rpm --skip-build
 
 格式参数必须指定为 `deb` 或 `rpm`，每次只生成一种格式；脚本默认构建默认 Release，`--skip-build` 适用于复用已确认的二进制。打包前会对 Linux 二进制执行 `strip --strip-debug`，移除调试信息。
 
-包包含桌面入口、图标、许可证和样本；保留 X11／Wayland。直接动态依赖由 `dpkg-shlibdeps`／RPM 扫描，另外声明运行时加载的图形、字体和桌面库。Ubuntu 24.04 二进制不承诺兼容更旧 glibc；RPM 仍需目标发行版安装验证。
+包包含桌面入口、图标、许可证和样本；保留 X11／Wayland。直接动态依赖由 `dpkg-shlibdeps`／RPM 扫描，另外声明运行时加载的图形、字体和桌面库。RPM 使用 Fedora 的 `libwayland-client`、`libwayland-cursor` 和 `libwayland-egl` 声明 Wayland 运行时依赖。Ubuntu 24.04 二进制不承诺兼容更旧 glibc；RPM 仍需目标发行版安装验证。
 
 ## 发行契约
 
