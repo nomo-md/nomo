@@ -115,8 +115,8 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     shortcut!("toggle-toolbar", "shortcuts.toggleToolbar", "view", Workspace, action::ToggleToolbar, &["Ctrl+Shift+B"], &["Command+Shift+B"]),
     shortcut!("toggle-outline", "shortcuts.outline", "view", Workspace, action::ToggleOutline, &["Ctrl+Alt+O"], &["Command+Alt+O"]),
     shortcut!("toggle-markdown-mini", "shortcuts.toggleMini", "view", Workspace, action::ToggleMini, &["Ctrl+Alt+M"], &["Command+Alt+M"]),
-    shortcut!("zoom-in", "shortcuts.zoomIn", "view", Workspace, action::ZoomIn, &["Ctrl+Plus"], &["Command+Plus"]),
-    shortcut!("zoom-out", "shortcuts.zoomOut", "view", Workspace, action::ZoomOut, &["Ctrl+Alt+-"], &["Command+Alt+-"]),
+    shortcut!("zoom-in", "shortcuts.zoomIn", "view", Workspace, action::ZoomIn, &["Ctrl+Shift+="], &["Command+Plus"]),
+    shortcut!("zoom-out", "shortcuts.zoomOut", "view", Workspace, action::ZoomOut, &["Ctrl+Shift+-"], &["Command+Alt+-"]),
     shortcut!("zoom-reset", "shortcuts.zoomReset", "view", Workspace, action::ZoomReset, &["Ctrl+Alt+Shift+0"], &["Command+Alt+Shift+0"]),
     shortcut!("show-home", "navigation.home", "view", Workspace, action::ShowHome, &["Ctrl+Alt+Shift+H"], &["Command+Alt+Shift+H"]),
     shortcut!("open-settings", "menu.openSettings", "view", Application, action::OpenSettings, &["Ctrl+,"], &["Command+,"]),
@@ -210,7 +210,15 @@ pub(super) fn record(key: &Keystroke) -> Result<String, UiMessage> {
 
 fn binding(entry: &Shortcut, value: &str, cx: &App) -> Result<KeyBinding, UiMessage> {
     let (_, keys) = normalize(value)?;
-    KeyBinding::load(&keys, (entry.action)(), Some(KeyBindingContextPredicate::parse(entry.scope.predicate()).expect("快捷键上下文").into()), false, None, cx)
+    let keys = keys.as_str();
+    // XKB reports shifted punctuation as the resulting symbol without Shift.
+    #[cfg(target_os = "linux")]
+    let keys = match keys {
+        "ctrl-shift-=" => "ctrl-+",
+        "ctrl-shift--" => "ctrl-_",
+        _ => keys,
+    };
+    KeyBinding::load(keys, (entry.action)(), Some(KeyBindingContextPredicate::parse(entry.scope.predicate()).expect("快捷键上下文").into()), false, None, cx)
         .map_err(|e| UiMessage::new("shortcuts.parseFailed").arg("error", e))
 }
 

@@ -198,7 +198,7 @@ bash scripts/package-linux.sh rpm --skip-build
 
 旧 `shortcutPreferences` 字符串和未知字段保持原样，旧 Ctrl 在 macOS 上仍按 Command 读取。新修改分别写入同一对象中的 `__windows`／`__macos`／`__linux` 命令数组；空数组明确表示解除绑定。单项及全部恢复只影响当前平台，不清除其它平台或旧字段。无效值读取时回退并提示；冲突时优先自定义值，未启用的组合保留配置并提示原因。菜单、右键菜单与工具栏显示实际生效的组合，清除后不再显示旧提示。
 
-Windows 与 macOS 独立定义默认键位，macOS 区分 Command、Control、Option、Shift，并支持 Fn 修饰。复制为 Markdown 使用 Ctrl+Shift+C／⌘⇧C；Windows／Linux 行内代码使用 Ctrl+反引号，macOS 使用 ⌘⇧反引号，插入代码块保持 Ctrl／⌘+Shift+K。Mac 引用使用 ⌥⌘Q，避开 ⌘反引号 和 ⌘⇧Q；Windows 其余格式键位保持不变，缩小使用 Ctrl+Alt+-，重置缩放使用 Ctrl+Alt+Shift+0，避免占用标题降级与正文格式键。系统／输入法可能拦截组合，录制拒绝已知保留键。更改设置只重建有限键表；无正文副本、生产依赖或后台轮询。Windows／macOS 的录制、中文输入法、非美式键盘、多窗口及菜单实机验收仍需分别执行。
+Windows 与 macOS 独立定义默认键位，macOS 区分 Command、Control、Option、Shift，并支持 Fn 修饰。复制为 Markdown 使用 Ctrl+Shift+C／⌘⇧C；Windows／Linux 行内代码使用 Ctrl+反引号，macOS 使用 ⌘⇧反引号，插入代码块保持 Ctrl／⌘+Shift+K。Mac 引用使用 ⌥⌘Q，避开 ⌘反引号 和 ⌘⇧Q；Windows／Linux 使用 Ctrl+Shift+= 放大、Ctrl+Shift+- 缩小，Ctrl+= 和 Ctrl+- 用于提升和降低标题，Ctrl+Alt+Shift+0 用于恢复 100% 缩放。系统／输入法可能拦截组合，录制拒绝已知保留键。更改设置只重建有限键表；无正文副本、生产依赖或后台轮询。Windows／macOS 的录制、中文输入法、非美式键盘、多窗口及菜单实机验收仍需分别执行。
 
 本次界面恢复的增量资源为静态主题预览令牌、三个小型内嵌 SVG 和文本设置的少量校验结果；专属页面只在选中分区时构造，禁用输入不创建实体或订阅。开关动效只在变化期间请求绘制，分区切换和窗口关闭时释放对应状态；不新增正文副本、进程常驻的字体列表、依赖或空闲轮询。字体列表只在展开时从 GPUI 文字系统后台读取；限 4096 个名称及约 512 KiB，超限时按查询重新筛选，列表只渲染可见行。构建检查与实机逐页视觉、DPI、交互验收分别记录，后者仍待执行。
 
