@@ -107,7 +107,7 @@ impl Renderer<'_, '_> {
         if language.eq_ignore_ascii_case("mermaid") {
             self.embed_count += 1;
             let svg = if self.embed_count > 256 { Err("渲染数量超过预算".into()) } else {
-                crate::embeds::export_mermaid(source, self.appearance.theme.dark, self.appearance.theme.mermaid)
+                crate::embeds::export_mermaid(source, self.appearance.theme.dark, self.appearance.theme.mermaid, &self.appearance.font)
             };
             if let Ok(svg) = svg.and_then(|svg| if svg.len() <= MAX_RESOURCE_BYTES { Ok(svg) } else { Err("图表输出超过预算".into()) }) {
                 self.output.raw("<span class=\"mermaid\"><img alt=\"")?; self.output.attr(source)?;

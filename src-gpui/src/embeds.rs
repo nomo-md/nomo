@@ -19,9 +19,9 @@ use std::time::{Duration, Instant};
 #[path = "embeds_native.rs"]
 mod native;
 pub use native::MermaidPalette;
-pub(crate) use native::{math_svg, thumbnail_mermaid, export_mermaid, font_database};
-use native::{mermaid_svg_with_palette, MERMAID_FONT_FAMILY};
-#[cfg(test)] use native::mermaid_svg;
+pub(crate) use native::{math_svg, thumbnail_mermaid, export_mermaid, font_database, mermaid_font_resolver};
+use native::mermaid_svg_with_palette;
+#[cfg(test)] use native::{mermaid_svg, MERMAID_FONT_FAMILY};
 
 /// 位图缓存上限（BGRA 字节）。800 个块级公式在 2 倍分辨率下约占 60–90 MiB，留出余量。
 const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
@@ -58,16 +58,19 @@ pub struct EmbedSpec {
     pub kind: EmbedKind,
     pub source: String,
     pub em_px: f32,
+    pub font_family: String,
     pub color: [u8; 3],
     pub dark: bool,
 }
 
 impl EmbedSpec {
-    // 只有尺寸不同的同一张 Mermaid 可临时替代；源码、主题或配色变化不能串图。
+    fn estimated_bytes(&self) -> usize { self.source.capacity() + self.font_family.capacity() }
+    // 只有尺寸不同的同一张 Mermaid 可临时替代；源码、字体或配色变化不能串图。
     fn scale_family(&self) -> Option<u64> {
         if !matches!(self.kind, EmbedKind::Mermaid | EmbedKind::MermaidThemed(_)) { return None; }
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.kind.hash(&mut hasher);
+        self.font_family.hash(&mut hasher);
         self.source.trim().hash(&mut hasher);
         self.color.hash(&mut hasher);
         self.dark.hash(&mut hasher);
@@ -77,6 +80,7 @@ impl EmbedSpec {
     pub fn key(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.kind.hash(&mut hasher);
+        if matches!(self.kind, EmbedKind::Mermaid | EmbedKind::MermaidThemed(_)) { self.font_family.hash(&mut hasher); }
         // 围栏解析和局部草稿保留的首尾换行不同，但它们使用同一份渲染结果。
         self.source.trim().hash(&mut hasher);
         self.em_px.to_bits().hash(&mut hasher);
@@ -288,7 +292,7 @@ impl EmbedStore {
         });
         self.specs.retain(|key, spec| {
             if self.entries.contains_key(key) { return true; }
-            self.spec_bytes -= spec.source.capacity();
+            self.spec_bytes -= spec.estimated_bytes();
             false
         });
         self.visible_requests.get_mut().retain(|key| self.entries.contains_key(key));
@@ -343,14 +347,14 @@ pub fn request(specs: Vec<EmbedSpec>, cx: &mut App) {
             continue;
         }
         if store.entries.len() >= MAX_ENTRIES { continue; }
-        if store.spec_bytes + spec.source.len() > MAX_SPEC_BYTES {
+        if store.spec_bytes + spec.estimated_bytes() > MAX_SPEC_BYTES {
             store.entries.insert(key, Entry::Failed(BUDGET_MESSAGE.into()));
             store.generation = store.generation.wrapping_add(1);
             cx.refresh_windows();
             continue;
         }
         let saved = spec.clone();
-        store.spec_bytes += saved.source.capacity();
+        store.spec_bytes += saved.estimated_bytes();
         store.specs.insert(key, saved);
         store.next_request = store.next_request.wrapping_add(1);
         let request = store.next_request;
@@ -381,23 +385,24 @@ fn render(spec: &EmbedSpec) -> Result<(EmbedInfo, RenderImage, usize), String> {
     match spec.kind {
         EmbedKind::Math { display } => {
             let (svg, depth_ratio) = math_svg(source, display, spec.color)?;
-            let (image, width, height, bytes) = rasterize(&svg, scale_to_em, false)?;
+            let (image, width, height, bytes) = rasterize(&svg, scale_to_em, None)?;
             Ok((EmbedInfo { width, height, depth: height * depth_ratio }, image, bytes))
         }
         EmbedKind::Mermaid | EmbedKind::MermaidThemed(_) => {
             let palette = if let EmbedKind::MermaidThemed(palette) = spec.kind { Some(palette) } else { None };
-            let svg = mermaid_svg_with_palette(source, spec.dark, palette, merman::OperationControl::new())?;
-            let (image, width, height, bytes) = rasterize(&svg, scale_to_em, true)?;
+            let svg = mermaid_svg_with_palette(source, spec.dark, palette, &spec.font_family, merman::OperationControl::new())?;
+            let (image, width, height, bytes) = rasterize(&svg, scale_to_em, Some(&spec.font_family))?;
             Ok((EmbedInfo { width, height, depth: 0.0 }, image, bytes))
         }
     }
 }
 
 /// 栅格化 SVG：`scale` 为逻辑缩放（相对 SVG 自身尺寸），实际按 2 倍分辨率出图并转为 BGRA。
-fn rasterize(svg: &str, scale: f32, mermaid_text: bool) -> Result<(RenderImage, f32, f32, usize), String> {
+fn rasterize(svg: &str, scale: f32, font_family: Option<&str>) -> Result<(RenderImage, f32, f32, usize), String> {
     let mut options = resvg::usvg::Options { fontdb: font_database(), ..Default::default() };
-    if mermaid_text {
-        options.font_family = MERMAID_FONT_FAMILY.into();
+    if let Some(font_family) = font_family {
+        options.font_family = font_family.into();
+        options.font_resolver = mermaid_font_resolver();
     }
     let tree = resvg::usvg::Tree::from_str(svg, &options).map_err(|error| format!("SVG 解析失败：{error}"))?;
     let size = tree.size();
@@ -474,8 +479,8 @@ mod tests {
     #[test]
     fn evicted_mermaid_layout_stays_ready_without_offscreen_demands() {
         use crate::nomo_mark::resources::ResourceAdapter;
-        fn adapter<'a>(store: &'a EmbedStore, images: &'a crate::images::ImageStore, spec: &EmbedSpec, palette: MermaidPalette) -> ResourceAdapter<'a> {
-            ResourceAdapter { images, embeds: store, em_px: spec.em_px, dark: false,
+        fn adapter<'a>(store: &'a EmbedStore, images: &'a crate::images::ImageStore, spec: &'a EmbedSpec, palette: MermaidPalette) -> ResourceAdapter<'a> {
+            ResourceAdapter { images, embeds: store, em_px: spec.em_px, font_family: &spec.font_family, dark: false,
                 mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default() }
         }
         for zoom in [1.0, 1.4] {
@@ -483,7 +488,7 @@ mod tests {
             let images = crate::images::ImageStore::default();
             let palette = MermaidPalette { mode: 0, colors: [0; 9] };
             let spec = EmbedSpec { kind: EmbedKind::MermaidThemed(palette), source: "flowchart TD\n A --> B".into(),
-                em_px: 16.0 * zoom, color: [0; 3], dark: false };
+                em_px: 16.0 * zoom, font_family: MERMAID_FONT_FAMILY.into(), color: [0; 3], dark: false };
             let key = spec.key();
             let info = EmbedInfo { width: 800.0 * zoom, height: 1200.0 * zoom, depth: 0.0 };
             let decoded = || Ok((info, RenderImage::new(vec![Frame::new(RgbaImage::new(1, 1))]), MAX_CACHE_BYTES / 2));
@@ -510,8 +515,8 @@ mod tests {
         let info = EmbedInfo { width: 800.0, height: 1200.0, depth: 0.0 };
         let decoded = || Ok((info, RenderImage::new(vec![Frame::new(RgbaImage::new(1, 1))]), MAX_CACHE_BYTES / 2));
         for key in 1..=3 {
-            let spec = EmbedSpec { kind: EmbedKind::Mermaid, source: format!("flowchart TD\n A --> B{key}"), em_px: 16.0, color: [0; 3], dark: false };
-            store.spec_bytes += spec.source.capacity();
+            let spec = EmbedSpec { kind: EmbedKind::Mermaid, source: format!("flowchart TD\n A --> B{key}"), em_px: 16.0, font_family: MERMAID_FONT_FAMILY.into(), color: [0; 3], dark: false };
+            store.spec_bytes += spec.estimated_bytes();
             store.specs.insert(key, spec);
             store.insert(key, decoded());
         }
@@ -542,10 +547,10 @@ mod tests {
     #[test]
     fn closing_during_restore_releases_reservation_and_ignores_completion() {
         let mut store = EmbedStore::default();
-        let spec = EmbedSpec { kind: EmbedKind::Mermaid, source: "flowchart TD\n A --> B".into(), em_px: 16.0, color: [0; 3], dark: false };
+        let spec = EmbedSpec { kind: EmbedKind::Mermaid, source: "flowchart TD\n A --> B".into(), em_px: 16.0, font_family: MERMAID_FONT_FAMILY.into(), color: [0; 3], dark: false };
         let info = EmbedInfo { width: 800.0, height: 1200.0, depth: 0.0 };
         let decoded = || Ok((info, RenderImage::new(vec![Frame::new(RgbaImage::new(1, 1))]), MAX_CACHE_BYTES));
-        store.spec_bytes = spec.source.capacity();
+        store.spec_bytes = spec.estimated_bytes();
         store.specs.insert(1, spec);
         store.insert(1, decoded());
         store.insert(2, decoded());
@@ -559,7 +564,7 @@ mod tests {
 
     #[test]
     fn renders_display_math_with_depth() {
-        let spec = EmbedSpec { kind: EmbedKind::Math { display: true }, source: r"\frac{a}{b} + \sum_{i=1}^n x_i".into(), em_px: 16.0, color: [0, 0, 0], dark: false };
+        let spec = EmbedSpec { kind: EmbedKind::Math { display: true }, source: r"\frac{a}{b} + \sum_{i=1}^n x_i".into(), em_px: 16.0, font_family: MERMAID_FONT_FAMILY.into(), color: [0, 0, 0], dark: false };
         let (info, _, bytes) = render(&spec).expect("render");
         assert!(info.width > 30.0 && info.height > 20.0, "{info:?}");
         assert!(info.depth > 0.0 && info.depth < info.height);
@@ -571,7 +576,7 @@ mod tests {
         let svg = mermaid_svg("flowchart TD\n  A[开始] --> B{判断}\n  B --> C[结束]", false).expect("svg");
         assert!(!svg.contains("<foreignObject"), "resvg 管线不应保留 foreignObject");
         assert!(svg.contains("开始"));
-        let spec = EmbedSpec { kind: EmbedKind::Mermaid, source: "flowchart TD\n  A[开始] --> B[结束]".into(), em_px: 16.0, color: [0, 0, 0], dark: true };
+        let spec = EmbedSpec { kind: EmbedKind::Mermaid, source: "flowchart TD\n  A[开始] --> B[结束]".into(), em_px: 16.0, font_family: MERMAID_FONT_FAMILY.into(), color: [0, 0, 0], dark: true };
         assert!(render(&spec).is_ok());
     }
 
@@ -580,7 +585,7 @@ mod tests {
         use crate::nomo_mark::resources::ResourceAdapter;
         let palette = MermaidPalette { mode: 0, colors: [0; 9] };
         let base = EmbedSpec { kind: EmbedKind::MermaidThemed(palette), source: "flowchart TD\n A[开始] --> B[结束]".into(),
-            em_px: 16.0, color: [0; 3], dark: false };
+            em_px: 16.0, font_family: MERMAID_FONT_FAMILY.into(), color: [0; 3], dark: false };
         let mut store = EmbedStore::default();
         let images = crate::images::ImageStore::default();
         let base_key = base.key();
@@ -591,7 +596,7 @@ mod tests {
         let original_image = store.image(base_key).unwrap();
         for em_px in [9.6, 22.4, 32.0, 12.8, 16.0] {
             let spec = EmbedSpec { em_px, ..base.clone() };
-            let resources = ResourceAdapter { images: &images, embeds: &store, em_px, dark: false,
+            let resources = ResourceAdapter { images: &images, embeds: &store, em_px, font_family: &base.font_family, dark: false,
                 mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default() };
             let (key, state) = resources.embed(EmbedKind::Mermaid, &base.source);
             assert_eq!(key, base_key);
@@ -604,7 +609,7 @@ mod tests {
         let key = target.key();
         store.specs.insert(key, target.clone());
         store.entries.insert(key, Entry::Loading(7));
-        let resources = ResourceAdapter { images: &images, embeds: &store, em_px: target.em_px, dark: false,
+        let resources = ResourceAdapter { images: &images, embeds: &store, em_px: target.em_px, font_family: &target.font_family, dark: false,
             mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default() };
         assert_eq!(resources.embed(EmbedKind::Mermaid, &base.source).0, base_key);
         assert!(resources.demands.borrow().is_empty());
@@ -612,7 +617,7 @@ mod tests {
         let generation = dependencies.generation(&images, &store);
         store.complete(key, 7, render(&target));
         assert_ne!(dependencies.generation(&images, &store), generation);
-        let resources = ResourceAdapter { images: &images, embeds: &store, em_px: target.em_px, dark: false,
+        let resources = ResourceAdapter { images: &images, embeds: &store, em_px: target.em_px, font_family: &target.font_family, dark: false,
             mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default() };
         assert_eq!(resources.embed(EmbedKind::Mermaid, &base.source).0, key);
         for different in [EmbedSpec { source: "flowchart TD\n A --> C".into(), ..target.clone() },
@@ -652,7 +657,7 @@ mod tests {
         sources.push((EmbedKind::Math { display: true }, r"\begin{bmatrix}1&2\\3&4\end{bmatrix}".into()));
         for (index, (kind, source)) in sources.into_iter().enumerate() {
             for dark in [false, true] {
-                let spec = EmbedSpec { kind, source: source.clone(), em_px: 16.0, color: if dark { [215, 220, 225] } else { [32, 36, 40] }, dark };
+                let spec = EmbedSpec { kind, source: source.clone(), em_px: 16.0, font_family: MERMAID_FONT_FAMILY.into(), color: if dark { [215, 220, 225] } else { [32, 36, 40] }, dark };
                 let (_, image, _) = render(&spec).unwrap_or_else(|error| panic!("{index}: {error}"));
                 let size = image.size(0);
                 let mut data = image.as_bytes(0).unwrap().to_vec();
@@ -667,7 +672,7 @@ mod tests {
 
     #[test]
     fn renders_cjk_text_with_system_font_outlines() {
-        let spec = EmbedSpec { kind: EmbedKind::Math { display: false }, source: r"E = mc^2 \text{（质能方程）}".into(), em_px: 16.0, color: [0, 0, 0], dark: false };
+        let spec = EmbedSpec { kind: EmbedKind::Math { display: false }, source: r"E = mc^2 \text{（质能方程）}".into(), em_px: 16.0, font_family: MERMAID_FONT_FAMILY.into(), color: [0, 0, 0], dark: false };
         let (info, image, bytes) = render(&spec).expect("中文公式应使用可用系统字体");
         assert!(info.width > 100.0 && info.height > 10.0 && bytes > 0, "{info:?}");
         assert!(info.depth >= 0.0 && info.depth < info.height);
@@ -679,7 +684,7 @@ mod tests {
     #[test]
     fn cjk_fraction_scripts_and_spaces_keep_real_metrics() {
         let measure = |source: &str| {
-            render(&EmbedSpec { kind: EmbedKind::Math { display: true }, source: source.into(), em_px: 16.0, color: [32, 36, 40], dark: false }).unwrap().0
+            render(&EmbedSpec { kind: EmbedKind::Math { display: true }, source: source.into(), em_px: 16.0, font_family: MERMAID_FONT_FAMILY.into(), color: [32, 36, 40], dark: false }).unwrap().0
         };
         let base = measure(r"\text{中文}");
         let fraction = measure(r"\frac{\text{中文}}{\text{分母}}");

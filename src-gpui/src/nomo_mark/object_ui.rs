@@ -947,7 +947,7 @@ impl NomoMark {
         let theme = cx.global::<Theme>();
         let color: gpui::Rgba = theme.fg.into();
         let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-        Some(EmbedSpec { kind: kind.with_palette(theme.mermaid), source: source.to_string(), em_px: cx.global::<Settings>().metrics().body_size(),
+        Some(EmbedSpec { kind: kind.with_palette(theme.mermaid), source: source.to_string(), font_family: crate::theme::font_for(crate::theme::Family::Text, false, false).family.to_string(), em_px: cx.global::<Settings>().metrics().body_size(),
             color: [byte(color.r), byte(color.g), byte(color.b)], dark: theme.dark })
     }
     fn object_preview(&self, cx: &App) -> Option<(u64, crate::embeds::EmbedState)> {
@@ -967,7 +967,7 @@ impl NomoMark {
             }).or(Some((key, EmbedState::Pending))),
         }
     }
-    fn request_object_preview(&mut self, immediate: bool, cx: &mut Context<Self>) {
+    pub(super) fn request_object_preview(&mut self, immediate: bool, cx: &mut Context<Self>) {
         // 切换请求前记住当前已完成结果。旧结果只在新请求等待时显示，失败仍明确显示错误。
         self.object_preview(cx);
         let spec = self.object_preview_spec(cx);

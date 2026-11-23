@@ -111,8 +111,8 @@ impl Media<'_> {
                     self.enhancements += 1;
                     let image = if self.enhancements <= 256 && text.len() <= 64 * 1024 {
                         self.picture(SourceKind::Mermaid, text, |media| {
-                            let svg = crate::embeds::export_mermaid(text, media.appearance.theme.dark, media.appearance.theme.mermaid)?;
-                            media.svg(svg.as_bytes())
+                            let svg = crate::embeds::export_mermaid(text, media.appearance.theme.dark, media.appearance.theme.mermaid, &media.appearance.font)?;
+                            media.svg(svg.as_bytes(), true)
                         })?
                     } else { None };
                     self.job.check()?;
@@ -182,7 +182,7 @@ impl Media<'_> {
                     let result = if tex.len() <= 64 * 1024 && self.enhancements <= 256 {
                         self.picture(SourceKind::Math(*display), tex, |media| {
                             let (svg, _) = crate::embeds::math_svg(tex, *display, super::pdf::rgb_bytes(media.appearance.theme.fg))?;
-                            media.svg(svg.as_bytes())
+                            media.svg(svg.as_bytes(), false)
                         })?
                     } else { None };
                     match result {
@@ -225,14 +225,15 @@ impl Media<'_> {
                 let image = if w.max(h) > 2048 { image.resize(2048, 2048, image::imageops::FilterType::Triangle) } else { image };
                 Ok(Bitmap { pixels: image.into_rgba8(), width: w as f32 * 0.75, height: h as f32 * 0.75 })
             },
-            Err(_) => self.svg(&bytes),
+            Err(_) => self.svg(&bytes, false),
         }
     }
-    fn svg(&self, bytes: &[u8]) -> Result<Bitmap, String> {
+    fn svg(&self, bytes: &[u8], mermaid: bool) -> Result<Bitmap, String> {
         if bytes.len() > MAX_RESOURCE_BYTES { return Err("SVG 超过预算".into()); }
         let refused = Arc::new(AtomicBool::new(false));
         let (a, b) = (refused.clone(), refused.clone());
         let options = resvg::usvg::Options { fontdb: crate::embeds::font_database(),
+            font_resolver: if mermaid { crate::embeds::mermaid_font_resolver() } else { Default::default() },
             image_href_resolver: resvg::usvg::ImageHrefResolver {
                 resolve_data: Box::new(move |_, _, _| { a.store(true, Ordering::Relaxed); None }),
                 resolve_string: Box::new(move |_, _| { b.store(true, Ordering::Relaxed); None }),

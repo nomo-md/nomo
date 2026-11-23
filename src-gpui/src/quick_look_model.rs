@@ -43,17 +43,18 @@ impl<F: Fn() -> bool> Budget<F> {
         self.check()?;
         let (svg, depth) = if mermaid {
             // 首次字体加载属于预览总预算，不应耗尽后续图表计算的 150 ms。
-            let _ = native::mermaid_fonts();
+            let _ = native::mermaid_fonts(native::MERMAID_FONT_FAMILY);
             self.check()?;
             let palette = dark.then_some(native::MermaidPalette { mode: 2,
                 colors: [0x202020, 0x303030, 0xe6e6e6, 0x888888, 0xc0c0c0, 0x262626, 0x303030, 0x7dbbff, 0xffffff] });
-            (native::mermaid_svg_with_palette(source, dark, palette,
+            (native::mermaid_svg_with_palette(source, dark, palette, native::MERMAID_FONT_FAMILY,
                 merman::OperationControl::new().with_deadline(Duration::from_millis(150)))?, 0.0)
         }
             else { native::math_svg(source, display, if dark { [225, 225, 230] } else { [30, 30, 35] })? };
         if svg.len() > 2 * 1024 * 1024 { return Err("SVG budget".into()); }
         let options = resvg::usvg::Options {
             fontdb: native::font_database(),
+            font_resolver: if mermaid { native::mermaid_font_resolver() } else { Default::default() },
             // Mermaid 的 image 节点也不得绕过 Swift 的本地资源预算。
             image_href_resolver: resvg::usvg::ImageHrefResolver {
                 resolve_data: Box::new(|_, _, _| None), resolve_string: Box::new(|_, _| None),

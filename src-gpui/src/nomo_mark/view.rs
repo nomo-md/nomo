@@ -1834,6 +1834,9 @@ impl NomoMark {
         }
         self.layout_external_composition(width, window, cx);
         self.refresh_code_view_state(cx);
+        if self.object.is_some() && self.layout_key.as_ref().is_none_or(|key| key.0.font_generation != crate::layout::generation()) {
+            self.request_object_preview(true, cx);
+        }
         let settings = cx.global::<Settings>();
         let metrics = settings.metrics();
         let wrap = settings.wrap();
@@ -1930,10 +1933,12 @@ impl NomoMark {
             let theme = cx.global::<Theme>();
             let rgba = gpui::Rgba::from(theme.fg);
             let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let document_font = crate::theme::font_for(Family::Text, false, false).family;
             let resources = ResourceAdapter {
                 images: cx.global::<ImageStore>(),
                 embeds: cx.global::<EmbedStore>(),
                 em_px: metrics.body_size(),
+                font_family: &document_font,
                 dark: theme.dark,
                 mermaid: theme.mermaid,
                 color: [byte(rgba.r), byte(rgba.g), byte(rgba.b)],
