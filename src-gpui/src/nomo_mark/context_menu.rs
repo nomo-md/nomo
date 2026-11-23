@@ -72,13 +72,16 @@ impl Item {
 impl NomoMark {
     pub(crate) fn open_context_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         if self.host.interaction.protected() || self.auxiliary_input { return; }
-        let at = self.content_bounds().and_then(|bounds| self.layout.as_ref()?.object_source_at(
+        let implicit = self.implicit_cell_at(position);
+        let at = implicit.map(|cell| cell.anchor(&self.host.parsed.source))
+            .or_else(|| self.content_bounds().and_then(|bounds| self.layout.as_ref()?.object_source_at(
             f32::from(position.x - bounds.left()), f32::from(position.y - bounds.top())))
-            .or_else(|| self.hit(position)).unwrap_or_else(|| self.local_cursor());
+            ).or_else(|| self.hit(position)).unwrap_or_else(|| self.local_cursor());
         let absolute = self.host.parsed.identity.from_byte + at as u64;
         let selection = self.host.selection.range();
         if selection.is_empty() || absolute < selection.start || absolute > selection.end {
-            self.move_to(at, false, cx);
+            if let Some(cell) = implicit { self.select_implicit_cell(cell, cx); }
+            else { self.move_to(at, false, cx); }
         }
         self.dismiss_quick_insert(cx);
         self.menu_open = false;
@@ -102,6 +105,13 @@ impl NomoMark {
     fn context_target(&self, at: usize) -> Target {
         if self.effective_mode() == ViewMode::Semantic {
             let parsed = &self.host.parsed;
+            if let Some(cell) = self.active_implicit_cell()
+                && let Some(table) = Table::at(parsed, at)
+                && let Some(row) = table.implicit_row(cell)
+            {
+                return Target::Table { source: table.source, row, column: cell.column,
+                    rows: table.rows.len(), columns: table.separator.cells.len(), header: true };
+            }
             if let Some(mut range) = self.image_range_at(at) {
                 if parsed.source[range.end..].starts_with('{') {
                     if let Some(end) = parsed.source[range.end..].find('}') { range.end += end + 1; }

@@ -139,7 +139,7 @@ pub(super) fn prepaint_cursors(
         let (x, y, w, h, cursor) = match item {
             DisplayItem::Text { x, y, layout, map } if !map.is_empty() =>
                 (*x, *y, layout.max_hit_width().max(4.0), layout.height(), IBeam),
-            DisplayItem::TableCell { x, y, w, h, .. } => (*x, *y, *w, *h, IBeam),
+            DisplayItem::TableCell { x, y, w, h, .. } | DisplayItem::ImplicitTableCell { x, y, w, h, .. } => (*x, *y, *w, *h, IBeam),
             DisplayItem::Checkbox { x, y, size, .. } | DisplayItem::Disclosure { x, y, size, .. }
                 | DisplayItem::CopyButton { x, y, size, .. } => (*x, *y, *size, *size, PointingHand),
             DisplayItem::TocLink { x, y, w, h, .. } => (*x, *y, *w, *h, PointingHand),
@@ -247,7 +247,7 @@ fn paint_layer(
                 let _ = window.paint_svg(Bounds::new(origin + point(px(*x), px(*y)), size(px(*side), px(*side))),
                     path.into(), None, TransformationMatrix::unit(), role.resolve(theme), cx);
             }
-            DisplayItem::CodeHeader { .. } | DisplayItem::CodeLanguage { .. } | DisplayItem::TableCell { .. } | DisplayItem::BlockControls { .. } | DisplayItem::TocLink { .. } => {}
+            DisplayItem::CodeHeader { .. } | DisplayItem::CodeLanguage { .. } | DisplayItem::TableCell { .. } | DisplayItem::ImplicitTableCell { .. } | DisplayItem::BlockControls { .. } | DisplayItem::TocLink { .. } => {}
             DisplayItem::CodeBody { x, y, w, h, body, .. } => {
                 if y+h < clip.start || *y > clip.end { continue; }
                 let (width, height) = body.viewport(*w, *h);

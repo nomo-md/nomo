@@ -33,7 +33,12 @@ pub(crate) fn markup(parsed: &ParsedWindow, range: &Range<usize>, text: &str) ->
 }
 
 pub(crate) fn markdown_cell(parsed: &ParsedWindow, range: &Range<usize>) -> bool {
-    parsed.nodes.iter().any(|node| node.kind == "table-cell" && node.source.start <= range.start && range.end <= node.source.end)
+    parsed.nodes.iter().any(|node| {
+        node.kind == "table-cell" && node.source.start <= range.start && range.end <= node.source.end
+            && !(node.source.is_empty() && node.parent.and_then(|parent| parsed.nodes.get(parent)).is_some_and(|row| {
+                row.kind == "table-row" && super::table::ImplicitCell::matches(&node.source, row.source.end)
+            }))
+    })
 }
 
 /// 语义格内输入允许 Markdown 标记，但管道不能意外成为新的列边界。

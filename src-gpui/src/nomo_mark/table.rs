@@ -6,6 +6,85 @@ use super::{
 };
 use std::ops::Range;
 
+/// GFM 补出的单元格没有源码区间；同一行的多个补位以列号区分。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ImplicitCell {
+    pub row_end: usize,
+    pub column: usize,
+}
+
+pub(super) enum CellTarget {
+    Source(usize),
+    Implicit(ImplicitCell),
+}
+
+impl ImplicitCell {
+    pub(crate) fn matches(range: &Range<usize>, row_end: usize) -> bool {
+        range.is_empty() && range.start == row_end
+    }
+
+    pub(super) fn anchor(self, source: &str) -> usize {
+        let end = &source[..self.row_end];
+        end.strip_suffix("\r\n").or_else(|| end.strip_suffix('\n')).unwrap_or(end).len()
+    }
+
+    pub(super) fn replace(self, parsed: &ParsedWindow, text: &str) -> Result<EditResult, ControlError> {
+        use pulldown_cmark::{Event, Tag, TagEnd};
+
+        let source = &*parsed.source;
+        let mut column = 0;
+        let mut last_real = None;
+        let mut in_row = false;
+        let mut found = false;
+        for (event, range) in &parsed.events {
+            match event {
+                Event::Start(Tag::TableRow) if range.end == self.row_end => in_row = true,
+                Event::End(TagEnd::TableRow) if in_row => break,
+                Event::Start(Tag::TableCell) if in_row => {
+                    if Self::matches(range, self.row_end) {
+                        if column == self.column {
+                            found = true;
+                            break;
+                        }
+                    } else {
+                        last_real = Some((column, range.end));
+                    }
+                    column += 1;
+                }
+                _ => {}
+            }
+        }
+        let (last_column, last_end) = last_real.filter(|_| found)
+            .ok_or(ControlError::InvalidRange)?;
+        let line_end = self.anchor(source);
+        let at = source[..line_end].trim_end_matches([' ', '\t']).len();
+        let closed = source.as_bytes().get(last_end) == Some(&b'|') && last_end < at;
+        let mut inserted = String::new();
+        if !closed {
+            inserted.push_str(" |");
+        }
+        for _ in last_column + 1..column {
+            inserted.push_str("  |");
+        }
+        inserted.push(' ');
+        let text = if text.contains(['\r', '\n']) {
+            text.replace("\r\n", "\n").replace(['\r', '\n'], "<br>")
+        } else {
+            text.to_owned()
+        };
+        let escaped = super::table_inline::markdown_input(&inserted, inserted.len(), &text);
+        inserted.push_str(&escaped);
+        let base = parsed.identity.from_byte + at as u64;
+        let selection = DocumentSelection::caret(base + inserted.len() as u64);
+        inserted.push_str(" |");
+        Ok(EditResult {
+            edits: vec![SourceEdit { from_byte: base, to_byte: base, inserted_text: inserted }],
+            selection,
+            template_update: None,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TableRow {
     pub source: Range<usize>,
@@ -79,23 +158,48 @@ impl Table {
         }
         None
     }
-    pub fn next_cell(&self, position: usize, backwards: bool) -> Option<Range<usize>> {
-        let (row, column) = self.cell_at(position)?;
-        if backwards {
-            if column > 0 {
-                self.rows[row].cells.get(column - 1).cloned()
-            } else if row > 0 {
-                self.rows[row - 1].cells.last().cloned()
-            } else {
-                None
+    pub(super) fn implicit_row(&self, cell: ImplicitCell) -> Option<usize> {
+        self.rows.iter().position(|row| row.source.end == cell.row_end)
+    }
+
+    pub(super) fn next_cell(&self, parsed: &ParsedWindow, position: usize, implicit: Option<ImplicitCell>, backwards: bool) -> Option<CellTarget> {
+        use pulldown_cmark::{Event, Tag, TagEnd};
+
+        let table_events = parsed.events.iter().skip_while(|(event, range)| {
+            !matches!(event, Event::Start(Tag::Table(_))) || range != &self.source
+        }).skip(1);
+        let mut row_end = None;
+        let mut column = 0;
+        let mut previous = None;
+        let mut found = false;
+        for (event, range) in table_events {
+            match event {
+                Event::Start(Tag::TableHead) => { row_end = None; column = 0; }
+                Event::Start(Tag::TableRow) => { row_end = Some(range.end); column = 0; }
+                Event::Start(Tag::TableCell) => {
+                    let cell = row_end.filter(|end| ImplicitCell::matches(range, *end))
+                        .map(|row_end| ImplicitCell { row_end, column });
+                    let current = if let Some(cell) = cell { implicit == Some(cell) } else {
+                        implicit.is_none() && range.start <= position && position <= range.end
+                    };
+                    let target = if let Some(cell) = cell { CellTarget::Implicit(cell) } else {
+                        let text = &parsed.source[range.clone()];
+                        let trimmed = text.trim_start_matches([' ', '\t']);
+                        CellTarget::Source(if trimmed.is_empty() { range.start } else { range.end - trimmed.len() })
+                    };
+                    if found { return Some(target); }
+                    if current {
+                        if backwards { return previous; }
+                        found = true;
+                    }
+                    previous = Some(target);
+                    column += 1;
+                }
+                Event::End(TagEnd::Table) => break,
+                _ => {}
             }
-        } else {
-            self.rows[row]
-                .cells
-                .get(column + 1)
-                .or_else(|| self.rows.get(row + 1).and_then(|row| row.cells.first()))
-                .cloned()
         }
+        None
     }
     pub fn edit(
         &self,
