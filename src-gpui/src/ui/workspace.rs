@@ -1539,25 +1539,26 @@ impl Workspace {
         let viewport = self.tab_scroll.bounds();
         let offset = self.tab_scroll.offset().x;
         let reduced = self.explorer.reduce_motion;
+        let show_tooltips = self.tab_tooltips_enabled();
+        let workspace = cx.entity().downgrade();
         let rows: Vec<AnyElement> = self.tab_rows(cx).into_iter().enumerate().filter_map(|(index, row)| {
             let bounds = self.tab_scroll.bounds_for_item(index)?;
             if bounds.left() + offset >= viewport.left() && bounds.right() + offset <= viewport.right() { return None; }
             let item=row.item;
             let tab=row.tab.map(|index| &self.tabs[index]);
             let key=item.first();
-            let title=row.title;
             let dirty=row.dirty;
             let hover=tab.map_or(0.0, |tab| tab.hidden_hover.value());
             let active=self.tabs.get(self.active).is_some_and(|tab|item.contains(tab.key));
-            let row = div().id(("hidden-tab", index)).h(px(30.0)).px(px(8.0)).flex().flex_none()
+            let row = div().id(("hidden-tab", key)).h(px(30.0)).px(px(8.0)).flex().flex_none()
                 .items_center().gap(px(8.0)).rounded(px(5.0)).cursor_pointer()
                 .text_color(if active { theme.heading } else { motion::color(theme.muted, theme.fg, hover) })
                 .bg(gpui::Hsla::from(gpui::rgba(0x80808014)).opacity(hover))
                 .when(tab.is_none(), |el| el.hover(|style| style.text_color(theme.fg).bg(gpui::rgba(0x80808014))))
                 .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
                 .child(icon(if row.favorite { IconName::StarFilled } else { IconName::FileText }, 13.0, theme.accent))
-                .child(div().flex_1().min_w(px(0.0)).truncate()
-                    .when(tab.is_some_and(|tab| tab.preview), |el| el.italic().opacity(0.85)).child(title))
+                .child(row.label(tab.is_some_and(|tab| tab.preview), show_tooltips))
+                .when(show_tooltips && row.has_path, |el| el.tooltip(Self::tab_tooltip(key, workspace.clone())))
                 .children(dirty.then(|| div().size(px(6.0)).rounded_full().bg(theme.accent)))
                 .on_hover(cx.listener(move |workspace, hovered: &bool, _, cx| {
                     let reduced = workspace.explorer.reduce_motion;
@@ -1600,11 +1601,12 @@ impl Workspace {
         if tab_count == 0 { surface.clear(); }
         let focused=self.tabs.get(self.active).map(|tab|tab.key);
         let highlight=self.comparison.highlight;
+        let show_tooltips = !self.tab_menu_open && self.tab_tooltips_enabled();
+        let weak_workspace = cx.entity().downgrade();
         let tabs: Vec<AnyElement> = rows.into_iter().enumerate().map(|(index,row)| {
                 let item=row.item;
                 let key=item.first();
                 let active=focused.is_some_and(|key|item.contains(key));
-                let title=row.title;
                 let dirty=row.dirty;
                 if let Some(tab_index)=row.tab {
                     let tab=&mut self.tabs[tab_index];
@@ -1655,7 +1657,7 @@ impl Workspace {
                         workspace.close_item(item, window, cx);
                     }));
                 let tab_element = div()
-                    .id(("tab", index))
+                    .id(("tab", key))
                     .when(tab.is_none(), |el| el.group("document-tab"))
                     .relative()
                     .flex()
@@ -1675,8 +1677,8 @@ impl Workspace {
                     .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
                     .children(tab_id.filter(|_| active).map(|tab_id| surface.tab_marker(tab_id, index, tab_count, tab_scroll.clone())))
                     .child(icon(if row.favorite { IconName::StarFilled } else { IconName::FileText }, 14.0, tab_icon_color.opacity(title_opacity)))
-                    .child(div().flex_1().min_w(px(0.0)).truncate()
-                        .when(tab.is_some_and(|tab| tab.preview), |el| el.italic().opacity(0.85)).child(title))
+                    .child(row.label(tab.is_some_and(|tab| tab.preview), show_tooltips))
+                    .when(show_tooltips && row.has_path, |el| el.tooltip(Self::tab_tooltip(key, weak_workspace.clone())))
                     .children(Self::drop_marker(highlight,item,index,tab_count,theme))
                     .when(cfg!(windows), |el| el
                         .on_mouse_down(MouseButton::Right,cx.listener(move |w,e:&gpui::MouseDownEvent,win,cx| w.open_tab_context(item,e.position,win,cx)))
@@ -1716,7 +1718,6 @@ impl Workspace {
         let hidden_tabs = self.render_hidden_tabs(theme, cx);
         let overflow_state = self.tab_overflow.clone();
         let measured_scroll = self.tab_scroll.clone();
-        let weak_workspace = cx.entity().downgrade();
         let button_bounds = self.tab_menu_button_bounds.clone();
         let overflow_marker = gpui::canvas(
             move |bounds, _, _| button_bounds.set(Some(bounds)),

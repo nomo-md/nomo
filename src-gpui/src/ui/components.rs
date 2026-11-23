@@ -368,18 +368,21 @@ pub struct Tooltip {
 
 impl Render for Tooltip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let animate_theme = Theme::ui_transition_active(cx);
-        let theme = Theme::ui(cx);
-        div()
-            .relative().children(animate_theme.then(crate::ui::motion::theme_frame))
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(px(6.0))
-            .bg(theme.heading)
-            .text_color(theme.surface)
-            .text_size(px(12.0))
-            .child(self.text.clone())
+        tooltip_body(cx).child(self.text.clone())
     }
+}
+
+pub(super) fn tooltip_body(cx: &App) -> Div {
+    let animate_theme = Theme::ui_transition_active(cx);
+    let theme = Theme::ui(cx);
+    div()
+        .relative().children(animate_theme.then(crate::ui::motion::theme_frame))
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .bg(theme.heading)
+        .text_color(theme.surface)
+        .text_size(px(12.0))
 }
 
 fn settings_raised_shadow(theme: &Theme) -> Vec<gpui::BoxShadow> {
