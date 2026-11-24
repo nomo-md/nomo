@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::components::{TOOLTIP_FONT_SIZE, TOOLTIP_HORIZONTAL_PADDING, tooltip_body};
 use std::collections::{HashMap, HashSet};
 
 pub(in crate::ui::workspace) struct PaneFocus {
@@ -82,35 +83,45 @@ impl Render for DocumentTabTooltip {
         let Some(item) = workspace.comparison.item(self.key) else {
             return div();
         };
-        let directory_color = Theme::ui(cx).surface.opacity(0.8);
         let max_width = (window.viewport_size().width - px(12.0)).clamp(px(0.0), px(440.0));
-        crate::ui::components::tooltip_body(cx)
-            .max_w(max_width)
+        let text_style = window.text_style();
+        let text_system = window.text_system();
+        let name_width = |text: &str| {
+            text.split('\n')
+                .map(|line| {
+                    let mut run = text_style.to_run(line.len());
+                    run.font.weight = FontWeight::SEMIBOLD;
+                    text_system.layout_line(line, TOOLTIP_FONT_SIZE, &[run], None).width
+                })
+                .fold(px(0.0), gpui::Pixels::max)
+        };
+
+        let mut content_width = px(0.0);
+        let mut body = tooltip_body(cx)
             .flex()
             .flex_col()
             .gap(px(6.0))
-            .whitespace_normal()
-            .children(item.keys().into_iter().filter_map(|key| {
-                let (name, path) = if let Some(index) = workspace.tab_index(key) {
-                    let doc = workspace.tabs[index].document.read(cx);
-                    (doc.display_title(cx), doc.status().path.as_deref().map(Path::new))
-                } else {
-                    let saved = workspace.comparison.layout.pending.get(&key)?;
-                    (saved.display_title(cx), saved.path.as_deref())
-                };
-                let directory = path
-                    .and_then(Path::parent)
-                    .filter(|path| !path.as_os_str().is_empty())
-                    .map(super::explorer_actions::display_tree_path);
-                Some(
-                    div()
-                        .min_w(px(0.0))
-                        .flex()
-                        .flex_col()
-                        .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
-                        .children(directory.map(|directory| div().text_color(directory_color).child(directory))),
-                )
-            }))
+            .whitespace_normal();
+        for key in item.keys() {
+            let name = if let Some(index) = workspace.tab_index(key) {
+                workspace.tabs[index].document.read(cx).display_title(cx)
+            } else if let Some(saved) = workspace.comparison.layout.pending.get(&key) {
+                saved.display_title(cx)
+            } else {
+                continue;
+            };
+
+            content_width = content_width.max(name_width(&name));
+            body = body.child(
+                div()
+                    .min_w(px(0.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(name),
+            );
+        }
+
+        // GPUI 以最小内容尺寸布局提示框，给定实际宽度后才按窗口上限换行。
+        body.w((content_width.ceil() + TOOLTIP_HORIZONTAL_PADDING * 2.0).min(max_width))
     }
 }
 

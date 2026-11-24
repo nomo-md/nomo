@@ -372,17 +372,20 @@ impl Render for Tooltip {
     }
 }
 
+pub(super) const TOOLTIP_HORIZONTAL_PADDING: gpui::Pixels = px(8.0);
+pub(super) const TOOLTIP_FONT_SIZE: gpui::Pixels = px(12.0);
+
 pub(super) fn tooltip_body(cx: &App) -> Div {
     let animate_theme = Theme::ui_transition_active(cx);
     let theme = Theme::ui(cx);
     div()
         .relative().children(animate_theme.then(crate::ui::motion::theme_frame))
-        .px(px(8.0))
+        .px(TOOLTIP_HORIZONTAL_PADDING)
         .py(px(4.0))
         .rounded(px(6.0))
         .bg(theme.heading)
         .text_color(theme.surface)
-        .text_size(px(12.0))
+        .text_size(TOOLTIP_FONT_SIZE)
 }
 
 fn settings_raised_shadow(theme: &Theme) -> Vec<gpui::BoxShadow> {
