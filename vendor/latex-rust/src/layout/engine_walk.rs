@@ -507,13 +507,21 @@ impl Engine<'_> {
                 }
                 Ok(())
             }
-            MatrixStyle::Gather => {
+            MatrixStyle::Gather | MatrixStyle::Gathered => {
                 for row in rows {
                     match row {
                         EnvRow::Hline => {}
                         EnvRow::Intertext(body) => jobs.push(tree(body, MathStyle::Text)),
                         EnvRow::Cells { cells, .. } => {
-                            self.push_row_job(cells, body, jobs);
+                            self.push_row_job(
+                                cells,
+                                if ms == MatrixStyle::Gathered {
+                                    MathStyle::Display
+                                } else {
+                                    body
+                                },
+                                jobs,
+                            );
                         }
                     }
                 }

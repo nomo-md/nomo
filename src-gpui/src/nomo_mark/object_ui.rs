@@ -33,13 +33,18 @@ pub(super) struct ObjectEditor {
     preview_ready_key: Cell<Option<u64>>,
     image_preview: bool,
     preview_return: bool,
-    preview_mode: u8,
-    preview_modes: bool,
-    image_scale: f32,
+    // None 随窗口适配，手动缩放后才保存固定比例。
+    image_scale: Option<f32>,
     image_offset: Point<Pixels>,
     image_drag: Option<Point<Pixels>>,
 }
 impl ObjectEditor {
+    fn reset_viewer(&mut self) {
+        self.image_scale = None;
+        self.image_offset = point(px(0.0), px(0.0));
+        self.image_drag = None;
+    }
+
     pub(super) fn estimated_bytes(&self) -> usize {
         std::mem::size_of::<Self>() + if self.preview_task.is_some() { self.draft.text.len() + 256 } else { 0 }
             + self.draft.estimated_bytes()
@@ -230,7 +235,7 @@ impl NomoMark {
         let text = match initial {
             Some(text) => text,
             None if range.is_empty() => crate::ui::toolbar_i18n::ToolbarLocale::current(cx).text("comment_insert").into(),
-            None => super::super::clipboard_content::selected(&self.host.parsed, range.clone(), false)?.text,
+            None => super::super::clipboard_content::selected(&self.host.parsed, range.clone(), CopyFormat::Readable)?.text,
         }.replace("-->", "-- >");
         let markup = if super::super::table_inline::markdown_cell(&self.host.parsed, &range) || super::super::table_inline::html_cell(&self.host.parsed, &range).is_some() {
             let html = super::super::html_table::InlineAtom::Comment(text.clone()).with_text(&text).unwrap();
@@ -538,9 +543,7 @@ impl NomoMark {
         self.object = Some(ObjectEditor {
             image_preview: image.is_some(),
             preview_return: false,
-            preview_mode: if kind == ObjectKind::Mermaid { 1 } else { 0 },
-            preview_modes: false,
-            image_scale: 1.0,
+            image_scale: None,
             image_offset: point(px(0.0), px(0.0)),
             image_drag: None,
             draft,
@@ -953,7 +956,7 @@ impl NomoMark {
         let theme = cx.global::<Theme>();
         let color: gpui::Rgba = theme.fg.into();
         let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-        Some(EmbedSpec { kind: kind.with_palette(theme.mermaid), source: source.to_string(), em_px: cx.global::<Settings>().metrics().body_size(),
+        Some(EmbedSpec { kind: kind.with_palette(theme.mermaid), source: source.to_string(), font_family: crate::theme::font_for(crate::theme::Family::Text, false, false).family.to_string(), em_px: cx.global::<Settings>().metrics().body_size(),
             color: [byte(color.r), byte(color.g), byte(color.b)], dark: theme.dark })
     }
     fn object_preview(&self, cx: &App) -> Option<(u64, crate::embeds::EmbedState)> {
@@ -973,7 +976,7 @@ impl NomoMark {
             }).or(Some((key, EmbedState::Pending))),
         }
     }
-    fn request_object_preview(&mut self, immediate: bool, cx: &mut Context<Self>) {
+    pub(super) fn request_object_preview(&mut self, immediate: bool, cx: &mut Context<Self>) {
         // 切换请求前记住当前已完成结果。旧结果只在新请求等待时显示，失败仍明确显示错误。
         self.object_preview(cx);
         let spec = self.object_preview_spec(cx);
@@ -1009,8 +1012,7 @@ impl NomoMark {
         if let Some(object) = &mut self.object {
             object.image_preview = true;
             object.preview_return = returning;
-            object.preview_mode = 1;
-            object.image_offset = point(px(0.0), px(0.0));
+            object.reset_viewer();
             window.focus(&self.focus, cx);
             cx.notify();
         }
@@ -1041,15 +1043,11 @@ impl NomoMark {
     }
     fn preview_scale(&self, window: &Window, cx: &App) -> f32 {
         let Some(object) = &self.object else { return 1.0; };
+        if let Some(scale) = object.image_scale { return scale; }
         let Some((_, (width, height))) = self.preview_media(cx) else { return 1.0; };
         let viewport = window.viewport_size();
         let available = ((f32::from(viewport.width) - 80.0).max(1.0), (f32::from(viewport.height) - 120.0).max(1.0));
-        match object.preview_mode {
-            0 => (available.0 / width.max(1.0)).min(available.1 / height.max(1.0)).min(1.0).max(0.01),
-            1 => (available.0 / width.max(1.0)).min(1.0).max(0.85),
-            2 => 1.0,
-            _ => object.image_scale,
-        }
+        (available.0 / width.max(1.0)).min(available.1 / height.max(1.0)).min(1.0).max(0.01)
     }
     pub(super) fn viewer_key(&mut self, keys: &gpui::Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.object.as_ref().is_some_and(|o| o.image_preview) { return false; }
@@ -1058,8 +1056,8 @@ impl NomoMark {
             "+" | "=" => self.zoom_viewer(0.1, None, window, cx),
             "-" => self.zoom_viewer(-0.1, None, window, cx),
             "0" => if let Some(object) = &mut self.object {
-                object.preview_mode = if object.draft.kind == ObjectKind::Mermaid { 1 } else { 0 };
-                object.image_offset = point(px(0.0), px(0.0)); cx.notify();
+                object.reset_viewer();
+                cx.notify();
             },
             _ => {}
         }
@@ -1071,11 +1069,11 @@ impl NomoMark {
         let viewport = window.viewport_size();
         let center = point(viewport.width / 2.0, viewport.height / 2.0);
         if let Some(object) = &mut self.object {
-            let next = (old + delta).clamp(0.1, 3.0);
+            // 适应长图时可能低于 10%；缩小不能被旧下限反向放大。
+            let next = (old + delta).clamp(0.01, 3.0);
             let pivot = pivot.unwrap_or(center) - center;
             object.image_offset = pivot - (pivot - object.image_offset) * (next / old);
-            object.image_scale = next;
-            object.preview_mode = 3;
+            object.image_scale = Some(next);
         }
         cx.notify();
     }
@@ -1115,22 +1113,7 @@ impl NomoMark {
         }
         let mut controls = div().absolute().top(px(16.0)).right(px(16.0)).flex().gap(px(6.0)).items_center().p(px(5.0)).rounded(px(8.0)).bg(theme.surface)
             .child(format!("{}%", (scale * 100.0).round() as u32));
-        if object.draft.kind == ObjectKind::Mermaid {
-            let label = match object.preview_mode { 0 => "适应窗口", 1 => "易读", 2 => "原始大小", _ => "自定义" };
-            controls = controls.child(div().id("diagram-view-mode").relative().px(px(8.0)).h(px(30.0)).cursor_pointer().child(label)
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(|view, _, _, cx| { if let Some(o) = &mut view.object { o.preview_modes = !o.preview_modes; } cx.notify(); })));
-            if object.preview_modes {
-                let mut menu = div().id("diagram-view-modes").absolute().right(px(148.0)).top(px(38.0)).w(px(120.0)).bg(theme.surface).border_1().border_color(theme.border).rounded(px(6.0));
-                for (mode, label) in [(1, "易读"), (0, "适应窗口"), (2, "原始大小")] {
-                    menu = menu.child(div().id(("diagram-mode", mode as usize)).p(px(8.0)).cursor_pointer().hover(|s| s.bg(theme.hover)).child(label)
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |view, _, _, cx| { if let Some(o) = &mut view.object { o.preview_mode = mode; o.preview_modes = false; o.image_offset = point(px(0.0), px(0.0)); } cx.notify(); })));
-                }
-                controls = controls.child(menu);
-            }
-        }
-        for (id, label, glyph) in [(0, "缩小", IconName::ZoomOut), (1, "重置缩放", IconName::RotateCcw), (2, "放大", IconName::ZoomIn), (3, "关闭", IconName::Close)] {
+        for (id, label, glyph) in [(0, "缩小", IconName::ZoomOut), (1, "适应窗口并居中", IconName::RotateCcw), (2, "放大", IconName::ZoomIn), (3, "关闭", IconName::Close)] {
             controls = controls.child(div().id(("image-preview-control", id as usize)).size(px(30.0)).flex().items_center().justify_center().cursor_pointer()
                 .rounded(px(4.0)).hover(|s| s.bg(theme.hover)).tooltip(tooltip(label)).child(icon(glyph, 16.0, theme.fg))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1138,14 +1121,14 @@ impl NomoMark {
                     if id == 3 { view.close_viewer(window, cx); return; }
                     if id != 1 { view.zoom_viewer(if id == 0 { -0.1 } else { 0.1 }, None, window, cx); return; }
                     if let Some(object) = &mut view.object {
-                        object.preview_mode = if object.draft.kind == ObjectKind::Mermaid { 1 } else { 0 };
-                        if id == 1 { object.image_offset = point(px(0.0), px(0.0)); }
+                        object.reset_viewer();
                     }
                     cx.notify();
                 })));
         }
         let dragging = object.image_drag.is_some();
-        let mut panel = div().id("image-preview").w(viewport.width).h(viewport.height).relative().bg(theme.surface).text_color(theme.fg).occlude()
+        let background = if object.draft.kind == ObjectKind::Mermaid { theme.surface.opacity(0.9) } else { theme.surface };
+        let mut panel = div().id("image-preview").w(viewport.width).h(viewport.height).relative().bg(background).text_color(theme.fg).occlude()
             .cursor(gpui::CursorStyle::OpenHand)
             .on_mouse_down(MouseButton::Left, cx.listener(|view, event: &MouseDownEvent, _, cx| {
                 if let Some(object) = &mut view.object { object.image_drag = Some(event.position); cx.notify(); } cx.stop_propagation();
@@ -1197,7 +1180,7 @@ impl NomoMark {
     }
     fn embed_editor_panel(&self, rect: (f32, f32, f32, f32), window: &Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         use crate::embeds::EmbedState;
-        use crate::ui::components::{icon, IconName, tooltip};
+        use crate::ui::components::tooltip;
         let object = self.object.as_ref()?;
         let (input_height, preview_height) = self.embed_edit_heights(window, cx)?;
         let (left, top, width, height) = rect;
@@ -1218,31 +1201,9 @@ impl NomoMark {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(input);
         if diagram {
-            let label = match object.preview_mode { 0 => "适应窗口", 2 => "原始大小", _ => "易读" };
-            let mut mode = div().id("embed-preview-mode").relative().h(px(32.0 * zoom)).px(px(8.0 * zoom))
-                .flex().items_center().gap(px(4.0 * zoom)).hover(|s| s.bg(theme.surface))
-                .rounded(px(3.0 * zoom)).cursor_pointer().text_size(px(12.0 * zoom))
-                .child(label).child(icon(IconName::ChevronDown, 14.0 * zoom, theme.muted))
-                .on_click(cx.listener(|view, _, _, cx| {
-                    if let Some(object) = &mut view.object { object.preview_modes = !object.preview_modes; }
-                    cx.notify();
-                }));
-            if object.preview_modes {
-                let mut menu = div().id("embed-preview-modes").absolute().right_0().top(px(34.0 * zoom)).w(px(120.0 * zoom))
-                    .bg(theme.surface).border_1().border_color(theme.border).rounded(px(3.0 * zoom)).shadow_md();
-                for (value, label) in [(1usize, "易读"), (0, "适应窗口"), (2, "原始大小")] {
-                    menu = menu.child(div().id(("embed-preview-mode-item", value)).p(px(8.0 * zoom)).hover(|s| s.bg(theme.hover)).child(label)
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            cx.stop_propagation();
-                            if let Some(object) = &mut view.object { object.preview_mode = value as u8; object.preview_modes = false; }
-                            cx.notify();
-                        })));
-                }
-                mode = mode.child(gpui::deferred(menu).with_priority(1));
-            }
             let range = object.draft.range.clone();
             panel = panel.child(div().h(px(40.0 * zoom)).mt(px(14.0 * zoom)).pb(px(8.0 * zoom)).flex_shrink_0()
-                .flex().justify_end().gap(px(8.0 * zoom)).child(mode)
+                .flex().justify_end()
                 .child(div().id("draft-diagram-fullscreen").size(px(32.0 * zoom)).flex().items_center().justify_center()
                     .rounded(px(3.0 * zoom)).hover(|s| s.bg(theme.surface)).cursor_pointer()
                     .tooltip(tooltip("放大查看")).child(gpui::svg().path("icons/maximize.svg").size(px(16.0 * zoom)).text_color(theme.muted))
@@ -1257,13 +1218,10 @@ impl NomoMark {
                 EmbedState::Ready(info) => if let Some(image) = cx.global::<EmbedStore>().visible_image(key, cx) {
                     let available_width = (content_width - pad * 2.0).max(1.0);
                     let available_height = (preview_height - pad * 2.0).max(1.0);
-                    let scale = if diagram && object.preview_mode == 0 {
-                        (available_width / info.width.max(1.0)).min(available_height / info.height.max(1.0)).min(1.0)
-                    } else { 1.0 };
                     // 维持正常阅读尺寸；宽图／公式在块内滚动，不能为了固定预览框把内容缩成缩略图。
-                    preview = preview.child(div().w(px((info.width * scale).max(available_width))).min_h(px(available_height))
+                    preview = preview.child(div().w(px(info.width.max(available_width))).min_h(px(available_height))
                         .flex().items_center().justify_center()
-                        .child(gpui::img(image).w(px(info.width * scale)).h(px(info.height * scale)).flex_shrink_0()));
+                        .child(gpui::img(image).w(px(info.width)).h(px(info.height)).flex_shrink_0()));
                 } else { preview = preview.text_color(theme.muted).child(cx.global::<EmbedStore>().notice(key)); },
                 EmbedState::Failed(message) => preview = preview.text_color(theme.warning).child(message.to_string()),
                 EmbedState::Pending => preview = preview.text_color(theme.muted).child("正在生成预览…"),

@@ -2102,6 +2102,7 @@ impl Engine<'_> {
             MatrixStyle::Aligned => self.amsmath_aligned(rows, body_style),
             MatrixStyle::Split => self.align_env(rows, body_style, false),
             MatrixStyle::Gather => self.gather_env(rows, body_style),
+            MatrixStyle::Gathered => self.gathered_env(rows, body_style),
             MatrixStyle::Multline => self.multline_env(rows, body_style),
             MatrixStyle::Equation => self.equation_env(rows, body_style),
             MatrixStyle::Array => self.array_env(spec, rows, body_style),
@@ -2499,6 +2500,91 @@ impl Engine<'_> {
         })
     }
 
+    fn gathered_env(&self, rows: &[EnvRow], style: MathStyle) -> Result<Item, Error> {
+        // TeX accepts `\hline` in gathered and draws the rule: the box
+        // grows by exactly the rule thickness, split evenly between height
+        // and depth by the axis centring. Alignment tabs stay an error:
+        // TeX errors on them too ("Extra alignment tab").
+        let mut cells: Vec<Vec<MathBox>> = Vec::with_capacity(rows.len());
+        let mut is_rule_row: Vec<bool> = Vec::with_capacity(rows.len());
+        for row in rows {
+            match row {
+                EnvRow::Cells { cells: source, .. } => {
+                    if source.len() != 1 {
+                        return Err(Error::Unsupported {
+                            what: "alignment tabs in gathered".into(),
+                        });
+                    }
+                    is_rule_row.push(false);
+                    cells.push(vec![self.take_box()?]);
+                }
+                EnvRow::Hline => is_rule_row.push(true),
+                _ => {
+                    return Err(Error::Unsupported {
+                        what: "non-math row in gathered".into(),
+                    });
+                }
+            }
+        }
+        let math_rows = self.build_amsmath_rows(
+            cells,
+            &Dim::zero(),
+            &self.tex_points_in_root_em(TEX_BASELINE_SKIP_PT),
+            |_| ColSpec::Center,
+            |_| false,
+        );
+        let math_gaps = self.aligned_interrow_gaps(&math_rows);
+        let thick = self.params.array_rule_thickness(style);
+        let half_thick = &thick / &Dim::from_i64(2);
+        let double_gap = &self.params.double_rule_sep(style) - &thick;
+        let max_w = math_rows
+            .iter()
+            .fold(Dim::zero(), |w, row| w.max(&row.width));
+        // Assemble the stack in source order. A rule adds only its own
+        // thickness: no gap around it, except the double-rule gap between
+        // two adjacent rules. The inter-row gap between two math rows is
+        // preserved across an intervening rule, exactly as in arrays: the
+        // rule sits in the boundary, it does not replace the row spacing.
+        let mut all_rows: Vec<MathBox> = Vec::with_capacity(is_rule_row.len());
+        let mut all_gaps: Vec<Dim> = Vec::with_capacity(is_rule_row.len().saturating_sub(1));
+        let mut mi = 0;
+        let mut pending: Option<Dim> = None;
+        let mut prev_rule = false;
+        for is_rule in &is_rule_row {
+            if !all_rows.is_empty() {
+                let gap = if *is_rule {
+                    if prev_rule {
+                        double_gap.clone()
+                    } else {
+                        pending.take().unwrap_or_else(Dim::zero)
+                    }
+                } else if prev_rule {
+                    Dim::zero()
+                } else {
+                    pending.take().unwrap_or_else(Dim::zero)
+                };
+                all_gaps.push(gap);
+            }
+            if *is_rule {
+                all_rows.push(MathBox::rule(
+                    max_w.clone(),
+                    half_thick.clone(),
+                    half_thick.clone(),
+                ));
+                prev_rule = true;
+            } else {
+                all_rows.push(math_rows[mi].clone());
+                pending = math_gaps.get(mi).cloned();
+                mi += 1;
+                prev_rule = false;
+            }
+        }
+        Ok(Item {
+            class: Some(AtomKind::Inner),
+            bx: self.center_amsmath_stack(all_rows, &all_gaps, style),
+        })
+    }
+
     fn gather_env(&self, rows: &[EnvRow], style: MathStyle) -> Result<Item, Error> {
         let row_sep = self.params.em(style) / Dim::from_i64(5);
         let mut bodies = Vec::new();
@@ -2607,9 +2693,15 @@ impl Engine<'_> {
         rows: &[EnvRow],
         style: MathStyle,
     ) -> Result<Item, Error> {
-        let thick = self.params.fraction_rule_thickness.clone() * self.params.scale(style);
+        // TeX `\arrayrulewidth` (0.4 pt at 10 pt): array rules are thinner
+        // than the font's fraction rule (0.068 em in STIX Two Math).
+        let thick = self.params.array_rule_thickness(style);
         let col_sep = self.params.mu(style) * Dim::from_i64(10);
         let row_sep = self.params.em(style) / Dim::from_i64(5);
+        let double_rule_sep = self.params.double_rule_sep(style);
+        // Between two adjacent rules TeX leaves `\doublerulesep` minus one
+        // rule thickness of space.
+        let double_gap = &double_rule_sep - &thick;
         let mut kinds = Vec::new();
         let mut data: Vec<Vec<MathBox>> = Vec::new();
         let mut ncols_data = 0;
@@ -2645,16 +2737,10 @@ impl Engine<'_> {
                 row.push(MathBox::empty());
             }
         }
-        let mut col_w: Vec<Dim> = spec
-            .iter()
-            .map(|c| {
-                if c.is_rule() {
-                    thick.clone()
-                } else {
-                    Dim::zero()
-                }
-            })
-            .collect();
+        // A rule track has zero width: TeX draws the rule centred in the
+        // intercolumn gap, so it adds nothing to the table width. The rule
+        // itself is drawn later, as an overlay.
+        let mut col_w: Vec<Dim> = vec![Dim::zero(); spec.len()];
         for row in &data {
             let mut dj = 0;
             for (j, sp) in spec.iter().enumerate() {
@@ -2667,54 +2753,102 @@ impl Engine<'_> {
                 dj += 1;
             }
         }
+        // Gap between adjacent spec tracks. A vertical rule adds no width:
+        // a single rule between two columns splits the ordinary column gap
+        // in half on each side, a `||` group adds `\doublerulesep` between
+        // its rules, and a rule at an outer edge adds nothing (latex-rust
+        // has no outer margins for it to sit in).
+        let mut data_before = vec![false; spec.len()];
+        let mut seen_before = false;
+        for (j, sp) in spec.iter().enumerate() {
+            data_before[j] = seen_before;
+            if !sp.is_rule() {
+                seen_before = true;
+            }
+        }
+        let mut data_after = vec![false; spec.len()];
+        let mut seen_after = false;
+        for (j, sp) in spec.iter().enumerate().rev() {
+            data_after[j] = seen_after;
+            if !sp.is_rule() {
+                seen_after = true;
+            }
+        }
+        let half_col_sep = &col_sep / &Dim::from_i64(2);
+        let gaps: Vec<Dim> = (0..spec.len().saturating_sub(1))
+            .map(|j| match (spec[j].is_rule(), spec[j + 1].is_rule()) {
+                (false, false) => col_sep.clone(),
+                (true, true) => double_rule_sep.clone(),
+                (false, true) => {
+                    if data_after[j + 1] {
+                        half_col_sep.clone()
+                    } else {
+                        Dim::zero()
+                    }
+                }
+                (true, false) => {
+                    if data_before[j] {
+                        half_col_sep.clone()
+                    } else {
+                        Dim::zero()
+                    }
+                }
+            })
+            .collect();
         let mut table_w = Dim::zero();
         for (j, _) in spec.iter().enumerate() {
-            if j > 0 && !spec[j].is_rule() && !spec[j - 1].is_rule() {
-                table_w = &table_w + &col_sep;
+            if j > 0 {
+                table_w = &table_w + &gaps[j - 1];
             }
             table_w = &table_w + &col_w[j];
         }
+        // A horizontal rule adds only its own thickness, split evenly
+        // between height and depth: TeX grows a box with a rule at its
+        // start by half the rule thickness in height and half in depth.
+        // Between two adjacent rules TeX leaves the double-rule gap. No
+        // other padding surrounds a rule: the inter-row gap belongs to the
+        // boundary between two cell rows and is added exactly once per
+        // boundary, whether or not rules intervene.
+        let half_thick = &thick / &Dim::from_i64(2);
         let mut packed = Vec::new();
         let mut di = 0;
+        let mut prev_hline = false;
+        let mut seen_row = false;
         for kind in kinds {
             match kind {
                 RowKind::Hline => {
-                    packed.push(MathBox::rule(table_w.clone(), thick.clone(), Dim::zero()));
+                    if prev_hline {
+                        packed.push(sep_row(double_gap.clone()));
+                    }
+                    packed.push(MathBox::rule(
+                        table_w.clone(),
+                        half_thick.clone(),
+                        half_thick.clone(),
+                    ));
+                    prev_hline = true;
                 }
                 RowKind::Intertext(t) => {
                     if !packed.is_empty() {
                         packed.push(sep_row(row_sep.clone()));
                     }
                     packed.push(*t);
+                    seen_row = true;
+                    prev_hline = false;
                 }
                 RowKind::Cells => {
-                    if !packed.is_empty()
-                        && !matches!(packed.last().map(|b| &b.content), Some(BoxContent::Rule))
-                    {
+                    if seen_row {
                         packed.push(sep_row(row_sep.clone()));
                     }
                     let row = &data[di];
-                    let mut rh = Dim::zero();
-                    let mut rd = Dim::zero();
-                    for c in row {
-                        rh = rh.max(&c.height);
-                        rd = rd.max(&c.depth);
-                    }
                     let mut parts = Vec::new();
                     let mut dj = 0;
                     for (j, sp) in spec.iter().enumerate() {
-                        if j > 0 && !sp.is_rule() && !spec[j - 1].is_rule() {
-                            parts.push(MathBox::kern(col_sep.clone()));
+                        if j > 0 {
+                            parts.push(MathBox::kern(gaps[j - 1].clone()));
                         }
                         if sp.is_rule() {
-                            parts.push(MathBox {
-                                width: thick.clone(),
-                                height: rh.clone(),
-                                depth: rd.clone(),
-                                italic: Dim::zero(),
-                                shift: Dim::zero(),
-                                content: BoxContent::Rule,
-                            });
+                            // Zero-width track: the rule is an overlay.
+                            parts.push(MathBox::kern(Dim::zero()));
                         } else {
                             let cell = row.get(dj).cloned().unwrap_or_else(MathBox::empty);
                             parts.push(align_in(cell, &col_w[j], *sp));
@@ -2723,12 +2857,78 @@ impl Engine<'_> {
                     }
                     packed.push(MathBox::hpack(parts));
                     di += 1;
+                    seen_row = true;
+                    prev_hline = false;
                 }
             }
         }
+        let mut table = MathBox::vpack(packed);
+        // Draw each vertical rule once across the complete table, including
+        // row glue and horizontal rules. Per-cell rules leave broken borders.
+        // A rule is drawn centred in the intercolumn gap it sits in, so a
+        // run of rules is centred in its gap as a group; a run at an outer
+        // edge is drawn flush inside the table, which has no outer margin.
+        let mut overlays = Vec::new();
+        let mut track_x: Vec<Dim> = Vec::with_capacity(spec.len());
+        let mut x = Dim::zero();
+        for (j, _) in spec.iter().enumerate() {
+            if j > 0 {
+                x = &x + &gaps[j - 1];
+            }
+            track_x.push(x.clone());
+            x = &x + &col_w[j];
+        }
+        let mut j = 0;
+        while j < spec.len() {
+            if !spec[j].is_rule() {
+                j += 1;
+                continue;
+            }
+            let start = j;
+            while j < spec.len() && spec[j].is_rule() {
+                j += 1;
+            }
+            let end = j - 1;
+            let count = end - start + 1;
+            let gap_before = if start > 0 {
+                gaps[start - 1].clone()
+            } else {
+                Dim::zero()
+            };
+            let gap_after = if end + 1 < spec.len() {
+                gaps[end].clone()
+            } else {
+                Dim::zero()
+            };
+            let span_start = &track_x[start] - &gap_before;
+            let span_end = &track_x[end] + &gap_after;
+            let group_width = &thick * &Dim::from_i64(count as i64)
+                + &double_rule_sep * &Dim::from_i64((count - 1) as i64);
+            let group_left = if start == 0 {
+                span_start.clone()
+            } else if end + 1 == spec.len() {
+                &span_end - &group_width
+            } else {
+                let span = &span_end - &span_start;
+                let spare = &span - &group_width;
+                &span_start + &(&spare / &Dim::from_i64(2))
+            };
+            for i in 0..count {
+                let rule_x = &group_left + &(&thick + &double_rule_sep) * &Dim::from_i64(i as i64);
+                overlays.push(MathBox::hpack(vec![
+                    MathBox::kern(rule_x),
+                    MathBox::rule(thick.clone(), table.height.clone(), table.depth.clone()),
+                ]));
+            }
+        }
+        if !overlays.is_empty() {
+            let mut children = vec![table.clone()];
+            children.extend(overlays);
+            table.content = BoxContent::Overlap(children);
+        }
         Ok(Item {
             class: Some(AtomKind::Inner),
-            bx: MathBox::vpack(packed),
+            bx: table,
         })
     }
 }

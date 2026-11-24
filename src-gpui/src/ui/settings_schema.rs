@@ -82,7 +82,7 @@ pub const CATEGORIES: &[Category] = &[
                 item("codeBlockIndent", "settings.codeBlockIndent.label", "settings.codeBlockIndent.description", Control::Choice(&[("spaces-2", "settings.codeBlockIndent.choice.spaces-2"), ("spaces-4", "settings.codeBlockIndent.choice.spaces-4"), ("tab", "settings.codeBlockIndent.choice.tab")]), Support::Full),
                 item("codeBlockLineNumbersVisible", "settings.codeBlockLineNumbersVisible.label", "settings.codeBlockLineNumbersVisible.description", Control::Toggle, Support::Full),
                 item("inlineCodeRenderingEnabled", "settings.inlineCodeRenderingEnabled.label", "settings.inlineCodeRenderingEnabled.description", Control::Toggle, Support::Full),
-                item("copyMarkdownSyntaxEnabled", "settings.copyMarkdownSyntaxEnabled.label", "settings.copyMarkdownSyntaxEnabled.description", Control::Toggle, Support::Full),
+                item("defaultCopyFormat", "settings.defaultCopyFormat.label", "settings.defaultCopyFormat.description", Control::Choice(&[("readable", "settings.defaultCopyFormat.choice.readable"), ("markdown", "settings.defaultCopyFormat.choice.markdown")]), Support::Full),
             ]),
             group("settings.group.quickInsert", &[
                 item("quickInsertEnabled", "settings.quickInsertEnabled.label", "settings.quickInsertEnabled.description", Control::Toggle, Support::Full),
@@ -145,7 +145,6 @@ pub const CATEGORIES: &[Category] = &[
     Category {
         title: "settings.category.statistics", icon: IconName::ChartColumn,
         page: Page::Groups(&[group("settings.group.statistics", &[
-            item("outlineVisible", "settings.outlineVisible.label", "settings.outlineVisible.description", Control::Toggle, Support::Full),
             item("documentNavigationLayout", "settings.documentNavigationLayout.label", "settings.documentNavigationLayout.description", Control::Choice(&[("right-outline", "settings.documentNavigationLayout.choice.right-outline"), ("left-tabs", "settings.documentNavigationLayout.choice.left-tabs"), ("left-split", "settings.documentNavigationLayout.choice.left-split")]), Support::Full),
             item("writingStatsVisible", "settings.writingStatsVisible.label", "settings.writingStatsVisible.description", Control::Toggle, Support::Full),
             item("writingStatsMetric", "settings.writingStatsMetric.label", "settings.writingStatsMetric.description", Control::Choice(&[("lines", "settings.writingStatsMetric.choice.lines"), ("words", "settings.writingStatsMetric.choice.words"), ("visibleChars", "settings.writingStatsMetric.choice.visibleChars"), ("chars", "settings.writingStatsMetric.choice.chars")]), Support::Full),

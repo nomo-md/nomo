@@ -45,6 +45,9 @@ pub(crate) fn read_images(cx: &App) -> Result<Option<Vec<crate::image_import::Im
 }
 
 pub(crate) fn write_rich(text: &str, html: &str, cx: &mut App) -> Result<(), String> {
+    if text.len().saturating_add(html.len()) > 64 * 1024 * 1024 {
+        return Err("复制内容超过 64 MiB 剪贴板预算；原文已保留".into());
+    }
     #[cfg(target_os = "windows")]
     { let _ = cx; rich::write(text, html) }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -68,6 +71,7 @@ pub(crate) fn read_html() -> Option<String> {
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn write_text(text: &str, cx: &App) -> Result<(), String> {
+    if text.len() > 64 * 1024 * 1024 { return Err("复制内容超过 64 MiB 剪贴板预算；原文已保留".into()); }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     native::validate(text, "")?;
     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_owned()));
@@ -80,6 +84,7 @@ pub(crate) fn write_text(text: &str, cx: &App) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn write_text(text: &str, _: &App) -> Result<(), String> {
+    if text.len() > 64 * 1024 * 1024 { return Err("复制内容超过 64 MiB 剪贴板预算；原文已保留".into()); }
     use std::ffi::c_void;
     #[link(name = "kernel32")]
     unsafe extern "system" {

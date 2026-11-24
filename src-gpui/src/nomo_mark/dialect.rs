@@ -320,6 +320,54 @@ fn parser_definitions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escaped_whitespace_renders_through_editor_pipeline() {
+        let prefix = "\\boxed{\\mathcal F\n=\\left[0,\\frac{\\pi^2}{6}-1\\right]\\ \\cup";
+        let suffix = r"\left[1,\frac{\pi^2}{6}\right].}";
+        let expected = latex_rust::parse(&format!("{prefix}\\ {suffix}")).unwrap();
+        for whitespace in ["\n", "\r\n", "\r", "\t", " ", "\r\n       "] {
+            let formula = format!("{prefix}\\{whitespace}{suffix}");
+            let source = format!("$$\n{formula}\n$$\n");
+            let parsed = crate::nomo_mark::parse::fixture(&source);
+            assert_eq!(&*parsed.source, source);
+            let math: Vec<_> = parsed.events.iter().filter_map(|(event, range)| match event {
+                Event::DisplayMath(tex) => Some((tex.as_ref(), range)), _ => None,
+            }).collect();
+            assert_eq!(math.len(), 1, "{source:?}");
+            assert_eq!(&source[math[0].1.clone()], source.trim_end());
+            assert_eq!(latex_rust::parse(math[0].0).unwrap_or_else(|error| panic!("{whitespace:?}: {error}")), expected);
+            let (svg, depth) = crate::embeds::math_svg(math[0].0, true, [0, 0, 0]).unwrap();
+            assert!(depth.is_finite());
+            let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+            let size = tree.size().to_int_size();
+            let mut pixels = resvg::tiny_skia::Pixmap::new(size.width() * 3, size.height() * 3).unwrap();
+            pixels.fill(resvg::tiny_skia::Color::WHITE);
+            resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(3.0, 3.0), &mut pixels.as_mut());
+            assert!(pixels.pixels().iter().any(|pixel| pixel.red() < 250));
+            if whitespace == "\n" {
+                if let Some(out) = std::env::var_os("NOMO_EMBED_DUMP") {
+                    let out = std::path::PathBuf::from(out);
+                    std::fs::create_dir_all(&out).unwrap();
+                    pixels.save_png(out.join("escaped-whitespace.png")).unwrap();
+                }
+            }
+        }
+        assert!(latex_rust::parse("x\\").is_err());
+        assert!(latex_rust::parse(r"\begin{bmatrix}1&2\\3&4\end{bmatrix}").is_ok());
+    }
+
+    #[test]
+    fn explicit_space_immediately_before_math_closing_fence() {
+        for source in ["$$\nx\\\n$$\n", "$$\r\nx\\\r\n$$\r\n", "$$\nx\\ \n$$\n", "\\(x\\ \\)", "\\[\nx\\\n\\]\n"] {
+            let parsed = crate::nomo_mark::parse::fixture(source);
+            let tex = parsed.events.iter().find_map(|(event, _)| match event {
+                Event::InlineMath(tex) | Event::DisplayMath(tex) => Some(tex.as_ref()),
+                _ => None,
+            }).unwrap_or_else(|| panic!("no math event: {source:?}"));
+            assert!(crate::embeds::math_svg(tex, true, [0; 3]).is_ok(), "{source:?}: {tex:?}");
+        }
+    }
     #[test]
     fn latex_delimiters_render_through_editor_pipeline() {
         let source = "行内 \\(x_1+1\\)。\n\n\\[\n\\Phi_k=\\sum_{r=1}^4 p_k(r)u_r\n\\]\n";

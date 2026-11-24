@@ -553,6 +553,7 @@ impl DocumentHost {
         &mut self,
         selection: DocumentSelection,
         cut: bool,
+        format: CopyFormat,
         cx: &mut Context<Self>,
     ) {
         if (cut && self.editing_locked()) || !self.ready_for_session_action(cx) {
@@ -561,13 +562,12 @@ impl DocumentHost {
         let revision = self.control.read(cx).host.parsed.identity.revision;
         let port = self.port.clone();
         let semantic = self.control.read(cx).mode == ViewMode::Semantic && !self.control.read(cx).host.parsed.context.source_only;
-        let markdown = cx.global::<crate::settings::Settings>().copy_markdown_syntax;
         let request = self.begin_session_action(cx);
         let task = cx
             .background_executor()
             .spawn(async move {
-                if semantic { super::super::clipboard_content::from_session(&port, revision, selection.range(), markdown, &request) }
-                else { port.copy_range(revision, selection.range()).map(|text| super::super::clipboard_content::Payload { text, html: String::new() }) }
+                if semantic { super::super::clipboard_content::from_session(&port, revision, selection.range(), format, &request) }
+                else { port.copy_range(revision, selection.range()).map(|text| super::super::clipboard_content::Payload { text, html: String::new(), source: String::new() }) }
             });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -576,7 +576,7 @@ impl DocumentHost {
                 host.control.update(cx, |v, _| v.host.set_readonly(false));
                 match result {
                     Ok(payload) => {
-                        let written = if semantic { crate::clipboard::write_rich(&payload.text, &payload.html, cx) }
+                        let written = if semantic { payload.write(format, cx) }
                             else { crate::clipboard::write_text(&payload.text, cx) };
                         match written {
                             Ok(()) if cut => host.global_edit(selection, EditIntent::Replace(String::new()), cx),

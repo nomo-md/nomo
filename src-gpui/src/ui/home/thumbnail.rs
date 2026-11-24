@@ -11,7 +11,7 @@ pub(super) const HEIGHT: u32 = 384;
 const HEAD_BYTES: u64 = 32 * 1024;
 const PAGE_WIDTH: f32 = WIDTH as f32;
 const PAGE_HEIGHT: f32 = HEIGHT as f32;
-const RENDER_VERSION: &[u8] = b"nomo-home-preview-3";
+const RENDER_VERSION: &[u8] = b"nomo-home-preview-4";
 
 pub(super) struct Thumbnail {
     pub pixels: RgbaImage,
@@ -318,11 +318,12 @@ fn paint_text(svg: &mut String, text: &RichText, x: f32, y: f32, size: f32, bold
     svg.push_str("</text>");
 }
 
-fn raster_svg(svg: &str, width: u32, height: u32, palette: &Palette) -> Result<RgbaImage, String> {
+fn raster_svg(svg: &str, width: u32, height: u32, palette: &Palette, mermaid: bool) -> Result<RgbaImage, String> {
     if svg.len() > 256 * 1024 { return Err("图表超过预览预算".into()); }
     let options = resvg::usvg::Options {
         fontdb: crate::embeds::font_database(),
         font_family: palette.font_family.clone(),
+        font_resolver: if mermaid { crate::embeds::mermaid_font_resolver() } else { Default::default() },
         image_href_resolver: resvg::usvg::ImageHrefResolver { resolve_string: Box::new(|_, _| None), ..Default::default() },
         ..Default::default()
     };
@@ -398,12 +399,12 @@ fn render(blocks: &[Block], palette: &Palette, cancel: &AtomicBool) -> Result<Rg
                     Block::Image { path, alt } => (path.as_ref().ok_or_else(|| "非本地图片".into()).and_then(|path| image_asset(path)), if alt.is_empty() { palette.locale.app_text("preview.image").to_string() } else { alt.clone() }),
                     Block::Diagram(source) if rich_assets < 2 && source.len() <= 4096 => {
                         rich_assets += 1;
-                        (crate::embeds::thumbnail_mermaid(source,palette.dark).and_then(|svg| raster_svg(&svg,WIDTH,144,palette)), palette.locale.app_text("preview.diagram").into())
+                        (crate::embeds::thumbnail_mermaid(source,palette.dark,&palette.font_family).and_then(|svg| raster_svg(&svg,WIDTH,144,palette,true)), palette.locale.app_text("preview.diagram").into())
                     },
                     Block::Math(source) if rich_assets < 2 && source.len() <= 512 => {
                         rich_assets += 1;
                         let color = [(palette.fg >> 16) as u8, (palette.fg >> 8) as u8, palette.fg as u8];
-                        (crate::embeds::math_svg(source,true,color).and_then(|(svg,_)| raster_svg(&svg,WIDTH,96,palette)), palette.locale.app_text("preview.formula").into())
+                        (crate::embeds::math_svg(source,true,color).and_then(|(svg,_)| raster_svg(&svg,WIDTH,96,palette,false)), palette.locale.app_text("preview.formula").into())
                     },
                     _ => (Err("资源超过预览预算".into()), palette.locale.app_text("preview.rich").into()),
                 };
@@ -425,7 +426,7 @@ fn render(blocks: &[Block], palette: &Palette, cancel: &AtomicBool) -> Result<Rg
     }
     svg.push_str("</svg>");
     check(cancel)?;
-    let mut image = raster_svg(&svg,WIDTH,HEIGHT,palette)?;
+    let mut image = raster_svg(&svg,WIDTH,HEIGHT,palette,false)?;
     for (asset,x,y) in assets { image::imageops::overlay(&mut image,&asset,x,y); }
     Ok(image)
 }

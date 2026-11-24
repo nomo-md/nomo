@@ -975,7 +975,7 @@ fn finish_env_row(cells: Vec<MathNode>, number: EqNumber, labels: Vec<String>) -
 fn is_empty_node(n: &MathNode) -> bool {
     match n {
         MathNode::Row(v) => v.is_empty() || v.iter().all(is_empty_node),
-        MathNode::Space(_) | MathNode::NoNumber | MathNode::Label(_) => true,
+        MathNode::NoNumber | MathNode::Label(_) => true,
         _ => false,
     }
 }

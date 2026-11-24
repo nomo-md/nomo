@@ -113,7 +113,10 @@ pub fn apply_semantic(
         if let Some(result) = delete_paragraph_boundary(parsed, range, &intent) {
             return Ok(result);
         }
-        let result = apply(parsed, selection, intent)?;
+        let joined = if matches!(intent, EditIntent::ToggleInline(InlineFormat::Code)) {
+            super::inline_commands::join_code_selection(parsed, selection, true)?
+        } else { None };
+        let result = if let Some(result) = joined { result } else { apply(parsed, selection, intent)? };
         validate_html_edits(parsed, &result.edits)?;
         return Ok(result);
     };
@@ -475,6 +478,11 @@ pub fn apply(
                     edits,
                 });
             }
+            if format == InlineFormat::Code {
+                if let Some(result) = super::inline_commands::join_code_selection(parsed, selection, false)? {
+                    return Ok(result);
+                }
+            }
             let (mut open, mut close) = {
                 let (a, b) = format.markers();
                 (a.to_string(), b.to_string())
@@ -496,18 +504,7 @@ pub fn apply(
                 close = format!("</{tag}>");
             }
             if format == InlineFormat::Code && !in_html_cell {
-                let ticks = source[range.clone()]
-                    .split(|c| c != '`')
-                    .map(str::len)
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
-                open = "`".repeat(ticks);
-                close = open.clone();
-                if source[range.clone()].starts_with('`') || source[range.clone()].ends_with('`') {
-                    open.push(' ');
-                    close.insert(0, ' ');
-                }
+                (open, close) = super::inline_commands::code_markers(&source[range.clone()]);
             }
             let template =
                 (range.is_empty() && format != InlineFormat::Link).then(|| InlineTemplate {

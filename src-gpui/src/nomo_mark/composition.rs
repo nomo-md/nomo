@@ -110,7 +110,10 @@ impl NomoMark {
             let selection = composition.selection;
             let range = selection.range();
             let local = local_range(&self.host.parsed.source, self.host.parsed.identity.from_byte, range.clone()).is_ok();
-            let result = if let Some(result) = self.selected_cells_edit(&EditIntent::Replace(composition.text.clone())) { result }
+            let result = if let Some(cell) = self.active_implicit_cell() {
+                cell.replace(&self.host.parsed, &composition.text)
+            }
+            else if let Some(result) = self.selected_cells_edit(&EditIntent::Replace(composition.text.clone())) { result }
             else if local {
                 let intent = EditIntent::Replace(composition.text.clone());
                 if self.effective_mode() == ViewMode::Semantic {
@@ -135,6 +138,7 @@ impl NomoMark {
             });
             queued?;
             self.cell_selection = None;
+            self.implicit_cell = None;
         }
         self.external_composition = None;
         self.composition_templates.clear();

@@ -181,42 +181,7 @@ impl NomoMark {
         Some(Ok(EditResult { edits, selection: after, template_update }))
     }
     pub(super) fn copy_cells(&self, markdown: bool) -> Option<Result<Payload, ControlError>> {
-        let selection = self.cell_selection.as_ref()?;
-        if selection.identity != self.host.parsed.identity { return None; }
-        let t = grid(&self.host.parsed, selection.table)?;
-        let mut text = String::new();
-        let mut html = String::from("<table><tbody>");
-        for row in selection.anchor.0.min(selection.head.0)..=selection.anchor.0.max(selection.head.0) {
-            if row > selection.anchor.0.min(selection.head.0) { text.push('\n'); }
-            html.push_str("<tr>");
-            if markdown { text.push('|'); }
-            for column in selection.anchor.1.min(selection.head.1)..=selection.anchor.1.max(selection.head.1) {
-                if column > selection.anchor.1.min(selection.head.1) && !markdown { text.push('\t'); }
-                let Some(cell) = t.cells.iter().find(|c| c.row <= row && row < c.row + c.rowspan && c.column <= column && column < c.column + c.colspan) else {
-                    if markdown { text.push_str("  |"); } html.push_str("<td></td>"); continue;
-                };
-                let first_row = cell.row.max(selection.anchor.0.min(selection.head.0));
-                let first_column = cell.column.max(selection.anchor.1.min(selection.head.1));
-                if row != first_row || column != first_column {
-                    if markdown { text.push_str("  |"); }
-                    continue;
-                }
-                let payload = match clipboard_content::selected(&self.host.parsed, cell.content.clone(), markdown) {
-                    Ok(p) => p, Err(error) => return Some(Err(error)),
-                };
-                if markdown { text.push(' '); text.push_str(payload.text.trim()); text.push_str(" |"); }
-                else { text.push_str(&payload.text); }
-                let rowspan = (cell.row + cell.rowspan).min(selection.anchor.0.max(selection.head.0) + 1) - first_row;
-                let colspan = (cell.column + cell.colspan).min(selection.anchor.1.max(selection.head.1) + 1) - first_column;
-                html.push_str(&format!("<td rowspan=\"{rowspan}\" colspan=\"{colspan}\">")); html.push_str(&payload.html); html.push_str("</td>");
-            }
-            html.push_str("</tr>");
-            if markdown && row == selection.anchor.0.min(selection.head.0) {
-                text.push_str("\n|"); text.push_str(&" --- |".repeat(selection.anchor.1.abs_diff(selection.head.1) + 1));
-            }
-        }
-        html.push_str("</tbody></table>");
-        Some(Ok(Payload { text, html }))
+        copy_selection(&self.host.parsed, self.cell_selection.as_ref()?, markdown)
     }
     pub(super) fn paste_cells(&mut self, text: &str, html: Option<&str>, cx: &mut Context<Self>) -> bool {
         let Some((table_at, row, column)) = self.table_cell_at(self.local_cursor()) else { return false; };
@@ -304,5 +269,86 @@ impl NomoMark {
         let group = format!("{}:table-paste:{}", self.host.parsed.identity.window_id, self.history_serial);
         match result { Ok(result) => if let Err(error) = self.queue_result(result, &group, cx) { self.error(error, cx); }, Err(error) => self.error(error, cx) }
         true
+    }
+}
+
+fn copy_selection(parsed: &ParsedWindow, selection: &CellSelection, markdown: bool) -> Option<Result<Payload, ControlError>> {
+    if selection.identity != parsed.identity { return None; }
+    let t = grid(parsed, selection.table)?;
+    let mut text = String::new();
+    let mut html = String::from("<table><tbody>");
+    for row in selection.anchor.0.min(selection.head.0)..=selection.anchor.0.max(selection.head.0) {
+        if row > selection.anchor.0.min(selection.head.0) { text.push('\n'); }
+        html.push_str("<tr>");
+        if markdown { text.push('|'); }
+        for column in selection.anchor.1.min(selection.head.1)..=selection.anchor.1.max(selection.head.1) {
+            if column > selection.anchor.1.min(selection.head.1) && !markdown { text.push('\t'); }
+            let Some(cell) = t.cells.iter().find(|c| c.row <= row && row < c.row + c.rowspan && c.column <= column && column < c.column + c.colspan) else {
+                if markdown { text.push_str("  |"); } html.push_str("<td></td>"); continue;
+            };
+            let first_row = cell.row.max(selection.anchor.0.min(selection.head.0));
+            let first_column = cell.column.max(selection.anchor.1.min(selection.head.1));
+            if row != first_row || column != first_column {
+                if markdown { text.push_str("  |"); }
+                continue;
+            }
+            let payload = match clipboard_content::selected(parsed, cell.content.clone(), CopyFormat::Readable) {
+                Ok(p) => p, Err(error) => return Some(Err(error)),
+            };
+            if markdown { text.push(' '); text.push_str(&crate::nomo_mark::table_inline::markdown_input("", 0, payload.source.trim()).replace('\n', "<br>")); text.push_str(" |"); }
+            else { text.push_str(&payload.text); }
+            let rowspan = (cell.row + cell.rowspan).min(selection.anchor.0.max(selection.head.0) + 1) - first_row;
+            let colspan = (cell.column + cell.colspan).min(selection.anchor.1.max(selection.head.1) + 1) - first_column;
+            html.push_str(&format!("<td rowspan=\"{rowspan}\" colspan=\"{colspan}\">")); html.push_str(&payload.html); html.push_str("</td>");
+        }
+        html.push_str("</tr>");
+        if markdown && row == selection.anchor.0.min(selection.head.0) {
+            text.push_str("\n|"); text.push_str(&" --- |".repeat(selection.anchor.1.abs_diff(selection.head.1) + 1));
+        }
+    }
+    html.push_str("</tbody></table>");
+    let source = clipboard_content::from_html(&html);
+    // Markdown 管道表不能表达合并格；HTML 是 Markdown 支持的无损结构形式。
+    if markdown && (t.html || t.cells.iter().any(|c| selection.includes(c) && (c.rowspan > 1 || c.colspan > 1))) {
+        text = source.clone();
+    }
+    Some(Ok(Payload { text, html, source }))
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::*;
+
+    fn parsed(source: &str) -> ParsedWindow {
+        ParsedWindow::parse(DocumentWindow { document_id: "grid".into(), revision: 0,
+            from_byte: 0, to_byte: source.len() as u64, text: source.into(), inline_templates: Vec::new() },
+            "grid", 0, WindowContext::Complete).unwrap()
+    }
+
+    #[test]
+    fn clipboard_rectangular_selection_uses_tsv_and_preserves_format() {
+        let source = "| A | B |\n| --- | --- |\n| **中** | \x60x*y\x60 |\n| tail | last |";
+        let parsed = parsed(source);
+        let selection = CellSelection { identity: parsed.identity.clone(), table: 0, anchor: (1, 0), head: (2, 1) };
+        let copied = copy_selection(&parsed, &selection, false).unwrap().unwrap();
+        assert_eq!(copied.text, "中\tx*y\ntail\tlast");
+        assert!(copied.html.contains("<strong>中</strong>"));
+        assert!(copied.html.contains("<code>x*y</code>"));
+        let markdown = copy_selection(&parsed, &selection, true).unwrap().unwrap();
+        assert!(markdown.text.contains("**中**"));
+        assert!(markdown.text.contains("\x60x*y\x60"));
+        assert!(markdown.html.contains("<table>"));
+    }
+
+    #[test]
+    fn clipboard_merged_cells_keep_spans_and_blank_tsv_positions() {
+        let parsed = parsed("<table data-nomo-table=\"semantic\"><tbody><tr><td colspan=\"2\"><p>wide</p></td></tr><tr><td><p>x</p></td><td><p>y</p></td></tr></tbody></table>");
+        let selection = CellSelection { identity: parsed.identity.clone(), table: 0, anchor: (0, 0), head: (1, 1) };
+        let copied = copy_selection(&parsed, &selection, false).unwrap().unwrap();
+        assert_eq!(copied.text, "wide\t\nx\ty");
+        assert!(copied.html.contains("colspan=\"2\""));
+        assert!(crate::nomo_mark::html_table::HtmlTable::parse(&copied.source, 0..copied.source.len()).is_some());
+        let markdown = copy_selection(&parsed, &selection, true).unwrap().unwrap();
+        assert!(markdown.text.contains("colspan=\"2\""));
     }
 }

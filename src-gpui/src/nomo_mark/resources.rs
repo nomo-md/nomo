@@ -26,6 +26,7 @@ pub struct ResourceAdapter<'a> {
     pub images: &'a ImageStore,
     pub embeds: &'a EmbedStore,
     pub em_px: f32,
+    pub font_family: &'a str,
     pub dark: bool,
     pub mermaid: crate::embeds::MermaidPalette,
     pub color: [u8; 3],
@@ -99,6 +100,7 @@ impl ResourceAdapter<'_> {
             kind: kind.with_palette(self.mermaid),
             source: source.into(),
             em_px: self.em_px,
+            font_family: self.font_family.into(),
             dark: self.dark,
             color: self.color,
         };

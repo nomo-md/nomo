@@ -3,6 +3,18 @@ pub use crate::markdown_templates::{InlineTemplate, TemplateUpdate};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
+/// 普通复制保留富文本；显式 Markdown 命令只写文本。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyFormat { Readable, Markdown, MarkdownOnly }
+
+impl CopyFormat {
+    pub fn for_command(markdown_only: bool, default_markdown: bool) -> Self {
+        if markdown_only { Self::MarkdownOnly }
+        else if default_markdown { Self::Markdown }
+        else { Self::Readable }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceEdit {
@@ -269,6 +281,7 @@ pub enum ControlEvent {
         identity: WindowIdentity,
         selection: DocumentSelection,
         cut: bool,
+        format: CopyFormat,
     },
     ResourceUsage {
         identity: WindowIdentity,

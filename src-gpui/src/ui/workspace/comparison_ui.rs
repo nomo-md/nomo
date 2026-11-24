@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::components::{TOOLTIP_FONT_SIZE, TOOLTIP_HORIZONTAL_PADDING, tooltip_body};
 use std::collections::{HashMap, HashSet};
 
 pub(in crate::ui::workspace) struct PaneFocus {
@@ -39,12 +40,103 @@ enum Choice {
 pub(in crate::ui::workspace) struct TabRow {
     pub item: TabItem,
     pub tab: Option<usize>,
-    pub title: String,
+    title: SharedString,
     pub dirty: bool,
     pub favorite: bool,
+    pub has_path: bool,
+}
+
+impl TabRow {
+    pub(in crate::ui::workspace) fn label(&self, preview: bool, show_tooltips: bool) -> gpui::Div {
+        let label = div()
+            .flex_1()
+            .min_w(px(0.0))
+            .truncate()
+            .when(preview, |el| el.italic().opacity(0.85));
+        let title = self.title.clone();
+        if !show_tooltips || self.has_path {
+            return label.child(title);
+        }
+
+        // 用实际排版结果判断是否省略，避免按字符数推测不同字体的显示宽度。
+        let text = gpui::StyledText::new(title.clone());
+        let layout = text.layout().clone();
+        label.child(
+            gpui::InteractiveText::new("untitled-tab-label", text).tooltip(move |_, window, cx| {
+                (layout.text() != title.as_ref()).then(|| tooltip(title.clone())(window, cx))
+            }),
+        )
+    }
+}
+
+struct DocumentTabTooltip {
+    workspace: gpui::WeakEntity<Workspace>,
+    key: u64,
+}
+
+impl Render for DocumentTabTooltip {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return div();
+        };
+        let workspace = workspace.read(cx);
+        let Some(item) = workspace.comparison.item(self.key) else {
+            return div();
+        };
+        let max_width = (window.viewport_size().width - px(12.0)).clamp(px(0.0), px(440.0));
+        let text_style = window.text_style();
+        let text_system = window.text_system();
+        let name_width = |text: &str| {
+            text.split('\n')
+                .map(|line| {
+                    let mut run = text_style.to_run(line.len());
+                    run.font.weight = FontWeight::SEMIBOLD;
+                    text_system.layout_line(line, TOOLTIP_FONT_SIZE, &[run], None).width
+                })
+                .fold(px(0.0), gpui::Pixels::max)
+        };
+
+        let mut content_width = px(0.0);
+        let mut body = tooltip_body(cx)
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .whitespace_normal();
+        for key in item.keys() {
+            let name = if let Some(index) = workspace.tab_index(key) {
+                workspace.tabs[index].document.read(cx).display_title(cx)
+            } else if let Some(saved) = workspace.comparison.layout.pending.get(&key) {
+                saved.display_title(cx)
+            } else {
+                continue;
+            };
+
+            content_width = content_width.max(name_width(&name));
+            body = body.child(
+                div()
+                    .min_w(px(0.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(name),
+            );
+        }
+
+        // GPUI 以最小内容尺寸布局提示框，给定实际宽度后才按窗口上限换行。
+        body.w((content_width.ceil() + TOOLTIP_HORIZONTAL_PADDING * 2.0).min(max_width))
+    }
 }
 
 impl Workspace {
+    pub(in crate::ui::workspace) fn tab_tooltips_enabled(&self) -> bool {
+        self.comparison.ghost.is_none() && self.comparison.menu.is_none()
+    }
+
+    pub(in crate::ui::workspace) fn tab_tooltip(
+        key: u64,
+        workspace: gpui::WeakEntity<Self>,
+    ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+        move |_, cx| cx.new(|_| DocumentTabTooltip { workspace: workspace.clone(), key }).into()
+    }
+
     pub(in crate::ui::workspace) fn tab_rows(&self, cx: &App) -> Vec<TabRow> {
         let indices: HashMap<_, _> = self
             .tabs
@@ -66,42 +158,37 @@ impl Workspace {
             .map(|&item| {
                 let key = item.first();
                 let tab = indices.get(&key).copied();
-                let favorite = matches!(item, TabItem::Single(_)) && {
-                    let path = match tab {
-                        Some(index) => self.tabs[index]
-                            .document
-                            .read(cx)
-                            .status()
-                            .path
-                            .as_deref()
-                            .map(Path::new),
-                        None => self
-                            .comparison
-                            .layout
-                            .pending
-                            .get(&key)
-                            .and_then(|doc| doc.path.as_deref()),
-                    };
-                    path.is_some_and(|path| favorites.contains(path))
-                };
                 let mut titles = Vec::new();
                 let mut dirty = false;
+                let mut favorite = false;
+                let mut has_path = false;
                 for key in item.keys() {
-                    if let Some(&index) = indices.get(&key) {
+                    let (title, path, member_dirty) = if let Some(&index) = indices.get(&key) {
                         let doc = self.tabs[index].document.read(cx);
-                        titles.push(doc.display_title(cx));
-                        dirty |= doc.is_dirty(cx);
+                        (
+                            doc.display_title(cx),
+                            doc.status().path.as_deref().map(Path::new),
+                            doc.is_dirty(cx),
+                        )
                     } else if let Some(saved) = self.comparison.layout.pending.get(&key) {
-                        titles.push(saved.display_title(cx));
-                        dirty |= saved.dirty;
+                        (saved.display_title(cx), saved.path.as_deref(), saved.dirty)
+                    } else {
+                        continue;
+                    };
+                    titles.push(title);
+                    dirty |= member_dirty;
+                    if let Some(path) = path {
+                        has_path = true;
+                        favorite = matches!(item, TabItem::Single(_)) && favorites.contains(path);
                     }
                 }
                 TabRow {
                     item,
                     tab,
-                    title: titles.join("｜"),
+                    title: titles.join("｜").into(),
                     dirty,
                     favorite,
+                    has_path,
                 }
             })
             .collect()

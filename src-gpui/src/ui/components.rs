@@ -41,6 +41,7 @@ pub enum IconName {
     Strikethrough,
     Underline,
     Highlighter,
+    RemoveFormatting,
     CodeXml,
     Link,
     Quote,
@@ -138,6 +139,7 @@ impl IconName {
             IconName::Strikethrough => "icons/strikethrough.svg",
             IconName::Underline => "icons/underline.svg",
             IconName::Highlighter => "icons/highlighter.svg",
+            IconName::RemoveFormatting => "icons/remove-formatting.svg",
             IconName::CodeXml => "icons/code-xml.svg",
             IconName::Link => "icons/link.svg",
             IconName::Quote => "icons/quote.svg",
@@ -366,18 +368,24 @@ pub struct Tooltip {
 
 impl Render for Tooltip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let animate_theme = Theme::ui_transition_active(cx);
-        let theme = Theme::ui(cx);
-        div()
-            .relative().children(animate_theme.then(crate::ui::motion::theme_frame))
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(px(6.0))
-            .bg(theme.heading)
-            .text_color(theme.surface)
-            .text_size(px(12.0))
-            .child(self.text.clone())
+        tooltip_body(cx).child(self.text.clone())
     }
+}
+
+pub(super) const TOOLTIP_HORIZONTAL_PADDING: gpui::Pixels = px(8.0);
+pub(super) const TOOLTIP_FONT_SIZE: gpui::Pixels = px(12.0);
+
+pub(super) fn tooltip_body(cx: &App) -> Div {
+    let animate_theme = Theme::ui_transition_active(cx);
+    let theme = Theme::ui(cx);
+    div()
+        .relative().children(animate_theme.then(crate::ui::motion::theme_frame))
+        .px(TOOLTIP_HORIZONTAL_PADDING)
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .bg(theme.heading)
+        .text_color(theme.surface)
+        .text_size(TOOLTIP_FONT_SIZE)
 }
 
 fn settings_raised_shadow(theme: &Theme) -> Vec<gpui::BoxShadow> {

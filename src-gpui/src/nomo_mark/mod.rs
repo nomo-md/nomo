@@ -13,6 +13,7 @@ mod editing_rules;
 pub(crate) mod footnote_preview;
 pub(crate) mod front_matter;
 pub(crate) mod clipboard_content;
+mod clipboard_fragment;
 #[cfg(feature = "nomo-mark-demo")]
 pub mod demo;
 pub mod document_host;

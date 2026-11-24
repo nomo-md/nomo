@@ -13,6 +13,7 @@ impl NomoMark {
     pub(super) fn resolve_navigation_caret(&mut self, cx: &mut Context<Self>) {
         if self.keyboard_protected() { return; }
         if self.effective_mode() != ViewMode::Semantic { self.pending_navigation_caret = false; return; }
+        if self.active_implicit_cell().is_some() { return; }
         let selection = self.host.selection;
         if !self.pending_navigation_caret && !selection.range().is_empty() { return; }
         let identity = &self.host.parsed.identity;
@@ -57,7 +58,7 @@ impl NomoMark {
     }
 
     pub(super) fn delete_boundary(&mut self, forward: bool, unit: CursorUnit, cx: &mut Context<Self>) {
-        if self.keyboard_protected() { return; }
+        if self.keyboard_protected() || self.active_implicit_cell().is_some() { return; }
         let identity = &self.host.parsed.identity;
         let selected = self.host.selection.range();
         let at = self.local_cursor();

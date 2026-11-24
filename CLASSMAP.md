@@ -25,7 +25,7 @@
 | 标题栏和菜单 | `src-gpui/src/ui/chrome.rs`、`ui/chrome/view_menu.rs`、`ui/window_chrome.rs` | 应用内菜单和 macOS 系统菜单共用显示菜单分组；窗口拖动、按钮和菜单焦点恢复 |
 | NomoMark 正式文档宿主 | `src-gpui/src/nomo_mark/document_host.rs`、`workspace_host.rs`、`save_dialog.rs` | 每标签窗口生命周期、控件事件、正式错误恢复；保存框按当前目录和首个 H1 提供默认值，不持有全文 |
 | 文档元数据入口 | `src-gpui/src/nomo_mark/metadata_commands.rs`、`object_ui.rs` | 按需加载文首、已有属性原位编辑、缺少时通过主会话插入模板；复用窗口预算、取消与撤销历史 |
-| NomoMark 剪贴板 | `src-gpui/src/clipboard.rs`、`clipboard_rich.rs`、`clipboard_images.rs`、`clipboard_{native,macos,linux,x11}.rs`、`nomo_mark/clipboard_content.rs`、`nomo_mark/html_style.rs`、`session_actions.rs` | 三平台局部及跨窗口语义复制、纯文本／HTML 双格式、受限 HTML 粘贴及有界图片输入；成功写入后才删除原文，跨窗口输出限制 64 MiB；非 Windows 所有者按需创建并在退出时释放 |
+| NomoMark 剪贴板 | `src-gpui/src/clipboard.rs`、`clipboard_rich.rs`、`clipboard_images.rs`、`clipboard_{native,macos,linux,x11}.rs`、`nomo_mark/clipboard_content.rs`、`nomo_mark/clipboard_fragment.rs`、`nomo_mark/html_style.rs`、`session_actions.rs` | 三平台局部及跨窗口语义复制、可配置的可读文本／Markdown、HTML 与有界内部片段、独立 Markdown 复制、受限 HTML 粘贴及有界图片输入；成功写入后才删除原文，跨窗口输出限制 64 MiB；非 Windows 所有者按需创建并在退出时释放 |
 | 共享编辑动作与保存前快照 | `src-gpui/src/editor.rs`、`snapshots.rs` | 正式与开发入口共用动作、视图模式及快照策略；各活动控件注册自身键位，不保留旧 Buffer/EditorView |
 | 块索引测试文档 | `src-gpui/src/document/mod.rs`、`markdown/blocks.rs` | 仅在测试构建中提供内存文档夹具，保留增量结构编辑的既有验证 |
 | Markdown 渲染 | `src-gpui/src/markdown/` | 块结构、行内标记、当前窗口代码布局 |
@@ -35,14 +35,14 @@
 | 行内注释标签与原位编辑 | `src-gpui/src/nomo_mark/comments.rs`、`object_ui.rs` | 跟随主题主色的完整注释，按正文或单元格宽度折行，支持原位输入；局部草稿按会话确认，IME 收尾后提交，关闭释放输入控件 |
 | HTML 容器与属性卡片 | `src-gpui/src/nomo_mark/html_table.rs`、`front_matter.rs`、`object_ui.rs` | 安全 HTML 文本及实体映射、Details 标题边界；Front Matter 字段摘要、块注释完整预览与原位草稿；仅解析当前窗口，不重写未知属性 |
 | 文字布局与 KP | `src-gpui/src/layout.rs`、`kp.rs`、`kp/hyphenation.rs`、`resources/hyph-en-us.tex` | GPUI 塑形、有界 KP 求解、按需英文 Liang 断词、悬挂标点与虚拟连字符几何；保留原文字节身份，字典不缓存用户词语 |
-| 图片／公式／图表 | `src-gpui/src/images.rs`、`images/{source,gif,animation}.rs`、`embeds.rs`、`embeds_native.rs`、`nomo_mark/resource_lifecycle.rs` | 本地／HTTP(S)／内嵌 Base64 图片共用解码预检、有限任务队列、失败与位图预算、CPU／atlas 淘汰；内嵌图用内容摘要作为键，编码数据仅在有限的在途请求内保留；GIF 首帧优先、流式合成与两帧预读、可见绘制驱动循环、静态降级提示；关闭文档按其他窗口与后台标签的有界资源键回收，旧异步请求失效；无视图 SVG 管线供编辑器、导出和 Quick Look 共用 |
+| 图片／公式／图表 | `src-gpui/src/images.rs`、`images/{source,gif,animation}.rs`、`embeds.rs`、`embeds_native.rs`、`nomo_mark/resource_lifecycle.rs` | 本地／HTTP(S)／Base64 内嵌图片解码预检、有限任务队列、失败与位图预算、CPU／atlas 淘汰；内嵌数据以内容摘要作为资源键；GIF 首帧优先、流式合成与两帧预读、可见绘制驱动循环、静态降级提示；关闭文档按其他窗口与后台标签的有界资源键回收，旧异步请求失效；无视图 SVG 管线供编辑器、导出和 Quick Look 共用 |
 | macOS Quick Look | `src-gpui/macos-quick-look/`、`src-gpui/src/quick_look.rs`、`quick_look_model.rs`、`scripts/build-macos-quick-look.sh` | 按需沙箱预览扩展，AppKit 原生排版、内嵌图片和用户选定目录的相对图片；正文 1 MiB、可取消串行渲染、有限图片和增强结果，关闭释放；无编辑会话、网络或 WebView |
-| 公式兼容与字体回退 | `src-gpui/src/math_fallback.rs`、`vendor/latex-rust/NOMO-PATCH.md` | 固定版 TeX 引擎补充中间分隔符及伸缩、取模和下划线间距，扩展缺字接口；系统字体度量及轮廓参与正常排版，缓存只活到单次公式完成，复用现有位图缓存 |
-| 主题、动效与平台字体 | `src-gpui/src/theme.rs`、`theme_catalog.rs`、`resources/color-themes.json`、`src-gpui/src/ui/motion.rs` | 四套原版主题、有限用户主题目录及 JSON 导入／导出；同明暗配色与字体变更也失效可见区布局，图表配色进入共享缓存键 |
+| 公式兼容与字体回退 | `src-gpui/src/embeds_native.rs`、`math_compat.rs`、`math_fallback.rs`、`vendor/latex-rust/NOMO-PATCH.md` | 优先使用 TeX 引擎及宿主字形回退；语法不兼容时复用有界的纯 Rust KaTeX 渲染器及内嵌字体。编辑、导出及 Quick Look 共享 SVG 入口，保留原公式和已有位图缓存 |
+| 主题、动效与平台字体 | `src-gpui/src/theme.rs`、`theme_catalog.rs`、`resources/color-themes.json`、`src-gpui/src/ui/motion.rs` | 四套原版主题、有限用户主题目录及 JSON 导入／导出；同明暗配色与字体变更也失效可见区布局，图表配色与正文字体进入共享缓存键；图表测量、位图、预览和导出共用字体选择 |
 | 配置与设置窗口 | `src-gpui/src/settings.rs`、`ui/settings_schema.rs`、`ui/settings_window.rs`、`ui/settings_pages.rs`、`ui/settings_fonts.rs` | 九个分区（快捷键独立）、文档导航布局、主题导入／导出、从本机字体中搜索选用或恢复主题、图片策略；按原有配置原子保存 |
 | 文件管理器定位 | `src-gpui/src/ui/file_manager.rs` | 文件树、文档标签和本地图片共用定位入口。Windows 在后台线程解析路径并选中条目，失败时通过界面提示 |
 | Windows 文件集成 | `src-gpui/src/windows_integration.rs`、`ui/settings_pages.rs`、`src-gpui/windows-shell-extension/`、`scripts/msix/`、`scripts/packaging/{open-with.nsh,msix/}` | NSIS／ZIP 的当前用户默认应用候选与经典右键菜单；MSIX 的原生 IExplorerCommand、新式菜单与包内启停标记；注册／卸载按副本或包身份核对 |
-| 自定义快捷键 | `src-gpui/src/ui/shortcuts.rs`、`ui/settings_shortcuts.rs`、`ui/mod.rs` | 74 项命令、轻量分组列表、固定搜索筛选与按需编辑浮层，每命令最多 3 个键位及作用域冲突校验；保留旧配置，平台覆盖独立保存；提交后替换有限键表，菜单、右键与工具栏共用实际提示 |
+| 自定义快捷键 | `src-gpui/src/ui/shortcuts.rs`、`ui/settings_shortcuts.rs`、`ui/mod.rs` | 75 项命令、轻量分组列表、固定搜索筛选与按需编辑浮层，每命令最多 3 个键位及作用域冲突校验；保留旧配置，平台覆盖独立保存；提交后替换有限键表，菜单、右键与工具栏共用实际提示 |
 | UI 原件与图标 | `src-gpui/src/ui/components.rs`、`popup.rs`、`icon_assets.rs`、`text_field.rs` | 静态 SVG 内嵌、按钮、菜单、输入框；弹层按触发边界测量、翻转、限高和入场动画 |
 | 确认框与短提示 | `src-gpui/src/ui/dialogs.rs`、`dialogs/secondary.rs`、`toast.rs` | 保存、删除、外部变更、恢复、打开位置与关闭选择的旧版布局；焦点与短动效、单条有界 Toast，不接管系统文件选择器 |
 | 应用弹窗业务与更新 | `src-gpui/src/ui/workspace/application_dialogs.rs`、`open_requests.rs`、`recovery_ui.rs`、`ui/tray.rs`、`ui/tray/windows.rs`、`ui/updates.rs`、`ui/updates/{notice,installer,install_ui}.rs`、`ui/updates/installer/{windows,macos}.rs` | 有界打开队列、跨窗口归属和恢复列表；Windows 应用级托盘、macOS／X11 关闭到托盘（原生 Wayland 暂不支持）、官方优先且 gh-proxy 回退的 Release 元数据、MSIX Store 入口；共享安装包延迟竞速、SHA-256、进度和取消，Windows NSIS 与 macOS 退出后同卷替换分别适配，保存确认后重启安装 |
@@ -58,7 +58,7 @@
 | 脚注悬停预览 | `src-gpui/src/nomo_mark/footnote_preview.rs`、`workspace_queries.rs` | 共享结构索引定位，最多读取 8 KiB／显示 360 字；提示关闭、文档隐藏和后续悬停取消旧请求 |
 | 键盘与局部资源失效 | `src-gpui/src/nomo_mark/keyboard.rs`、`keyboard_session.rs`、`navigation.rs`、`resources.rs` | 按词、行、文档与翻页动作；有界跨窗查询；按资源依赖失效，无全文镜像 |
 | 连续窗口与预算 | `src-gpui/src/nomo_mark/native_port.rs`、`session_actions.rs`、`session_window.rs`、`viewport_ui.rs`、`viewport_model.rs`、`resident_budget.rs` | 正式/开发共用会话连接、已发布索引前缀增量分组、未索引尾部估算占位与阅读锚点、大编辑重分配、超大结构原文分片、失败重试、预取、回收和驻留预算 |
-| 同会话单栏/双栏 | `src-gpui/src/nomo_mark/window_panes.rs`、`src-gpui/src/ui/workspace/outline.rs` | 按需 Pane、唯一输入控件、全局导航、局部窗口同步、模式/历史阅读锚点与取消，不持有完整正文/历史。单栏按编辑区百分比排正文；右侧大纲自动隐藏或手动浮在当前编辑区，左栏大纲不参与正文偏移；两种容器共用分页、折叠、定位和章节拖动 |
+| 同会话单栏/双栏 | `src-gpui/src/nomo_mark/window_panes.rs`、`src-gpui/src/ui/workspace/outline.rs` | 按需 Pane、唯一输入控件、全局导航、局部窗口同步、模式/历史阅读锚点与取消，不持有完整正文/历史。单栏按编辑区百分比排正文；右侧大纲按偏好开关，按留白选择正文避让或浮层，左栏大纲不参与正文偏移；两种容器共用分页、折叠、定位和章节拖动 |
 | 页面全文查询 | `src-gpui/src/nomo_mark/workspace_queries.rs` | 后台搜索分页、全文统计、大纲（`outline_queries.rs`）；隐藏大纲取消查询并保留有界标题分页，重新展开复用同修订缓存，过期时后台更新；按文档保留磁盘折叠投影，关闭会话释放；查找与批量替换独立调度，按文档校验请求身份与修订 |
 | 应用界面语言 | `src-gpui/src/ui/toolbar_i18n.rs`、`resources/app-locales.json`、`resources/markdown-lint-locales.json`、`main.rs`、`settings.rs` | 四种语言与系统语言、稳定消息键及延迟解析；菜单、托盘与已缓存提示跟随界面语言，用户内容及底层错误原文不翻译 |
 | 工具栏文档命令与语言 | `src-gpui/src/nomo_mark/toolbar_commands.rs`、`toolbar_global.rs`、`semantic_selection.rs`、`semantic_global.rs`、`toc_update.rs`、`src-gpui/src/ui/toolbar_i18n.rs`、`src-gpui/resources/toolbar-locales.json` | 脚注和目录分页、派生事务、跨窗口语义补丁、四种界面语言；按需和预算内处理 |
@@ -66,7 +66,7 @@
 | 文档导出与打印 | `src-gpui/src/document_export.rs`、`document_export/{html,resources,remote,model,media,pdf,pdf_fonts,word}.rs`、`ui/workspace/{export,print}.rs`、`ui/workspace/print/` | 固定修订及单个可取消任务。打印按浅色 PDF 分页。Windows 的 PrintManager 按需请求预览页，预览与输出共用纸张和可打印区域布局。macOS 由 PDFKit 打印任务在文档窗口内显示 AppKit 预览。Linux 通过 X11／Wayland 父窗口调用打印 portal，按 PDF 文件输出设置生成所选页面；HTTP(S) 图片有界下载并内嵌，HTML 流式输出，PDF 与 Word 逐张编码并复用图片，每处引用独立排版；PDF 嵌入字体分页、Word 原生 OOXML，原子发布前复核取消 |
 | 外部文件变更策略 | `src-gpui/src/ui/workspace/application_dialogs.rs`、`text_document/markdown_session/external.rs` | 干净文档按偏好自动重载／覆盖／忽略；本地修改和删除仍显式选择，忽略继续阻止普通保存，覆盖校验检测令牌；Mini 返回后处理延迟冲突 |
 | 文档会话与保存 | `src-gpui/src/text_document/mod.rs`、`markdown_session.rs`、`markdown_session/rename.rs`、`markdown_session/external.rs`、`markdown_session/recovery.rs`、`markdown_history.rs` | PieceTree、磁盘正文与历史、快照、保存及重命名事务；会话编辑锁保护正文事务、历史、批量替换和章节移动；外部身份复核、进程租约和原会话按需恢复 |
-| 结构索引／搜索／统计 | `src-gpui/src/text_document/structure_index/`、`markdown_search/`、`writing_stats/` | 唯一结构索引、分页查询和有界统计；关闭时撤销索引归属，`structure_index/reclaim.rs` 分批回收派生页 |
+| 结构索引／搜索／统计 | `src-gpui/src/text_document/structure_index/`、`markdown_search/`、`writing_stats/` | 唯一结构索引、分页查询和有界统计；长内嵌图片的编码载荷使用有界压缩语法投影，验证图片目的地址后恢复真实范围与哈希，普通语义预算不变；可见资源块按页读出原文；关闭时撤销索引归属，`structure_index/reclaim.rs` 分批回收派生页 |
 | 编码、文件写入、格式模板 | `src-gpui/src/models.rs`、`file_system.rs`、`markdown_templates.rs` | 编码定义、原子替换、显式模板来源 |
 | Emoji 加载 | `src-gpui/src/nomo_mark/native_emoji.rs`、`ui/emoji_picker.rs` | 按需加载；固定版本 JSON、哈希、虚拟列表和原有缓存预算 |
 | 策略和既有语料 | `src-gpui/resources/` | 策略 JSON、搜索与结构样本 |

@@ -360,6 +360,8 @@ pub enum MatrixStyle {
     Align,
     /// `{gather}`
     Gather,
+    /// `{gathered}`: unnumbered centered display rows in an inline stack.
+    Gathered,
     /// `{multline}`
     Multline,
     /// `{equation}`
@@ -382,6 +384,7 @@ impl MatrixStyle {
             Self::Aligned => "aligned",
             Self::Align => "align",
             Self::Gather => "gather",
+            Self::Gathered => "gathered",
             Self::Multline => "multline",
             Self::Equation => "equation",
             Self::Split => "split",

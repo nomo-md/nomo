@@ -73,7 +73,7 @@ pub use layout::{
     NumberStyle, NumberingConfig, NumberingState, FallbackGlyph, GlyphFallback,
 };
 pub use parser::{
-    format_tokens, parse, parse_with_colors, parse_with_options, preprocess, tokenize, AccentKind,
+    format_tokens, parse, parse_with_colors, parse_with_options, preprocess, tokenize, trim_math, AccentKind,
     AtomKind, ColSpec, DelimSize, Delimiter, EnvRow, EqNumber, FracStyle, IntegralKind, MathNode,
     MatrixStyle, ParseOptions, PhantomKind, SpaceKind, TextItem, TextRun, TextStyle, Token,
     DEFAULT_MAX_NESTING_DEPTH,
@@ -82,6 +82,6 @@ pub use parser::{
 pub use render::egui::{latex_to_shapes, paint_egui, shapes};
 pub use render::egui::{render_egui, EguiOptions};
 pub use render::png::{latex_to_png, render_png, PngBackground, PngOptions};
-pub use render::svg::{latex_to_svg, render_svg, SvgOptions};
+pub use render::svg::{latex_to_svg, render_svg, render_svg_with_metrics, SvgImage, SvgOptions};
 pub use style_map::styled_char;
 pub use symbols::{category_count, glyph_char, lookup, symbols, SymbolEntry, SymbolKind};

@@ -72,7 +72,7 @@ pub fn default_value(key: &str) -> Value {
         "externalFileChangeBehavior" => json!("reload-external"),
         "homeSidebarHidden" | "sidebarHidden" => json!(false),
         "toolbarHidden" => json!(false),
-        "outlineVisible" => json!(true),
+        "outlineVisible" => json!(false),
         "documentNavigationLayout" => json!("right-outline"),
         "documentNavigationTab" => json!("files"),
         "documentNavigationSplitRatio" => json!(0.55),
@@ -90,7 +90,7 @@ pub fn default_value(key: &str) -> Value {
         "codeBlockLineNumbersVisible" => json!(true),
         "codeBlockIndent" => json!("spaces-2"),
         "inlineCodeRenderingEnabled" => json!(true),
-        "copyMarkdownSyntaxEnabled" => json!(true),
+        "defaultCopyFormat" => json!("readable"),
         "quickInsertEnabled" => json!(true),
         "quickInsertTrigger" => json!("/"),
         "imageHandlingSettings" => crate::image_import::defaults(),
@@ -119,7 +119,7 @@ pub struct Settings {
     pub default_mode: EditorMode,
     /// 分栏时源码在左（`source-semantic`）。
     pub split_source_first: bool,
-    pub show_outline: bool,
+    pub right_outline_open: bool,
     pub document_navigation_layout: DocumentNavigationLayout,
     pub show_home_sidebar: bool,
     pub show_sidebar: bool,
@@ -139,7 +139,7 @@ pub struct Settings {
     /// 代码块中 Tab 插入的缩进文本。
     pub code_indent: &'static str,
     pub inline_code_rendering: bool,
-    pub copy_markdown_syntax: bool,
+    pub copy_markdown: bool,
     pub default_code_language: String,
 }
 
@@ -157,7 +157,7 @@ impl Default for Settings {
             content_width_percent: 0.6,
             default_mode: EditorMode::Semantic,
             split_source_first: false,
-            show_outline: true,
+            right_outline_open: false,
             document_navigation_layout: DocumentNavigationLayout::RightOutline,
             show_home_sidebar: true,
             show_sidebar: true,
@@ -176,7 +176,7 @@ impl Default for Settings {
             code_line_numbers: true,
             code_indent: "  ",
             inline_code_rendering: true,
-            copy_markdown_syntax: true,
+            copy_markdown: false,
             default_code_language: "ts".into(),
         };
         settings.derive();
@@ -324,7 +324,7 @@ impl Settings {
             _ => EditorMode::Semantic,
         };
         self.split_source_first = self.string("splitViewLayout") == "source-semantic";
-        self.show_outline = self.bool("outlineVisible");
+        self.right_outline_open = self.bool("outlineVisible");
         self.document_navigation_layout = match self.string("documentNavigationLayout").as_str() {
             "left-tabs" => DocumentNavigationLayout::LeftTabs,
             "left-split" => DocumentNavigationLayout::LeftSplit,
@@ -356,7 +356,7 @@ impl Settings {
             _ => "  ",
         };
         self.inline_code_rendering = self.bool("inlineCodeRenderingEnabled");
-        self.copy_markdown_syntax = self.bool("copyMarkdownSyntaxEnabled");
+        self.copy_markdown = self.string("defaultCopyFormat") == "markdown";
         self.default_code_language = self.string("defaultCodeBlockLanguage");
         theme::set_font_overrides(&self.string("documentFontFamily"), &self.string("monoFontFamily"));
     }
@@ -410,4 +410,21 @@ fn write_setting(key: &str, value: &Value, zoom_control_visible: bool) -> std::i
     }
     let bytes = serde_json::to_vec_pretty(&config).map_err(std::io::Error::other)?;
     crate::file_system::write_file_atomically(&path, &bytes).map_err(std::io::Error::other)
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_default_copy_setting_updates_and_falls_back_to_readable() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.string("defaultCopyFormat"), "readable");
+        assert!(!settings.copy_markdown);
+        for (value, expected) in [(json!("markdown"), true), (json!("readable"), false), (json!("unknown"), false), (Value::Null, false)] {
+            settings.values.insert("defaultCopyFormat".into(), value);
+            settings.derive();
+            assert_eq!(settings.copy_markdown, expected);
+        }
+    }
 }

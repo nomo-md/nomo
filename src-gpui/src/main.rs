@@ -354,6 +354,7 @@ fn set_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action(locale.app_text("menu.cut"), editor::Cut),
                 MenuItem::action(locale.app_text("menu.copy"), editor::Copy),
+                MenuItem::action(locale.app_text("menu.copyAsMarkdown"), editor::CopyMarkdown),
                 MenuItem::action(locale.app_text("menu.paste"), editor::Paste),
                 MenuItem::action(locale.app_text("shortcuts.pastePlain"), nomo_mark::view::PastePlain),
                 MenuItem::action(locale.app_text("menu.selectAll"), editor::SelectAll),

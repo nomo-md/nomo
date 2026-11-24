@@ -41,7 +41,10 @@ pub(super) fn read() -> Result<Option<String>, String> {
     if generation != pasteboard.changeCount() {
         return Err("读取期间剪贴板内容已改变".into());
     }
-    Ok(html.filter(|html| !html.is_empty()))
+    Ok(html.filter(|html| !html.is_empty()).map(|html| {
+        html.strip_prefix(HTML_PREFIX).and_then(|body| body.strip_suffix(HTML_SUFFIX))
+            .map(str::to_owned).unwrap_or(html)
+    }))
 }
 
 pub(super) fn confirm(text: &str, html: &str) -> Result<(), String> {

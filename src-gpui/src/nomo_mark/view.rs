@@ -7,6 +7,7 @@ use super::{
     parse::InlineFormat,
     protocol::*,
     resources::ResourceAdapter,
+    table::{CellTarget, ImplicitCell},
 };
 use crate::{
     editor::{self, ViewMode},
@@ -80,6 +81,7 @@ pub struct NomoMark {
     pub(crate) context_history: (bool, bool),
     cell_selection: Option<table_clipboard::CellSelection>,
     table_drag_anchor: Option<(usize, usize, usize)>,
+    implicit_cell: Option<(WindowIdentity, ImplicitCell)>,
     pub host: WindowHostAdapter,
     pub mode: ViewMode,
     pub base_dir: Option<PathBuf>,
@@ -153,6 +155,7 @@ impl NomoMark {
             context_history: (false, false),
             cell_selection: None,
             table_drag_anchor: None,
+            implicit_cell: None,
             host,
             mode: ViewMode::Semantic,
             base_dir: None,
@@ -220,6 +223,7 @@ impl NomoMark {
             return Err(ControlError::Busy);
         }
         self.mode = mode;
+        self.implicit_cell = None;
         self.upstream_caret = None;
         self.pending_navigation_caret = false;
         self.context_menu = None;
@@ -244,6 +248,7 @@ impl NomoMark {
         self.context_form = None;
         self.cell_selection = None;
         self.table_drag_anchor = None;
+        self.implicit_cell = None;
         self.table_size_picker = false;
         self.code_language = None;
         self.code_copy = None;
@@ -301,6 +306,9 @@ impl NomoMark {
     }
     fn rekey_layout_identity(&mut self, previous: &WindowIdentity) {
         // 确认版本或邻窗位移都不改变局部几何，无需丢弃布局再绘制整段正文。
+        if let Some((identity, _)) = &mut self.implicit_cell {
+            if identity == previous { *identity = self.host.parsed.identity.clone(); }
+        }
         if let Some((stamp, ..)) = &mut self.layout_key {
             if &stamp.identity == previous { stamp.identity = self.host.parsed.identity.clone(); }
         }
@@ -325,6 +333,7 @@ impl NomoMark {
         self.context_form = None;
         self.dismiss_quick_insert(cx);
         self.host.suspend()?;
+        self.implicit_cell = None;
         // 切换标签后恢复输入时不能继续合并隐藏前的编辑。
         self.history_serial += 1;
         self.layout = None;
@@ -362,6 +371,7 @@ impl NomoMark {
         self.dismiss_quick_insert(cx);
         let identity = self.host.parsed.identity.clone();
         self.host.detach(discard)?;
+        self.implicit_cell = None;
         self.layout = None;
         self.layout_key = None;
         self.layout_resources = Default::default();
@@ -445,6 +455,7 @@ impl NomoMark {
         self.code_copy = None;
         self.block_menu_open = false;
         self.cell_selection = None;
+        self.implicit_cell = None;
         let at = self.local_cursor();
         self.context_menu = None;
         self.context_form = None;
@@ -481,6 +492,18 @@ impl NomoMark {
     pub fn command(&mut self, intent: EditIntent, cx: &mut Context<Self>) {
         if self.host.editing_locked() { return; }
         self.dismiss_quick_insert(cx);
+        let implicit_edit = if let Some(cell) = self.active_implicit_cell() {
+            let text = match &intent {
+                EditIntent::Replace(text) if !text.is_empty() => text,
+                EditIntent::Newline | EditIntent::ParagraphBreak | EditIntent::SoftBreak => "<br>",
+                EditIntent::Replace(_) | EditIntent::Backspace | EditIntent::Delete => return,
+                _ => {
+                    self.error(ControlError::Unsupported("请先在空单元格中输入内容".into()), cx);
+                    return;
+                }
+            };
+            Some(cell.replace(&self.host.parsed, text))
+        } else { None };
         let enter_math = matches!(intent, EditIntent::InsertMathBlock) && self.effective_mode() == ViewMode::Semantic;
         let range = self.host.selection.range();
         let identity = &self.host.parsed.identity;
@@ -503,7 +526,8 @@ impl NomoMark {
         if !matches!(intent, EditIntent::Replace(_)) {
             self.history_serial += 1;
         }
-        let result = if let Some(result) = local_boundary_edit { Ok(result) }
+        let result = if let Some(result) = implicit_edit { result }
+        else if let Some(result) = local_boundary_edit { Ok(result) }
         else if let Some(result) = self.selected_cells_edit(&intent) { result }
         else if self.effective_mode() == ViewMode::Semantic {
             commands::apply_semantic(&self.host.parsed, self.host.selection, intent)
@@ -587,8 +611,11 @@ impl NomoMark {
         {
             return Some((cell.row, cell.column));
         }
-        super::table::Table::at(&self.host.parsed, self.local_cursor())?
-            .cell_at(self.local_cursor())
+        let table = super::table::Table::at(&self.host.parsed, self.local_cursor())?;
+        if let Some(cell) = self.active_implicit_cell() {
+            return table.implicit_row(cell).map(|row| (row, cell.column));
+        }
+        table.cell_at(self.local_cursor())
     }
     fn insert_paragraph(&mut self, before: bool, cx: &mut Context<Self>) {
         if self.effective_mode() == ViewMode::Semantic {
@@ -662,8 +689,11 @@ impl NomoMark {
                 return;
             }
             if let Some(table) = super::table::Table::at(&self.host.parsed, self.local_cursor()) {
-                if let Some(cell) = table.next_cell(self.local_cursor(), backwards) {
-                    self.move_to(cell.start, false, cx);
+                if let Some(cell) = table.next_cell(&self.host.parsed, self.local_cursor(), self.active_implicit_cell(), backwards) {
+                    match cell {
+                        CellTarget::Source(at) => self.move_to(at, false, cx),
+                        CellTarget::Implicit(cell) => self.select_implicit_cell(cell, cx),
+                    }
                     return;
                 }
                 if !backwards {
@@ -702,9 +732,25 @@ impl NomoMark {
             .min(self.host.parsed.source.len() as u64) as usize
     }
     pub fn select(&mut self, selection: DocumentSelection, cx: &mut Context<Self>) {
-        self.select_with_reveal(selection, true, cx);
+        self.select_with_reveal(selection, true, None, cx);
     }
-    fn select_with_reveal(&mut self, selection: DocumentSelection, reveal: bool, cx: &mut Context<Self>) {
+
+    fn active_implicit_cell(&self) -> Option<ImplicitCell> {
+        let (identity, cell) = self.implicit_cell.as_ref()?;
+        let parsed = &self.host.parsed;
+        if self.effective_mode() != ViewMode::Semantic || identity != &parsed.identity { return None; }
+        let anchor = identity.from_byte + cell.anchor(&parsed.source) as u64;
+        (self.host.selection == DocumentSelection::caret(anchor)).then_some(*cell)
+    }
+
+    fn select_implicit_cell(&mut self, cell: ImplicitCell, cx: &mut Context<Self>) {
+        let parsed = &self.host.parsed;
+        let anchor = parsed.identity.from_byte + cell.anchor(&parsed.source) as u64;
+        self.select_with_reveal(DocumentSelection::caret(anchor), true, Some(cell), cx);
+        self.preferred_x = None;
+    }
+
+    fn select_with_reveal(&mut self, selection: DocumentSelection, reveal: bool, implicit: Option<ImplicitCell>, cx: &mut Context<Self>) {
         self.upstream_caret = None;
         self.context_menu = None;
         self.context_form = None;
@@ -715,7 +761,8 @@ impl NomoMark {
         self.cell_selection = None;
         self.dismiss_quick_insert(cx);
         if self.finish_external_composition(true, cx) { return; }
-        self.pending_navigation_caret = selection.range().is_empty();
+        self.implicit_cell = implicit.map(|cell| (self.host.parsed.identity.clone(), cell));
+        self.pending_navigation_caret = implicit.is_none() && selection.range().is_empty();
         self.host.selection = selection;
         self.ensure_horizontal_caret();
         self.history_serial += 1;
@@ -733,7 +780,10 @@ impl NomoMark {
     }
     /// 宿主恢复/同步全局选区，不伪造用户选区事件或切换活动输入视图。
     pub(crate) fn restore_selection(&mut self, selection:DocumentSelection, cx:&mut Context<Self>) {
-        if self.host.selection != selection { self.upstream_caret = None; }
+        if self.host.selection != selection {
+            self.upstream_caret = None;
+            self.implicit_cell = None;
+        }
         if self.host.selection != selection { self.context_menu = None; self.context_form = None; }
         self.dismiss_quick_insert(cx);
         self.pending_navigation_caret = false;
@@ -777,8 +827,14 @@ impl NomoMark {
         self.ensure_horizontal_caret();
     }
     fn visual_caret_at(&self, at: usize) -> Option<(f32, f32, f32)> {
+        let layout = self.layout.as_ref()?;
+        if let Some(cell) = self.active_implicit_cell() {
+            if at == self.local_cursor() {
+                return layout.implicit_table_caret(cell);
+            }
+        }
         let byte = self.host.parsed.identity.from_byte + at as u64;
-        self.layout.as_ref()?.caret_at_with_affinity(at, self.upstream_caret == Some(byte))
+        layout.caret_at_with_affinity(at, self.upstream_caret == Some(byte))
     }
     fn horizontal(&mut self, forward: bool, word: bool, extend: bool, cx: &mut Context<Self>) {
         if self.keyboard_protected() {
@@ -897,11 +953,12 @@ impl NomoMark {
         self.upstream_caret = end.then_some(self.host.selection.head_byte);
         self.ensure_horizontal_caret();
     }
-    fn copy(&mut self, cut: bool, cx: &mut Context<Self>) {
+    fn copy(&mut self, cut: bool, markdown: bool, cx: &mut Context<Self>) {
         if cut && self.host.editing_locked() { return; }
-        if let Some(payload) = self.copy_cells(cx.global::<Settings>().copy_markdown_syntax) {
-            match payload.map_err(|e| e.to_string()).and_then(|p| crate::clipboard::write_rich(&p.text, &p.html, cx)) {
-                Ok(()) if cut => self.command(EditIntent::Replace(String::new()), cx),
+        let format = CopyFormat::for_command(markdown, cx.global::<Settings>().copy_markdown);
+        if let Some(payload) = self.copy_cells(format != CopyFormat::Readable) {
+            match payload.map_err(|e| e.to_string()).and_then(|p| p.write(format, cx)) {
+                Ok(()) if cut => self.cut_selection(cx),
                 Ok(()) => {}
                 Err(error) => cx.emit(ControlEvent::Failure(error)),
             }
@@ -917,6 +974,7 @@ impl NomoMark {
                 identity: self.host.parsed.identity.clone(),
                 selection,
                 cut,
+                format,
             });
             return;
         };
@@ -924,19 +982,26 @@ impl NomoMark {
             return;
         }
         let result = if self.effective_mode() == ViewMode::Semantic {
-            super::clipboard_content::selected(&self.host.parsed, range, cx.global::<Settings>().copy_markdown_syntax)
-                .map_err(|e| e.to_string()).and_then(|p| crate::clipboard::write_rich(&p.text, &p.html, cx))
+            super::clipboard_content::selected(&self.host.parsed, range, format)
+                .map_err(|e| e.to_string()).and_then(|p| p.write(format, cx))
         } else { crate::clipboard::write_text(&self.host.parsed.source[range], cx) };
         match result {
-            Ok(()) if cut => self.command(EditIntent::Replace(String::new()), cx),
+            Ok(()) if cut => self.cut_selection(cx),
             Ok(()) => {}
             Err(error) => cx.emit(ControlEvent::Failure(error)),
         }
     }
+    fn cut_selection(&mut self, cx: &mut Context<Self>) {
+        // 剪切是独立撤销步骤，不能与前一次格式操作或后续输入合并。
+        self.history_serial += 1;
+        self.command(EditIntent::Replace(String::new()), cx);
+        self.history_serial += 1;
+    }
     fn paste(&mut self, plain: bool, cx: &mut Context<Self>) {
         if self.host.editing_locked() { return; }
         let in_code = self.host.parsed.nodes.iter().any(|node| node.kind == "code" && node.source.contains(&self.local_cursor()));
-        if !plain && !self.auxiliary_input && !in_code {
+        let implicit = self.active_implicit_cell().is_some();
+        if !plain && !self.auxiliary_input && !in_code && !implicit {
             match crate::clipboard::read_images(cx) {
                 Ok(Some(inputs)) => {
                     if let Err(error) = self.prepare_unmount() { self.error(error, cx); return; }
@@ -951,9 +1016,9 @@ impl NomoMark {
         let at = self.local_cursor();
         let semantic = self.effective_mode() == ViewMode::Semantic && !self.auxiliary_input;
         let html = if semantic && !plain { crate::clipboard::read_html() } else { None };
-        if semantic && !plain && self.paste_cells(&text, html.as_deref(), cx) { return; }
         let literal_context = self.host.parsed.nodes.iter().any(|n| n.kind == "code" && n.source.contains(&at))
             || self.host.parsed.inline.iter().any(|s| s.format == InlineFormat::Code && s.content.start <= at && at <= s.content.end);
+        if semantic && !plain && !literal_context && !implicit && self.paste_cells(&text, html.as_deref(), cx) { return; }
         let html_cell = super::table_inline::html_cell(&self.host.parsed, &(at..at)).is_some();
         let inserted = if !semantic || literal_context || html_cell { text }
             else if plain { super::clipboard_content::literal_paragraphs(&text) }
@@ -1297,6 +1362,13 @@ impl NomoMark {
                 return;
             }
         }
+        if !event.modifiers.shift && let Some(cell) = self.implicit_cell_at(event.position) {
+            self.select_implicit_cell(cell, cx);
+            self.table_drag_anchor = None;
+            self.host.interaction.dragging = true;
+            self.host.interaction.drag_selection_started = false;
+            return;
+        }
         let object_at = (self.effective_mode() == ViewMode::Semantic && event.click_count == 2)
             .then(|| {
                 let bounds = self.content_bounds()?;
@@ -1410,6 +1482,9 @@ impl NomoMark {
             return;
         }
         if self.host.interaction.dragging {
+            if let Some(cell) = self.active_implicit_cell() {
+                if self.implicit_cell_at(event.position) == Some(cell) { return; }
+            }
             if let Some(at) = self.hit(event.position) {
                 if let Some(bounds) = self.bounds { self.move_to_row(at, f32::from(event.position.y - bounds.top()), true, cx); }
                 if let (Some((table, row, column)), Some((target, r, c))) = (self.table_drag_anchor, self.table_cell_at(at)) {
@@ -1491,6 +1566,7 @@ impl NomoMark {
             return;
         };
         let at = self.local_cursor();
+        let implicit = self.active_implicit_cell();
         for item in &layout.items {
             if let DisplayItem::CodeBody { source, w, h, body, .. } = item {
                 if source.contains(&at) {
@@ -1508,7 +1584,9 @@ impl NomoMark {
             } = item
             {
                 if source.start <= at && at <= source.end {
-                    if let Some((x, _, _)) = layout.caret_at_with_affinity(at, self.upstream_caret == Some(self.host.selection.head_byte)) {
+                    let caret = if let Some(cell) = implicit { layout.implicit_table_caret(cell) }
+                        else { layout.caret_at_with_affinity(at, self.upstream_caret == Some(self.host.selection.head_byte)) };
+                    if let Some((x, _, _)) = caret {
                         let current = offset.get();
                         let next = if x < current + 4.0 {
                             x - 4.0
@@ -1528,6 +1606,14 @@ impl NomoMark {
             }
         }
     }
+
+    fn implicit_cell_at(&self, position: Point<Pixels>) -> Option<ImplicitCell> {
+        if self.effective_mode() != ViewMode::Semantic { return None; }
+        let bounds = self.content_bounds()?;
+        let local = position - bounds.origin;
+        self.layout.as_ref()?.implicit_table_cell_at(f32::from(local.x), f32::from(local.y))
+    }
+
     fn hit(&self, position: Point<Pixels>) -> Option<usize> {
         if self.layout_key.as_ref()?.0.identity != self.host.parsed.identity {
             return None;
@@ -1583,7 +1669,7 @@ impl NomoMark {
         let base = parsed.identity.from_byte;
         window.focus(&self.focus, cx);
         self.select_with_reveal(
-            DocumentSelection { anchor_byte: base + range.start as u64, head_byte: base + end as u64 }, false, cx,
+            DocumentSelection { anchor_byte: base + range.start as u64, head_byte: base + end as u64 }, false, None, cx,
         );
         self.preferred_x = None;
     }
@@ -1596,6 +1682,11 @@ impl NomoMark {
     /// 纸面留白沿用正文命中及选区事件，不创建文档补丁或历史记录。
     pub(crate) fn place_caret_at(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         if self.host.interaction.protected() || self.host.presentation != Presentation::Editable { return; }
+        if let Some(cell) = self.implicit_cell_at(position) {
+            window.focus(&self.focus, cx);
+            self.select_implicit_cell(cell, cx);
+            return;
+        }
         if let (Some(at), Some(bounds)) = (self.hit(position), self.bounds) {
             window.focus(&self.focus, cx);
             self.move_to_row(at, f32::from(position.y - bounds.top()), false, cx);
@@ -1826,6 +1917,9 @@ impl NomoMark {
         }
         self.layout_external_composition(width, window, cx);
         self.refresh_code_view_state(cx);
+        if self.object.is_some() && self.layout_key.as_ref().is_none_or(|key| key.0.font_generation != crate::layout::generation()) {
+            self.request_object_preview(true, cx);
+        }
         let settings = cx.global::<Settings>();
         let metrics = settings.metrics();
         let wrap = settings.wrap();
@@ -1922,10 +2016,12 @@ impl NomoMark {
             let theme = cx.global::<Theme>();
             let rgba = gpui::Rgba::from(theme.fg);
             let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let document_font = crate::theme::font_for(Family::Text, false, false).family;
             let resources = ResourceAdapter {
                 images: cx.global::<ImageStore>(),
                 embeds: cx.global::<EmbedStore>(),
                 em_px: metrics.body_size(),
+                font_family: &document_font,
                 dark: theme.dark,
                 mermaid: theme.mermaid,
                 color: [byte(rgba.r), byte(rgba.g), byte(rgba.b)],
@@ -2311,6 +2407,14 @@ impl NomoMark {
         cx: &mut Context<Self>,
     ) {
         if self.host.editing_locked() { return; }
+        if self.active_implicit_cell().is_some() {
+            if mark || self.external_composition.is_some() {
+                self.replace_external_composition(range, text, selected, mark, cx);
+            } else if !text.is_empty() {
+                self.command(EditIntent::Replace(text.into()), cx);
+            }
+            return;
+        }
         if !mark && text == " " && range.is_none() && !self.keyboard_protected() && self.external_composition.is_none()
             && self.effective_mode() == ViewMode::Semantic && !self.auxiliary_input
         {
@@ -2685,8 +2789,9 @@ impl Render for NomoMark {
             .on_action(
                 cx.listener(|_, _: &editor::SelectAll, _, cx| cx.emit(ControlEvent::SelectAll)),
             )
-            .on_action(cx.listener(|v, _: &editor::Copy, _, cx| v.copy(false, cx)))
-            .on_action(cx.listener(|v, _: &editor::Cut, _, cx| v.copy(true, cx)))
+            .on_action(cx.listener(|v, _: &editor::Copy, _, cx| v.copy(false, false, cx)))
+            .on_action(cx.listener(|v, _: &editor::CopyMarkdown, _, cx| v.copy(false, true, cx)))
+            .on_action(cx.listener(|v, _: &editor::Cut, _, cx| v.copy(true, false, cx)))
             .on_action(cx.listener(|v, _: &editor::Paste, _, cx| v.paste(false, cx)))
             .on_drop(cx.listener(|v, paths: &gpui::ExternalPaths, window, cx| {
                 // GPUI 在回调前已取走拖放载荷，文档不能靠冒泡交给工作区。

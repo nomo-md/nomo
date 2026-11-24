@@ -1,10 +1,10 @@
 [package]
 name = "latex-rust"
-version = "3.0.1"
+version = "3.0.3"
 edition = "2021"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
-description = "Nomo's vendored latex-rust 3.0.1 with host glyph fallback"
+description = "Nomo's vendored latex-rust 3.0.3 with host glyph fallback and math compatibility"
 repository = "https://github.com/jscarr64/latex-rust"
 
 [features]

@@ -10,6 +10,7 @@ use crate::images::{ImageKey, ImageSource, image_label, is_data_source, resolve_
 use crate::layout::{ColorRole, InlineAsset, InlineObject, InlineStyle, OBJECT_CHAR, ParaSpec, TextLayout, Wrap, layout_text};
 use crate::theme::{Family, Metrics};
 use crate::nomo_mark::parse::ParsedWindow;
+use crate::nomo_mark::table::ImplicitCell;
 use crate::nomo_mark::image_properties::{self, ImageWidth};
 use gpui::{Bounds, Pixels, Point, Window, point, px, size};
 use pulldown_cmark::{Alignment, BlockQuoteKind, CodeBlockKind, Event, Parser, Tag, TagEnd};
@@ -64,6 +65,7 @@ pub enum DisplayItem {
     CalloutHeader { x: f32, y: f32, size: f32, button_offset: f32, source: usize, kind: BlockQuoteKind, role: ColorRole },
     /// 当前窗口内单元格的真实边界，供控件命中和矩形选区使用；不绘制正文。
     TableCell { x: f32, y: f32, w: f32, h: f32, table: usize, row: usize, column: usize, rowspan: usize, colspan: usize, source: Range<usize> },
+    ImplicitTableCell { x: f32, y: f32, w: f32, h: f32, caret: (f32, f32, f32), table: usize, row: usize, cell: ImplicitCell },
     /// 宽表格及无法拆开的段落只在自己的矩形内横向滚动，宿主纵向调度保持原位。
     Horizontal {x:f32,y:f32,w:f32,h:f32,content_width:f32,source:Range<usize>,offset:std::cell::Cell<f32>,layout:Box<BlockLayout>},
     Text { x: f32, y: f32, layout: Rc<TextLayout>, map: Vec<MapSeg> },
@@ -152,6 +154,8 @@ impl BlockLayout {
             match item {
                 DisplayItem::TableCell { x, y, w, h, table: id, row, column, rowspan, colspan, source } if *id == table =>
                     cells.push((*row, *column, *rowspan, *colspan, *x, *y, *w, *h, source.clone())),
+                DisplayItem::ImplicitTableCell { x, y, w, h, table: id, row, cell, .. } if *id == table =>
+                    cells.push((*row, cell.column, 1, 1, *x, *y, *w, *h, cell.row_end..cell.row_end)),
                 DisplayItem::Horizontal { x, y, w, offset, layout, .. } => {
                     for (r, c, rs, cs, ix, iy, iw, ih, source) in layout.table_cells(table) {
                         let left = (ix - offset.get()).max(0.0);
@@ -163,6 +167,29 @@ impl BlockLayout {
             }
         }
         cells
+    }
+    pub(crate) fn implicit_table_cell_at(&self, x: f32, y: f32) -> Option<ImplicitCell> {
+        self.items.iter().find_map(|item| match item {
+            DisplayItem::ImplicitTableCell { x: left, y: top, w, h, cell, .. }
+                if x >= *left && x < left + w && y >= *top && y < top + h => Some(*cell),
+            DisplayItem::Horizontal { x: left, y: top, w, h, offset, layout, .. }
+                if x >= *left && x < left + w && y >= *top && y < top + h =>
+                    layout.implicit_table_cell_at(x - left + offset.get(), y - top),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn implicit_table_caret(&self, target: ImplicitCell) -> Option<(f32, f32, f32)> {
+        self.items.iter().find_map(|item| match item {
+            DisplayItem::ImplicitTableCell { x, y, caret: (dx, dy, height), cell, .. } if *cell == target =>
+                Some((x + dx, y + dy, *height)),
+            DisplayItem::Horizontal { x, y, w, offset, layout, .. } =>
+                layout.implicit_table_caret(target).and_then(|(cx, cy, height)| {
+                    let cx = cx - offset.get();
+                    (0.0 <= cx && cx < *w).then_some((x + cx, y + cy, height))
+                }),
+            _ => None,
+        })
     }
     /// 从本帧可见的位图矩形命中图片，宽表格内沿用自己的滚动裁切。
     pub(crate) fn find_visible_image(
@@ -1289,7 +1316,7 @@ fn is_cjk(ch: char) -> bool {
 struct TableData {
     source:Range<usize>,
     alignments: Vec<Alignment>,
-    rows: Vec<(bool, Vec<ParaBuilder>)>,
+    rows: Vec<(bool, usize, Vec<ParaBuilder>)>,
 }
 
 fn push_comment(para: &mut ParaBuilder, content: &str, range: Range<usize>, font_size: f32, env: &RenderEnv, window: &Window) {
@@ -1372,16 +1399,18 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
         match event {
             Event::Start(Tag::TableHead) => {
                 in_head = true;
-                table.rows.push((true, Vec::new()));
+                table.rows.push((true, range.end, Vec::new()));
             }
             Event::End(TagEnd::TableHead) => in_head = false,
-            Event::Start(Tag::TableRow) => table.rows.push((in_head, Vec::new())),
+            Event::Start(Tag::TableRow) => table.rows.push((in_head, range.end, Vec::new())),
             Event::Start(Tag::TableCell) => {
                 inline = InlineState::default();
                 cell_range = Some(range.clone());
-                if let Some((_, cells)) = table.rows.last_mut() {
-                    let mut cell=ParaBuilder::new();
-                    cell.map.push(MapSeg{text:0..0,source:range.start,source_end:range.start,exact:true});
+                if let Some((header, row_end, cells)) = table.rows.last_mut() {
+                    let mut cell = ParaBuilder::new();
+                    if *header || !ImplicitCell::matches(&range, *row_end) {
+                        cell.map.push(MapSeg { text: 0..0, source: range.start, source_end: range.start, exact: true });
+                    }
                     cells.push(cell);
                 }
             }
@@ -1398,7 +1427,7 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
             Event::End(TagEnd::Subscript) => inline.sub=inline.sub.saturating_sub(1),
             Event::InlineHtml(html) => {
                 if let Some(run) = html_table::atom_at(source, range.start).filter(|run| cell_range.as_ref().is_some_and(|cell| run.source.end <= cell.end)) {
-                    if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
+                    if let Some(cell) = table.rows.last_mut().and_then(|(_, _, cells)| cells.last_mut()) {
                         push_table_atom(cell, run.atom.as_ref().unwrap(), run.source.clone(), inline.style(&InlineStyle::default()), env, window);
                     }
                     skip = Some(run.source);
@@ -1406,10 +1435,10 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
                     match inline.apply_html(&html) {
                         Some(true) => {}
                         Some(false) => {
-                            if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) { cell.push("\n", inline.style(&InlineStyle::default()), Some((range.start, false))); if let Some(map)=cell.map.last_mut(){map.source_end=range.end;} }
+                            if let Some(cell) = table.rows.last_mut().and_then(|(_, _, cells)| cells.last_mut()) { cell.push("\n", inline.style(&InlineStyle::default()), Some((range.start, false))); if let Some(map)=cell.map.last_mut(){map.source_end=range.end;} }
                         }
                         None => {
-                            if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) { cell.push(&html, InlineStyle { mono: true, color: ColorRole::Muted, ..inline.style(&InlineStyle::default()) }, Some((range.start, true))); }
+                            if let Some(cell) = table.rows.last_mut().and_then(|(_, _, cells)| cells.last_mut()) { cell.push(&html, InlineStyle { mono: true, color: ColorRole::Muted, ..inline.style(&InlineStyle::default()) }, Some((range.start, true))); }
                         }
                     }
                 }
@@ -1420,7 +1449,7 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
                 let pending = context.is_some_and(|context| context.reference_target_pending(&range));
                 let (image, range) = table_inline::image(source, events, &dest_url, &title, range);
                 let atom = InlineAtom::Image { src: image.src, alt: image.alt, width: ImageWidth::parse(&image.width), align: Some(image.align) };
-                if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
+                if let Some(cell) = table.rows.last_mut().and_then(|(_, _, cells)| cells.last_mut()) {
                     if pending {
                         cell.push(&atom.display_text(), inline.style(&InlineStyle::default()), Some((range.start, false)));
                         if let Some(map) = cell.map.last_mut() { map.source_end = range.end; }
@@ -1431,7 +1460,7 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
                 skip = Some(range);
             }
             Event::Text(text) => {
-                if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
+                if let Some(cell) = table.rows.last_mut().and_then(|(_, _, cells)| cells.last_mut()) {
                     let exact = source.get(range.clone())==Some(text.as_ref());
                     let mut style = inline.style(&InlineStyle::default());
                     if is_revealed(revealed, range.clone()) { style.color = ColorRole::Muted; }
@@ -1440,7 +1469,7 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
                 }
             }
             Event::Code(code) => {
-                if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
+                if let Some(cell) = table.rows.last_mut().and_then(|(_, _, cells)| cells.last_mut()) {
                     let style = InlineStyle { mono: true, code_bg: true, color: ColorRole::InlineCode, ..inline.style(&InlineStyle::default()) };
                     let inner=source[range.clone()].find(code.as_ref()).map(|offset|range.start+offset);
                     cell.push(&code, style, Some((inner.unwrap_or(range.start), inner.is_some())));
@@ -1448,12 +1477,12 @@ fn collect_table<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)
                 }
             }
             Event::InlineMath(tex) | Event::DisplayMath(tex) => {
-                if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) {
+                if let Some(cell) = table.rows.last_mut().and_then(|(_, _, cells)| cells.last_mut()) {
                     push_table_atom(cell, &InlineAtom::Math(tex.to_string()), range, inline.style(&InlineStyle::default()), env, window);
                 }
             }
             Event::FootnoteReference(id) => {
-                if let Some(cell) = table.rows.last_mut().and_then(|(_, cells)| cells.last_mut()) { push_table_atom(cell, &InlineAtom::Footnote(id.to_string()), range, inline.style(&InlineStyle::default()), env, window); }
+                if let Some(cell) = table.rows.last_mut().and_then(|(_, _, cells)| cells.last_mut()) { push_table_atom(cell, &InlineAtom::Footnote(id.to_string()), range, inline.style(&InlineStyle::default()), env, window); }
             }
             Event::End(TagEnd::Table) => break,
             _ => {}
@@ -2426,7 +2455,7 @@ impl Builder<'_> {
         self.apply_table_gap();
         let first_item=self.items.len();
         let metrics = self.env.metrics;
-        let columns = table.rows.iter().map(|(_, cells)| cells.len()).max().unwrap_or(0).max(table.alignments.len());
+        let columns = table.rows.iter().map(|(_, _, cells)| cells.len()).max().unwrap_or(0).max(table.alignments.len());
         if columns == 0 {
             return;
         }
@@ -2454,7 +2483,7 @@ impl Builder<'_> {
         // NomoMark 使用共享语义约束；旧 Buffer 渲染入口保留原有分配方式。
         let mut natural = vec![40.0f32; columns];
         let mut cell_metrics=Vec::new();
-        for (header, cells) in &table.rows {
+        for (header, _, cells) in &table.rows {
             for (column, cell) in cells.iter().enumerate() {
                 let spec = spec_for(cell, *header);
                 if self.controlled {
@@ -2484,7 +2513,7 @@ impl Builder<'_> {
         let mut y = top;
         let mut cells_out = Vec::new();
         let mut row_bounds = Vec::new();
-        for (row, (header, cells)) in table.rows.iter().enumerate() {
+        for (row, (header, row_end, cells)) in table.rows.iter().enumerate() {
             let mut row_height = if self.controlled && *header { 13.0 * 1.55 * metrics.zoom } else { line_height };
             let mut laid = Vec::new();
             let mut x = self.indent + border;
@@ -2514,12 +2543,20 @@ impl Builder<'_> {
                     if let (Some(start), Some(end)) = (cell.map.iter().map(|m| m.source).min(), cell.map.iter().map(|m| m.source_end).max()) {
                         cells_out.push(DisplayItem::TableCell { x, y, w: widths[column], h: height, table: table.source.start,
                             row, column, rowspan: 1, colspan: 1, source: start..end });
+                    } else {
+                        let (text_x, layout, _) = &laid[column];
+                        cells_out.push(DisplayItem::ImplicitTableCell {
+                            x, y, w: widths[column], h: height, caret: (*text_x - x, pad_y, layout.line_height),
+                            table: table.source.start, row, cell: ImplicitCell { row_end: *row_end, column },
+                        });
                     }
                     x += widths[column];
                 }
             }
             for (x, layout, map) in laid {
-                cells_out.push(DisplayItem::Text { x, y: y + pad_y, layout, map });
+                if !map.is_empty() {
+                    cells_out.push(DisplayItem::Text { x, y: y + pad_y, layout, map });
+                }
             }
             y += height;
         }
@@ -2554,7 +2591,7 @@ impl Builder<'_> {
         if content_width<=width+0.5{return;}
         let mut items=self.items.split_off(first);
         for item in &mut items{match item{
-            DisplayItem::CodeBody{x,y,..}|DisplayItem::CodeHeader{x,y,..}|DisplayItem::CodeLanguage{x,y,..}|DisplayItem::Text{x,y,..}|DisplayItem::Rect{x,y,..}|DisplayItem::Image{x,y,..}|DisplayItem::Checkbox{x,y,..}|DisplayItem::CopyButton{x,y,..}|DisplayItem::Disclosure{x,y,..}|DisplayItem::Embed{x,y,..}|DisplayItem::Horizontal{x,y,..}|DisplayItem::TableCell{x,y,..}|DisplayItem::CalloutHeader{x,y,..}|DisplayItem::BlockControls{x,y,..}|DisplayItem::TocLink{x,y,..}=>{*x-=self.indent;*y-=top;}
+            DisplayItem::CodeBody{x,y,..}|DisplayItem::CodeHeader{x,y,..}|DisplayItem::CodeLanguage{x,y,..}|DisplayItem::Text{x,y,..}|DisplayItem::Rect{x,y,..}|DisplayItem::Image{x,y,..}|DisplayItem::Checkbox{x,y,..}|DisplayItem::CopyButton{x,y,..}|DisplayItem::Disclosure{x,y,..}|DisplayItem::Embed{x,y,..}|DisplayItem::Horizontal{x,y,..}|DisplayItem::TableCell{x,y,..}|DisplayItem::ImplicitTableCell{x,y,..}|DisplayItem::CalloutHeader{x,y,..}|DisplayItem::BlockControls{x,y,..}|DisplayItem::TocLink{x,y,..}=>{*x-=self.indent;*y-=top;}
         }}
         let height=self.y-top;self.y+=8.0;
         self.items.push(DisplayItem::Horizontal{x:self.indent,y:top,w:width,h:height+8.0,content_width,source,offset:std::cell::Cell::new(0.0),layout:Box::new(BlockLayout{height,items})});

@@ -88,6 +88,14 @@ pub struct MathFont {
 }
 
 impl MathFont {
+    /// Outline bounds in font units, including horizontal side bearings.
+    pub(crate) fn outline_bounds(&self, gid: u16) -> Option<[Dim; 4]> {
+        let metrics = self
+            .face
+            .glyph_metrics(Size::unscaled(), LocationRef::default());
+        let b = metrics.bounds(GlyphId::new(u32::from(gid)))?;
+        Some([b.x_min, b.y_min, b.x_max, b.y_max].map(|v| Dim::from_ieee32_bits(v.to_bits())))
+    }
     /// Load the embedded STIX Two Math Regular face.
     ///
     /// # Errors

@@ -1,5 +1,5 @@
 //! 读取页不是 Markdown 块；保留未确认后缀，在有界语义片段之间推进。
-use super::parser::{self, Batch, Block, Enhancements, MAX_SEMANTIC_BYTES};
+use super::parser::{self, Batch, Block, Enhancements, MAX_SEMANTIC_BYTES, MAX_EMBEDDED_IMAGE_WINDOW_BYTES};
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -23,6 +23,7 @@ pub struct Scanner {
     finished: bool,
     limit: usize,
     examined: usize,
+    image_examined: Option<usize>,
 }
 
 fn prefix(source: &str, limit: usize) -> usize {
@@ -72,6 +73,7 @@ impl Scanner {
             finished: false,
             limit: MAX_SEMANTIC_BYTES,
             examined: 0,
+            image_examined: None,
         }
     }
     pub fn consumed(&self) -> u64 {
@@ -85,9 +87,33 @@ impl Scanner {
         self.line += parser::line_count(&self.pending[..end]);
         self.pending.drain(..end);
         self.examined = 0;
+        self.image_examined = None;
+        if self.pending.capacity() > (self.limit + 16384) * 2 && self.pending.len() <= self.limit {
+            self.pending.shrink_to(self.limit + 16384);
+        }
+    }
+    fn publish(&self, parsed: Vec<Block>, blocks: &mut Vec<Block>, references: &mut BTreeMap<String, parser::Reference>) {
+        for mut block in parsed {
+            block.from_byte += self.from;
+            block.to_byte += self.from;
+            block.from_line += self.line - 1;
+            block.to_line += self.line - 1;
+            for h in &mut block.headings {
+                h.byte += self.from;
+                h.line += self.line - 1;
+            }
+            for note in &mut block.footnotes {
+                note.from_byte += self.from;
+                note.to_byte += self.from;
+            }
+            for (key, value) in &block.definitions {
+                references.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+            blocks.push(block);
+        }
     }
     /// 每次最多读入 16 KiB；返回定义增量，由索引服务维护全文首次有效定义。
-    /// 调用方在每次 push 前后检查取消，单次同步解析不超过 32 KiB。
+    /// 普通语义片段仍限制 32 KiB；长内嵌图片仅在有界资源缓冲区等待完整语法。
     pub fn push(&mut self, text: &str, eof: bool) -> Result<Batch, String> {
         if self.finished {
             return Err("结构扫描已结束".into());
@@ -128,34 +154,46 @@ impl Scanner {
                 cutoff = parser::bullet_list_cutoff(candidate);
             }
             if cutoff > 0 {
-                for mut block in
-                    parser::parse_fragment(&candidate[..cutoff], self.revision, self.from == 0)?
-                {
-                    block.from_byte += self.from;
-                    block.to_byte += self.from;
-                    block.from_line += self.line - 1;
-                    block.to_line += self.line - 1;
-                    for h in &mut block.headings {
-                        h.byte += self.from;
-                        h.line += self.line - 1;
-                    }
-                    for note in &mut block.footnotes {
-                        note.from_byte += self.from;
-                        note.to_byte += self.from;
-                    }
-                    for (key, value) in &block.definitions {
-                        references
-                            .entry(key.clone())
-                            .or_insert_with(|| value.clone());
-                    }
-                    blocks.push(block);
-                }
+                let parsed = parser::parse_fragment(&candidate[..cutoff], self.revision, self.from == 0)?;
+                self.publish(parsed, &mut blocks, &mut references);
                 self.consume(cutoff);
                 continue;
             }
             if !oversized {
                 break;
             }
+            // Do not split a potential data image in the middle of its destination.
+            // Only inspect new bytes for line endings while the Base64 is streaming in.
+            // At a complete line use a compact, parser-validated projection; plain
+            // text/code and invalid image syntax retain the existing raw fallback.
+            if self.pending.len() <= MAX_EMBEDDED_IMAGE_WINDOW_BYTES
+                && (self.image_examined.is_some()
+                    || (parser::has_embedded_image_prefix(&self.pending[..prefix(&self.pending, self.limit)])
+                        && !parser::parse_fragment(candidate, self.revision, self.from == 0)?
+                            .first().is_some_and(|block| matches!(block.kind.as_str(), "fence" | "code_block" | "front_matter"))))
+            {
+                let checked = self.image_examined.unwrap_or(end).saturating_sub(1);
+                let checked = prefix(&self.pending, checked);
+                let complete = if eof {
+                    self.pending.len()
+                } else {
+                    self.pending[checked..].rfind(['\r', '\n']).map_or(0, |at| checked + at + 1)
+                };
+                self.image_examined = Some(self.pending.len());
+                if complete <= end || (!eof && self.pending.as_bytes().get(complete.wrapping_sub(1)) == Some(&b'\r') && complete == self.pending.len()) {
+                    if !eof { break; }
+                } else if let Some((cut, parsed)) = parser::embedded_image_fragment(
+                    &self.pending[..complete], self.revision, self.from == 0, eof)
+                {
+                    if cut > 0 {
+                        self.publish(parsed, &mut blocks, &mut references);
+                        self.consume(cut);
+                        continue;
+                    }
+                    if !eof { break; }
+                }
+            }
+            self.image_examined = None;
             let kind = parser::parse_fragment(candidate, self.revision, self.from == 0)?
                 .first()
                 .map(|block| block.kind.clone())
@@ -198,7 +236,10 @@ impl Scanner {
             if eof {
                 self.pending.len()
             } else if self.pending.len() > self.limit {
-                prefix(&self.pending, self.limit)
+                // A failed large-image probe may have buffered a long line.
+                // Consume the excess in one pass rather than repeatedly
+                // scanning and shifting the same large allocation.
+                prefix(&self.pending, self.limit.max(self.pending.len().saturating_sub(self.limit)))
             } else {
                 0
             }
@@ -250,6 +291,7 @@ impl Scanner {
             enhancements: Enhancements::default(),
             metrics_complete: false,
             semantic_complete: false,
+            embedded_image_bytes: 0,
             headings: vec![],
             references: vec![],
             definitions: BTreeMap::new(),
@@ -297,7 +339,8 @@ mod tests {
                     result.push(block);
                 }
             }
-            assert!(scanner.pending_bytes() <= limit + 16384);
+            assert!(scanner.pending_bytes() <= limit + 16384 ||
+                (scanner.image_examined.is_some() && scanner.pending_bytes() <= MAX_EMBEDDED_IMAGE_WINDOW_BYTES));
             at = to;
         }
         assert_eq!(scanner.consumed(), source.len() as u64);
@@ -307,6 +350,34 @@ mod tests {
             assert_eq!(pair[0].to_byte, pair[1].from_byte);
         }
         result
+    }
+    #[test]
+    fn long_image_payloads_keep_semantic_coordinates_and_following_blocks() {
+        let payload = "A".repeat(180_000);
+        let source = format!("# 前文\r\n\r\n说明\r\n\r\n![图](data:image/png;base64,{payload})\r\n\r\n# 后文\r\n\r\n<img alt='第二张' src='data:image/png;base64,{payload}' />\r\n\r\n## 结束\r\n");
+        for page in [127, 4096, 16384] {
+            let blocks = scan(&source, page, MAX_SEMANTIC_BYTES);
+            let images: Vec<_> = blocks.iter().filter(|b| b.embedded_image_bytes > 0).collect();
+            assert_eq!(images.len(), 2);
+            assert!(images.iter().all(|b| b.mode == "semantic" && b.semantic_complete && b.embedded_image_bytes == payload.len()));
+            for heading in blocks.iter().flat_map(|b| &b.headings) {
+                assert!(source[heading.byte as usize..].starts_with('#'));
+            }
+            assert_eq!(blocks.last().unwrap().headings[0].title, "结束");
+        }
+    }
+    #[test]
+    fn non_image_data_is_not_given_a_resource_window() {
+        let data = format!("data:image/png;base64,{}", "A".repeat(100_000));
+        for source in [
+            format!("```md\n![]({data})\n```\n\n# after\n"),
+            format!("[link]({data})\n\n# after\n"),
+            format!("<div title='{data}'>text</div>\n\n# after\n"),
+        ] {
+            let blocks = scan(&source, 4096, MAX_SEMANTIC_BYTES);
+            assert!(blocks.iter().all(|b| b.embedded_image_bytes == 0));
+            assert!(blocks.iter().any(|b| b.mode == "raw"));
+        }
     }
     #[test]
     fn giant_fence_is_bounded_and_resumes_after_real_closing_fence() {

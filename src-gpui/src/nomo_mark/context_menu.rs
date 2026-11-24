@@ -38,7 +38,7 @@ impl ContextMenu {
 
 #[derive(Clone)]
 pub(super) enum MenuAction {
-    None, Edit(EditIntent), Undo, Redo, Cut, Copy, Paste(bool), SelectAll, Find,
+    None, Edit(EditIntent), Undo, Redo, Cut, Copy, CopyMarkdown, Paste(bool), SelectAll, Find,
     LinkEdit, LinkOpen, LinkCopy, LinkRemove, InlineComment, InlineMath, ChooseImage,
     ObjectEdit, ObjectCopy, CodeLanguage, CodeParagraph, Delete,
     Table(TableIntent), DetailsDefault, DetailsUnwrap,
@@ -72,13 +72,16 @@ impl Item {
 impl NomoMark {
     pub(crate) fn open_context_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         if self.host.interaction.protected() || self.auxiliary_input { return; }
-        let at = self.content_bounds().and_then(|bounds| self.layout.as_ref()?.object_source_at(
+        let implicit = self.implicit_cell_at(position);
+        let at = implicit.map(|cell| cell.anchor(&self.host.parsed.source))
+            .or_else(|| self.content_bounds().and_then(|bounds| self.layout.as_ref()?.object_source_at(
             f32::from(position.x - bounds.left()), f32::from(position.y - bounds.top())))
-            .or_else(|| self.hit(position)).unwrap_or_else(|| self.local_cursor());
+            ).or_else(|| self.hit(position)).unwrap_or_else(|| self.local_cursor());
         let absolute = self.host.parsed.identity.from_byte + at as u64;
         let selection = self.host.selection.range();
         if selection.is_empty() || absolute < selection.start || absolute > selection.end {
-            self.move_to(at, false, cx);
+            if let Some(cell) = implicit { self.select_implicit_cell(cell, cx); }
+            else { self.move_to(at, false, cx); }
         }
         self.dismiss_quick_insert(cx);
         self.menu_open = false;
@@ -102,6 +105,13 @@ impl NomoMark {
     fn context_target(&self, at: usize) -> Target {
         if self.effective_mode() == ViewMode::Semantic {
             let parsed = &self.host.parsed;
+            if let Some(cell) = self.active_implicit_cell()
+                && let Some(table) = Table::at(parsed, at)
+                && let Some(row) = table.implicit_row(cell)
+            {
+                return Target::Table { source: table.source, row, column: cell.column,
+                    rows: table.rows.len(), columns: table.separator.cells.len(), header: true };
+            }
             if let Some(mut range) = self.image_range_at(at) {
                 if parsed.source[range.end..].starts_with('{') {
                     if let Some(end) = parsed.source[range.end..].find('}') { range.end += end + 1; }
@@ -181,21 +191,22 @@ impl NomoMark {
             Target::Selection => {
                 let mut formats = Vec::new();
                 for (key, icon, format) in [
-                    ("bold", "crop", InlineFormat::Strong), ("italic", "crop", InlineFormat::Emphasis),
-                    ("underline", "crop", InlineFormat::Underline), ("strikethrough", "crop", InlineFormat::Strike),
-                    ("inlineCode", "code-xml", InlineFormat::Code), ("highlight", "crop", InlineFormat::Highlight),
+                    ("bold", "bold", InlineFormat::Strong), ("italic", "italic", InlineFormat::Emphasis),
+                    ("underline", "underline", InlineFormat::Underline), ("strikethrough", "strikethrough", InlineFormat::Strike),
+                    ("inlineCode", "code-xml", InlineFormat::Code), ("highlight", "highlighter", InlineFormat::Highlight),
                 ] {
                     let selected = local_range(&self.host.parsed.source, self.host.parsed.identity.from_byte, menu.selection.range()).ok();
                     let active = selected.as_ref().is_some_and(|range| self.host.parsed.inline.iter().any(|span|
                         span.format == format && span.content.start <= range.start && range.end <= span.content.end));
                     formats.push(edit(key, icon, EditIntent::ToggleInline(format)).checked(active));
                 }
-                formats.extend([sep(), edit("clearStyle", "crop", EditIntent::ClearFormatting)]);
+                formats.extend([sep(), edit("clearStyle", "remove-formatting", EditIntent::ClearFormatting)]);
                 vec![item("cut", "scissors", MenuAction::Cut).enabled(editable),
                     item("copy", "copy", MenuAction::Copy),
+                    item("copyAsMarkdown", "copy", MenuAction::CopyMarkdown),
                     item("paste", "clipboard", MenuAction::Paste(false)).enabled(editable),
                     item("pasteAsPlainText", "clipboard", MenuAction::Paste(true)).enabled(editable), sep(),
-                    item("format", "crop", MenuAction::None).enabled(editable).children(formats),
+                    item("format", "case-sensitive", MenuAction::None).enabled(editable).children(formats),
                     item("createLink", "link", MenuAction::LinkEdit).enabled(editable && semantic),
                     item("insertInlineComment", "pencil", MenuAction::InlineComment).enabled(editable && semantic), sep(),
                     item("selectAll", "text-cursor-input", MenuAction::SelectAll),
@@ -211,13 +222,14 @@ impl NomoMark {
             Target::Heading(level) => vec![
                 item("cut", "scissors", MenuAction::Cut).enabled(editable && !menu.selection.range().is_empty()),
                 item("copy", "copy", MenuAction::Copy).enabled(!menu.selection.range().is_empty()),
+                item("copyAsMarkdown", "copy", MenuAction::CopyMarkdown).enabled(!menu.selection.range().is_empty()),
                 item("paste", "clipboard", MenuAction::Paste(false)).enabled(editable),
                 item("pasteAsPlainText", "clipboard", MenuAction::Paste(true)).enabled(editable),
                 edit("deleteAction", "trash-2", EditIntent::Replace(String::new())).enabled(editable && !menu.selection.range().is_empty()),
                 item("selectAll", "text-cursor-input", MenuAction::SelectAll), sep(),
                 item("heading", "heading", MenuAction::None)
                     .children((1..=6).map(|n| heading(n).checked(n == *level)).collect()),
-                edit("paragraph", "crop", EditIntent::Heading(0)), sep(),
+                edit("paragraph", "pilcrow", EditIntent::Heading(0)), sep(),
                 edit("liftHeading", "heading", EditIntent::AdjustHeading { increase: true }).enabled(editable && *level > 1),
                 edit("sinkHeading", "heading", EditIntent::AdjustHeading { increase: false }).enabled(editable && *level < 6)],
             Target::Block(range, kind) => {
@@ -228,7 +240,7 @@ impl NomoMark {
                 let mut items = vec![item(edit_key, "pencil", MenuAction::ObjectEdit).enabled(editable), item(copy_key, "copy", MenuAction::ObjectCopy)];
                 if *kind == ObjectKind::Code { items.extend([
                     item("selectLanguage", "code-xml", MenuAction::CodeLanguage).enabled(editable && crate::nomo_mark::code_blocks::FencedCode::at(&self.host.parsed, range.start).is_some()),
-                    item("convertToParagraph", "crop", MenuAction::CodeParagraph).enabled(editable),
+                    item("convertToParagraph", "pilcrow", MenuAction::CodeParagraph).enabled(editable),
                 ]); }
                 items.extend([sep(), item("deleteAction", "trash-2", MenuAction::Delete).enabled(editable).danger()]); items
             }
@@ -268,7 +280,7 @@ impl NomoMark {
             for item in items {
                 let id = match item.key {
                     "undo" => "undo", "redo" => "redo", "cut" => "cut", "copy" => "copy", "paste" => "paste",
-                    "pasteAsPlainText" => "paste-plain", "selectAll" => "select-all", "find" => "find",
+                    "copyAsMarkdown" => "copy-markdown", "pasteAsPlainText" => "paste-plain", "selectAll" => "select-all", "find" => "find",
                     "bold" => "bold", "italic" => "italic", "underline" => "underline", "strikethrough" => "strike",
                     "inlineCode" => "inline-code", "highlight" => "highlight", "clearStyle" => "menu-clear-format",
                     "createLink" | "editLink" => "menu-link", "unorderedList" => "bullet-list", "orderedList" => "ordered-list",
@@ -321,12 +333,13 @@ impl NomoMark {
         let target_at = match &menu.target { Target::Link(at) => Some(*at), Target::Block(r, _) | Target::Image(r) | Target::Details(r, _) => Some(r.start),
             Target::Table { source, row, column, .. } => self.context_table_cell(source, *row, *column), Target::Heading(_) => Some(menu.hit), _ => None };
         // 通用编辑命令保留右键打开时的选区；只有结构／对象动作重新定位到命中处。
-        let selection_action = matches!(&action, A::Cut | A::Copy | A::Paste(_) | A::SelectAll | A::Find | A::Undo | A::Redo | A::Edit(EditIntent::Replace(_)));
+        let selection_action = matches!(&action, A::Cut | A::Copy | A::CopyMarkdown | A::Paste(_) | A::SelectAll | A::Find | A::Undo | A::Redo | A::Edit(EditIntent::Replace(_)));
         if !selection_action { if let Some(at) = target_at { self.move_to(at, false, cx); } }
         match action {
             A::None => {}, A::Edit(intent) => self.command(intent, cx),
             A::Undo => cx.emit(ControlEvent::Undo), A::Redo => cx.emit(ControlEvent::Redo),
-            A::Cut => self.copy(true, cx), A::Copy => self.copy(false, cx), A::Paste(plain) => self.paste(plain, cx),
+            A::Cut => self.copy(true, false, cx), A::Copy => self.copy(false, false, cx),
+            A::CopyMarkdown => self.copy(false, true, cx), A::Paste(plain) => self.paste(plain, cx),
             A::SelectAll => cx.emit(ControlEvent::SelectAll), A::Find => window.dispatch_action(Box::new(crate::ui::workspace::Find), cx),
             A::InlineComment => { if let Err(error) = self.begin_inline_comment(window, cx) { self.error(error, cx); } },
             A::InlineMath => { if let Err(error) = self.begin_inline_math(window, cx) { self.error(error, cx); } },

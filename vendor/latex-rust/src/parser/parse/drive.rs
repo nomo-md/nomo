@@ -1006,8 +1006,7 @@ fn step_cmd(
         Cmd::Accent { kind, phase } => match one_call(phase, ready, true, Kind::arg)? {
             OneOut::Step(step) => Ok(step),
             OneOut::Node(body) => {
-                // Rules can underline/overline an explicit horizontal skip (e.g. a blank in a test).
-                if is_empty_node(&body) && !matches!(kind, AccentKind::Underline | AccentKind::Overline) {
+                if is_empty_node(&body) {
                     return Err(ParseError::Malformed("empty accent base".into()));
                 }
                 Ok(Step::Done(MathNode::Accent(Box::new(body), *kind)))
@@ -1675,6 +1674,7 @@ fn start_begin(parser: &mut super::Parser) -> Result<Classified, ParseError> {
         "aligned" => MatrixStyle::Aligned,
         "align" => MatrixStyle::Align,
         "gather" => MatrixStyle::Gather,
+        "gathered" => MatrixStyle::Gathered,
         "multline" => MatrixStyle::Multline,
         "equation" => MatrixStyle::Equation,
         "split" => MatrixStyle::Split,

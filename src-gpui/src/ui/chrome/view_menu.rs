@@ -76,7 +76,7 @@ impl ViewMenuState {
                 action("menu.editLockButton", "", || Box::new(action::ToggleEditLockButton), true).checked(self.edit_lock_button_visible),
             ],
             Menu::ViewAppearance => vec![
-                action("menu.zoomIn", "Ctrl + +", || Box::new(action::ZoomIn), true),
+                action("menu.zoomIn", "", || Box::new(action::ZoomIn), true),
                 action("menu.zoomOut", "", || Box::new(action::ZoomOut), true),
                 action("menu.zoomReset", "", || Box::new(action::ZoomReset), true),
                 separator(),

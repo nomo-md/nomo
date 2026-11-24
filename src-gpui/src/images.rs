@@ -608,4 +608,86 @@ mod tests {
         assert_eq!(image_label(&huge, "diagram"), "diagram");
         assert_eq!(image_label(&"a".repeat(1000), "").chars().count(), 121);
     }
+
+    // Exercise the same session/index/window path the Workspace uses, not just
+    // a whole-document parser fixture which bypasses the 32 KiB index limit.
+    fn assert_visible_window_image(name: &str, markdown: String, marker: &str, dims: (u32,u32)) {
+        use crate::nomo_mark::{native_port::NativeWindowPort, session_window::WindowRequest, parse::ParsedWindow,
+            resources::{ResourceAdapter, ResourceRequest}};
+        use pulldown_cmark::{Event, Tag};
+        let at = markdown.find(marker).unwrap() as u64;
+        let root = std::env::temp_dir().join(format!("nomo-large-image-{}-{name}", std::process::id()));
+        let port = NativeWindowPort::open(root.clone(), name.into(), None, Some(markdown.clone())).unwrap();
+        let request = WindowRequest::default();
+        let groups = port.window_groups(0, &[], &request).unwrap();
+        let group = groups.iter().find(|g|g.from <= at && at < g.to).unwrap();
+        assert!(group.semantic && group.estimate < 4096.0);
+        assert!(group.to-group.from > 32*1024);
+        let loaded = port.load_group(0, group.from, Some(group.to), &request).unwrap();
+        assert_eq!(loaded.input.text, markdown[loaded.input.from_byte as usize..loaded.input.to_byte as usize]);
+        let parsed = ParsedWindow::parse(loaded.input, name, 0, loaded.context).unwrap();
+        assert!(!parsed.context.source_only);
+        assert!(parsed.source.len() > 32*1024);
+        let mut found = None;
+        for (event, range) in &parsed.events {
+            let source = match event {
+                Event::Start(Tag::Image { dest_url, .. }) => dest_url.to_string(),
+                Event::Html(_) | Event::InlineHtml(_) => {
+                    let Some((_, tag)) = crate::nomo_mark::image_properties::html_image_tag(&parsed.source, range.clone()) else {continue};
+                    tag.attrs["src"].clone()
+                }
+                _ => continue,
+            };
+            if is_data_source(&source) { found = Some(source); break; }
+        }
+        let source = found.expect("semantic window must contain intact image destination");
+        let resolved = resolve_image(&source, None).unwrap();
+        assert!(matches!(resolved.key, ImageKey::Embedded(_)));
+        let mut images = ImageStore::default();
+        let embeds = crate::embeds::EmbedStore::default();
+        let requests = {
+            let resources = ResourceAdapter {
+                images: &images, embeds: &embeds, em_px: 16.0, font_family: "", dark: false,
+                mermaid: crate::embeds::MermaidPalette { mode: 0, colors: [0; 9] },
+                color: [0; 3], demands: Default::default(), requested_data_bytes: Default::default(),
+                dependencies: Default::default(),
+            };
+            assert_eq!(resources.image_size(&resolved), None);
+            resources.demands.into_inner()
+        };
+        let [ResourceRequest::Image(request)] = requests.as_slice() else { panic!("expected exactly one image request"); };
+        let decoded = decode(request).unwrap();
+        assert_eq!((decoded.bitmap.1, decoded.bitmap.2), dims);
+        assert!(decoded.bitmap.0.as_bytes(0).is_some());
+        images.insert(resolved.key.clone(), Some(decoded.bitmap));
+        assert_eq!(images.size(&resolved.key), Some(dims));
+        println!("LARGE_IMAGE {name}: source_bytes={} bitmap={}x{}", parsed.source.len(), dims.0, dims.1);
+        assert_eq!(port.copy_range(0, 0..markdown.len() as u64).unwrap(), markdown);
+        let saved = root.join("roundtrip.md");
+        port.save_to(saved.clone()).unwrap();
+        assert_eq!(std::fs::read(&saved).unwrap(), markdown.as_bytes());
+        port.close(true).unwrap();
+        drop(port);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn large_embedded_images_survive_native_windows() {
+        use base64::Engine;
+        use image::ImageEncoder;
+        for (side, name) in [(256u32,"medium"),(1024,"large"),(2048,"very-large")] {
+            let mut state = 123456789u32;
+            let pixels: Vec<u8> = (0..side*side*4).map(|_| {
+                state ^= state << 13; state ^= state >> 17; state ^= state << 5; state as u8
+            }).collect();
+            let mut png = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut png)
+                .write_image(&pixels, side, side, image::ExtendedColorType::Rgba8).unwrap();
+            let data = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png));
+            assert!(data.len() > 32*1024);
+            if side >= 1024 { assert!(data.len() > 4*1024*1024); }
+            assert_visible_window_image(&format!("{name}-markdown"), format!("# 前文\r\n\r\n说明\r\n\r\n![图]({data})\r\n\r\n# 后文\r\n"), "![图]", (side,side));
+            assert_visible_window_image(&format!("{name}-html"), format!("# 前文\r\n\r\n说明\r\n\r\n<img alt='图' src='{data}' />\r\n\r\n# 后文\r\n"), "<img", (side,side));
+        }
+    }
+
 }
