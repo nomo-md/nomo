@@ -59,7 +59,7 @@ use ui::workspace::{self, Workspace};
 use window_placement::WindowPlacement;
 
 #[derive(Clone, Copy)]
-enum QuitReason { Normal, Reset(app_data::Scope), #[cfg(any(windows, target_os = "macos"))] Install }
+enum QuitReason { Normal, Reset(app_data::Scope), #[cfg(any(windows, target_os = "macos", target_os = "linux"))] Install }
 #[derive(Clone, Copy)]
 struct PendingQuit {
     reason: QuitReason,
@@ -85,7 +85,7 @@ pub(crate) fn quit_to_reset(scope: app_data::Scope, cx: &mut App) {
     }
     request_quit(QuitReason::Reset(scope), cx);
 }
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub(crate) fn quit_to_install(cx:&mut App){
     for handle in cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()) {
         if !handle.update(cx,|workspace,window,cx| workspace.can_quit_to_install(window,cx)).unwrap_or(false) { return; }
@@ -121,7 +121,7 @@ fn finish_quit(cx:&mut App){
         open_workspace(Vec::new(), cx);
         return;
     }
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     if matches!(_reason, QuitReason::Install) && let Err(error)=ui::updates::launch_after_close(cx) {
         match try_open_workspace(Vec::new(),cx) {
             Ok(handle)=>{ let _=handle.update(cx,|_,window,cx|ui::updates::show_error(error,window,cx)); }

@@ -371,7 +371,11 @@ impl SettingsWindow {
                 let state = super::updates::chrome_state(cx);
                 let label = match state {
                     Some(super::chrome::ChromeUpdateState::Downloading(p)) => locale.app_format("settings.downloading", &[("progress", &p.to_string())]),
-                    Some(super::chrome::ChromeUpdateState::Downloaded) => locale.app_text("settings.restartInstall").into(),
+                    Some(super::chrome::ChromeUpdateState::Downloaded) => locale.app_text(if cfg!(target_os="linux") { "updates.linuxInstall" } else { "settings.restartInstall" }).into(),
+                    #[cfg(target_os = "linux")]
+                    Some(super::chrome::ChromeUpdateState::Installing) => locale.app_text("updates.linuxInstalling").into(),
+                    #[cfg(target_os = "linux")]
+                    Some(super::chrome::ChromeUpdateState::RestartRequired) => locale.app_text("updates.linuxRestart").into(),
                     _ if busy => locale.app_text("settings.checking").into(), _ => locale.app_text(label).into(),
                 };
                 super::components::button_shell("update-check", ButtonKind::Secondary, theme)

@@ -74,7 +74,9 @@ pub struct ChromeRecentEntry {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChromeUpdateState { Available, Downloading(u8), Downloaded }
+pub enum ChromeUpdateState { Available, Downloading(u8), Downloaded,
+    #[cfg(target_os = "linux")] Installing,
+    #[cfg(target_os = "linux")] RestartRequired }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChromeState {
@@ -571,7 +573,9 @@ impl Render for Chrome {
                 } else { icon(IconName::ArrowDown, 15.0, theme.fg).into_any_element() })
                 .when(!enabled, |el| el.opacity(0.5)).tooltip(tooltip(locale.app_text("chrome.softwareUpdate")))
                 .child(div().absolute().right_0().top_0().text_size(px(8.0)).text_color(theme.accent)
-                    .child(match update { ChromeUpdateState::Available => "●".to_owned(), ChromeUpdateState::Downloading(percent) => percent.min(100).to_string(), ChromeUpdateState::Downloaded => "✓".to_owned() }))
+                    .child(match update { ChromeUpdateState::Available => "●".to_owned(), ChromeUpdateState::Downloading(percent) => percent.min(100).to_string(), ChromeUpdateState::Downloaded => "✓".to_owned(),
+                        #[cfg(target_os = "linux")] ChromeUpdateState::Installing => "…".to_owned(),
+                        #[cfg(target_os = "linux")] ChromeUpdateState::RestartRequired => "↻".to_owned() }))
                 .on_click(cx.listener(move |this, _, window, cx| { if enabled { this.dismiss(window, cx); cx.emit(ChromeEvent::SoftwareUpdate); } })));
         }
         if self.state.view_menu.mode.is_some() {

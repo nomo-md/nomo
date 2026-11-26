@@ -5,25 +5,27 @@ use gpui::{App, AppContext, AnyWindowHandle, Entity, Global, Task, Window, IntoE
 use serde::Deserialize;
 use std::{sync::{Arc, OnceLock}, time::Duration};
 mod notice;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod installer;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod install_ui;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub(crate) use install_ui::launch_after_close;
 
 #[derive(Default)]
 struct Updates { started:bool, busy:bool, task:Option<Task<()>>, notice:Option<(AnyWindowHandle,Entity<notice::UpdateNotice>)>, pending:Option<(AnyWindowHandle,Pending)>,
-    #[cfg(any(windows, target_os = "macos"))] install:install_ui::InstallState }
-enum Pending { Release(Release,bool), Failure(UiMessage), #[cfg(any(windows, target_os = "macos"))] Install }
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))] install:install_ui::InstallState }
+enum Pending { Release(Release,bool), Failure(UiMessage), #[cfg(any(windows, target_os = "macos", target_os = "linux"))] Install }
 impl Global for Updates {}
 #[derive(Clone,Deserialize)]
-struct Release {tag_name:String, html_url:String, body:Option<String>, published_at:Option<String>,#[serde(default)]assets:Vec<ReleaseAsset>}
+struct Release {tag_name:String, html_url:String, body:Option<String>, published_at:Option<String>,#[serde(default)]assets:Vec<ReleaseAsset>,
+    #[cfg(target_os = "linux")] #[serde(skip)] linux_package:Option<installer::LinuxPackage> }
 #[derive(Clone,Deserialize)]
-struct ReleaseAsset {name:String,browser_download_url:String, #[cfg(any(windows, target_os = "macos"))] #[serde(default)] size:u64, #[cfg(any(windows, target_os = "macos"))] digest:Option<String>}
-fn installed_app()->bool {
+struct ReleaseAsset {name:String,browser_download_url:String, #[cfg(any(windows, target_os = "macos", target_os = "linux"))] #[serde(default)] size:u64, #[cfg(any(windows, target_os = "macos", target_os = "linux"))] digest:Option<String>}
+fn installed_app(_release:&Release)->bool {
+    #[cfg(target_os = "linux")] { installer::Candidate::from_release(_release).is_ok() }
     #[cfg(any(windows, target_os = "macos"))] { installer::installed() }
-    #[cfg(not(any(windows, target_os = "macos")))] { false }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))] { false }
 }
 #[cfg(target_os = "macos")]
 pub(crate) fn run_install_command()->Option<i32> { installer::run_command() }
@@ -40,18 +42,18 @@ fn portable_download(release:&Release)->Option<String>{
 fn version(value:&str)->Option<(u64,u64,u64)> {let mut parts=value.trim_start_matches('v').split('.');let result=(parts.next()?.parse().ok()?,parts.next()?.parse().ok()?,parts.next()?.parse().ok()?);if parts.next().is_some(){None}else{Some(result)}}
 pub(crate) fn busy(cx:&App)->bool {cx.try_global::<Updates>().is_some_and(|state|state.busy)}
 pub(crate) fn chrome_state(cx:&App) -> Option<super::chrome::ChromeUpdateState> {
-    #[cfg(any(windows, target_os = "macos"))] if let Some(stage) = install_ui::stage(cx) { return Some(stage); }
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))] if let Some(stage) = install_ui::stage(cx) { return Some(stage); }
     cx.try_global::<Updates>()?.notice.as_ref().map(|_| super::chrome::ChromeUpdateState::Available)
 }
 pub(crate) fn action(window:&mut Window, cx:&mut App) {
-    #[cfg(any(windows, target_os = "macos"))] if install_ui::handle_action(window,cx) { return; }
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))] if install_ui::handle_action(window,cx) { return; }
     check(window,cx,false);
 }
 pub(crate) fn startup(window:&mut Window,cx:&mut App) {
     if cx.try_global::<Updates>().is_some_and(|state|state.started){return;}
     if cx.try_global::<Updates>().is_none(){cx.set_global(Updates::default());}
     cx.global_mut::<Updates>().started=true;
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     cx.background_executor().spawn(async {
         if let Err(error) = installer::clean_stale() {
             crate::app_logger::warn("UpdateCache", &format!("旧更新包清理失败，已保留：{error}"));
@@ -112,7 +114,7 @@ fn show_store_update(window:&mut Window,cx:&mut App) {
 pub(crate) fn present_pending(window:&mut Window,cx:&mut App)->bool {
     let matches=cx.try_global::<Updates>().and_then(|state|state.pending.as_ref()).is_some_and(|(owner,_)|*owner==window.window_handle());
     if !matches||window.has_active_prompt(){return false;}
-    if let Some((_,pending))=cx.global_mut::<Updates>().pending.take(){match pending {Pending::Release(release,success)=>show_release(release,success,window,cx),Pending::Failure(error)=>show_error(error,window,cx), #[cfg(any(windows, target_os = "macos"))] Pending::Install=>install_ui::confirm(window,cx)}return true;}
+    if let Some((_,pending))=cx.global_mut::<Updates>().pending.take(){match pending {Pending::Release(release,success)=>show_release(release,success,window,cx),Pending::Failure(error)=>show_error(error,window,cx), #[cfg(any(windows, target_os = "macos", target_os = "linux"))] Pending::Install=>install_ui::confirm(window,cx)}return true;}
     false
 }
 pub(crate) fn defer_pending(window:&Window,cx:&mut App) {
@@ -122,7 +124,7 @@ pub(crate) fn defer_pending(window:&Window,cx:&mut App) {
 }
 fn show_release(release:Release,success:bool,window:&mut Window,cx:&mut App) {
     let newer=version(&release.tag_name)>version(env!("CARGO_PKG_VERSION"));
-    let installed=installed_app();
+    let installed=newer && installed_app(&release);
     let in_app=installed && newer && !success;
     let download=if newer && !installed {portable_download(&release)}else{None};
     let primary=download.clone().unwrap_or_else(||release.html_url.clone());
@@ -134,13 +136,13 @@ fn show_release(release:Release,success:bool,window:&mut Window,cx:&mut App) {
     let summary=update_summary(release.body.as_deref().unwrap_or(""));
     let locale=ToolbarLocale::current(cx);
     let notes=format!("{}\n\n[{}]({})",if summary.is_empty(){locale.text("softwareUpdateReleaseFallback")}else{summary},locale.text("softwareUpdateFullReleaseNotes"),release.html_url);
-    let detail=if success{Some(UiMessage::toolbar("softwareUpdateInstalledHint"))}else if in_app {Some(UiMessage::toolbar("nativeUpdateDownloadHint"))}else if !newer {Some(UiMessage::toolbar("nativeUpdateCurrent"))}else if download.is_some(){Some(UiMessage::new(if cfg!(target_os="macos"){"updates.macosManualHint"}else{"updates.portableHint"}))}else{None};
+    let detail=if success{Some(UiMessage::toolbar("softwareUpdateInstalledHint"))}else if in_app && cfg!(target_os="linux") {Some(UiMessage::new("updates.linuxDownloadHint"))}else if in_app {Some(UiMessage::toolbar("nativeUpdateDownloadHint"))}else if !newer {Some(UiMessage::toolbar("nativeUpdateCurrent"))}else if download.is_some(){Some(UiMessage::new(if cfg!(target_os="macos"){"updates.macosManualHint"}else{"updates.portableHint"}))}else{None};
     let dialog=SecondaryDialog {kind:if success {SecondaryKind::UpdateSuccess}else{SecondaryKind::Update},title,message:UiMessage::raw(message),detail,notes:Some(notes),actions,cancel:0,remember:None,leading:Vec::new()};
     let response=dialogs::choose(dialog,window,cx);
     window.to_async(cx).spawn(async move |context| {let choice=response.await;let _=context.update(|window,cx| {
         if success {Settings::set(cx,"nativeReleaseNotesVersion",serde_json::json!(env!("CARGO_PKG_VERSION")));}
         if choice.index==1 {
-            #[cfg(any(windows, target_os = "macos"))] if in_app { install_ui::start(&release,window,cx); return; }
+            #[cfg(any(windows, target_os = "macos", target_os = "linux"))] if in_app { install_ui::start(&release,window,cx); return; }
             cx.open_url(&primary);
         }
     });}).detach();
@@ -159,7 +161,7 @@ pub(crate) fn prune_closed_windows(cx:&mut App) {
     let windows=cx.windows();
     if cx.try_global::<Updates>().is_some() {
         let state=cx.global_mut::<Updates>();
-        #[cfg(any(windows, target_os = "macos"))] state.install.owner_closed(&windows);
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))] state.install.owner_closed(&windows);
         if state.notice.as_ref().is_some_and(|(owner,_)|!windows.contains(owner)){state.notice=None;}
         if state.pending.as_ref().is_some_and(|(owner,_)|!windows.contains(owner)){state.pending=None;}
     }
@@ -219,7 +221,17 @@ fn fetch(endpoint:&str)->Result<Release,UiMessage> {
     runtime.block_on(async {
         let client=reqwest::Client::builder().timeout(Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none()).build().map_err(|error|error.to_string())?;
         match fetch_once(&client,endpoint).await {
-            Ok(release)=>Ok(release),
+            Ok(release)=>{
+                #[cfg(target_os = "linux")]
+                let release = {
+                    let mut release = release;
+                    if version(&release.tag_name) > version(env!("CARGO_PKG_VERSION")) {
+                        release.linux_package = installer::LinuxPackage::detect();
+                    }
+                    release
+                };
+                Ok(release)
+            },
             Err(error) if error.retryable=>{
                 let proxy=metadata_proxy_url(endpoint).ok_or_else(||UiMessage::new("update.invalidSource"))?;
                 fetch_once(&client,&proxy).await.map(|release|{crate::app_logger::warn("Update","官方 Release API 不可用，本次元数据来自 gh-proxy");release}).map_err(|proxy_error|proxy_error.message)

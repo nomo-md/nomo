@@ -2,10 +2,14 @@ use super::*;
 use super::installer::{Candidate, DownloadCancel, Verified};
 use crate::ui::chrome::ChromeUpdateState;
 
+#[cfg(target_os = "linux")]
+mod linux;
+
 struct Transfer { owner: AnyWindowHandle, cancel: Arc<DownloadCancel>, percent: u8 }
 impl Drop for Transfer { fn drop(&mut self) { self.cancel.cancel(); } }
 #[derive(Default)]
-pub(super) struct InstallState { transfer: Option<Transfer>, ready: Option<Verified> }
+pub(super) struct InstallState { transfer: Option<Transfer>, ready: Option<Verified>,
+    #[cfg(target_os = "linux")] linux: linux::State }
 impl InstallState {
     pub(super) fn owner_closed(&mut self, windows: &[AnyWindowHandle]) {
         if let Some(t) = &mut self.transfer && !windows.contains(&t.owner) {
@@ -17,6 +21,8 @@ impl InstallState {
 pub(super) fn stage(cx: &App) -> Option<ChromeUpdateState> {
     let install = &cx.try_global::<Updates>()?.install;
     if let Some(t) = &install.transfer { return Some(ChromeUpdateState::Downloading(t.percent)); }
+    #[cfg(target_os = "linux")]
+    if let Some(stage) = install.linux.stage() { return Some(stage); }
     install.ready.as_ref().map(|_| ChromeUpdateState::Downloaded)
 }
 
@@ -73,6 +79,9 @@ pub(super) fn handle_action(window: &mut Window, cx: &mut App) -> bool {
     true
 }
 
+#[cfg(target_os = "linux")]
+pub(super) use linux::confirm;
+#[cfg(not(target_os = "linux"))]
 pub(super) fn confirm(window: &mut Window, cx: &mut App) {
     let Some(ready) = &cx.global::<Updates>().install.ready else { return; };
     let dialog = SecondaryDialog { kind: SecondaryKind::Update, title: UiMessage::toolbar("nativeUpdateReady").arg("version",&ready.version),
@@ -85,7 +94,11 @@ pub(super) fn confirm(window: &mut Window, cx: &mut App) {
 }
 
 pub(crate) fn launch_after_close(cx: &mut App) -> Result<(),String> {
+    #[cfg(target_os = "linux")]
+    linux::restart(cx)?;
+    #[cfg(not(target_os = "linux"))]
     let ready = cx.try_global::<Updates>().and_then(|s| s.install.ready.as_ref()).ok_or_else(|| ToolbarLocale::current(cx).app_text("installer.noVerified").to_owned())?;
+    #[cfg(not(target_os = "linux"))]
     ready.launch().map_err(|message| message.render(ToolbarLocale::current(cx)))?;
     Settings::set(cx,"nativeReleaseNotesVersion",serde_json::json!(env!("CARGO_PKG_VERSION")));
     Ok(())

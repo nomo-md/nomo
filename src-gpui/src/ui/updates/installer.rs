@@ -14,6 +14,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as platform;
+#[cfg(target_os = "linux")]
+pub(super) use linux::{LinuxPackage, restart};
+
 #[cfg(target_os = "macos")]
 mod macos;
 // 在宿主测试 Windows 缓存文件名和启动命令，不执行安装器。
@@ -27,6 +34,7 @@ use windows as platform;
 const PROXY_PREFIX: &str = "https://gh-proxy.com/";
 const HEDGE_DELAY: Duration = Duration::from_secs(8);
 
+#[cfg(any(windows, target_os = "macos"))]
 pub(super) fn installed() -> bool {
     platform::installed()
 }
@@ -37,6 +45,8 @@ pub(crate) fn run_command() -> Option<i32> {
 
 pub(super) struct Candidate {
     pub version: String,
+    #[cfg(target_os = "linux")]
+    package: LinuxPackage,
     url: String,
     size: u64,
     digest: [u8; 32],
@@ -52,6 +62,11 @@ impl Candidate {
         {
             return Err(UiMessage::new("installer.newerOnly"));
         }
+        #[cfg(target_os = "linux")]
+        let package = release.linux_package.ok_or(UiMessage::new("installer.invalidAsset"))?;
+        #[cfg(target_os = "linux")]
+        let rule = package.asset_rule(&version);
+        #[cfg(not(target_os = "linux"))]
         let rule = platform::asset_rule(&version)?;
         let url = format!(
             "https://github.com/nomo-md/nomo/releases/download/v{version}/{}",
@@ -80,6 +95,8 @@ impl Candidate {
         }
         Ok(Self {
             version,
+            #[cfg(target_os = "linux")]
+            package,
             url,
             size: asset.size,
             digest,
@@ -128,7 +145,14 @@ fn cache_directory(create: bool) -> Result<Option<PathBuf>, UiMessage> {
         .ok_or(UiMessage::new("installer.directory"))?;
     let directory = base.join("native-updates");
     if create {
-        fs::create_dir_all(&directory)
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&directory)
             .map_err(|error| UiMessage::new("installer.createDirectory").arg("error", error))?;
     }
     let metadata = match fs::symlink_metadata(&directory) {
@@ -138,6 +162,14 @@ fn cache_directory(create: bool) -> Result<Option<PathBuf>, UiMessage> {
     };
     if !metadata.is_dir() || is_link(&metadata) {
         return Err(UiMessage::raw("更新缓存目录不是普通目录，已保留"));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let owner = fs::metadata("/proc/self").map_err(UiMessage::raw)?.uid();
+        if metadata.uid() != owner || metadata.mode() & 0o022 != 0 {
+            return Err(UiMessage::new("updates.linuxCacheUnsafe"));
+        }
     }
     Ok(Some(directory.canonicalize().map_err(UiMessage::raw)?))
 }
@@ -176,6 +208,11 @@ fn cache_lease(directory: &Path) -> Result<Option<Arc<CacheLease>>, UiMessage> {
     }
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -234,6 +271,8 @@ pub(super) fn clean_stale() -> Result<(), UiMessage> {
 }
 
 struct StagedPath {
+    #[cfg(target_os = "linux")]
+    keep_for_manual_install: bool,
     path: PathBuf,
     _lease: Arc<CacheLease>,
 }
@@ -255,12 +294,16 @@ impl StagedPath {
         Self {
             path,
             _lease: lease,
+            #[cfg(target_os = "linux")]
+            keep_for_manual_install: false,
         }
     }
 }
 
 impl Drop for StagedPath {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.keep_for_manual_install { return; }
         if let Err(error) = fs::remove_file(&self.path)
             && error.kind() != io::ErrorKind::NotFound
         {
@@ -283,6 +326,11 @@ fn remove_existing(path: &Path) -> Result<(), UiMessage> {
 fn open_new(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -464,7 +512,7 @@ pub(super) fn download(
     race_and_prepare(cancel, progress, HEDGE_DELAY, attempt, |download| {
         #[cfg(target_os = "macos")]
         return platform::finish(&candidate, download, cancel);
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         platform::finish(&candidate, download)
     })
 }
@@ -761,6 +809,8 @@ mod tests {
     pub(super) fn test_candidate() -> Candidate {
         Candidate {
             version: "0.8.0".into(),
+            #[cfg(target_os = "linux")]
+            package: LinuxPackage::Deb,
             url: String::new(),
             size: TEST_BYTES.len() as u64,
             digest: Sha256::digest(TEST_BYTES).into(),
