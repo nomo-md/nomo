@@ -2044,7 +2044,9 @@ impl Render for Workspace {
             }
         }
         if !mini && let Some(area) = self.outline_ui.bounds.get() && let Some(document) = self.document() {
-            document.update(cx, |host, cx| host.update_outline_layout(f32::from(area.size.width), settings.content_width_percent, cx));
+            let width = f32::from(area.size.width);
+            let outline_width = self.outline_ui.floating_width(width, &settings);
+            document.update(cx, |host, cx| host.update_outline_layout(width, settings.content_width_percent, outline_width, cx));
         }
         self.sync_navigation(window, cx);
         let outline_visible = self.outline_visible(cx);

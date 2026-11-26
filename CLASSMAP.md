@@ -14,7 +14,7 @@
 | Windows 组合标签 | `src-gpui/src/ui/workspace/comparison.rs`、`comparison_ui.rs`、`comparison_close.rs`、`comparison_drag.rs`、`comparison_layout.rs` | 展示项与文档会话分离；双文档焦点、标签/成员拖放、批量关闭、跨窗归属移交及按需恢复 |
 | 普通工作区恢复 | `src-gpui/src/ui/workspace/comparison_layout.rs`、`comparison_close.rs`、`folder_workspace.rs`、`workspace.rs` | 三平台记录标签顺序、活动文档、模式、选区、阅读位置及文件夹；关闭窗口可按次或自动保留未命名草稿，直接启动时恢复含草稿的上次工作区；进入目录恢复其最新布局，macOS／Linux 将组合记录展开，沿用有界清单与按需恢复 |
 | 编辑收尾与文档切换 | `src-gpui/src/ui/workspace/document_transition.rs`、`nomo_mark/workspace_host.rs`、`nomo_mark/object_ui.rs` | 组字和对象草稿收尾、确认后继续切换或关闭；单个待执行意图、临时订阅，无正文镜像或轮询 |
-| 右下角控件 | `src-gpui/src/ui/workspace/status.rs` | 缩放、统计、格式检查和锁图标各自显隐，隐藏时清理对应弹层状态；切换编辑锁先收尾输入 |
+| 右下角控件 | `src-gpui/src/ui/workspace/status.rs` | 缩放、统计、格式检查和锁图标各自显隐，隐藏时清理对应弹层状态；发布可见控件范围供右侧大纲避让；切换编辑锁先收尾输入 |
 | Markdown 格式检查 | `src-gpui/src/text_document/markdown_lint/`、`markdown_session/lint.rs`、`nomo_mark/markdown_lint.rs`、`ui/workspace/markdown_lint.rs` | 固定修订的原生只读规则扫描；默认／宽松规则、注释作用域、按字节定位的有界诊断；活动文档调度、取消及超预算跳过，不修改正文 |
 | Markdown Mini 小窗 | `src-gpui/src/ui/workspace/mini.rs`、`ui/mini.rs`、`ui/mini/{native,bounds_motion}.rs`、`ui/mini/native/`、`nomo_mark/window_panes.rs` | Windows 共用进度收放；macOS 原生操作在 GPUI 更新借用外执行，X11 等待窗口管理器确认，Wayland 使用受限紧凑模式；复用原窗口、文档和阅读锚点，任务按代次失效 |
 | 打开耗时采样 | `src-gpui/src/open_profile.rs`、`ui/workspace.rs`、`nomo_mark/view.rs` | 显式启用；记录会话、首窗口、首帧和语义恢复，不记录正文或路径 |
@@ -58,7 +58,7 @@
 | 脚注悬停预览 | `src-gpui/src/nomo_mark/footnote_preview.rs`、`workspace_queries.rs` | 共享结构索引定位，最多读取 8 KiB／显示 360 字；提示关闭、文档隐藏和后续悬停取消旧请求 |
 | 键盘与局部资源失效 | `src-gpui/src/nomo_mark/keyboard.rs`、`keyboard_session.rs`、`navigation.rs`、`resources.rs` | 按词、行、文档与翻页动作；有界跨窗查询；按资源依赖失效，无全文镜像 |
 | 连续窗口与预算 | `src-gpui/src/nomo_mark/native_port.rs`、`session_actions.rs`、`session_window.rs`、`viewport_ui.rs`、`viewport_model.rs`、`resident_budget.rs` | 正式/开发共用会话连接、已发布索引前缀增量分组、未索引尾部估算占位与阅读锚点、大编辑重分配、超大结构原文分片、失败重试、预取、回收和驻留预算 |
-| 同会话单栏/双栏 | `src-gpui/src/nomo_mark/window_panes.rs`、`src-gpui/src/ui/workspace/outline.rs` | 按需 Pane、唯一输入控件、全局导航、局部窗口同步、模式/历史阅读锚点与取消，不持有完整正文/历史。单栏按编辑区百分比排正文；右侧大纲按偏好开关，按留白选择正文避让或浮层，左栏大纲不参与正文偏移；两种容器共用分页、折叠、定位和章节拖动 |
+| 同会话单栏/双栏 | `src-gpui/src/nomo_mark/window_panes.rs`、`src-gpui/src/ui/workspace/outline.rs` | 按需 Pane、唯一输入控件、全局导航、局部窗口同步、模式/历史阅读锚点与取消，不持有完整正文/历史。单栏按编辑区百分比排正文；右侧大纲随编辑区自动调宽，也可拖边并保存宽度。正文按实际宽度和留白避让，浮层按顶边到安全底边限高，左栏大纲不参与正文偏移；两种容器共用分页、折叠、定位和章节拖动 |
 | 页面全文查询 | `src-gpui/src/nomo_mark/workspace_queries.rs` | 后台搜索分页、全文统计、大纲（`outline_queries.rs`）；隐藏大纲取消查询并保留有界标题分页，重新展开复用同修订缓存，过期时后台更新；按文档保留磁盘折叠投影，关闭会话释放；查找与批量替换独立调度，按文档校验请求身份与修订 |
 | 应用界面语言 | `src-gpui/src/ui/toolbar_i18n.rs`、`resources/app-locales.json`、`resources/markdown-lint-locales.json`、`main.rs`、`settings.rs` | 四种语言与系统语言、稳定消息键及延迟解析；菜单、托盘与已缓存提示跟随界面语言，用户内容及底层错误原文不翻译 |
 | 工具栏文档命令与语言 | `src-gpui/src/nomo_mark/toolbar_commands.rs`、`toolbar_global.rs`、`semantic_selection.rs`、`semantic_global.rs`、`toc_update.rs`、`src-gpui/src/ui/toolbar_i18n.rs`、`src-gpui/resources/toolbar-locales.json` | 脚注和目录分页、派生事务、跨窗口语义补丁、四种界面语言；按需和预算内处理 |

@@ -5,7 +5,8 @@ use crate::ui::toolbar_i18n::ToolbarLocale;
 use crate::nomo_mark::document_host::{OutlineLayout, OutlineSnapshot};
 
 const OUTLINE_PADDING: f32 = 14.0;
-const OUTLINE_PANEL_WIDTH: f32 = OutlineLayout::PANEL_WIDTH;
+const OUTLINE_MIN_WIDTH: f32 = 180.0;
+const OUTLINE_MAX_WIDTH: f32 = 500.0;
 const OUTLINE_EDGE_GAP: f32 = 8.0;
 const MAX_ANIMATED_ROWS: usize = 64;
 
@@ -131,7 +132,15 @@ impl ActiveMotion {
     }
 }
 
-struct PanelDrag { start: gpui::Point<gpui::Pixels>, origin: (f32, f32), current: (f32, f32), moved: bool }
+enum PanelDrag {
+    Move { start: gpui::Point<gpui::Pixels>, origin: (f32, f32), current: (f32, f32), moved: bool },
+    Resize {
+        start_x: gpui::Pixels,
+        start_width: f32,
+        width: f32,
+        anchor: PanelInset,
+    },
+}
 
 #[derive(serde::Deserialize)]
 struct SavedOutlinePosition {
@@ -147,36 +156,42 @@ impl SavedOutlinePosition {
         let mut saved: Self = serde_json::from_value(value).ok()?;
         if !saved.left.is_finite() || !saved.top.is_finite() { return None; }
         if saved.right.is_none_or(|right| !right.is_finite()) {
-            // 旧位置没有记录编辑区宽度。首次显示已最大化时，优先用能容纳旧位置的还原窗口。
+            // 旧位置以默认宽度保存。首次显示已最大化时，优先用能容纳旧位置的还原窗口。
+            let old_panel_width = 220.0;
             let width = f32::from(area.size.width);
             let restored_width = match window.window_bounds() {
                 gpui::WindowBounds::Windowed(_) => width,
                 gpui::WindowBounds::Maximized(bounds) | gpui::WindowBounds::Fullscreen(bounds) =>
                     f32::from(bounds.size.width - area.origin.x),
             };
-            let reference_width = if restored_width > 900.0 && saved.left + OUTLINE_PANEL_WIDTH + OUTLINE_EDGE_GAP <= restored_width {
+            let reference_width = if restored_width > 900.0 && saved.left + old_panel_width + OUTLINE_EDGE_GAP <= restored_width {
                 restored_width
             } else { width };
             // 手动打开的窄栏可能容不下旧坐标，等能还原原位置时再补记右边距。
-            if saved.left + OUTLINE_PANEL_WIDTH + OUTLINE_EDGE_GAP <= reference_width {
-                saved.save(reference_width, cx);
+            if saved.left + old_panel_width + OUTLINE_EDGE_GAP <= reference_width {
+                saved.save(reference_width, old_panel_width, cx);
             }
         }
         Some(saved)
     }
 
-    fn save(&mut self, area_width: f32, cx: &mut App) {
-        self.right = Some((area_width - panel_width(area_width) - self.left).max(OUTLINE_EDGE_GAP));
+    fn save(&mut self, area_width: f32, panel_width: f32, cx: &mut App) {
+        self.right = Some((area_width - panel_width - self.left).max(OUTLINE_EDGE_GAP));
         Settings::set(cx, "outlinePanelPosition", serde_json::json!({
             "positioned": true, "left": self.left, "top": self.top, "right": self.right,
         }));
     }
 }
 
+#[derive(Clone, Copy)]
 enum PanelInset { Left(f32), Right(f32) }
 
-fn panel_width(area_width: f32) -> f32 {
-    (area_width - 2.0 * OUTLINE_EDGE_GAP).clamp(0.0, OUTLINE_PANEL_WIDTH)
+#[derive(Clone, Copy)]
+struct FloatingPanel {
+    inset: PanelInset,
+    top: f32,
+    width: f32,
+    max_height: f32,
 }
 
 fn clamp_panel_inset(inset: f32, area: f32, panel: f32) -> f32 {
@@ -184,12 +199,12 @@ fn clamp_panel_inset(inset: f32, area: f32, panel: f32) -> f32 {
 }
 
 fn panel_position(
-    area: gpui::Bounds<gpui::Pixels>, height: f32, saved: Option<&SavedOutlinePosition>, drag: Option<(f32, f32)>,
-    default_right: f32,
+    area: gpui::Bounds<gpui::Pixels>, saved: Option<&SavedOutlinePosition>, drag: Option<(f32, f32)>,
+    default_right: f32, panel_width: f32,
 ) -> (PanelInset, f32) {
     let width = f32::from(area.size.width);
-    let clamp_x = |inset| clamp_panel_inset(inset, width, panel_width(width));
-    let (horizontal, top) = if let Some((left, top)) = drag {
+    let clamp_x = |inset| clamp_panel_inset(inset, width, panel_width);
+    if let Some((left, top)) = drag {
         (PanelInset::Left(clamp_x(left)), top)
     } else if let Some(saved) = saved {
         let inset = match saved.right {
@@ -199,8 +214,21 @@ fn panel_position(
         (inset, saved.top)
     } else {
         (PanelInset::Right(clamp_x(default_right)), 168.0 - f32::from(area.origin.y))
-    };
-    (horizontal, clamp_panel_inset(top, f32::from(area.size.height), height))
+    }
+}
+
+fn panel_vertical_space(
+    area: gpui::Bounds<gpui::Pixels>, controls: Option<gpui::Bounds<gpui::Pixels>>,
+    inset: PanelInset, width: f32, requested_top: f32, min_height: f32,
+) -> (f32, f32) {
+    let left = match inset { PanelInset::Left(x) => area.left() + px(x), PanelInset::Right(x) => area.right() - px(x + width) };
+    let right = left + px(width);
+    let bottom = controls.filter(|bounds| left < bounds.right() && right > bounds.left())
+        .map_or(area.bottom(), |bounds| area.bottom().min(bounds.top()));
+    let safe_bottom = (f32::from(bottom - area.top()) - OUTLINE_EDGE_GAP).max(0.0);
+    let min_top = OUTLINE_EDGE_GAP.min(safe_bottom);
+    let top = requested_top.clamp(min_top, (safe_bottom - min_height).max(min_top));
+    (top, safe_bottom - top)
 }
 
 struct OutlineMenu { position: gpui::Point<gpui::Pixels>, heading: Option<Heading>, revision: u64 }
@@ -218,7 +246,7 @@ pub(super) struct OutlineUi {
     selected: usize,
     selected_key: Option<String>,
     selected_revision: u64,
-    panel_height: f32,
+    min_panel_height: f32,
     list_height: f32,
     document_id: Option<String>,
     showing: bool,
@@ -243,10 +271,21 @@ impl OutlineUi {
         let activation = cx.observe_window_activation(window, |workspace, window, cx| {
             if !window.is_window_active() { workspace.outline_ui.panel_drag = None; workspace.outline_ui.section_drag = None; workspace.outline_ui.auto_scroll = None; workspace.outline_ui.menu = None; cx.notify(); }
         });
-        Self { bounds: Rc::new(Cell::new(None)), sidebar_bounds: Rc::new(Cell::new(None)), panel_bounds: Rc::new(Cell::new(None)), focus: cx.focus_handle(), keyboard_focus_visible: true, selected: 0, selected_key: None, selected_revision: 0, panel_height: 92.0, list_height: 24.0, document_id: None,
+        Self { bounds: Rc::new(Cell::new(None)), sidebar_bounds: Rc::new(Cell::new(None)), panel_bounds: Rc::new(Cell::new(None)), focus: cx.focus_handle(), keyboard_focus_visible: true, selected: 0, selected_key: None, selected_revision: 0, min_panel_height: 0.0, list_height: 24.0, document_id: None,
             showing: false, visibility: ScalarMotion::default(), exit_snapshot: None, pending_projection: None,
             projection_motion: None, active_target: None, active_motion: None, row_hovers: Vec::new(), bulk_hover: ScalarMotion::default(),
             panel_drag: None, menu: None, section_drag: None, auto_scroll: None, suppress_click: false, drag_generation: 0, _activation: activation }
+    }
+
+    pub(super) fn floating_width(&self, area_width: f32, settings: &Settings) -> f32 {
+        let preferred = match self.panel_drag {
+            Some(PanelDrag::Resize { width, .. }) => width,
+            _ => settings.outline_panel_width.map_or_else(
+                || (area_width * 0.25).clamp(220.0, 320.0),
+                |width| width.clamp(OUTLINE_MIN_WIDTH, OUTLINE_MAX_WIDTH),
+            ),
+        };
+        preferred.min((area_width - 2.0 * OUTLINE_EDGE_GAP).max(0.0))
     }
 
     pub(super) fn clear_document(&mut self) {
@@ -503,22 +542,37 @@ impl Workspace {
         let count = snapshot.count + usize::from(!snapshot.complete && snapshot.count > 0);
         let area_height = f32::from(area.size.height);
         let notice_height = if snapshot.error.is_some() || snapshot.incomplete { 40.0 } else { 0.0 };
-        let saved = if docked { None } else { SavedOutlinePosition::load(area, window, cx) };
-        let max_panel_height = if saved.is_some() { area_height - 16.0 } else { f32::from(window.viewport_size().height) - 260.0 };
         let header_height = if docked { 0.0 } else { 54.0 };
         let top_padding = if count == 0 { row_style.list_top_padding() } else { 0.0 };
         let bottom_padding = if docked { 6.0 } else if count == 0 { OUTLINE_PADDING } else { OUTLINE_PADDING - 8.0 };
-        let max_list_height = if docked { (area_height - top_padding - bottom_padding - notice_height).max(0.0) }
-            else { (max_panel_height.min(area_height - 16.0) - header_height - bottom_padding - notice_height).max(24.0) };
-        let target_list_height = if docked { max_list_height } else { (count as f32 * row_style.height).clamp(24.0, max_list_height) };
+        let border_height = if docked { 0.0 } else { 2.0 };
+        let chrome_height = header_height + top_padding + bottom_padding + notice_height + border_height;
+        let floating = (!docked).then(|| {
+            let saved = SavedOutlinePosition::load(area, window, cx);
+            let drag = match self.outline_ui.panel_drag {
+                Some(PanelDrag::Move { current, moved: true, .. }) => Some(current),
+                _ => None,
+            };
+            let default_right = if mode == EditorMode::Split { (width * 0.035).clamp(32.0, 160.0) } else { OutlineLayout::RIGHT_INSET };
+            let width = self.outline_ui.floating_width(width, &settings);
+            let (inset, requested_top) = panel_position(area, saved.as_ref(), drag, default_right, width);
+            let min_rows_height = (count.min(2) as f32 * row_style.height).max(24.0);
+            self.outline_ui.min_panel_height = chrome_height + min_rows_height;
+            let (top, max_height) = panel_vertical_space(
+                area, self.status_ui.controls_bounds(&settings), inset, width, requested_top, self.outline_ui.min_panel_height,
+            );
+            FloatingPanel { inset, top, width, max_height }
+        });
+        if floating.is_some_and(|panel| panel.max_height <= border_height) { return None; }
+        let max_list_height = (floating.map_or(area_height, |panel| panel.max_height) - chrome_height).max(0.0);
+        let min_list_height = max_list_height.min(24.0);
+        let target_list_height = if docked { max_list_height } else { (count as f32 * row_style.height).clamp(min_list_height, max_list_height) };
         let animation = self.outline_ui.projection_motion.clone();
         let progress = animation.as_ref().map_or(1.0, ProjectionMotion::progress);
         let list_height = if docked { target_list_height } else { animation.as_ref().map_or(target_list_height, |animation|
-            (animation.before.list_height + (target_list_height - animation.before.list_height) * progress).clamp(24.0, max_list_height))
+            (animation.before.list_height + (target_list_height - animation.before.list_height) * progress).clamp(min_list_height, max_list_height))
         };
         self.outline_ui.list_height = list_height;
-        let height = list_height + header_height + top_padding + bottom_padding + notice_height;
-        self.outline_ui.panel_height = height;
         let visibility = self.outline_ui.visibility.value() * self.mini.shell_frame().map_or(1.0, |frame| frame.visibility);
         let active = snapshot.active_byte;
         let active_motion = self.outline_ui.active_motion.clone();
@@ -642,10 +696,10 @@ impl Workspace {
                             .into_any_element()
                     }).collect()
                 })
-            }).track_scroll(&self.outline_scroll).w_full().h(px(list_height)).pt(px(row_style.list_top_padding()))
+            }).track_scroll(&self.outline_scroll).w_full().h_full().pt(px(row_style.list_top_padding()))
                 .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()));
-            div().w_full().px(px(row_style.padding)).child(div().relative().w_full().h(px(list_height)).overflow_hidden()
-                .child(list).children(ghosts)).into_any_element()
+            div().w_full().h(px(list_height)).min_h_0().px(px(row_style.padding))
+                .child(div().relative().size_full().overflow_hidden().child(list).children(ghosts)).into_any_element()
         };
         let header = (!docked).then(|| {
             let bulk_expand = snapshot.has_collapsed;
@@ -662,7 +716,7 @@ impl Workspace {
                 .on_mouse_down(MouseButton::Left, cx.listener(|workspace, _, _, cx| { workspace.outline_ui.keyboard_focus_visible = false; cx.stop_propagation(); cx.notify(); }))
                 .on_click(cx.listener(move |workspace, _, _, cx| { cx.stop_propagation(); let level = if bulk_expand { 6 } else { cx.global::<Settings>().outline_level }; workspace.set_outline_level_animated(level,cx); }));
             let title = ToolbarLocale::current(cx).app_text("outline.title");
-            div().h(px(header_height)).px(px(14.0)).flex().items_center().justify_between().gap(px(4.0)).cursor(outline_drag_cursor(false))
+            div().h(px(header_height)).flex_none().px(px(14.0)).flex().items_center().justify_between().gap(px(4.0)).cursor(outline_drag_cursor(false))
                 .child(div().id("outline-document-title").min_w_0().truncate().text_size(px(14.0))
                     .font_weight(FontWeight::EXTRA_BOLD).text_color(theme.heading).tooltip(tooltip(title)).child(title))
                 .when(snapshot.has_expandable, |el| el.child(bulk))
@@ -673,15 +727,15 @@ impl Workspace {
                     cx.stop_propagation(); window.focus(&workspace.outline_ui.focus, cx);
                     let offset = card.origin - area.origin;
                     let origin = (f32::from(offset.x), f32::from(offset.y));
-                    workspace.outline_ui.panel_drag = Some(PanelDrag { start: event.position, origin, current: origin, moved: false });
+                    workspace.outline_ui.panel_drag = Some(PanelDrag::Move { start: event.position, origin, current: origin, moved: false });
                     cx.notify();
                 }))
         });
         let notice = if let Some(error) = snapshot.error.clone() {
-            Some(div().px(px(14.0)).pb(px(6.0)).text_size(px(11.0)).text_color(theme.callout_caution)
+            Some(div().flex_none().px(px(14.0)).pb(px(6.0)).text_size(px(11.0)).text_color(theme.callout_caution)
                 .child(error).child(div().id("outline-retry").cursor_pointer().text_color(theme.accent_strong).child(ToolbarLocale::current(cx).app_text("outline.retry"))
                     .on_click(cx.listener(|workspace, _, _, cx| { if let Some(doc) = workspace.document() { doc.update(cx, |host, cx| host.retry_outline(cx)); } }))))
-        } else { snapshot.incomplete.then(|| div().px(px(14.0)).pb(px(6.0)).text_size(px(11.0)).text_color(theme.muted).child(ToolbarLocale::current(cx).app_text("outline.partial"))) };
+        } else { snapshot.incomplete.then(|| div().flex_none().px(px(14.0)).pb(px(6.0)).text_size(px(11.0)).text_color(theme.muted).child(ToolbarLocale::current(cx).app_text("outline.partial"))) };
         let shadows = vec![
             gpui::BoxShadow { inset: false, color: gpui::rgba(if theme.dark { 0x00000033 } else { 0x16202c0f }).into(),
                 offset: gpui::point(px(0.0), px(0.0)), blur_radius: px(24.0), spread_radius: px(0.0) },
@@ -691,29 +745,101 @@ impl Workspace {
         let card = div().id("outline-card").key_context("Outline").relative().w_full()
             .opacity(visibility)
             .when(docked, |el| el.h_full().pt(px(top_padding)).overflow_hidden().bg(theme.rail_bg))
-            .when(!docked, |el| el.rounded(px(8.0)).bg(motion::color(theme.surface, theme.app_bg, 0.04)).border_1().border_color(theme.border.opacity(0.82)).shadow(shadows))
+            .when_some(floating, |el, panel| el.flex().flex_col().max_h(px(panel.max_height)).overflow_hidden()
+                .rounded(px(8.0)).bg(motion::color(theme.surface, theme.app_bg, 0.04)).border_1().border_color(theme.border.opacity(0.82)).shadow(shadows))
             .occlude().track_focus(&self.outline_ui.focus).tab_index(0)
             .on_mouse_move(cx.listener(|workspace, event: &gpui::MouseMoveEvent, _, cx| workspace.outline_mouse_move(event, cx)))
             .on_mouse_down(MouseButton::Right, cx.listener(move |workspace, event: &gpui::MouseDownEvent, _, cx| { if !workspace.outline_ui.showing { return; } workspace.outline_ui.keyboard_focus_visible = false; cx.stop_propagation(); workspace.outline_ui.menu = Some(OutlineMenu { position: event.position, heading: None, revision }); cx.notify(); }))
             .on_key_down(cx.listener(|workspace, event: &gpui::KeyDownEvent, _, cx| workspace.outline_key(event, cx)))
             .children(header).children(notice).child(rows).pb(px(bottom_padding));
         let panel_bounds = self.outline_ui.panel_bounds.clone();
-        if docked {
+        let Some(FloatingPanel { inset, top, width: panel_width, .. }) = floating else {
             return Some(div().size_full().on_children_prepainted(move |bounds, _, _| panel_bounds.set(bounds.first().copied()))
                 .child(card).into_any_element());
-        }
-        let drag = self.outline_ui.panel_drag.as_ref().filter(|drag| drag.moved).map(|drag| drag.current);
-        let default_right = if mode == EditorMode::Split { (width * 0.035).clamp(32.0, 160.0) } else { OutlineLayout::RIGHT_INSET };
-        let (inset, top) = panel_position(area, height, saved.as_ref(), drag, default_right);
+        };
         let top = if reduced { top } else { top - (1.0 - visibility) * 4.0 };
-        let panel = div().absolute().top(px(top)).w(px(panel_width(width)))
+        let panel = div().absolute().top(px(top)).w(px(panel_width))
             .on_children_prepainted(move |bounds, _, _| panel_bounds.set(bounds.first().copied()));
         let panel = match inset { PanelInset::Left(x) => panel.left(px(x)), PanelInset::Right(x) => panel.right(px(x)) };
-        let holding = self.outline_ui.panel_drag.is_some() || drag_visual.is_some();
+        let holding = matches!(self.outline_ui.panel_drag, Some(PanelDrag::Move { .. })) || drag_visual.is_some();
+        let card = card.when(visible && !self.mini.active() && panel_width > 0.0, |card| {
+            card.child(self.outline_width_handle(inset, panel_width, &theme, cx))
+        });
         Some(panel.child(card).when(holding, |el| el.child(
             gpui::canvas(|_, _, _| (), |_, _, window, _| window.set_window_cursor_style(outline_drag_cursor(true)))
                 .absolute().size_0()
         )).into_any_element())
+    }
+
+    fn outline_width_handle(&self, anchor: PanelInset, width: f32, theme: &Theme, cx: &Context<Self>) -> impl IntoElement {
+        let resizing = matches!(self.outline_ui.panel_drag, Some(PanelDrag::Resize { .. }));
+        let edge = theme.accent.opacity(0.36);
+        let grip = if resizing { edge } else { theme.border };
+        let handle = div().id("outline-width-resizer").absolute().top(px(4.0)).bottom(px(4.0)).w(px(8.0))
+            .cursor_col_resize().flex().items_center().justify_center().group("outline-resizer").occlude()
+            .child(div().w(px(2.0)).h(px(24.0)).rounded(px(1.0)).bg(grip)
+                .group_hover("outline-resizer", move |style| style.bg(edge)))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |workspace, event: &gpui::MouseDownEvent, window, cx| {
+                workspace.outline_ui.keyboard_focus_visible = false;
+                window.focus(&workspace.outline_ui.focus, cx);
+                workspace.outline_ui.panel_drag = Some(PanelDrag::Resize {
+                    start_x: event.position.x, start_width: width, width, anchor,
+                });
+                cx.stop_propagation();
+                cx.notify();
+            }));
+        let handle = match anchor { PanelInset::Left(_) => handle.right_0(), PanelInset::Right(_) => handle.left_0() };
+        let workspace = cx.entity().downgrade();
+        // 在按下前就注册当前帧的捕获监听，拖离卡片或快速松手时仍能交接。
+        handle.child(gpui::canvas(|_, _, _| (), move |_, _, window, _| {
+            if resizing { window.set_window_cursor_style(gpui::CursorStyle::ResizeLeftRight); }
+            let moving = workspace.clone();
+            window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                if phase != gpui::DispatchPhase::Capture { return; }
+                if let Some(workspace) = moving.upgrade()
+                    && matches!(workspace.read(cx).outline_ui.panel_drag, Some(PanelDrag::Resize { .. }))
+                {
+                    workspace.update(cx, |workspace, cx| {
+                        if event.pressed_button == Some(MouseButton::Left) {
+                            if workspace.resize_outline_width(event.position.x) { cx.notify(); }
+                        } else {
+                            workspace.cancel_outline_drag(cx);
+                        }
+                    });
+                    cx.stop_propagation();
+                }
+            });
+            let released = workspace.clone();
+            window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, _, cx| {
+                if phase != gpui::DispatchPhase::Capture || event.button != MouseButton::Left { return; }
+                if let Some(workspace) = released.upgrade()
+                    && matches!(workspace.read(cx).outline_ui.panel_drag, Some(PanelDrag::Resize { .. }))
+                {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.resize_outline_width(event.position.x);
+                        if let Some(PanelDrag::Resize { start_width, width, .. }) = workspace.outline_ui.panel_drag.take()
+                            && width != start_width && width >= OUTLINE_MIN_WIDTH
+                        {
+                            Settings::set(cx, "outlinePanelWidth", serde_json::json!(width));
+                        }
+                        cx.notify();
+                    });
+                    cx.stop_propagation();
+                }
+            });
+        }).absolute().size_0())
+    }
+
+    fn resize_outline_width(&mut self, x: gpui::Pixels) -> bool {
+        let Some(PanelDrag::Resize { start_x, start_width, width, anchor }) = &mut self.outline_ui.panel_drag else { return false; };
+        let Some(area) = self.outline_ui.bounds.get() else { return false; };
+        let dx = f32::from(x - *start_x);
+        let (offset, delta) = match *anchor { PanelInset::Left(left) => (left, dx), PanelInset::Right(right) => (right, -dx) };
+        let max = (f32::from(area.size.width) - offset - OUTLINE_EDGE_GAP).clamp(0.0, OUTLINE_MAX_WIDTH);
+        let next = (*start_width + delta).clamp(OUTLINE_MIN_WIDTH.min(max), max);
+        if next == *width { return false; }
+        *width = next;
+        true
     }
 
     fn outline_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
@@ -746,10 +872,10 @@ impl Workspace {
             }
             return;
         }
-        if let Some(drag) = self.outline_ui.panel_drag.as_mut() {
-            let dx = f32::from(event.position.x - drag.start.x); let dy = f32::from(event.position.y - drag.start.y);
-            if !drag.moved && dx.hypot(dy) < 5.0 { return; }
-            drag.moved = true; drag.current = (drag.origin.0 + dx, drag.origin.1 + dy); cx.notify(); return;
+        if let Some(PanelDrag::Move { start, origin, current, moved }) = &mut self.outline_ui.panel_drag {
+            let dx = f32::from(event.position.x - start.x); let dy = f32::from(event.position.y - start.y);
+            if !*moved && dx.hypot(dy) < 5.0 { return; }
+            *moved = true; *current = (origin.0 + dx, origin.1 + dy); cx.notify(); return;
         }
         let Some(drag) = self.outline_ui.section_drag.as_mut() else { return; };
         let dx=f32::from(event.position.x-drag.start.x); let dy=f32::from(event.position.y-drag.start.y);
@@ -822,12 +948,15 @@ impl Workspace {
                 cx.notify();
             }
         }
-        if let Some(drag) = self.outline_ui.panel_drag.take() {
-            if drag.moved && let Some(area) = self.outline_ui.bounds.get() {
+        if let Some(PanelDrag::Move { current, moved, .. }) = self.outline_ui.panel_drag.take() {
+            if moved && let Some(area) = self.outline_ui.bounds.get() {
                 let width = f32::from(area.size.width);
-                let left = clamp_panel_inset(drag.current.0, width, panel_width(width));
-                let top = clamp_panel_inset(drag.current.1, f32::from(area.size.height), self.outline_ui.panel_height);
-                SavedOutlinePosition { left, top, right: None }.save(width, cx);
+                let settings = cx.global::<Settings>();
+                let panel_width = self.outline_ui.floating_width(width, settings);
+                let left = clamp_panel_inset(current.0, width, panel_width);
+                let (top, _) = panel_vertical_space(area, self.status_ui.controls_bounds(settings),
+                    PanelInset::Left(left), panel_width, current.1, self.outline_ui.min_panel_height);
+                SavedOutlinePosition { left, top, right: None }.save(width, panel_width, cx);
             }
             cx.notify();
         }
@@ -870,6 +999,9 @@ impl Workspace {
         items.extend([("expand", ToolbarLocale::current(cx).app_text("outline.expandAll")), ("collapse", ToolbarLocale::current(cx).app_text("outline.collapseAll")), ("default", ToolbarLocale::current(cx).app_text("outline.defaultLevel"))]);
         if cx.global::<Settings>().document_navigation_layout == DocumentNavigationLayout::RightOutline {
             items.push(("reset", ToolbarLocale::current(cx).app_text("outline.resetPosition")));
+            if cx.global::<Settings>().outline_panel_width.is_some() {
+                items.push(("reset-width", ToolbarLocale::current(cx).app_text("outline.resetWidth")));
+            }
         }
         items.push(("hide", ToolbarLocale::current(cx).app_text("outline.hide")));
         let mut panel = div().id("outline-context-menu").w(px(if ToolbarLocale::current(cx).is_chinese() { 190.0 } else { 280.0 })).py(px(5.0)).flex().flex_col().rounded(px(8.0))
@@ -888,6 +1020,7 @@ impl Workspace {
                         "expand" | "collapse" => workspace.set_outline_level_animated(if action=="expand" {6}else{1},cx),
                         "default" => { let level = cx.global::<Settings>().outline_level; workspace.set_outline_level_animated(level,cx); },
                         "reset" => workspace.reset_outline_position(cx),
+                        "reset-width" => Settings::set(cx, "outlinePanelWidth", serde_json::json!("auto")),
                         "hide" => workspace.set_outline_open(false, cx),
                         _ => {},
                     }

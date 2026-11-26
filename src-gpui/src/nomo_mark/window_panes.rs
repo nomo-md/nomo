@@ -13,7 +13,6 @@ pub(crate) enum OutlineLayout {
 }
 
 impl OutlineLayout {
-    pub(crate) const PANEL_WIDTH: f32 = 220.0;
     pub(crate) const RIGHT_INSET: f32 = 16.0;
     pub(super) const CENTERED: Self = Self::Visible { shift_fraction: 0.0 };
 
@@ -21,12 +20,12 @@ impl OutlineLayout {
         if open { Self::ManualOverlay } else if self == Self::ManualOverlay { Self::Hidden } else { self }
     }
 
-    fn for_area(self, width: f32, percent: f32, split: bool) -> Self {
+    fn for_area(self, width: f32, percent: f32, split: bool, outline_width: f32) -> Self {
         // 留白不足时保留当前浮层，留白充足时恢复正文避让。
         let when_narrow = if self == Self::ManualOverlay { Self::ManualOverlay } else { Self::Hidden };
         if split { return if width > 900.0 { Self::CENTERED } else { when_narrow }; }
         let right_margin = (width - width * percent) / 2.0;
-        let missing = Self::PANEL_WIDTH + Self::RIGHT_INSET + 12.0 - right_margin;
+        let missing = outline_width + Self::RIGHT_INSET + 12.0 - right_margin;
         let max_shift = (width * 0.03).min(48.0);
         // 恢复正文避让时多等 8px 余量，避免在临界宽度反复切换。
         let threshold = if matches!(self, Self::Visible { .. }) { max_shift } else { (max_shift - 8.0).max(0.0) };
@@ -38,12 +37,13 @@ impl OutlineLayout {
 fn outline_content_column_preserves_percentage_and_outline_clearance() {
     use OutlineLayout::{Hidden, ManualOverlay, Visible};
     let initial = OutlineLayout::CENTERED;
+    let panel = 220.0;
     for width in [420.0, 900.0, 1000.0, 1200.0, 1600.0, 4000.0] {
         for percent in 30..=100 {
             let fraction = percent as f32 / 100.0;
             let margin = (width - width * fraction) / 2.0;
             let max_shift = (width * 0.03_f32).min(48.0);
-            match initial.for_area(width, fraction, false) {
+            match initial.for_area(width, fraction, false, panel) {
                 Visible { shift_fraction } => {
                     let text_shift = width * shift_fraction;
                     assert!(text_shift <= max_shift + 0.01 && margin >= text_shift);
@@ -54,19 +54,19 @@ fn outline_content_column_preserves_percentage_and_outline_clearance() {
             }
         }
     }
-    assert_eq!(initial.for_area(1200.0, 0.60, false), Visible { shift_fraction: 8.0 / 1200.0 });
-    let hidden = initial.for_area(1200.0, 0.75, false);
+    assert_eq!(initial.for_area(1200.0, 0.60, false, panel), Visible { shift_fraction: 8.0 / 1200.0 });
+    let hidden = initial.for_area(1200.0, 0.75, false, panel);
     assert_eq!(hidden, Hidden);
-    assert_eq!(initial.for_area(1600.0, 0.75, false), Visible { shift_fraction: 48.0 / 1600.0 });
-    assert_eq!(hidden.for_area(1600.0, 0.75, false), Hidden);
-    assert_eq!(hidden.for_area(1600.0, 0.74, false), Visible { shift_fraction: 40.0 / 1600.0 });
+    assert_eq!(initial.for_area(1600.0, 0.75, false, panel), Visible { shift_fraction: 48.0 / 1600.0 });
+    assert_eq!(hidden.for_area(1600.0, 0.75, false, panel), Hidden);
+    assert_eq!(hidden.for_area(1600.0, 0.74, false, panel), Visible { shift_fraction: 40.0 / 1600.0 });
     let manual = hidden.with_manual_open(true);
-    assert_eq!(manual.for_area(1200.0, 0.90, false), ManualOverlay);
-    assert_eq!(manual.for_area(800.0, 0.60, true), ManualOverlay);
-    assert_eq!(manual.with_manual_open(false).for_area(1200.0, 0.90, false), Hidden);
-    let automatic = manual.for_area(1600.0, 0.60, false);
+    assert_eq!(manual.for_area(1200.0, 0.90, false, panel), ManualOverlay);
+    assert_eq!(manual.for_area(800.0, 0.60, true, panel), ManualOverlay);
+    assert_eq!(manual.with_manual_open(false).for_area(1200.0, 0.90, false, panel), Hidden);
+    let automatic = manual.for_area(1600.0, 0.60, false, panel);
     assert_eq!(automatic, initial);
-    assert_eq!(automatic.for_area(1200.0, 0.90, false), Hidden);
+    assert_eq!(automatic.for_area(1200.0, 0.90, false, panel), Hidden);
 }
 
 #[derive(Clone, Copy)]
@@ -1035,11 +1035,11 @@ impl DocumentHost {
             },
         ).absolute().right_0().top_0().w(px(12.0)).h_full()
     }
-    pub(crate) fn update_outline_layout(&mut self, width: f32, percent: f32, cx: &mut Context<Self>) {
+    pub(crate) fn update_outline_layout(&mut self, width: f32, percent: f32, outline_width: f32, cx: &mut Context<Self>) {
         // 左栏大纲不占正文留白，也不受右侧浮层的空间阈值控制。
         let settings = cx.global::<Settings>();
         if settings.document_navigation_layout != crate::settings::DocumentNavigationLayout::RightOutline { return; }
-        let layout = match self.outline_layout.for_area(width, percent, self.panes.len() == 2) {
+        let layout = match self.outline_layout.for_area(width, percent, self.panes.len() == 2, outline_width) {
             narrow @ (OutlineLayout::Hidden | OutlineLayout::ManualOverlay) => narrow.with_manual_open(settings.right_outline_open),
             visible => visible,
         };

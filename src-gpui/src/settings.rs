@@ -79,6 +79,7 @@ pub fn default_value(key: &str) -> Value {
         "documentNavigationSplitRatio" => json!(0.55),
         "documentNavigationFilesCollapsed" | "documentNavigationOutlineCollapsed" => json!(false),
         "documentSidebarWidth" => json!("auto"),
+        "outlinePanelWidth" => json!("auto"),
         "outlinePanelPosition" => json!({"positioned": false}),
         "writingStatsVisible" | "zoomControlVisible" | "markdownLintIndicatorVisible" | "editLockButtonVisible" => json!(true),
         "writingStatsMetric" => json!("words"),
@@ -121,6 +122,7 @@ pub struct Settings {
     /// 分栏时源码在左（`source-semantic`）。
     pub split_source_first: bool,
     pub right_outline_open: bool,
+    pub(crate) outline_panel_width: Option<f32>,
     pub document_navigation_layout: DocumentNavigationLayout,
     pub show_home_sidebar: bool,
     pub show_sidebar: bool,
@@ -159,6 +161,7 @@ impl Default for Settings {
             default_mode: EditorMode::Semantic,
             split_source_first: false,
             right_outline_open: false,
+            outline_panel_width: None,
             document_navigation_layout: DocumentNavigationLayout::RightOutline,
             show_home_sidebar: true,
             show_sidebar: true,
@@ -326,6 +329,7 @@ impl Settings {
         };
         self.split_source_first = self.string("splitViewLayout") == "source-semantic";
         self.right_outline_open = self.bool("outlineVisible");
+        self.outline_panel_width = self.value("outlinePanelWidth").as_f64().map(|width| width as f32);
         self.document_navigation_layout = match self.string("documentNavigationLayout").as_str() {
             "left-tabs" => DocumentNavigationLayout::LeftTabs,
             "left-split" => DocumentNavigationLayout::LeftSplit,

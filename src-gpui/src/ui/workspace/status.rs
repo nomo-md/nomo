@@ -22,6 +22,7 @@ pub(super) struct StatusUi {
     document: Option<EntityId>,
     locale: &'static str,
     anchors: [Rc<Cell<Option<Bounds<Pixels>>>>; 3],
+    controls_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     triggers: [FocusHandle; 3],
     edit_lock_focus: FocusHandle,
     focus: FocusHandle,
@@ -47,6 +48,7 @@ impl StatusUi {
         Self {
             open: None, opened: Instant::now(), generation: 0, document: None, locale: "",
             anchors: std::array::from_fn(|_| Rc::new(Cell::new(None))),
+            controls_bounds: Rc::new(Cell::new(None)),
             triggers: std::array::from_fn(|_| cx.focus_handle()), edit_lock_focus: cx.focus_handle(),
             focus: cx.focus_handle(),
             hover: [false; 3], motion: [ScalarMotion::default(); 3],
@@ -57,6 +59,14 @@ impl StatusUi {
             last_zoom: None, pulse: None,
             stats: StatsTransition::default(),
             lint_hint: false,
+        }
+    }
+
+    pub(super) fn controls_bounds(&self, settings: &Settings) -> Option<Bounds<Pixels>> {
+        if settings.zoom_control_visible || settings.stats_visible || settings.lint_indicator_visible || settings.edit_lock_button_visible {
+            self.controls_bounds.get()
+        } else {
+            None
         }
     }
 }
@@ -256,7 +266,10 @@ impl Workspace {
             if let Some(document) = &doc { window.focus(&document.focus_handle(cx), cx); }
             else { window.focus(&self.focus, cx); }
         }
-        let doc = doc?;
+        let Some(doc) = doc else {
+            self.status_ui.controls_bounds.set(None);
+            return None;
+        };
         let reduced = self.explorer.reduce_motion;
         for (index, visible) in panels.into_iter().enumerate() {
             if visible {
@@ -274,7 +287,29 @@ impl Workspace {
         }
         if !stats_visible { self.status_ui.stats = StatsTransition::default(); }
         let edit_lock = edit_lock_visible.then(|| self.edit_lock_button(doc.read(cx).editing_locked(), theme, cx));
-        let controls = div().absolute().right(px(16.0)).bottom(px(14.0)).flex().items_center().gap(px(8.0));
+        let settings = cx.global::<Settings>();
+        let track_controls = settings.right_outline_open && settings.document_navigation_layout == DocumentNavigationLayout::RightOutline;
+        let controls = div().absolute().right(px(16.0)).bottom(px(14.0)).flex().items_center().gap(px(8.0))
+            .when(track_controls, |controls| {
+                let measured = self.status_ui.controls_bounds.clone();
+                let workspace = cx.entity().downgrade();
+                controls.on_children_prepainted(move |children, window, _| {
+                    // 按常驻按钮的实际范围避让，弹出的统计面板不改变大纲高度。
+                    let bounds = children.iter().copied().filter(|bounds| !bounds.is_empty())
+                        .reduce(|row, button| row.union(&button));
+                    if measured.replace(bounds) != bounds {
+                        let workspace = workspace.clone();
+                        window.on_next_frame(move |_, cx| {
+                            let _ = workspace.update(cx, |workspace, cx| {
+                                if workspace.outline_visible(cx) { cx.notify(); }
+                            });
+                        });
+                    }
+                })
+            });
+        if !track_controls || (!zoom_visible && !stats_visible && !lint_visible && !edit_lock_visible) {
+            self.status_ui.controls_bounds.set(None);
+        }
         if !zoom_visible && !stats_visible && !lint_visible {
             return edit_lock.map(|button| gpui::deferred(controls.child(button)).with_priority(3).into_any_element());
         }
