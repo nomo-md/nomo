@@ -1,5 +1,6 @@
 //! 同一会话的窗口化视图。双栏各自调度片段；事务和历史仍只有 DocumentHost 一个入口。
 use super::*;
+use crate::nomo_mark::session_window::WindowRequest;
 use crate::settings::{EditorMode, Settings};
 use std::{sync::atomic::{AtomicU64, Ordering}, time::{Duration, Instant}};
 
@@ -575,7 +576,7 @@ impl DocumentHost {
             })).map(|mount| &mount.view).unwrap_or(&self.control);
             let view=seed.read(cx);
             let identity=&view.host.parsed.identity;
-            let input=self.port.read_window(identity.revision,identity.from_byte..identity.to_byte)?;
+            let input=self.port.read_complete_group(identity.revision,identity.from_byte..identity.to_byte,&WindowRequest::default())?;
             let context=WindowContext::Resolved(view.host.parsed.context.clone());
             static NEXT_WINDOW:AtomicU64=AtomicU64::new(1);
             let window_id=format!("split-{}-{}",identity.window_id,NEXT_WINDOW.fetch_add(1,Ordering::Relaxed));
@@ -602,7 +603,7 @@ impl DocumentHost {
                         let view=mount.view.read(cx);
                         let id=&view.host.parsed.identity;
                         if id.revision!=revision {continue;}
-                        let input=self.port.read_window(revision,id.from_byte..id.to_byte)?;
+                        let input=self.port.read_complete_group(revision,id.from_byte..id.to_byte,&WindowRequest::default())?;
                         let bytes=input.text.len();
                         let context=WindowContext::Resolved(view.host.parsed.context.clone());
                         let id=format!("split-{}-{}",id.window_id,NEXT_WINDOW.fetch_add(1,Ordering::Relaxed));

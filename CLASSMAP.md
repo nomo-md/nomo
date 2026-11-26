@@ -35,9 +35,9 @@
 | 行内注释标签与原位编辑 | `src-gpui/src/nomo_mark/comments.rs`、`object_ui.rs` | 跟随主题主色的完整注释，按正文或单元格宽度折行，支持原位输入；局部草稿按会话确认，IME 收尾后提交，关闭释放输入控件 |
 | HTML 容器与属性卡片 | `src-gpui/src/nomo_mark/html_table.rs`、`front_matter.rs`、`object_ui.rs` | 安全 HTML 文本及实体映射、Details 标题边界；Front Matter 字段摘要、块注释完整预览与原位草稿；仅解析当前窗口，不重写未知属性 |
 | 文字布局与 KP | `src-gpui/src/layout.rs`、`kp.rs`、`kp/hyphenation.rs`、`resources/hyph-en-us.tex` | GPUI 塑形、有界 KP 求解、按需英文 Liang 断词、悬挂标点与虚拟连字符几何；保留原文字节身份，字典不缓存用户词语 |
-| 图片／公式／图表 | `src-gpui/src/images.rs`、`images/{gif,animation}.rs`、`embeds.rs`、`embeds_native.rs`、`nomo_mark/resource_lifecycle.rs` | 本地／HTTP(S) 图片解码预检、有限任务队列、失败与位图预算、CPU／atlas 淘汰；GIF 首帧优先、流式合成与两帧预读、可见绘制驱动循环、静态降级提示；关闭文档按其他窗口与后台标签的有界资源键回收，旧异步请求失效；无视图 SVG 管线供编辑器、导出和 Quick Look 共用 |
+| 图片／公式／图表 | `src-gpui/src/images.rs`、`images/{source,gif,animation}.rs`、`embeds.rs`、`embeds_native.rs`、`nomo_mark/resource_lifecycle.rs` | 本地／HTTP(S)／Base64 内嵌图片解码预检、有限任务队列、失败与位图预算、CPU／atlas 淘汰；内嵌数据以内容摘要作为资源键；GIF 首帧优先、流式合成与两帧预读、可见绘制驱动循环、静态降级提示；关闭文档按其他窗口与后台标签的有界资源键回收，旧异步请求失效；无视图 SVG 管线供编辑器、导出和 Quick Look 共用 |
 | macOS Quick Look | `src-gpui/macos-quick-look/`、`src-gpui/src/quick_look.rs`、`quick_look_model.rs`、`scripts/build-macos-quick-look.sh` | 按需沙箱预览扩展，AppKit 原生排版、内嵌图片和用户选定目录的相对图片；正文 1 MiB、可取消串行渲染、有限图片和增强结果，关闭释放；无编辑会话、网络或 WebView |
-| 公式字体回退 | `src-gpui/src/math_fallback.rs`、`vendor/latex-rust/NOMO-PATCH.md` | 固定版 TeX 引擎扩展缺字接口，系统字体度量及轮廓参与正常排版；缓存只活到单次公式完成，复用现有位图缓存 |
+| 公式兼容与字体回退 | `src-gpui/src/embeds_native.rs`、`math_compat.rs`、`math_fallback.rs`、`vendor/latex-rust/NOMO-PATCH.md` | 优先使用 TeX 引擎及宿主字形回退；语法不兼容时复用有界的纯 Rust KaTeX 渲染器及内嵌字体。编辑、导出及 Quick Look 共享 SVG 入口，保留原公式和已有位图缓存 |
 | 主题、动效与平台字体 | `src-gpui/src/theme.rs`、`theme_catalog.rs`、`resources/color-themes.json`、`src-gpui/src/ui/motion.rs` | 四套原版主题、有限用户主题目录及 JSON 导入／导出；同明暗配色与字体变更也失效可见区布局，图表配色与正文字体进入共享缓存键；图表测量、位图、预览和导出共用字体选择 |
 | 配置与设置窗口 | `src-gpui/src/settings.rs`、`ui/settings_schema.rs`、`ui/settings_window.rs`、`ui/settings_pages.rs`、`ui/settings_fonts.rs` | 九个分区（快捷键独立）、文档导航布局、主题导入／导出、从本机字体中搜索选用或恢复主题、图片策略；按原有配置原子保存 |
 | 文件管理器定位 | `src-gpui/src/ui/file_manager.rs` | 文件树、文档标签和本地图片共用定位入口。Windows 在后台线程解析路径并选中条目，失败时通过界面提示 |
@@ -66,7 +66,7 @@
 | 文档导出与打印 | `src-gpui/src/document_export.rs`、`document_export/{html,resources,remote,model,media,pdf,pdf_fonts,word}.rs`、`ui/workspace/{export,print}.rs`、`ui/workspace/print/` | 固定修订及单个可取消任务。打印按浅色 PDF 分页。Windows 的 PrintManager 按需请求预览页，预览与输出共用纸张和可打印区域布局。macOS 由 PDFKit 打印任务在文档窗口内显示 AppKit 预览。Linux 通过 X11／Wayland 父窗口调用打印 portal，按 PDF 文件输出设置生成所选页面；HTTP(S) 图片有界下载并内嵌，HTML 流式输出，PDF 与 Word 逐张编码并复用图片，每处引用独立排版；PDF 嵌入字体分页、Word 原生 OOXML，原子发布前复核取消 |
 | 外部文件变更策略 | `src-gpui/src/ui/workspace/application_dialogs.rs`、`text_document/markdown_session/external.rs` | 干净文档按偏好自动重载／覆盖／忽略；本地修改和删除仍显式选择，忽略继续阻止普通保存，覆盖校验检测令牌；Mini 返回后处理延迟冲突 |
 | 文档会话与保存 | `src-gpui/src/text_document/mod.rs`、`markdown_session.rs`、`markdown_session/rename.rs`、`markdown_session/external.rs`、`markdown_session/recovery.rs`、`markdown_history.rs` | PieceTree、磁盘正文与历史、快照、保存及重命名事务；会话编辑锁保护正文事务、历史、批量替换和章节移动；外部身份复核、进程租约和原会话按需恢复 |
-| 结构索引／搜索／统计 | `src-gpui/src/text_document/structure_index/`、`markdown_search/`、`writing_stats/` | 唯一结构索引、分页查询和有界统计；关闭时撤销索引归属，`structure_index/reclaim.rs` 分批回收派生页 |
+| 结构索引／搜索／统计 | `src-gpui/src/text_document/structure_index/`、`markdown_search/`、`writing_stats/` | 唯一结构索引、分页查询和有界统计；长内嵌图片的编码载荷使用有界压缩语法投影，验证图片目的地址后恢复真实范围与哈希，普通语义预算不变；可见资源块按页读出原文；关闭时撤销索引归属，`structure_index/reclaim.rs` 分批回收派生页 |
 | 编码、文件写入、格式模板 | `src-gpui/src/models.rs`、`file_system.rs`、`markdown_templates.rs` | 编码定义、原子替换、显式模板来源 |
 | Emoji 加载 | `src-gpui/src/nomo_mark/native_emoji.rs`、`ui/emoji_picker.rs` | 按需加载；固定版本 JSON、哈希、虚拟列表和原有缓存预算 |
 | 策略和既有语料 | `src-gpui/resources/` | 策略 JSON、搜索与结构样本 |

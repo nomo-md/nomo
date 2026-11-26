@@ -42,6 +42,8 @@ struct Block {
     kind: String,
     semantic_complete: bool,
     references: Vec<String>,
+    #[serde(default)]
+    embedded_image_bytes: usize,
 }
 pub struct LoadedWindow {
     pub input: DocumentWindow,
@@ -175,6 +177,7 @@ impl NativeWindowPort {
                     to_line: block.from_line + lines.saturating_mul(to - block.from_byte) / span,
                     mode: "raw".into(), kind: "source_window".into(), semantic_complete: false,
                     layout_units: 1,
+                    embedded_image_bytes: 0,
                 });
                 from = to;
             }
@@ -368,6 +371,8 @@ impl NativeWindowPort {
                 && (i >= policy().group_blocks
                     || block.mode != "semantic"
                     || !block.semantic_complete
+                    || first.embedded_image_bytes > 0
+                    || block.embedded_image_bytes > 0
                     || block.to_byte - from > policy().group_bytes
                     || limit.is_some_and(|limit| block.to_byte > limit))
             {
@@ -381,7 +386,9 @@ impl NativeWindowPort {
                 "目标与已挂载窗口重叠，需重新定位完整边界".into(),
             ));
         }
-        if to - from > 1_048_576 {
+        let image_window = first.embedded_image_bytes > 0 && to == first.to_byte;
+        let window_limit = if image_window { crate::text_document::MAX_EMBEDDED_IMAGE_WINDOW_BYTES as u64 } else { 1_048_576 };
+        if to - from > window_limit {
             return Err(ControlError::NeedsContext(
                 "完整结构超过原版单次窗口限制".into(),
             ));
@@ -395,13 +402,37 @@ impl NativeWindowPort {
         // 只查当前窗口用到的定义；不复制全局引用表。
         let context = self.reference_context(revision, index.clone(), context, request)?;
         request.check()?;
-        let input = self.read_window(revision, from..to)?;
+        let input = self.read_complete_group(revision, from..to, request)?;
         Ok(LoadedWindow {
             input,
             context: WindowContext::Resolved(context),
             total_bytes: status.byte_length,
             index,
         })
+    }
+    /// Read a previously validated complete group. Resource groups can exceed
+    /// an individual snapshot page; ordinary windows retain the same API limit.
+    pub(super) fn read_complete_group(&self, revision: u64, range: Range<u64>, request: &WindowRequest) -> Result<DocumentWindow, ControlError> {
+        if range.end < range.start || range.end - range.start > crate::text_document::MAX_EMBEDDED_IMAGE_WINDOW_BYTES as u64 {
+            return Err(ControlError::InvalidRange);
+        }
+        request.check()?;
+        if range.end - range.start <= 1_048_576 { return self.read_window(revision, range); }
+        let (from, to) = (range.start, range.end);
+        let mut input = self.read_window(revision, from..from + 1_048_572)?;
+        if input.from_byte != from || input.to_byte > to { return Err(ControlError::InvalidRange); }
+        input.text.reserve((to - input.to_byte) as usize);
+        while input.to_byte < to {
+            request.check()?;
+            let at = input.to_byte;
+            let page = self.read_window(revision, at..(at + 1_048_572).min(to))?;
+            if page.from_byte != at || page.to_byte <= at || page.to_byte > to { return Err(ControlError::InvalidRange); }
+            input.text.push_str(&page.text);
+            input.inline_templates.extend(page.inline_templates);
+            input.to_byte = page.to_byte;
+        }
+        input.inline_templates.dedup();
+        Ok(input)
     }
     /// 只补齐当前窗口的引用元数据；不等待完整索引，也不重新读取正文。
     pub(crate) fn refresh_references(&self, revision: u64, context: ParseContext, request: &WindowRequest) -> Result<ParseContext, ControlError> {

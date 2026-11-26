@@ -6,6 +6,7 @@
 
 use super::highlight;
 use crate::embeds::{EmbedKind, EmbedState};
+use crate::images::{ImageKey, ImageSource, image_label, is_data_source, resolve_image};
 use crate::layout::{ColorRole, InlineAsset, InlineObject, InlineStyle, OBJECT_CHAR, ParaSpec, TextLayout, Wrap, layout_text};
 use crate::theme::{Family, Metrics};
 use crate::nomo_mark::parse::ParsedWindow;
@@ -14,7 +15,7 @@ use crate::nomo_mark::image_properties::{self, ImageWidth};
 use gpui::{Bounds, Pixels, Point, Window, point, px, size};
 use pulldown_cmark::{Alignment, BlockQuoteKind, CodeBlockKind, Event, Parser, Tag, TagEnd};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 
 #[path = "table_layout.rs"]
@@ -69,7 +70,7 @@ pub enum DisplayItem {
     Horizontal {x:f32,y:f32,w:f32,h:f32,content_width:f32,source:Range<usize>,offset:std::cell::Cell<f32>,layout:Box<BlockLayout>},
     Text { x: f32, y: f32, layout: Rc<TextLayout>, map: Vec<MapSeg> },
     Rect { x: f32, y: f32, w: f32, h: f32, paint: Paint, radius: f32, border: Option<Paint> },
-    Image { x: f32, y: f32, w: f32, h: f32, path: Option<PathBuf>, source: Range<usize> },
+    Image { x: f32, y: f32, w: f32, h: f32, path: Option<ImageKey>, source: Range<usize> },
     Checkbox { x: f32, y: f32, size: f32, checked: bool, source: usize },
     /// 代码块右上角的复制按钮；`text` 为代码正文。
     CopyButton { x: f32, y: f32, size: f32, text: Rc<str> },
@@ -357,6 +358,7 @@ impl BlockLayout {
                 DisplayItem::CodeHeader { text, .. } | DisplayItem::CopyButton { text, .. } => text.len() + 64,
                 DisplayItem::TocLink { target, .. } => target.capacity() + 64,
                 DisplayItem::Embed { .. } => 64,
+                DisplayItem::Image { path, .. } => 64 + path.as_ref().map_or(0, ImageKey::estimated_bytes),
                 DisplayItem::Horizontal{layout,..}=>layout.estimated_bytes(),
                 _ => 64,
             })
@@ -587,8 +589,8 @@ pub struct RenderEnv<'a> {
     pub metrics: Metrics,
     pub wrap: Wrap,
     pub base_dir: Option<&'a Path>,
-    pub image_size: &'a dyn Fn(&Path) -> Option<(u32, u32)>,
-    pub image_failure: &'a dyn Fn(&Path) -> Option<&'static str>,
+    pub image_size: &'a dyn Fn(&ImageSource<'_>) -> Option<(u32, u32)>,
+    pub image_failure: &'a dyn Fn(&ImageKey) -> Option<&'static str>,
     pub text_layouts: Option<&'a std::cell::RefCell<crate::layout::TextLayoutReuse>>,
     /// 宽内容（表格）可用的最大宽度：从正文左缘到编辑区右缘，允许超出正文宽度。
     pub wide_width: f32,
@@ -1117,7 +1119,7 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                     let (image, image_source) = table_inline::image(source, &mut events, &dest_url, &title, range.clone());
                     image_attributes = (range.end < image_source.end).then_some(range.end..image_source.end);
 
-                    let label = if image.alt.is_empty() { &image.src } else { &image.alt };
+                    let label = image_label(&image.src, &image.alt);
                     let style = InlineStyle { color: ColorRole::Link, ..Default::default() };
                     builder.para.push(&format!("［图片：{label}］"), style, Some((image_source.start, false)));
                     if let Some(map) = builder.para.map.last_mut() { map.source_end = image_source.end; }
@@ -1243,6 +1245,21 @@ fn layout_events<'a>(source: &str, width: f32, env: &RenderEnv, window: &Window,
                         continue;
                     }
                 }
+                // Inline data images must not expose the encoded bytes as literal HTML.
+                if html.get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case("<img"))
+                    && let Some((image, tag)) = image_properties::html_image_tag(source, range.clone()) {
+                    let src = html_escape::decode_html_entities(&tag.attrs["src"]);
+                    if is_data_source(&src) {
+                        let attr = |name: &str| tag.attrs.get(name).map(|value| html_escape::decode_html_entities(value).into_owned());
+                        let atom = crate::nomo_mark::html_table::InlineAtom::Image {
+                            src: src.into_owned(), alt: attr("alt").unwrap_or_default(),
+                            width: attr("width").and_then(|value| ImageWidth::parse(&value)), align: attr("align"),
+                        };
+                        builder.image_only = false;
+                        push_table_atom(&mut builder.para, &atom, image, builder.inline.style(&builder.base), env, window);
+                        continue;
+                    }
+                }
                 match builder.inline.apply_html(&html) {
                 Some(true) => {}
                 Some(false) => builder.line_break(range),
@@ -1336,12 +1353,14 @@ fn push_table_atom(para: &mut ParaBuilder, atom: &crate::nomo_mark::html_table::
                 Some(InlineObject { at: 0, width: info.width * scale, width_percent:None, ascent: (info.height - info.depth) * scale, descent: info.depth * scale, key: InlineAsset::Embed(key) })
             } else { style.color = ColorRole::Accent; None }
         }
-        InlineAtom::Image { src, width, .. } => {
-            let path = crate::images::resolve_source(src, env.base_dir);
-            path.and_then(|path| {
-                let size = (env.image_size)(&path);
-                if let Some(reason) = (env.image_failure)(&path) { fallback = format!("{reason}：{fallback}"); }
-                size.map(|(w, h)| (path, w, h))
+        InlineAtom::Image { src, alt, width, .. } => {
+            fallback = format!("[图片：{}]", image_label(src, alt));
+            let image = resolve_image(src, env.base_dir);
+            if let Err(reason) = image.as_ref() { fallback = format!("{reason}：{fallback}"); }
+            image.ok().and_then(|source| {
+                let size = (env.image_size)(&source);
+                if let Some(reason) = (env.image_failure)(&source.key) { fallback = format!("{reason}：{fallback}"); }
+                size.map(|(w, h)| (source.key, w, h))
             }).filter(|(_, w, h)| *w > 0 && *h > 0).map(|(path, w, h)| {
                 // 百分比在最终单元格宽度确定后解析；先保留非零的固有比例。
                 let display_w = match *width {Some(ImageWidth::Pixels(value))=>value*env.metrics.zoom,_=>w as f32*env.metrics.zoom};
@@ -1534,7 +1553,8 @@ impl Builder<'_> {
 
     fn end_paragraph(&mut self) {
         // 只含图片的段落按块级图片渲染。
-        if self.image_only && !self.images.is_empty() && self.env.base_dir.is_some() {
+        if self.image_only && !self.images.is_empty() && (self.env.base_dir.is_some()
+            || self.images.iter().all(|image| is_data_source(&image.url))) {
             let images = std::mem::take(&mut self.images);
             self.para = ParaBuilder::new();
             for image in images {
@@ -2056,11 +2076,12 @@ impl Builder<'_> {
     fn image_with(&mut self, url: &str, alt: &str, max_width: Option<ImageWidth>, align: Option<&str>, source:Range<usize>) {
         self.apply_gap();
         let metrics = self.env.metrics;
-        let available = max_width.map_or(self.width - self.indent, |width| width.resolve(self.width-self.indent,metrics.zoom).min(self.width - self.indent));
-        let path = crate::images::resolve_source(url, self.env.base_dir);
-        let size = path.as_deref().and_then(|path| (self.env.image_size)(path));
-        match (path, size) {
-            (Some(path), Some((w, h))) if w > 0 && h > 0 => {
+        let full_width = (self.width - self.indent).max(1.0);
+        let available = max_width.map_or(full_width, |width| width.resolve(full_width,metrics.zoom).min(full_width)).max(1.0);
+        let image = resolve_image(url, self.env.base_dir);
+        let size = image.as_ref().ok().and_then(|source| (self.env.image_size)(source));
+        match (image, size) {
+            (Ok(image), Some((w, h))) if w > 0 && h > 0 => {
                 // Store 返回原始像素；缩略图解码倍率不改变文档中的 CSS 尺寸。
                 let natural = w as f32 * metrics.zoom;
                 let display_w = if max_width.is_some() { available } else { natural.min(available) };
@@ -2071,19 +2092,22 @@ impl Builder<'_> {
                     Some("right") => free,
                     _ => 0.0,
                 };
-                self.items.push(DisplayItem::Image { x: self.indent + offset, y: self.y, w: display_w, h: display_h, path: Some(path), source });
+                self.items.push(DisplayItem::Image { x: self.indent + offset, y: self.y, w: display_w, h: display_h, path: Some(image.key), source });
                 self.y += display_h;
             }
-            (path, _) => {
-                let note = match path {
-                    Some(path) => format!("{}：{alt}", (self.env.image_failure)(&path).unwrap_or("图片未就绪")),
-                    None => format!("远程图片未加载：{url}"),
+            (image, _) => {
+                let reason = match image {
+                    Ok(image) => (self.env.image_failure)(&image.key).unwrap_or("图片未就绪"),
+                    Err(reason) => reason,
                 };
-                let h = 64.0 * metrics.zoom;
+                let note = format!("{reason}：{}", image_label(url, alt));
+                let pad = (12.0 * metrics.zoom).min(available / 4.0);
+                let spec = ParaSpec::plain(note, InlineStyle { color: ColorRole::Muted, ..Default::default() }, Family::Text, metrics.body_size() * 0.85, metrics.body_line_height(), Wrap::Greedy);
+                let layout = self.env.layout(&spec, (available - 2.0 * pad).max(1.0), self.window);
+                let h = (layout.height() + 2.0 * pad).max(64.0 * metrics.zoom);
                 self.items.push(DisplayItem::Image { x: self.indent, y: self.y, w: available, h, path: None, source });
-                let spec = ParaSpec::plain(note, InlineStyle { color: ColorRole::Muted, ..Default::default() }, Family::Text, metrics.body_size() * 0.85, h, Wrap::Greedy);
-                let layout = self.env.layout(&spec, available - 24.0, self.window);
-                self.items.push(DisplayItem::Text { x: self.indent + 12.0, y: self.y, layout, map: Vec::new() });
+                let text_y = self.y + (h - layout.height()) * 0.5;
+                self.items.push(DisplayItem::Text { x: self.indent + pad, y: text_y, layout, map: Vec::new() });
                 self.y += h;
             }
         }

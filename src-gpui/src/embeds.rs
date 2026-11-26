@@ -1,6 +1,6 @@
 //! 公式与 Mermaid 图表的后台渲染和有界缓存（GPUI 全局状态）。
 //!
-//! 渲染链路全部为 Rust：公式由 latex-rust 按 TeX 规则排版成 SVG（字形已转为路径），
+//! 渲染链路全部为 Rust：公式优先由 latex-rust 按 TeX 规则排版，语法不兼容时由 RaTeX 输出 SVG（字形已转为路径），
 //! Mermaid 由 merman 解析、布局并输出 resvg 兼容的 SVG；两者再用 resvg 按 2 倍分辨率栅格化，
 //! 交给 GPUI 作为位图绘制。
 //!
@@ -81,8 +81,11 @@ impl EmbedSpec {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.kind.hash(&mut hasher);
         if matches!(self.kind, EmbedKind::Mermaid | EmbedKind::MermaidThemed(_)) { self.font_family.hash(&mut hasher); }
-        // 围栏解析和局部草稿保留的首尾换行不同，但它们使用同一份渲染结果。
-        self.source.trim().hash(&mut hasher);
+        // 围栏的普通首尾空白不影响缓存键；公式末尾的控制空格必须保留。
+        let source = if matches!(self.kind, EmbedKind::Math { .. }) {
+            latex_rust::trim_math(&self.source)
+        } else { self.source.trim() };
+        source.hash(&mut hasher);
         self.em_px.to_bits().hash(&mut hasher);
         self.color.hash(&mut hasher);
         self.dark.hash(&mut hasher);
@@ -381,7 +384,9 @@ fn spawn_render(key: u64, request: u64, spec: EmbedSpec, cx: &mut App) {
 
 fn render(spec: &EmbedSpec) -> Result<(EmbedInfo, RenderImage, usize), String> {
     let scale_to_em = spec.em_px / BASE_EM_PX;
-    let source = spec.source.trim();
+    let source = if matches!(spec.kind, EmbedKind::Math { .. }) {
+        latex_rust::trim_math(&spec.source)
+    } else { spec.source.trim() };
     match spec.kind {
         EmbedKind::Math { display } => {
             let (svg, depth_ratio) = math_svg(source, display, spec.color)?;
@@ -481,7 +486,7 @@ mod tests {
         use crate::nomo_mark::resources::ResourceAdapter;
         fn adapter<'a>(store: &'a EmbedStore, images: &'a crate::images::ImageStore, spec: &'a EmbedSpec, palette: MermaidPalette) -> ResourceAdapter<'a> {
             ResourceAdapter { images, embeds: store, em_px: spec.em_px, font_family: &spec.font_family, dark: false,
-                mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default() }
+                mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default(), requested_data_bytes: Default::default() }
         }
         for zoom in [1.0, 1.4] {
             let mut store = EmbedStore::default();
@@ -597,7 +602,7 @@ mod tests {
         for em_px in [9.6, 22.4, 32.0, 12.8, 16.0] {
             let spec = EmbedSpec { em_px, ..base.clone() };
             let resources = ResourceAdapter { images: &images, embeds: &store, em_px, font_family: &base.font_family, dark: false,
-                mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default() };
+                mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default(), requested_data_bytes: Default::default() };
             let (key, state) = resources.embed(EmbedKind::Mermaid, &base.source);
             assert_eq!(key, base_key);
             let EmbedState::Ready(info) = state else { panic!("缩放不应退回加载占位"); };
@@ -610,7 +615,7 @@ mod tests {
         store.specs.insert(key, target.clone());
         store.entries.insert(key, Entry::Loading(7));
         let resources = ResourceAdapter { images: &images, embeds: &store, em_px: target.em_px, font_family: &target.font_family, dark: false,
-            mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default() };
+            mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default(), requested_data_bytes: Default::default() };
         assert_eq!(resources.embed(EmbedKind::Mermaid, &base.source).0, base_key);
         assert!(resources.demands.borrow().is_empty());
         let dependencies = resources.dependencies.into_inner();
@@ -618,7 +623,7 @@ mod tests {
         store.complete(key, 7, render(&target));
         assert_ne!(dependencies.generation(&images, &store), generation);
         let resources = ResourceAdapter { images: &images, embeds: &store, em_px: target.em_px, font_family: &target.font_family, dark: false,
-            mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default() };
+            mermaid: palette, color: [0; 3], demands: RefCell::new(Vec::new()), dependencies: Default::default(), requested_data_bytes: Default::default() };
         assert_eq!(resources.embed(EmbedKind::Mermaid, &base.source).0, key);
         for different in [EmbedSpec { source: "flowchart TD\n A --> C".into(), ..target.clone() },
             EmbedSpec { dark: true, ..target.clone() }, EmbedSpec { color: [255; 3], ..target.clone() },

@@ -14,6 +14,6 @@ mod writing_stats;
 
 pub(crate) use markdown_history::MarkdownSelection;
 pub(crate) use structure_index::{Identity as StructureIdentity, Query as StructureQuery};
-pub(crate) use structure_index::parser::{MAX_SEMANTIC_BYTES, normalize_label as normalize_reference_label};
+pub(crate) use structure_index::parser::{MAX_EMBEDDED_IMAGE_WINDOW_BYTES, MAX_SEMANTIC_BYTES, normalize_label as normalize_reference_label};
 pub(crate) use markdown_search::{SearchQuery, SearchMatch, ReplaceQuery};
 pub(crate) use writing_stats::{StatsQuery, DocumentStats, ByteRange};

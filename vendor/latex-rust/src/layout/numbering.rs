@@ -217,6 +217,12 @@ fn push_collect<'a>(node: &'a MathNode, stack: &mut Vec<Collect<'a>>) {
         | MathNode::Intertext(body)
         | MathNode::Tag { body, .. }
         | MathNode::FColorBox(_, _, body) => stack.push(Collect::Node(body)),
+        MathNode::DelimitedWithMiddle(_, parts, tail, _) => {
+            stack.push(Collect::Node(tail));
+            for (body, _) in parts.iter().rev() {
+                stack.push(Collect::Node(body));
+            }
+        }
         MathNode::Sum(lo, hi) | MathNode::Product(lo, hi) | MathNode::Integral(_, lo, hi) => {
             if let Some(hi) = hi {
                 stack.push(Collect::Node(hi));

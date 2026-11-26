@@ -23,28 +23,32 @@ pub fn preprocess(raw_input: &str) -> String {
     trim_math(raw_input).to_string()
 }
 
-/// Drop surrounding whitespace, but keep the ASCII space of a trailing
-/// control space.
+/// Drop surrounding whitespace, but keep the first ASCII whitespace character
+/// of a trailing control space.
 ///
-/// A control space is an odd-length run of backslashes followed by one
-/// space (`\ `, `\\\ `, …). [`str::trim`] deletes that space and leaves a
+/// A control space is an odd-length run of backslashes followed by ASCII
+/// whitespace. [`str::trim`] deletes that whitespace and leaves a
 /// stray `\`, which the tokenizer reports as a trailing backslash. Extra
 /// whitespace after that space is still dropped. An even run (`\\ `) is a
 /// control symbol plus an ordinary space, so the space goes.
-fn trim_math(input: &str) -> &str {
+#[must_use]
+pub fn trim_math(input: &str) -> &str {
     let start = input.len() - input.trim_start().len();
     let body = &input[start..];
     let kept = body.trim_end();
     if kept.len() == body.len() || !ends_with_odd_backslash(kept) {
         return &input[start..start + kept.len()];
     }
-    // The first discarded character is the control space only when it is an
-    // ASCII space. A trailing newline after `\` is not a control space.
-    if body.as_bytes().get(kept.len()) == Some(&b' ') {
+    // Keep one ASCII control space; the lexer normalizes its spelling.
+    if body[kept.len()..].chars().next().is_some_and(is_control_space) {
         &input[start..start + kept.len() + 1]
     } else {
         &input[start..start + kept.len()]
     }
+}
+
+pub(super) fn is_control_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}')
 }
 
 fn ends_with_odd_backslash(s: &str) -> bool {
@@ -89,6 +93,9 @@ mod tests {
         assert_eq!(preprocess("\\ %@QJXi"), "\\ %@QJXi");
         assert_eq!(preprocess(r"\\ "), r"\\");
         assert_eq!(preprocess(r"\\\ "), r"\\\ ");
+        for space in ['\t', '\n', '\r', '\u{b}', '\u{c}'] {
+            assert_eq!(preprocess(&format!(" x\\{space}  \n")), format!("x\\{space}"));
+        }
     }
 
     #[test]

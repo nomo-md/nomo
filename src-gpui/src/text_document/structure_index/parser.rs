@@ -10,8 +10,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::nomo_mark::html_table::{HtmlFragment, InlineAtom};
 
-pub const SYNTAX_VERSION: &str = "nomo-markdown-v1";
+pub const SYNTAX_VERSION: &str = "nomo-markdown-v2";
 pub const MAX_SEMANTIC_BYTES: usize = 32 * 1024;
+/// A visible embedded-image block may retain its original source independently of
+/// the ordinary semantic budget. Decoded images still use the image-store limits.
+pub const MAX_EMBEDDED_IMAGE_WINDOW_BYTES: usize =
+    (crate::images::MAX_INPUT_BYTES as usize).div_ceil(3) * 4 + MAX_SEMANTIC_BYTES;
 static NEXT_BLOCK: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -83,6 +87,9 @@ pub struct Block {
     pub enhancements: Enhancements,
     pub metrics_complete: bool,
     pub semantic_complete: bool,
+    /// Bytes of validated inline image payload, excluded from semantic layout estimates.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub embedded_image_bytes: usize,
     pub headings: Vec<Heading>,
     pub references: Vec<String>,
     pub definitions: BTreeMap<String, Reference>,
@@ -90,6 +97,7 @@ pub struct Block {
     #[serde(default)]
     pub footnotes: Vec<Footnote>,
 }
+fn is_zero(value: &usize) -> bool { *value == 0 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Batch {
@@ -487,6 +495,7 @@ fn metadata(source: &str, span: &Span, revision: u64, depth: usize) -> Block {
         enhancements: Enhancements::default(),
         metrics_complete: true,
         semantic_complete: true,
+        embedded_image_bytes: 0,
         headings: vec![],
         references: vec![],
         definitions: BTreeMap::new(),
@@ -714,6 +723,101 @@ pub fn parse_fragment(
         return Err("结构语义片段超过 32 KiB".into());
     }
     Ok(parse_inner(source, revision, document_start, 0))
+}
+
+fn data_image_header() -> &'static regex::Regex {
+    static HEADER: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    HEADER.get_or_init(|| regex::Regex::new(r"(?i-u:data:image/(?:png|jpeg|gif|webp|bmp|svg\+xml);base64,)").unwrap())
+}
+
+/// Only extend a pending fragment when it can actually be an image destination.
+/// Full syntax validation happens on the compact projection before publishing.
+pub(super) fn has_embedded_image_prefix(source: &str) -> bool {
+    data_image_header().find_iter(source).any(|header| {
+        let before = &source[..header.start()];
+        before.contains("![") || before.as_bytes().windows(4).any(|b| b.eq_ignore_ascii_case(b"<img"))
+    })
+}
+
+struct Payload {
+    original: Range<usize>,
+    projected: Range<usize>,
+    header_start: usize,
+}
+
+/// Base64 is opaque to Markdown. Compact only long contiguous payloads, then
+/// require the actual parser to identify every substitution as an image URL.
+/// All published offsets and hashes are mapped back to the unmodified source.
+pub(super) fn embedded_image_fragment(
+    original: &str,
+    revision: u64,
+    document_start: bool,
+    eof: bool,
+) -> Option<(usize, Vec<Block>)> {
+    if original.len() > MAX_EMBEDDED_IMAGE_WINDOW_BYTES { return None; }
+    let mut projected = String::with_capacity(original.len().min(MAX_SEMANTIC_BYTES));
+    let mut payloads = Vec::new();
+    let mut copied = 0;
+    for header in data_image_header().find_iter(original) {
+        let end = header.end() + original.as_bytes()[header.end()..].iter()
+            .take_while(|&&b| b.is_ascii_alphanumeric() || b"+/=".contains(&b)).count();
+        if end - header.end() < 1024 { continue; }
+        projected.push_str(&original[copied..header.end()]);
+        let start = projected.len();
+        let header_start = start - header.len();
+        projected.push_str("AAAA");
+        payloads.push(Payload { original: header.end()..end, projected: start..start+4, header_start });
+        copied = end;
+        if projected.len() > MAX_SEMANTIC_BYTES { return None; }
+    }
+    if payloads.is_empty() { return None; }
+    projected.push_str(&original[copied..]);
+    if projected.len() > MAX_SEMANTIC_BYTES { return None; }
+    // The projection must not change text, code, links, or any non-image HTML.
+    let mut valid = vec![false; payloads.len()];
+    let comment = syntax::project_comment_paragraphs(&projected, options());
+    let math = syntax::project_math(&comment, options());
+    for (event, range) in Parser::new_ext(math.as_ref(), options()).into_offset_iter() {
+        for (index, payload) in payloads.iter().enumerate() {
+            if valid[index] || payload.header_start < range.start || payload.projected.end > range.end { continue; }
+            let url = &projected[payload.header_start..payload.projected.end];
+            valid[index] = match &event {
+                Event::Start(Tag::Image { dest_url, .. }) => dest_url.as_ref() == url,
+                Event::Html(_) | Event::InlineHtml(_) => {
+                    projected[range.start..payload.header_start].rfind('<')
+                        .and_then(|at| syntax::html_tag(&projected, range.start+at))
+                        .is_some_and(|tag| tag.name == "img" && !tag.closing
+                            && tag.end <= range.end && tag.attrs.get("src").is_some_and(|src|src == url))
+                }
+                _ => false,
+            };
+        }
+    }
+    if !valid.iter().all(|&ok| ok) { return None; }
+    let map = |at: usize| {
+        let removed: usize = payloads.iter().take_while(|p| p.projected.end <= at)
+            .map(|p| p.original.len() - p.projected.len()).sum();
+        at + removed
+    };
+    let cutoff = if eof { projected.len() } else { stable_cutoff(&projected, document_start) };
+    if cutoff == 0 { return Some((0, Vec::new())); }
+    let mut blocks = parse_inner(&projected[..cutoff], revision, document_start, 0);
+    for block in &mut blocks {
+        let (from, to) = (block.from_byte as usize, block.to_byte as usize);
+        let image_payloads = payloads.iter().filter(|p| from <= p.projected.start && p.projected.end <= to);
+        block.embedded_image_bytes = image_payloads.clone().map(|p| p.original.len()).sum();
+        block.enhancements.images = block.enhancements.images.max(image_payloads.count());
+        block.enhancement_objects = block.enhancements.total();
+        block.from_byte = map(from) as u64;
+        block.to_byte = map(to) as u64;
+        block.source_hash = Some(source_hash(&original[block.from_byte as usize..block.to_byte as usize]));
+        for heading in &mut block.headings { heading.byte = map(heading.byte as usize) as u64; }
+        for note in &mut block.footnotes {
+            note.from_byte = map(note.from_byte as usize) as u64;
+            note.to_byte = map(note.to_byte as usize) as u64;
+        }
+    }
+    Some((map(cutoff), blocks))
 }
 
 /// 尚未完整的 Nomo 容器禁止在最后一个普通 CommonMark 块之前提前提交。

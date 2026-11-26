@@ -5,6 +5,7 @@ use core::iter::Peekable;
 use core::str::Chars;
 
 use crate::error::ParseError;
+use super::preproc::is_control_space;
 
 /// A single TeX-style math token.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,6 +207,13 @@ fn command(chars: &mut Peekable<Chars<'_>>) -> Result<Token, ParseError> {
             chars.next();
         }
         Ok(Token::Command(name))
+    } else if is_control_space(first) {
+        // TeX's explicit control space is written with ASCII whitespace,
+        // including CRLF. Keep a single token, not an unknown control symbol.
+        while chars.peek().is_some_and(|&c| is_control_space(c)) {
+            chars.next();
+        }
+        Ok(Token::Command(" ".into()))
     } else {
         chars.next();
         Ok(Token::Command(first.to_string()))

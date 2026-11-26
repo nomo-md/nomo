@@ -396,6 +396,12 @@ impl Engine<'_> {
             | MathNode::TextColor(_, body)
             | MathNode::ColorBox(_, body)
             | MathNode::FColorBox(_, _, body) => jobs.push(tree(body, style)),
+            MathNode::DelimitedWithMiddle(_, parts, tail, _) => {
+                for (body, _) in parts {
+                    jobs.push(tree(body, style));
+                }
+                jobs.push(tree(tail, style));
+            }
             MathNode::Intertext(body) | MathNode::Tag { body, .. } => {
                 jobs.push(tree(body, MathStyle::Text));
             }
@@ -501,13 +507,21 @@ impl Engine<'_> {
                 }
                 Ok(())
             }
-            MatrixStyle::Gather => {
+            MatrixStyle::Gather | MatrixStyle::Gathered => {
                 for row in rows {
                     match row {
                         EnvRow::Hline => {}
                         EnvRow::Intertext(body) => jobs.push(tree(body, MathStyle::Text)),
                         EnvRow::Cells { cells, .. } => {
-                            self.push_row_job(cells, body, jobs);
+                            self.push_row_job(
+                                cells,
+                                if ms == MatrixStyle::Gathered {
+                                    MathStyle::Display
+                                } else {
+                                    body
+                                },
+                                jobs,
+                            );
                         }
                     }
                 }

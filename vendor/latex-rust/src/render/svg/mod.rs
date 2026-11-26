@@ -3,4 +3,4 @@
 pub(crate) mod outline;
 mod render;
 
-pub use render::{latex_to_svg, render_svg, SvgOptions};
+pub use render::{latex_to_svg, render_svg, render_svg_with_metrics, SvgImage, SvgOptions};

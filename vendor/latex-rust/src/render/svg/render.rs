@@ -119,6 +119,29 @@ pub fn latex_to_svg(latex: &str, font: &MathFont, options: &SvgOptions) -> Resul
 /// assert!(svg.contains("<path"));
 /// ```
 pub fn render_svg(tree: &MathBox, font: &MathFont, options: &SvgOptions) -> Result<String, Error> {
+    Ok(render_svg_with_metrics(tree, font, options)?.svg)
+}
+
+/// Complete physical image metrics in points. Baseline is measured down from
+/// the top of the image, independently of the SVG coordinate origin.
+#[derive(Clone, Debug)]
+pub struct SvgImage {
+    /// Self-contained SVG artwork.
+    pub svg: String,
+    /// Physical viewport width in points.
+    pub width_pt: Dim,
+    /// Physical viewport height in points.
+    pub height_pt: Dim,
+    /// Distance from viewport top to mathematical baseline in points.
+    pub baseline_pt: Dim,
+}
+
+/// Render with explicit baseline and an ink-containing viewport.
+pub fn render_svg_with_metrics(
+    tree: &MathBox,
+    font: &MathFont,
+    options: &SvgOptions,
+) -> Result<SvgImage, Error> {
     let em_pt = options.font_size_pt.clone();
     let fu_pt = &em_pt / &Dim::from_i64(i64::from(font.units_per_em()));
     let svg_w = &tree.width * &em_pt;
@@ -126,6 +149,7 @@ pub fn render_svg(tree: &MathBox, font: &MathFont, options: &SvgOptions) -> Resu
     let baseline = &tree.height * &em_pt;
     let mut cache: HashMap<u16, String> = HashMap::new();
     let mut body = String::new();
+    let mut bounds = [Dim::zero(), Dim::zero(), svg_w.clone(), svg_h.clone()];
     emit(
         tree,
         font,
@@ -136,15 +160,17 @@ pub fn render_svg(tree: &MathBox, font: &MathFont, options: &SvgOptions) -> Resu
         options.color,
         &mut cache,
         &mut body,
+        &mut bounds,
     )?;
+    let width = &bounds[2] - &bounds[0];
+    let height = &bounds[3] - &bounds[1];
     let mut out = String::from(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
     out.push('\n');
     out.push_str(&format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}pt" height="{}pt" viewBox="0 0 {} {}">"#,
-        svg_w.to_svg_string(),
-        svg_h.to_svg_string(),
-        svg_w.to_svg_string(),
-        svg_h.to_svg_string()
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}pt" height="{}pt" viewBox="{} {} {} {}">"#,
+        width.to_svg_string(), height.to_svg_string(),
+        bounds[0].to_svg_string(), bounds[1].to_svg_string(),
+        width.to_svg_string(), height.to_svg_string()
     ));
     out.push('\n');
     out.push_str(r#"<g fill=""#);
@@ -152,7 +178,12 @@ pub fn render_svg(tree: &MathBox, font: &MathFont, options: &SvgOptions) -> Resu
     out.push_str("\">\n");
     out.push_str(&body);
     out.push_str("</g>\n</svg>\n");
-    Ok(out)
+    Ok(SvgImage {
+        svg: out,
+        width_pt: width,
+        height_pt: height,
+        baseline_pt: &baseline - &bounds[1],
+    })
 }
 
 enum SvgTask<'a> {
@@ -176,6 +207,7 @@ fn emit(
     fill: Color,
     cache: &mut HashMap<u16, String>,
     out: &mut String,
+    bounds: &mut [Dim; 4],
 ) -> Result<(), Error> {
     let mut stack = vec![SvgTask::Draw {
         bx,
@@ -191,18 +223,72 @@ fn emit(
                 origin_x,
                 parent_baseline,
                 fill,
-            } => emit_one(
-                bx,
-                font,
-                em_pt,
-                fu_pt,
-                &origin_x,
-                &parent_baseline,
-                fill,
-                cache,
-                out,
-                &mut stack,
-            )?,
+            } => {
+                let baseline = &parent_baseline - &(&bx.shift * em_pt);
+                let rect = match &bx.content {
+                    BoxContent::Glyph {
+                        glyph_id, scale, outline: None, ..
+                    } => font.outline_bounds(*glyph_id).map(|b| {
+                        let k = fu_pt * scale;
+                        [
+                            &origin_x + &(&b[0] * &k),
+                            &baseline - &(&b[3] * &k),
+                            &origin_x + &(&b[2] * &k),
+                            &baseline - &(&b[1] * &k),
+                        ]
+                    }),
+                    // Host outlines are not glyph 0 in the math face. Their
+                    // measured vertical metrics and advance are already in the box.
+                    BoxContent::Glyph { outline: Some(_), .. } => Some([
+                        origin_x.clone(),
+                        &baseline - &(&bx.height * em_pt),
+                        &origin_x + &(&bx.width * em_pt),
+                        &baseline + &(&bx.depth * em_pt),
+                    ]),
+                    BoxContent::Line {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        thickness,
+                    } => {
+                        let half = (thickness * em_pt) / Dim::from_i64(2);
+                        Some([
+                            &origin_x + &(x1.min(x2) * em_pt) - &half,
+                            &baseline - &(y1.max(y2) * em_pt) - &half,
+                            &origin_x + &(x1.max(x2) * em_pt) + &half,
+                            &baseline - &(y1.min(y2) * em_pt) + &half,
+                        ])
+                    }
+                    BoxContent::Rule | BoxContent::Frame { .. } | BoxContent::BackColor(..) => {
+                        Some([
+                            origin_x.clone(),
+                            &baseline - &(&bx.height * em_pt),
+                            &origin_x + &(&bx.width * em_pt),
+                            &baseline + &(&bx.depth * em_pt),
+                        ])
+                    }
+                    _ => None,
+                };
+                if let Some(rect) = rect {
+                    bounds[0] = bounds[0].min(&rect[0]);
+                    bounds[1] = bounds[1].min(&rect[1]);
+                    bounds[2] = bounds[2].max(&rect[2]);
+                    bounds[3] = bounds[3].max(&rect[3]);
+                }
+                emit_one(
+                    bx,
+                    font,
+                    em_pt,
+                    fu_pt,
+                    &origin_x,
+                    &parent_baseline,
+                    fill,
+                    cache,
+                    out,
+                    &mut stack,
+                )?;
+            }
         }
     }
     Ok(())

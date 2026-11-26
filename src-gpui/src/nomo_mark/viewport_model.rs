@@ -16,6 +16,8 @@ pub struct BlockSummary {
     pub kind: String,
     pub semantic_complete: bool,
     pub layout_units: usize,
+    #[serde(default)]
+    pub embedded_image_bytes: usize,
 }
 #[derive(Clone, Debug)]
 pub struct Group {
@@ -71,18 +73,19 @@ pub fn groups(blocks: impl IntoIterator<Item = BlockSummary>, retained: &[(u64, 
         if block.to_byte <= block.from_byte { return Err(ControlError::InvalidRange); }
         let semantic = block.mode == "semantic" && block.semantic_complete && block.kind != "native_region";
         let lines = (block.to_line.saturating_sub(block.from_line)).max(1);
-        let wrapped = (block.to_byte - block.from_byte).div_ceil(160);
+        let wrapped = (block.to_byte - block.from_byte).saturating_sub(block.embedded_image_bytes as u64).div_ceil(160);
         let height = if block.kind == "native_region" {
             (block.layout_units.max(1) * 32) as f32
         } else {
             lines.max(wrapped) as f32 * 24.0 + block.layout_units.max(1) as f32 * 8.0
+                + if block.embedded_image_bytes > 0 { 240.0 } else { 0.0 }
         };
         let keep = retained.iter().find(|&&(from, to)| from <= block.from_byte && block.to_byte <= to);
         if let Some(previous) = result.last_mut() {
             if previous.to != block.from_byte { return Err(ControlError::NeedsContext("原版索引尚未提供连续结构范围".into())); }
             let same_retained = keep.is_some_and(|&(from, _)| previous.from == from);
             let retained_boundary = retained.iter().any(|&(from, to)| from == block.from_byte || to == block.from_byte);
-            if same_retained || (!retained_boundary && previous.semantic && semantic && previous.blocks < policy().group_blocks && block.to_byte - previous.from <= policy().group_bytes) {
+            if block.embedded_image_bytes == 0 && (same_retained || (!retained_boundary && previous.semantic && semantic && previous.blocks < policy().group_blocks && block.to_byte - previous.from <= policy().group_bytes)) {
                 previous.to = block.to_byte;
                 previous.estimate += height;
                 previous.semantic &= semantic;
@@ -286,7 +289,7 @@ mod tests {
     }
     #[test]
     fn original_grouping_retains_edit_window_without_overlaps() {
-        let blocks = || (0..200).map(|i| BlockSummary { id: i.to_string(), from_byte: i*8, to_byte: (i+1)*8, from_line:i*2,to_line:i*2+2, mode:"semantic".into(), kind:"paragraph".into(), semantic_complete:true,layout_units:1 });
+        let blocks = || (0..200).map(|i| BlockSummary { id: i.to_string(), from_byte: i*8, to_byte: (i+1)*8, from_line:i*2,to_line:i*2+2, mode:"semantic".into(), kind:"paragraph".into(), semantic_complete:true,layout_units:1,embedded_image_bytes:0 });
         let original = groups(blocks(), &[]).unwrap();
         assert_eq!(original.iter().map(|g|g.blocks).collect::<Vec<_>>(), vec![64,64,64,8]);
         let retained = groups(blocks(), &[(40,520)]).unwrap();

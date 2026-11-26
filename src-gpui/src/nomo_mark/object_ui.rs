@@ -8,6 +8,7 @@ use std::cell::Cell;
 
 struct ImageForm {
     original: super::super::image_properties::ImageProperties,
+    key: Result<crate::images::ImageKey, &'static str>,
     fields: Vec<Entity<TextField>>,
     inline: bool,
 }
@@ -62,7 +63,7 @@ impl NomoMark {
         into.extend(&self.layout_resources);
         if let Some(object) = &self.object {
             for key in [object.preview_key, object.preview_ready_key.get()].into_iter().flatten() { into.embed(key); }
-            if let Some(path) = self.preview_image_path() { into.image(&path); }
+            if let Some(key) = self.preview_image_key() { into.image(key); }
             object.child.read(cx).retain_resources(into, cx);
         }
     }
@@ -473,8 +474,10 @@ impl NomoMark {
                     .html_tables
                     .iter()
                     .any(|t| t.cell_at(draft.range.start).is_some());
+                let key = crate::images::resolve_image(&original.src, self.base_dir.as_deref()).map(|source| source.key);
                 ImageForm {
                     original,
+                    key,
                     fields,
                     inline,
                 }
@@ -562,8 +565,11 @@ impl NomoMark {
         });
         self.request_object_preview(true, cx);
         if self.inline_editing() || self.block_editing() { self.invalidate(); }
-        if let Some(path) = self.preview_image_path() {
-            cx.emit(ControlEvent::ResourceDemand { identity: self.host.parsed.identity.clone(), requests: vec![ResourceRequest::Image(path)] });
+        if let Some(form) = self.object.as_ref().and_then(|object| object.image.as_ref()) {
+            if let Ok(source) = crate::images::resolve_image(&form.original.src, self.base_dir.as_deref())
+                && cx.global::<ImageStore>().can_request(&source.key, source.encoded_len()) {
+                cx.emit(ControlEvent::ResourceDemand { identity: self.host.parsed.identity.clone(), requests: vec![ResourceRequest::Image(source.request())] });
+            }
         }
         cx.emit(ControlEvent::DraftChanged {
             identity: self.host.parsed.identity.clone(),
@@ -997,9 +1003,8 @@ impl NomoMark {
             });
         }));
     }
-    fn preview_image_path(&self) -> Option<PathBuf> {
-        let src = &self.object.as_ref()?.image.as_ref()?.original.src;
-        crate::images::resolve_source(src, self.base_dir.as_deref())
+    fn preview_image_key(&self) -> Option<&crate::images::ImageKey> {
+        self.object.as_ref()?.image.as_ref()?.key.as_ref().ok()
     }
     pub(super) fn open_diagram_viewer(&mut self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let returning = self.object.is_some();
@@ -1030,10 +1035,10 @@ impl NomoMark {
             let crate::embeds::EmbedState::Ready(info) = state else { return None; };
             Some((store.visible_image(key, cx)?, (info.width, info.height)))
         } else {
-            let path = self.preview_image_path()?;
+            let path = self.preview_image_key()?;
             let store = cx.global::<ImageStore>();
-            let (width, height) = store.size(&path)?;
-            Some((store.image(&path)?, (width as f32, height as f32)))
+            let (width, height) = store.size(path)?;
+            Some((store.image(path)?, (width as f32, height as f32)))
         }
     }
     fn preview_scale(&self, window: &Window, cx: &App) -> f32 {
@@ -1077,7 +1082,7 @@ impl NomoMark {
         let object = self.object.as_ref().filter(|object| object.image_preview)?;
         let theme = cx.global::<Theme>().clone();
         let viewport = window.viewport_size();
-        let path = self.preview_image_path();
+        let path = self.preview_image_key().cloned();
         let store = cx.global::<ImageStore>();
         let loaded = self.preview_media(cx);
         let scale = self.preview_scale(window, cx);
@@ -1100,7 +1105,8 @@ impl NomoMark {
         } else {
             let embed_failure = object.preview_key.and_then(|key| cx.global::<EmbedStore>().state(key)).and_then(|state| match state {
                 crate::embeds::EmbedState::Failed(message) => Some(message), _ => None });
-            let message = embed_failure.as_deref().or_else(|| path.as_deref().and_then(|path| store.failure(path)))
+            let message = embed_failure.as_deref().or_else(|| path.as_ref().and_then(|path| store.failure(path)))
+                .or_else(|| object.image.as_ref().and_then(|form| form.key.as_ref().err().copied()))
                 .or_else(|| object.preview_key.map(|key| cx.global::<EmbedStore>().notice(key)))
                 .unwrap_or("正在加载预览…");
             contents = contents.child(message.to_string());

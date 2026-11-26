@@ -1,23 +1,22 @@
 //! 仅查询宿主共享资源和报告需求，不进行文件访问、解码或持有独立大型缓存。
 use crate::{
     embeds::{EmbedKind, EmbedSpec, EmbedState, EmbedStore},
-    images::ImageStore,
+    images::{ImageKey, ImageRequest, ImageSource, ImageStore},
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::BTreeSet,
-    path::{Path, PathBuf},
 };
 
 #[derive(Clone, Debug)]
 pub enum ResourceRequest {
-    Image(PathBuf),
+    Image(ImageRequest),
     Embed(EmbedSpec),
 }
 impl PartialEq for ResourceRequest {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Image(a), Self::Image(b)) => a == b,
+            (Self::Image(a), Self::Image(b)) => a.key == b.key,
             (Self::Embed(a), Self::Embed(b)) => a.key() == b.key(),
             _ => false,
         }
@@ -32,18 +31,19 @@ pub struct ResourceAdapter<'a> {
     pub mermaid: crate::embeds::MermaidPalette,
     pub color: [u8; 3],
     pub demands: RefCell<Vec<ResourceRequest>>,
+    pub requested_data_bytes: Cell<usize>,
     pub dependencies: RefCell<ResourceDependencies>,
 }
 
 #[derive(Default)]
-pub struct ResourceDependencies { images: BTreeSet<PathBuf>, embeds: BTreeSet<u64>, bytes: usize, overflow: bool }
+pub struct ResourceDependencies { images: BTreeSet<ImageKey>, embeds: BTreeSet<u64>, bytes: usize, overflow: bool }
 impl ResourceDependencies {
-    pub(super) fn image(&mut self, path: &Path) -> bool {
+    pub(super) fn image(&mut self, path: &ImageKey) -> bool {
         if self.images.contains(path) { return false; }
-        let bytes = path.as_os_str().len() + 128;
+        let bytes = path.estimated_bytes() + 128;
         if self.bytes + bytes > 256 * 1024 || self.images.len() + self.embeds.len() >= 512 { self.overflow = true; return true; }
         self.bytes += bytes;
-        self.images.insert(path.into());
+        self.images.insert(path.clone());
         true
     }
     pub(super) fn embed(&mut self, key: u64) -> bool {
@@ -62,7 +62,7 @@ impl ResourceDependencies {
         for key in &other.embeds { self.embed(*key); }
     }
     pub(super) fn has_images(&self) -> bool { self.overflow || !self.images.is_empty() }
-    pub(super) fn keeps_image(&self, path: &Path) -> bool { self.overflow || self.images.contains(path) }
+    pub(super) fn keeps_image(&self, path: &ImageKey) -> bool { self.overflow || self.images.contains(path) }
     pub(super) fn keeps_embed(&self, key: u64) -> bool { self.overflow || self.embeds.contains(&key) }
     pub fn generation(&self, images: &ImageStore, embeds: &EmbedStore) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -82,11 +82,16 @@ impl ResourceDependencies {
     }
 }
 impl ResourceAdapter<'_> {
-    pub fn image_size(&self, path: &Path) -> Option<(u32, u32)> {
+    pub fn image_size(&self, source: &ImageSource<'_>) -> Option<(u32, u32)> {
+        let path = &source.key;
         let first = self.dependencies.borrow_mut().image(path);
         let size = self.images.size(path);
-        if first && size.is_none() && !self.images.is_pending_or_known(path) {
-            self.demands.borrow_mut().push(ResourceRequest::Image(path.into()));
+        if first && size.is_none() && self.images.can_request(path, source.encoded_len()) {
+            let pending_data = self.requested_data_bytes.get();
+            if source.encoded_len() <= self.images.pending_data_capacity().saturating_sub(pending_data) {
+                self.requested_data_bytes.set(pending_data + source.encoded_len());
+                self.demands.borrow_mut().push(ResourceRequest::Image(source.request()));
+            }
         }
         size
     }
@@ -120,22 +125,23 @@ mod tests {
 
     #[test]
     fn resource_owners_merge_shared_keys_and_fail_closed_on_overflow() {
+        let shared = ImageKey::Location("shared.png".into());
         let mut first = ResourceDependencies::default();
-        first.image(Path::new("shared.png")); first.embed(1);
+        first.image(&shared); first.embed(1);
         let mut second = ResourceDependencies::default();
-        second.image(Path::new("shared.png")); second.embed(2);
+        second.image(&shared); second.embed(2);
         let mut live = ResourceDependencies::default();
         live.extend(&first); live.extend(&second);
         assert_eq!((live.images.len(), live.embeds.len()), (1, 2));
         assert!(!live.keeps_embed(3));
         let mut remaining = ResourceDependencies::default();
         remaining.extend(&second);
-        assert!(remaining.keeps_image(Path::new("shared.png")));
+        assert!(remaining.keeps_image(&shared));
         assert!(!remaining.keeps_embed(1));
         for key in 0..1024 { remaining.embed(key); }
         assert!(remaining.estimated_bytes() <= 256 * 1024);
         assert!(remaining.images.len() + remaining.embeds.len() <= 512);
         assert!(remaining.keeps_embed(u64::MAX));
-        assert!(remaining.keeps_image(Path::new("untracked.png")));
+        assert!(remaining.keeps_image(&ImageKey::Location("untracked.png".into())));
     }
 }

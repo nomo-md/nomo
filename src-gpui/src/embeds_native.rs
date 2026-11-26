@@ -2,6 +2,8 @@
 use std::sync::{Arc, OnceLock};
 #[path = "math_fallback.rs"]
 mod math_fallback;
+#[path = "math_compat.rs"]
+mod math_compat;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct MermaidPalette { pub mode: u8, pub colors: [u32; 9] }
@@ -15,22 +17,63 @@ fn math_font() -> Result<&'static latex_rust::MathFont, String> {
 
 /// 公式转 SVG，并返回基线以下部分占总高度的比例。
 pub(crate) fn math_svg(source: &str, display: bool, color: [u8; 3]) -> Result<(String, f32), String> {
+    math_svg_with_backend(source, display, color).map(|(svg, depth, _)| (svg, depth))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MathBackend { Native, Compatibility }
+
+fn compatibility_math_svg(source: &str, display: bool, color: [u8; 3], native_error: String) -> Result<(String, f32, MathBackend), String> {
+    let rendered = std::panic::catch_unwind(|| math_compat::math_svg(source, display, color))
+        .unwrap_or_else(|_| Err("兼容引擎内部错误".into()));
+    rendered
+        .map(|(svg, depth)| (svg, depth, MathBackend::Compatibility))
+        .map_err(|compat| format!("{native_error}；兼容引擎：{compat}"))
+}
+
+fn compatibility_layout_error(error: &latex_rust::Error) -> bool {
+    matches!(error, latex_rust::Error::Unsupported { what }
+        if !what.contains("nests deeper than") && !what.contains("预算"))
+}
+
+fn math_svg_with_backend(source: &str, display: bool, color: [u8; 3]) -> Result<(String, f32, MathBackend), String> {
     if source.len() > 64 * 1024 { return Err("公式超出 64 KiB 渲染预算；原文已保留".into()); }
+    let ast = match latex_rust::parse(source) {
+        Ok(ast) => ast,
+        Err(error) => {
+            let message = format!("公式解析失败：{error}");
+            // Keep genuine dangling escapes and unmatched fences as errors.
+            // Never use a second parser to bypass the native nesting budget.
+            if matches!(error, latex_rust::ParseError::TrailingBackslash | latex_rust::ParseError::UnmatchedDelimiter)
+                || matches!(&error, latex_rust::ParseError::Malformed(why) if why.contains("nests deeper than")) {
+                return Err(message);
+            }
+            return compatibility_math_svg(source, display, color, message);
+        }
+    };
     let font = math_font()?;
-    let ast = latex_rust::parse(source.trim()).map_err(|error| format!("公式解析失败：{error}"))?;
     let style = if display { latex_rust::MathStyle::Display } else { latex_rust::MathStyle::Text };
     let em = latex_rust::Dim::from_i64(12);
     let fallback = math_fallback::MathFallback::default();
-    let tree = latex_rust::layout_with_glyph_fallback(&ast, font, style, &em, &|ch, style| fallback.glyph(ch, style)).map_err(describe_math_error)?;
+    let tree = match latex_rust::layout_with_glyph_fallback(&ast, font, style, &em, &|ch, style| fallback.glyph(ch, style)) {
+        Ok(tree) => tree,
+        Err(error) if compatibility_layout_error(&error) => return compatibility_math_svg(source, display, color, describe_math_error(error)),
+        Err(error) => return Err(describe_math_error(error)),
+    };
     let as_f32 = |dim: &latex_rust::Dim| dim.to_svg_string().parse::<f32>().unwrap_or(0.0);
-    let (height, depth) = (as_f32(&tree.height), as_f32(&tree.depth));
-    let ratio = if height + depth > 0.0 { depth / (height + depth) } else { 0.0 };
     let mut options = latex_rust::SvgOptions::new();
     options.font_size_pt = em;
     options.display = display;
     options.color = latex_rust::Color::rgb(color[0], color[1], color[2]);
-    let svg = latex_rust::render_svg(&tree, font, &options).map_err(describe_math_error)?;
-    Ok((svg, ratio))
+    let image = match latex_rust::render_svg_with_metrics(&tree, font, &options) {
+        Ok(image) => image,
+        Err(error) if compatibility_layout_error(&error) => return compatibility_math_svg(source, display, color, describe_math_error(error)),
+        Err(error) => return Err(describe_math_error(error)),
+    };
+    let height = as_f32(&image.height_pt);
+    let baseline = as_f32(&image.baseline_pt);
+    let ratio = if height > 0.0 { ((height - baseline) / height).clamp(0.0, 1.0) } else { 0.0 };
+    Ok((image.svg, ratio, MathBackend::Native))
 }
 
 fn describe_math_error(error: latex_rust::Error) -> String {
@@ -39,6 +82,126 @@ fn describe_math_error(error: latex_rust::Error) -> String {
         format!("公式缺少可用字形（已尝试系统字体）：{text}")
     } else {
         format!("公式渲染失败：{text}")
+    }
+}
+
+#[cfg(test)]
+mod math_tests {
+    use super::*;
+
+    fn assert_visible(source: &str, display: bool) -> MathBackend {
+        let (svg, depth, actual) = math_svg_with_backend(source, display, [32, 48, 64])
+            .unwrap_or_else(|error| panic!("{source:?}: {error}"));
+        assert!(depth.is_finite() && (0.0..=1.0).contains(&depth));
+        assert!(!svg.contains("<text"), "unresolved glyphs: {source}");
+        let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+        let size = tree.size().to_int_size();
+        let mut pixels = resvg::tiny_skia::Pixmap::new(size.width(), size.height()).unwrap();
+        resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pixels.as_mut());
+        assert!(pixels.pixels().iter().any(|pixel| pixel.alpha() != 0), "{source}");
+        actual
+    }
+
+    fn assert_renders(source: &str, display: bool, backend: MathBackend) {
+        assert_eq!(assert_visible(source, display), backend, "{source}");
+    }
+
+    #[test]
+    fn primary_math_preserves_existing_grammar_and_geometry() {
+        for formula in [
+            r"\frac{1}{2}+\sqrt{x}",
+            r"\left\{x\middle|\frac{a}{b}>0\right\}",
+            r"a \pmod{30}", r"a \bmod n", r"\underline{\qquad\qquad}",
+            r"\begin{gathered}x+y=1\\x-y=0\end{gathered}",
+            r"\begin{bmatrix}1&2\\3&4\end{bmatrix}",
+        ] {
+            assert_renders(formula, true, MathBackend::Native);
+        }
+    }
+
+    #[test]
+    fn compatibility_renderer_accepts_command_families_and_environments() {
+        // These are different grammar families, not substitutes for one input.
+        for formula in [
+            r"\argmax_{x\in A} f(x)",
+            r"\text{\AA, \'{a}}",
+            r"\begin{alignedat}{2}x&+y&=1\\x&-y&=0\end{alignedat}",
+            r"\begin{matrix}a&b\\\hline c&d\end{matrix}",
+            r"\mathchoice{D}{T}{S}{SS}",
+            r"a\mod{n}", r"a\pod{n}", r"\bm{AB}",
+            r"\def\sq#1{#1^2}\sq{x}+\sq{y}",
+        ] {
+            assert_renders(formula, true, MathBackend::Compatibility);
+            assert_renders(formula, false, MathBackend::Compatibility);
+        }
+    }
+
+    #[test]
+    fn explicit_whitespace_has_one_semantics_in_math_and_text() {
+        let expected = latex_rust::parse(r"x\ y").unwrap();
+        let trailing = latex_rust::parse(r"x\ ").unwrap();
+        let text = latex_rust::parse(r"\text{a\ b}").unwrap();
+        for space in [" ", "\t", "\n", "\r\n", "\r", "\n  ", "\u{b}", "\u{c}"] {
+            assert_eq!(latex_rust::parse(&format!("x\\{space}y")).unwrap(), expected);
+            assert_eq!(latex_rust::parse(&format!("x\\{space}")).unwrap(), trailing);
+            assert_eq!(latex_rust::parse(&format!("\\text{{a\\{space}b}}")).unwrap(), text);
+            assert_renders(&format!("x\\{space}"), false, MathBackend::Native);
+        }
+        assert!(latex_rust::parse(r"\hat{}").is_err());
+    }
+
+    #[test]
+    fn common_math_grammar_families_render_in_both_styles() {
+        let mut examples = Vec::new();
+        for name in ["frac", "dfrac", "tfrac", "binom", "dbinom", "tbinom"] {
+            examples.push(format!(r"\{name}{{a^2+b}}{{c+d}}"));
+        }
+        for name in ["mathbf", "mathbb", "mathcal", "mathfrak", "mathsf", "mathtt", "mathit", "boldsymbol", "bm"] {
+            examples.push(format!(r"\{name}{{AB}}+x"));
+        }
+        for name in ["hat", "widehat", "tilde", "widetilde", "overline", "underline", "overrightarrow", "vec", "cancel", "bcancel", "xcancel", "boxed"] {
+            examples.push(format!(r"\{name}{{x+y}}"));
+        }
+        for name in ["sin", "cos", "ln", "log", "sinh", "lim", "argmax", "argmin", "max", "min", "det", "gcd"] {
+            examples.push(format!(r"\{name}_{{i\in A}} f(i)"));
+        }
+        for name in ["thinspace", "medspace", "thickspace", "negthinspace", "enspace", "quad", "qquad"] {
+            examples.push(format!(r"a\{name} b"));
+        }
+        for (open, close) in [("(", ")"), ("[", "]"), (r"\{", r"\}"), ("|", "|"), (r"\langle", r"\rangle"), (r"\lfloor", r"\rfloor"), (r"\lceil", r"\rceil"), (r"\lVert", r"\rVert")] {
+            examples.push(format!(r"\left{open} \frac{{a}}{{b}} \middle| x>0 \right{close}"));
+        }
+        for formula in [
+            r"\sqrt[3]{x+\frac{1}{2}}", r"\sum_{k=1}^n k^2", r"\int_0^1 x\,dx", r"\iint_D f(x,y)\,dx\,dy",
+            r"\overset{!}{=}", r"\underset{n\to\infty}{\lim}", r"\underbrace{x+x}_{n}\overbrace{y+y}^{m}",
+            r"a\pmod n", r"a\mod{n}", r"a\pod{n}", r"a\bmod n", r"\operatorname{rank}(A)",
+            r"\xrightarrow{n\to\infty}", r"a\coloneqq b", r"\mathclap{x}+y", r"x+\hphantom{00}+y",
+            r"\text{one }\textbf{two}\text{ \AA}", r"\def\sq#1{#1^2}\sq{x}+\sq{y}",
+        ] { examples.push(formula.to_owned()); }
+        for formula in &examples {
+            assert_visible(formula, true);
+            assert_visible(formula, false);
+        }
+        for name in ["matrix", "pmatrix", "bmatrix", "Bmatrix", "vmatrix", "Vmatrix", "smallmatrix"] {
+            assert_visible(&format!(r"\begin{{{name}}}1&2\\3&4\end{{{name}}}"), true);
+        }
+        for formula in [r"\begin{cases}x&x>0\\-x&x<0\end{cases}", r"\begin{aligned}a&=b\\c&=d\end{aligned}",
+            r"\begin{alignedat}{2}10&x+&3&y=2\\3&x+&13&y=4\end{alignedat}",
+            r"\begin{gathered}x=1\\y=2\end{gathered}", r"\begin{array}{c|c}1&2\\\hline 3&4\end{array}"] {
+            assert_visible(formula, true);
+        }
+    }
+
+    #[test]
+    fn malformed_or_over_budget_formulas_still_fail() {
+        for formula in [r"\nomoUnknownCommand{x}", r"\left(x", "x\\", r"\frac{1}", r"\begin{matrix}x\end{cases}", r"\def\loopcmd{\loopcmd}\loopcmd"] {
+            assert!(math_svg(formula, false, [0; 3]).is_err(), "{formula}");
+        }
+        let deep = "{".repeat(40) + "x" + &"}".repeat(40);
+        assert!(math_svg(&deep, false, [0; 3]).is_err());
+        let oversized = String::from(r"\argmax ") + &"x".repeat(16 * 1024);
+        assert!(math_svg(&oversized, false, [0; 3]).unwrap_err().contains("预算"));
+        assert!(math_svg(&"x".repeat(64 * 1024 + 1), true, [0; 3]).unwrap_err().contains("预算"));
     }
 }
 

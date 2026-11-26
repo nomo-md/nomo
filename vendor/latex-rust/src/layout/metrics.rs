@@ -213,4 +213,19 @@ impl MathParams {
     pub fn mu(&self, style: MathStyle) -> Dim {
         self.em(style) / Dim::from_i64(18)
     }
+
+    /// TeX `\arrayrulewidth` (0.4 pt at 10 pt = 0.04 em): the thickness of
+    /// array rules, horizontal and vertical. This is a TeX dimen, not the
+    /// font's fraction rule thickness (0.068 em in STIX Two Math).
+    #[must_use]
+    pub fn array_rule_thickness(&self, style: MathStyle) -> Dim {
+        self.em(style) / Dim::from_i64(25)
+    }
+
+    /// TeX `\doublerulesep` (2.0 pt at 10 pt = 0.2 em): the space between
+    /// two adjacent rules in a `||` group or `\hline\hline`.
+    #[must_use]
+    pub fn double_rule_sep(&self, style: MathStyle) -> Dim {
+        self.em(style) / Dim::from_i64(5)
+    }
 }

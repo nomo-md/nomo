@@ -88,6 +88,14 @@ pub struct MathFont {
 }
 
 impl MathFont {
+    /// Outline bounds in font units, including horizontal side bearings.
+    pub(crate) fn outline_bounds(&self, gid: u16) -> Option<[Dim; 4]> {
+        let metrics = self
+            .face
+            .glyph_metrics(Size::unscaled(), LocationRef::default());
+        let b = metrics.bounds(GlyphId::new(u32::from(gid)))?;
+        Some([b.x_min, b.y_min, b.x_max, b.y_max].map(|v| Dim::from_ieee32_bits(v.to_bits())))
+    }
     /// Load the embedded STIX Two Math Regular face.
     ///
     /// # Errors
@@ -254,10 +262,22 @@ impl MathFont {
     /// Horizontal glyph-assembly parts: `(gid, start_connector, end_connector, advance, extender)`.
     /// Lengths are font units.
     pub fn horizontal_assembly_parts(&self, glyph_id: u16) -> Vec<(u16, u16, u16, u16, bool)> {
+        self.assembly_parts(glyph_id, true)
+    }
+
+    pub(crate) fn vertical_assembly_parts(&self, glyph_id: u16) -> Vec<(u16, u16, u16, u16, bool)> {
+        self.assembly_parts(glyph_id, false)
+    }
+
+    pub(crate) fn min_connector_overlap(&self) -> u16 {
+        self.math.as_ref().and_then(MathTable::min_connector_overlap).unwrap_or(0)
+    }
+
+    fn assembly_parts(&self, glyph_id: u16, horizontal: bool) -> Vec<(u16, u16, u16, u16, bool)> {
         let Some(found) = self
             .math
             .as_ref()
-            .and_then(|math| math.construction(glyph_id, true))
+            .and_then(|math| math.construction(glyph_id, horizontal))
         else {
             return Vec::new();
         };
@@ -354,6 +374,13 @@ impl MathFont {
         let height = trunc_i64(bounds.y_max).max(0);
         let depth = (-trunc_i64(bounds.y_min)).max(0);
         (height, depth)
+    }
+
+    pub(crate) fn vertical_ink_bounds(&self, gid: u16) -> (Dim, Dim) {
+        let metrics = self.face.glyph_metrics(Size::unscaled(), LocationRef::default());
+        let (bottom, top) = metrics.bounds(GlyphId::new(u32::from(gid)))
+            .map_or((0, 0), |bounds| (trunc_i64(bounds.y_min), trunc_i64(bounds.y_max)));
+        (Dim::from_font_units(bottom, self.units_per_em), Dim::from_font_units(top, self.units_per_em))
     }
 }
 

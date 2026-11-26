@@ -17,5 +17,5 @@ pub use ast::{
 pub use parse::{
     parse, parse_with_colors, parse_with_options, ParseOptions, DEFAULT_MAX_NESTING_DEPTH,
 };
-pub use preproc::preprocess;
+pub use preproc::{preprocess, trim_math};
 pub use token::{format_tokens, tokenize, Token};

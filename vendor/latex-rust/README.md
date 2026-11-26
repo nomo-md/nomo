@@ -7,7 +7,7 @@
 > `TextRun`; see [documents/TEXT_MODE_SPEC.md](documents/TEXT_MODE_SPEC.md)):
 > `\text{\{\ )}` and `\text{$x$}` round-trip, and `\\` or unknown commands
 > in text are typed errors. See [CHANGELOG.md](CHANGELOG.md) for each change and its
-> migration. 3.0.0 was published to crates.io on 2026-10-15; the current release is 3.0.1.
+> migration. 3.0.0 was published to crates.io on 2026-10-15; this copy is based on 3.0.3.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE-APACHE)
@@ -170,7 +170,7 @@ elements (and PNG/egui meshes when those features are on). The optional
 
 ## Notes
 
-3.0.1 is the current version (3.0.0 was published 2026-10-15; 3.0.1 changes metadata only). Layout rules are the 2.1.x rules;
+3.0.3 adds gathered environments and ink-safe SVG metrics; 3.0.2 fixes spacing-only content. Layout rules are the 2.1.x rules;
 some parse trees change (see CHANGELOG.md). Since 2.1.1, `TealBlue` uses the upstream dvipsnames CMYK value, and `data/dvipsnames.tsv` carries its LPPL
 notice. baselogic contributed the TeX and OpenType MATH layout work in pull
 request 13. His commits are in the history under his name. They cover delimiter

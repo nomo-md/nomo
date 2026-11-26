@@ -308,7 +308,7 @@ impl Stop {
             Token::AlignmentTab if self.amp => true,
             Token::Command(s) if s == "\\" && self.cr => true,
             Token::Command(s) if s == "cr" && self.cr => true,
-            Token::Command(s) if s == "right" && self.right => true,
+            Token::Command(s) if (s == "right" || s == "middle") && self.right => true,
             Token::Command(s) if s == "end" && self.end_env => true,
             Token::Char(']') if self.rbracket => true,
             _ => false,
@@ -975,7 +975,7 @@ fn finish_env_row(cells: Vec<MathNode>, number: EqNumber, labels: Vec<String>) -
 fn is_empty_node(n: &MathNode) -> bool {
     match n {
         MathNode::Row(v) => v.is_empty() || v.iter().all(is_empty_node),
-        MathNode::Space(_) | MathNode::NoNumber | MathNode::Label(_) => true,
+        MathNode::NoNumber | MathNode::Label(_) => true,
         _ => false,
     }
 }
@@ -1057,6 +1057,7 @@ fn apply_text_style(node: MathNode, style: TextStyle) -> MathNode {
         Radical(bool),
         Accent(AccentKind),
         Delim(Delimiter, Delimiter),
+        DelimMiddle(Delimiter, Vec<Delimiter>, Delimiter),
         Row(usize),
         Substack(usize),
     }
@@ -1082,6 +1083,7 @@ fn apply_text_style(node: MathNode, style: TextStyle) -> MathNode {
             Radical,
             Accent,
             Delim,
+            DelimMiddle,
         }
         let shape = match &*node {
             MathNode::Atom(c, _) if crate::style_map::is_stylable(*c) => Shape::StyledAtom,
@@ -1096,6 +1098,7 @@ fn apply_text_style(node: MathNode, style: TextStyle) -> MathNode {
             MathNode::Radical(_, _) => Shape::Radical,
             MathNode::Accent(_, _) => Shape::Accent,
             MathNode::Delimited(_, _, _) => Shape::Delim,
+            MathNode::DelimitedWithMiddle(..) => Shape::DelimMiddle,
             _ => Shape::Keep,
         };
         match shape {
@@ -1244,6 +1247,26 @@ fn apply_text_style(node: MathNode, style: TextStyle) -> MathNode {
                     kids,
                 }
             }
+            Shape::DelimMiddle => {
+                let MathNode::DelimitedWithMiddle(open, parts, tail, close) = node else {
+                    unreachable!()
+                };
+                let mut kids = Vec::with_capacity(parts.len() + 1);
+                let mut middles = Vec::with_capacity(parts.len());
+                for (body, middle) in std::mem::take(parts) {
+                    kids.push(body);
+                    middles.push(middle);
+                }
+                kids.push(take_box(tail));
+                Exploded::Kids {
+                    join: Join::DelimMiddle(
+                        std::mem::replace(open, Delimiter::Empty),
+                        middles,
+                        std::mem::replace(close, Delimiter::Empty),
+                    ),
+                    kids,
+                }
+            }
         }
     };
     let mut tasks = vec![Task::Go(node)];
@@ -1298,6 +1321,11 @@ fn apply_text_style(node: MathNode, style: TextStyle) -> MathNode {
                     Join::Delim(open, close) => {
                         let body = take_styled(&mut vals);
                         MathNode::Delimited(open, Box::new(body), close)
+                    }
+                    Join::DelimMiddle(open, middles, close) => {
+                        let tail = take_styled(&mut vals);
+                        let parts = take_many(&mut vals, middles.len()).into_iter().zip(middles).collect();
+                        MathNode::DelimitedWithMiddle(open, parts, Box::new(tail), close)
                     }
                     Join::Row(n) => {
                         let built = take_many(&mut vals, n);

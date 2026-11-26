@@ -148,6 +148,10 @@ impl MathTable {
         self.glyph_value(2, glyph)
     }
 
+    pub(super) fn min_connector_overlap(&self) -> Option<u16> {
+        ru16(&self.data, self.variants?)
+    }
+
     /// Variant glyph ids and the assembly recipe, when the glyph is covered.
     pub(super) fn construction(&self, glyph: u16, horizontal: bool) -> Option<Construction> {
         let base = self.variants?;

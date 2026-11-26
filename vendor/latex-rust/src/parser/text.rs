@@ -31,7 +31,7 @@ enum Ctl {
 
 /// Whitespace in text (spec 2.1 `space`).
 fn is_text_space(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}')
+    super::preproc::is_control_space(c)
 }
 
 fn char_at(raw: &str, i: usize) -> Option<char> {
@@ -219,10 +219,15 @@ fn control(raw: &str, at: usize) -> Result<(Ctl, usize), ParseError> {
         return Err(ParseError::TrailingBackslash);
     };
     if !first.is_ascii_alphabetic() {
-        let next = start + first.len_utf8();
+        let mut next = start + first.len_utf8();
         return match first {
             '{' | '}' | '$' | '%' | '&' | '#' | '_' => Ok((Ctl::Char(first), next)),
-            c if is_text_space(c) => Ok((Ctl::Item(TextItem::ControlSpace), next)),
+            c if is_text_space(c) => {
+                while let Some(c) = char_at(raw, next).filter(|&c| is_text_space(c)) {
+                    next += c.len_utf8();
+                }
+                Ok((Ctl::Item(TextItem::ControlSpace), next))
+            }
             '\\' => Err(ParseError::Malformed("line break in text".into())),
             '(' => Ok((Ctl::Math, next)),
             ')' => Err(ParseError::Malformed("unmatched math shift in text".into())),
