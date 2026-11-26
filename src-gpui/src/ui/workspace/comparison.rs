@@ -175,7 +175,7 @@ impl Workspace {
         source_path.is_none()
             || source_path != self.host_for(target).and_then(|host| host.read(cx).path())
     }
-    fn tab_interaction_busy(&self, window: &Window) -> bool {
+    pub(super) fn tab_interaction_busy(&self, window: &Window) -> bool {
         window.has_active_prompt()
             || self.close_prompt
             || self.comparison.closing.is_some()

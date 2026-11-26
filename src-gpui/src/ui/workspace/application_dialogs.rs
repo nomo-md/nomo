@@ -71,6 +71,19 @@ fn tray_error(error: impl std::fmt::Display, cx: &App) -> SharedString {
 }
 
 impl Workspace {
+    #[cfg(windows)]
+    pub(crate) fn reuse_empty_home(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.home_visible || !self.tabs.is_empty() || !self.comparison.items.is_empty()
+            || !self.opening.is_empty() || !self.open_requests.pending.is_empty()
+            || self.pending_document_transition.is_some() || self.deferred_open.is_some()
+            || self.tab_interaction_busy(window)
+        {
+            return false;
+        }
+        self.reveal_window(window, cx);
+        true
+    }
+
     pub(crate) fn reveal_window(&mut self,window:&mut Window,cx:&mut Context<Self>) {
         #[cfg(windows)]
         if let Err(error) = crate::ui::tray::windows::restore_window(window) {
@@ -128,7 +141,11 @@ impl Workspace {
         }
         let path=path.canonicalize().unwrap_or(path);
         request.path=Some(path.clone());
-        if path.is_dir() && self.reuse_open_folder(&path, None, foreground, window, cx) {return;}
+        if path.is_dir() {
+            // 新窗口的初始请求和弹窗选定的当前窗口已确定目标，不能再次改派。
+            if !request.choose_window {self.open_request_here(request,window,cx);return;}
+            if !request.home_folder && self.reuse_open_folder(&path, None, foreground, window, cx) {return;}
+        }
         if self.reuse_open_document(&request,window,cx) {return;}
         let current=window.window_handle();
         let mut directory_windows=Vec::new();
@@ -140,7 +157,7 @@ impl Workspace {
         let belongs=self.tree.as_ref().is_some_and(|tree|path.starts_with(&tree.root));
         let already=self.saved_path_key(&path).is_some() || self.tabs.iter().any(|tab|tab.document.read(cx).path().as_ref()==Some(&path));
         let preference=cx.global::<Settings>().string("openDefaultBehavior");
-        if !request.choose_window || reusable || belongs || already || preference=="current-window" {self.open_request_here(request,window,cx);return;}
+        if !request.choose_window || (!request.home_folder && (reusable || belongs || already)) || preference=="current-window" {self.open_request_here(request,window,cx);return;}
         if preference=="new-window" {crate::open_workspace(vec![path],cx);return;}
         let name=path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
         let mut actions=directory_windows.iter().map(|_|A::new(UiMessage::toolbar("openInDirectoryWindow"),IconName::FolderOpen,Tone::Normal)).collect::<Vec<_>>();

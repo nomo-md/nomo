@@ -584,9 +584,12 @@ impl Workspace {
         if self.waiting_library_close { self.waiting_library_close=false; self.cancel_close(cx); }
         self.pending_tree_click.take();
         self.deferred_open=None;
-        // 主页选目录表示在当前窗口切换，继续沿用打开队列和未保存内容确认。
-        let choose_window = !self.home_visible || !path.is_dir();
-        self.enqueue_open(Some(path.to_path_buf()), false, None, choose_window, cx);
+        self.enqueue_open_request(OpenRequest {
+            path: Some(path.to_path_buf()),
+            choose_window: true,
+            home_folder: self.home_visible && path.is_dir(),
+            ..Default::default()
+        }, cx);
         self.drain_open_requests(window, cx);
     }
 

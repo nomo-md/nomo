@@ -263,9 +263,14 @@ fn main() {
             cx.spawn(async move |cx| {
                 while let Some(paths)=receiver.recv().await {
                     cx.update(|cx| {
-                        // 无参数再次启动明确创建主页窗口；平台 reopen 仍保留唤醒语义。
+                        // 连续启动先复用空主页，避免重叠窗口让后续卡片打开看起来像另开窗口。
                         if paths.is_empty() {
-                            open_workspace(Vec::new(),cx);
+                            let reused = cx.windows().into_iter()
+                                .filter_map(|handle| handle.downcast::<Workspace>())
+                                .any(|handle| handle.update(cx, |workspace, window, cx| {
+                                    workspace.reuse_empty_home(window, cx)
+                                }).unwrap_or(false));
+                            if !reused { open_workspace(Vec::new(),cx); }
                             cx.activate(true);
                         } else {
                             open_paths(paths,cx);

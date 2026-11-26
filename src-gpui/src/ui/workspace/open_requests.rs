@@ -10,6 +10,8 @@ pub(super) struct OpenRequest {
     pub preview: bool,
     pub anchor: Option<String>,
     pub choose_window: bool,
+    /// 主页目录入口必须先遵循窗口偏好，不能被空窗口或已有工作区复用短路。
+    pub home_folder: bool,
     pub newly_created: bool,
     pub document_only: bool,
     pub favorite_folder: bool,
