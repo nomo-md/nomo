@@ -13,21 +13,30 @@ pub struct CellMetrics {
 #[derive(Clone, Copy, Debug)]
 pub struct Constraint {
     pub minimum: f32,
+    pub short_header: f32,
     pub preferred: f32,
 }
 
 pub fn constraints(count: usize, cells: &[CellMetrics], zoom: f32) -> Vec<Constraint> {
-    let mut columns = vec![Constraint { minimum: 0.0, preferred: 0.0 }; count];
+    let mut columns = vec![Constraint { minimum: 0.0, short_header: 0.0, preferred: 0.0 }; count];
     // 32px 是普通单元格含边框与内边距的下限；表头只服从内容本身。
     let bounds = |cell: &CellMetrics| {
         let minimum = (cell.chrome + cell.minimum).max(if cell.header { 0.0 } else { 32.0 * zoom });
-        Constraint { minimum, preferred: minimum.max(cell.chrome + cell.natural) }
+        let preferred = minimum.max(cell.chrome + cell.natural);
+        // 以表头字号的 12em 区分短标签与长说明，只给前者预留单行宽度。
+        let short_header = if cell.header && cell.natural <= 12.0 * 13.0 * zoom {
+            preferred
+        } else {
+            minimum
+        };
+        Constraint { minimum, short_header, preferred }
     };
     for cell in cells {
         if cell.span == 1 {
             if let Some(column) = columns.get_mut(cell.column) {
                 let own = bounds(cell);
                 column.minimum = column.minimum.max(own.minimum);
+                column.short_header = column.short_header.max(own.short_header);
                 column.preferred = column.preferred.max(own.preferred);
             }
         }
@@ -44,15 +53,34 @@ pub fn constraints(count: usize, cells: &[CellMetrics], zoom: f32) -> Vec<Constr
     }
     let mut spans: Vec<_> = cells.iter().filter(|cell| cell.span > 1).collect();
     spans.sort_by_key(|cell| cell.span);
-    for cell in spans {
+    for &cell in &spans {
         let own = bounds(cell);
         raise(&mut columns, cell, own.minimum, false);
         raise(&mut columns, cell, own.preferred, true);
     }
-    // 向上量化下限，避免最终列宽的百分之一像素舍入触发额外拆词。
+    for column in &mut columns {
+        column.short_header = column.short_header.max(column.minimum);
+    }
+    // 跨列表头只预留其跨度里仍缺的宽度，复用已为单列表头或显式列宽留出的部分。
+    for cell in spans.into_iter().filter(|cell| cell.header) {
+        let end = cell.column.saturating_add(cell.span).min(columns.len());
+        let Some(group) = columns.get_mut(cell.column..end) else { continue };
+        let reserved: f32 = group.iter().map(|column| column.short_header).sum();
+        let missing = bounds(cell).short_header - reserved;
+        if missing <= 0.0 { continue; }
+        let room: f32 = group.iter().map(|column| column.preferred - column.short_header).sum();
+        if room > 0.0 {
+            let ratio = (missing / room).min(1.0);
+            for column in group {
+                column.short_header += ratio * (column.preferred - column.short_header);
+            }
+        }
+    }
+    // 分配结果精确到 0.01px；各目标向上取整，避免舍入后连自然宽度都放不下。
     for column in &mut columns {
         column.minimum = (column.minimum * 100.0).ceil() / 100.0;
-        column.preferred = column.preferred.max(column.minimum);
+        column.short_header = (column.short_header * 100.0).ceil() / 100.0;
+        column.preferred = ((column.preferred * 100.0).ceil() / 100.0).max(column.short_header);
     }
     columns
 }
@@ -93,20 +121,25 @@ fn raise(columns: &mut [Constraint], cell: &CellMetrics, required: f32, preferre
 }
 pub fn allocate(columns: &[Constraint], available: f32) -> Vec<f32> {
     let minimum: f32 = columns.iter().map(|c| c.minimum).sum();
+    let short_headers: f32 = columns.iter().map(|c| c.short_header).sum();
     let preferred: f32 = columns.iter().map(|c| c.preferred).sum();
     // 自然宽度已经能放下时保持紧凑，不把正文中的空余空间灌入短表。
     let target = minimum.max(available.max(0.0).min(preferred));
-    let ratio = if preferred > minimum {
-        (target - minimum) / (preferred - minimum)
-    } else {
-        0.0
-    };
+    // 先从硬下限分配到短表头单行，再分配给其余内容；窄窗口仍允许表头换行。
+    let headers_fit = target >= short_headers;
+    let (low, high) = if headers_fit { (short_headers, preferred) } else { (minimum, short_headers) };
+    let ratio = if high > low { (target - low) / (high - low) } else { 0.0 };
     let mut cumulative = 0.0_f64;
     let mut previous = 0.0_f64;
     columns
         .iter()
         .map(|column| {
-            cumulative += f64::from(column.minimum + ratio * (column.preferred - column.minimum));
+            let (low, high) = if headers_fit {
+                (column.short_header, column.preferred)
+            } else {
+                (column.minimum, column.short_header)
+            };
+            cumulative += f64::from(low + ratio * (high - low));
             let rounded = (cumulative * 100.0).round() / 100.0;
             let width = ((rounded - previous) * 100.0).round() / 100.0;
             previous = rounded;
