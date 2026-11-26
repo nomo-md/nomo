@@ -73,6 +73,15 @@ fn outline_content_column_preserves_percentage_and_outline_clearance() {
 enum ReadingEdge { Top, Bottom }
 #[derive(Clone, Copy)]
 struct OutlineScrollMotion { from: gpui::Pixels, previous: gpui::Pixels, started: Instant, duration: Duration }
+// 只保存尚未显示的位移。图片测量等操作修正视口时，余程自然从新位置继续。
+struct WheelScroll {
+    remaining: gpui::Pixels,
+    last_frame: Instant,
+    deadline: Instant,
+}
+
+const WHEEL_EASE_DURATION: Duration = Duration::from_millis(120);
+
 #[derive(Clone, Copy)]
 pub(super) struct ReadingAnchor { byte: u64, fraction: f32, revision: Option<u64>, view_only: bool, edge: Option<ReadingEdge>, motion: Option<OutlineScrollMotion> }
 
@@ -92,6 +101,7 @@ pub(super) struct Pane {
     pub mode: ViewMode,
     pub viewport: viewport_ui::Viewport,
     pub scroll: gpui::ScrollHandle,
+    wheel_scroll: Option<WheelScroll>,
     pub(super) scrollbar_drag: Option<f32>,
     scrollbar_activity: ScrollbarActivity,
     pub reveal_selection: bool,
@@ -106,8 +116,28 @@ impl Pane {
     pub fn new(control: Entity<NomoMark>, subscription: Subscription, mode: ViewMode) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self { id:NEXT.fetch_add(1,Ordering::Relaxed), control:control.clone(), mode,
-            viewport:viewport_ui::Viewport::new(control,subscription), scroll:gpui::ScrollHandle::new(),
+            viewport:viewport_ui::Viewport::new(control,subscription), scroll:gpui::ScrollHandle::new(), wheel_scroll:None,
             scrollbar_drag:None, scrollbar_activity:ScrollbarActivity::default(), reveal_selection:false, stale:false, load_error:None, reading_restore:None, sync_requested:false, layout_width:None }
+    }
+
+    fn advance_wheel(&mut self, now: Instant) {
+        let Some(motion) = &mut self.wheel_scroll else { return; };
+        // 预量布局已应用本帧的高度修正。继续滚动后，旧的阅读位置不能再把视口拉回去。
+        if self.reading_restore.is_some_and(|anchor| anchor.view_only) { self.reading_restore = None; }
+        let offset = self.scroll.offset();
+        let target = (offset.y + motion.remaining).clamp(-self.scroll.max_offset().y, px(0.0));
+        // 二次减速曲线在相邻采样之间的剩余比例；同向新输入延后截止时间，不重置上一帧。
+        let left = motion.deadline.saturating_duration_since(now).as_secs_f32();
+        let interval = (motion.deadline - motion.last_frame).as_secs_f32();
+        let fraction = (left / interval).clamp(0.0, 1.0);
+        let next = target - (target - offset.y) * fraction.powi(2);
+        self.scroll.set_offset(gpui::point(offset.x, next));
+        if next == target {
+            self.wheel_scroll = None;
+        } else {
+            motion.remaining = target - next;
+            motion.last_frame = now;
+        }
     }
 
     fn recently_scrolled(&mut self, offset: gpui::Pixels, cx: &mut Context<DocumentHost>) -> bool {
@@ -194,6 +224,7 @@ impl DocumentHost {
         }
     }
     pub(super) fn cancel_pane_follow(&mut self,pane:usize,cx:&mut Context<Self>) {
+        self.panes[pane].wheel_scroll = None;
         if self.panes[pane].reading_restore.is_some() {
             self.pause_pane(pane,cx);
             self.panes[pane].reading_restore=None;
@@ -201,6 +232,7 @@ impl DocumentHost {
         }
     }
     pub(super) fn cancel_pane_animation(&mut self, pane:usize) {
+        self.panes[pane].wheel_scroll = None;
         if self.panes[pane].reading_restore.is_some_and(|anchor| anchor.motion.is_some()) {
             self.panes[pane].reading_restore=None;
         }
@@ -217,7 +249,42 @@ impl DocumentHost {
     }
     fn request_pane_sync(&mut self, source:usize) {
         // 同一帧内两栏都收到用户输入时，以最后的真实意图为准，防止互相回送旧锚点。
-        for (index,pane) in self.panes.iter_mut().enumerate() {pane.sync_requested=index==source;}
+        for (index,pane) in self.panes.iter_mut().enumerate() {
+            pane.sync_requested = index == source;
+            if index != source { pane.wheel_scroll = None; }
+        }
+    }
+
+    fn manual_pane_scroll(&mut self, pane: usize, cx: &mut Context<Self>) {
+        self.cancel_pane_follow(pane, cx);
+        self.panes[pane].reveal_selection = false;
+        self.request_pane_sync(pane);
+        self.schedule_pane(pane, 16, cx);
+        cx.notify();
+    }
+
+    fn smooth_wheel(&mut self, pane: usize, delta: gpui::Pixels, cx: &mut Context<Self>) -> bool {
+        let interaction = &self.control.read(cx).host.interaction;
+        if self.navigating || self.split_dragging || self.panes[pane].scrollbar_drag.is_some()
+            || interaction.composing || interaction.draft || interaction.dragging || crate::ui::popup::reduced_motion(cx) {
+            return false;
+        }
+        let pending = self.panes[pane].wheel_scroll.take();
+        self.manual_pane_scroll(pane, cx);
+        let state = &mut self.panes[pane];
+        let now = Instant::now();
+        let same_direction = pending.filter(|motion| (motion.remaining > px(0.0)) == (delta > px(0.0)));
+        let offset = state.scroll.offset().y;
+        let distance = same_direction.as_ref().map_or(delta, |motion| motion.remaining + delta);
+        let target = (offset + distance).clamp(-state.scroll.max_offset().y, px(0.0));
+        if target != offset {
+            state.wheel_scroll = Some(WheelScroll {
+                remaining: target - offset,
+                last_frame: same_direction.map_or(now, |motion| motion.last_frame),
+                deadline: now + WHEEL_EASE_DURATION,
+            });
+        }
+        true
     }
     pub(crate) fn workspace_reading_position(&self, cx: &gpui::App) -> Option<(u64, f32)> {
         self.panes[self.active_pane].reading_restore.or_else(|| self.reading_anchor(self.active_pane, cx))
@@ -1056,22 +1123,31 @@ impl DocumentHost {
         let settings=cx.global::<Settings>();
         let padding = self.paper_padding(width);
         let single_column = !self.mini_layout && self.panes.len() == 1;
-        let mut document_body = div().children(self.pane_children(pane,cx))
-            .w(gpui::relative(if single_column { settings.content_width_percent } else { 1.0 })).mx_auto();
-        let shift = self.outline_column_shift(settings);
-        if single_column && shift > 0.0 {
-            let left = (1.0 - settings.content_width_percent) / 2.0 - shift;
-            document_body = document_body.ml(gpui::relative(left.max(0.0)));
-        }
-        let zoom_host = cx.entity().downgrade();
-        // GPUI 的默认滚动先于冒泡回调执行；在捕获阶段处理缩放，避免一次手势既缩放又滚动。
-        // 普通命中区域不遮挡编辑器；弹层的遮挡命中区域仍优先。
-        let zoom_capture = gpui::canvas(
-            |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        let scroll_host = host.clone();
+        let scroll = self.panes[pane].scroll.clone();
+        // 注册在纸面内容之前：冒泡先经过代码块等子控件，再经过此处，最后才到 GPUI 默认滚动。
+        // 命中整栏（含留白），不随正文位置移动；缩放仍在捕获阶段处理。
+        let scroll_input = gpui::canvas(
+            move |_, window, _| window.insert_hitbox(scroll.bounds(), gpui::HitboxBehavior::Normal),
             move |_, hitbox, window, _| {
-                let host = zoom_host.clone();
+                let host = scroll_host.clone();
+                let line_height = window.line_height();
                 window.on_mouse_event(move |event: &gpui::ScrollEvent, phase, window, cx| {
-                    if phase != gpui::DispatchPhase::Capture || !hitbox.should_handle_scroll(window) { return; }
+                    if !hitbox.should_handle_scroll(window) { return; }
+                    if phase == gpui::DispatchPhase::Bubble {
+                        let gpui::ScrollDelta::Lines(lines) = event.delta else { return; };
+                        if event.source != gpui::ScrollSource::Pointer || event.modifiers.shift || lines.x != 0.0
+                            || lines.y == 0.0 || event.modifiers.control || event.modifiers.platform { return; }
+                        // XInput 的连续轴也可能上报行增量；保留细粒度事件的原始节奏。
+                        #[cfg(target_os = "linux")]
+                        if lines.y.fract() != 0.0 { return; }
+                        let handled = host.update(cx, |host, cx| {
+                            !host.hidden && !host.closed && host.panes.get(pane).is_some_and(|state| state.id == id)
+                                && host.smooth_wheel(pane, line_height * lines.y, cx)
+                        }).unwrap_or(false);
+                        if handled { cx.stop_propagation(); }
+                        return;
+                    }
                     let settings = cx.global::<Settings>();
                     if !settings.ctrl_wheel_zoom || !(event.modifiers.control || event.modifiers.platform) { return; }
                     let delta = f32::from(event.delta.pixel_delta(px(16.0)).y);
@@ -1088,7 +1164,14 @@ impl DocumentHost {
                     cx.stop_propagation();
                 });
             },
-        ).absolute().top_0().left_0().size_full();
+        ).absolute().size_0();
+        let mut document_body = div().child(scroll_input).children(self.pane_children(pane,cx))
+            .w(gpui::relative(if single_column { settings.content_width_percent } else { 1.0 })).mx_auto();
+        let shift = self.outline_column_shift(settings);
+        if single_column && shift > 0.0 {
+            let left = (1.0 - settings.content_width_percent) / 2.0 - shift;
+            document_body = document_body.ml(gpui::relative(left.max(0.0)));
+        }
         let content=div().on_children_prepainted(move |_,window,cx| {let _=host.update(cx,|host,cx| {
             if host.panes.get(pane).is_some_and(|p|p.id==id) {
                 host.pane_prepainted(pane,cx);
@@ -1104,12 +1187,7 @@ impl DocumentHost {
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |host, event, window, cx| {
                 host.paper_mouse_down(pane, event, window, cx);
             }))
-            .on_scroll(cx.listener(move |host,_,_,cx| {
-                host.cancel_pane_follow(pane,cx);
-                host.panes[pane].reveal_selection=false;host.panes[pane].reading_restore=None;
-                host.request_pane_sync(pane);host.schedule_pane(pane,16,cx);
-                cx.notify();
-            })).child(document_body);
+            .on_scroll(cx.listener(move |host,_,_,cx| host.manual_pane_scroll(pane,cx))).child(document_body);
         let error=self.panes[pane].load_error.clone().map(|message| {
             div().flex().items_center().px_4().py_2().gap_2().child(div().flex_1().child(message))
                 .child(crate::ui::components::button(("retry-pane",id),"重新加载",None,crate::ui::components::ButtonKind::Secondary,cx.global::<Theme>())
@@ -1119,7 +1197,7 @@ impl DocumentHost {
         let source_notice=source_only.then(|| div().px_4().py_1().text_size(px(12.0)).text_color(cx.global::<Theme>().muted)
             .child("此结构暂以源码方式编辑"));
         div().size_full().flex().flex_col().children(error).children(source_notice)
-            .child(div().relative().flex_1().min_h_0().child(content).child(zoom_capture).child(self.pane_scrollbar(pane,cx))).into_any_element()
+            .child(div().relative().flex_1().min_h_0().child(content).child(self.pane_scrollbar(pane,cx))).into_any_element()
     }
     /// 模式切换、阅读导航及新邻窗在首帧前测量；只处理当前驻留窗口。
     fn prepare_reading_layouts(&mut self, window:&mut Window, cx:&mut Context<Self>) {
@@ -1173,6 +1251,18 @@ impl DocumentHost {
     }
     pub(super) fn render_panes(&mut self, window:&mut Window, cx:&mut Context<Self>) -> gpui::AnyElement {
         self.prepare_reading_layouts(window,cx);
+        // prepaint 前推进，子控件几何、双栏阅读锚点和预取看到的都是本帧实际位置。
+        for pane in 0..self.panes.len() {
+            if self.panes[pane].wheel_scroll.is_none() { continue; }
+            if self.panes[pane].reveal_selection || self.split_dragging {
+                self.panes[pane].wheel_scroll = None;
+                continue;
+            }
+            self.panes[pane].advance_wheel(Instant::now());
+            self.request_pane_sync(pane);
+            self.schedule_pane(pane, 16, cx);
+            if self.panes[pane].wheel_scroll.is_some() { window.request_animation_frame(); }
+        }
         if self.panes.len()==1 {return div().flex_1().min_h_0().child(self.render_pane(0,cx)).into_any_element();}
         let source_first=cx.global::<Settings>().split_source_first;
         let left=self.panes.iter().position(|p|(p.mode==ViewMode::Source)==source_first).unwrap_or(0);

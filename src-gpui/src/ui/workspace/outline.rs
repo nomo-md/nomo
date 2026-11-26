@@ -948,7 +948,9 @@ impl Workspace {
                 cx.notify();
             }
         }
-        if let Some(PanelDrag::Move { current, moved, .. }) = self.outline_ui.panel_drag.take() {
+        // 浮层遮挡工作区时，工作区先收到 mouse_up_out；调宽状态留给手柄保存。
+        if let Some(PanelDrag::Move { current, moved, .. }) = self.outline_ui.panel_drag {
+            self.outline_ui.panel_drag = None;
             if moved && let Some(area) = self.outline_ui.bounds.get() {
                 let width = f32::from(area.size.width);
                 let settings = cx.global::<Settings>();
