@@ -1599,7 +1599,7 @@ impl Workspace {
             let hover=tab.map_or(0.0, |tab| tab.hidden_hover.value());
             let active=self.tabs.get(self.active).is_some_and(|tab|item.contains(tab.key));
             let row = div().id(("hidden-tab", key)).h(px(30.0)).px(px(8.0)).flex().flex_none()
-                .items_center().gap(px(8.0)).rounded(px(5.0)).cursor_pointer()
+                .items_center().gap(px(8.0)).rounded(px(5.0)).cursor_default()
                 .text_color(if active { theme.heading } else { motion::color(theme.muted, theme.fg, hover) })
                 .bg(gpui::Hsla::from(gpui::rgba(0x80808014)).opacity(hover))
                 .when(tab.is_none(), |el| el.hover(|style| style.text_color(theme.fg).bg(gpui::rgba(0x80808014))))
@@ -1685,7 +1685,7 @@ impl Workspace {
                 });
                 let close = div().id(("close", index)).size(px(14.0)).flex().flex_none()
                     .when(tab.is_none(), |el| el.group("document-tab-close"))
-                    .items_center().justify_center().rounded_full().cursor_pointer()
+                    .items_center().justify_center().rounded_full().cursor_default()
                     .bg(gpui::Hsla::from(gpui::rgba(0x80808033)).opacity(close_hover))
                     .child(icon(IconName::Close, 12.0, motion::color(theme.muted, theme.palette_fg[0], close_hover))
                         .when(tab.is_none(), |icon| icon.group_hover("document-tab-close", |style| style.text_color(theme.palette_fg[0]))))
@@ -1718,7 +1718,7 @@ impl Workspace {
                     .px(px(12.0))
                     .rounded_t(px(12.0))
                     .text_size(px(13.0))
-                    .cursor_pointer()
+                    .cursor_default()
                     .text_color(tab_text)
                     .bg(gpui::Hsla::from(gpui::rgba(0x8080800f)).opacity(hover * (1.0 - active_color)))
                     .when(tab.is_none(), |el| el.hover(|style| style.text_color(theme.fg).bg(gpui::rgba(0x8080800f))))

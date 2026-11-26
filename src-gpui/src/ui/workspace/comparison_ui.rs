@@ -62,25 +62,31 @@ impl TabRow {
         let text = gpui::StyledText::new(title.clone());
         let layout = text.layout().clone();
         label.child(
-            gpui::InteractiveText::new("untitled-tab-label", text).tooltip(move |_, window, cx| {
-                (layout.text() != title.as_ref()).then(|| tooltip(title.clone())(window, cx))
+            gpui::InteractiveText::new("untitled-tab-label", text).tooltip(move |_, _, cx| {
+                (layout.text() != title.as_ref()).then(|| cx.new(|_| DocumentTabTooltip::Title(title.clone())).into())
             }),
         )
     }
 }
 
-struct DocumentTabTooltip {
-    workspace: gpui::WeakEntity<Workspace>,
-    key: u64,
+enum DocumentTabTooltip {
+    Title(SharedString),
+    Files { workspace: gpui::WeakEntity<Workspace>, key: u64 },
 }
 
 impl Render for DocumentTabTooltip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(workspace) = self.workspace.upgrade() else {
+        // GPUI 在窗口边缘会翻转提示，上下留白都计入测量，确保翻转后也能避开指针。
+        let frame = div().py(px(24.0));
+        let (workspace, key) = match self {
+            Self::Title(title) => return frame.child(tooltip_body(cx).child(title.clone())),
+            Self::Files { workspace, key } => (workspace, *key),
+        };
+        let Some(workspace) = workspace.upgrade() else {
             return div();
         };
         let workspace = workspace.read(cx);
-        let Some(item) = workspace.comparison.item(self.key) else {
+        let Some(item) = workspace.comparison.item(key) else {
             return div();
         };
         let max_width = (window.viewport_size().width - px(12.0)).clamp(px(0.0), px(440.0));
@@ -127,7 +133,7 @@ impl Render for DocumentTabTooltip {
 
         let scale = window.scale_factor();
         let content_width = px(content_width.scale(scale).ceil().as_f32() / scale);
-        body.w((content_width + padding_width).min(max_width))
+        frame.child(body.w((content_width + padding_width).min(max_width)))
     }
 }
 
@@ -140,7 +146,7 @@ impl Workspace {
         key: u64,
         workspace: gpui::WeakEntity<Self>,
     ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
-        move |_, cx| cx.new(|_| DocumentTabTooltip { workspace: workspace.clone(), key }).into()
+        move |_, cx| cx.new(|_| DocumentTabTooltip::Files { workspace: workspace.clone(), key }).into()
     }
 
     pub(in crate::ui::workspace) fn tab_rows(&self, cx: &App) -> Vec<TabRow> {
