@@ -20,8 +20,7 @@ pub(super) struct ApplicationDialogs {
     tray_visibility: Option<Task<()>>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     tray_generation: u64,
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    tray_hidden: bool,
+    pub(super) tray_hidden: bool,
     watch: Option<Task<()>>,
     probe: Option<Task<()>>,
     checking: bool,
@@ -71,19 +70,6 @@ fn tray_error(error: impl std::fmt::Display, cx: &App) -> SharedString {
 }
 
 impl Workspace {
-    #[cfg(windows)]
-    pub(crate) fn reuse_empty_home(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.home_visible || !self.tabs.is_empty() || !self.comparison.items.is_empty()
-            || !self.opening.is_empty() || !self.open_requests.pending.is_empty()
-            || self.pending_document_transition.is_some() || self.deferred_open.is_some()
-            || self.tab_interaction_busy(window)
-        {
-            return false;
-        }
-        self.reveal_window(window, cx);
-        true
-    }
-
     pub(crate) fn reveal_window(&mut self,window:&mut Window,cx:&mut Context<Self>) {
         #[cfg(windows)]
         if let Err(error) = crate::ui::tray::windows::restore_window(window) {
@@ -107,8 +93,8 @@ impl Workspace {
                     }
                 }
             }
-            self.application_dialogs.tray_hidden = false;
         }
+        self.application_dialogs.tray_hidden = false;
         #[cfg(not(target_os = "macos"))]
         window.activate_window();
         if let Some(document)=self.document(){let _=document.update(cx,|host,cx|host.set_active(true,cx));}
@@ -154,7 +140,8 @@ impl Workspace {
             if let Ok(Some(root))=handle.update(cx,|workspace,_,_|workspace.tree.as_ref().filter(|tree|path.starts_with(&tree.root)).map(|tree|tree.root.clone())) {directory_windows.push((handle,root));}
         }
         let reusable=self.tabs.is_empty() && self.opening.is_empty();
-        let belongs=self.tree.as_ref().is_some_and(|tree|path.starts_with(&tree.root));
+        let belongs=request.home_file_root.as_ref().is_some_and(|root| path.starts_with(root))
+            || self.tree.as_ref().is_some_and(|tree|path.starts_with(&tree.root));
         let already=self.saved_path_key(&path).is_some() || self.tabs.iter().any(|tab|tab.document.read(cx).path().as_ref()==Some(&path));
         let preference=cx.global::<Settings>().string("openDefaultBehavior");
         if !request.choose_window || (!request.home_folder && (reusable || belongs || already)) || preference=="current-window" {self.open_request_here(request,window,cx);return;}
@@ -346,6 +333,7 @@ impl Workspace {
         if let Some(document)=self.document(){if let Err(error)=document.update(cx,|host,cx|host.set_active(false,cx)){self.failure_notice=Some(error.to_string().into());cx.notify();return false;}}
         let result = crate::ui::tray::windows::hide_window(window, cx);
         if let Err(error)=result {self.failure_notice=Some(tray_error(error, cx));if let Some(document)=self.document(){let _=document.update(cx,|host,cx|host.set_active(true,cx));}cx.notify();return false;}
+        self.application_dialogs.tray_hidden = true;
         true
     }
 
@@ -386,10 +374,7 @@ impl Workspace {
                                     use crate::ui::tray::TrayEvent;
                                     match event {
                                         TrayEvent::Restore => workspace.reveal_window(window,cx),
-                                        TrayEvent::Quit => {
-                                            workspace.reveal_window(window,cx);
-                                            if !workspace.application_dialogs.tray_hidden {cx.defer(crate::quit_workspaces);}
-                                        }
+                                        TrayEvent::Quit => cx.defer(crate::quit_workspaces),
                                         TrayEvent::Unavailable => {
                                             if workspace.application_dialogs.tray_hidden { workspace.reveal_window(window,cx); }
                                             workspace.application_dialogs.tray=None;

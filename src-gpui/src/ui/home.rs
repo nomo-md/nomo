@@ -39,11 +39,43 @@ fn card_height(width: f32) -> f32 {
 
 #[derive(Clone)]
 pub(crate) enum HomeEvent {
-    Open(PathBuf), OpenFavoriteFolder(PathBuf), NewFile, OpenFile, OpenFolder, Resume, Restore,
+    Open { path: PathBuf, directory: bool }, OpenFavoriteFolder(PathBuf), NewFile, OpenFile, OpenFolder, Resume, Restore,
     Place { item: PathDrag, placement: crate::ui::tree_drag::Placement },
 }
 
-enum Preview { Ready { image: Arc<RenderImage>, title: SharedString, fingerprint: String }, Failed(UiMessage) }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryKind { File, Folder }
+
+impl EntryKind {
+    /// 点击时重新检查实际读取权限，允许暂时离线的入口在恢复后直接打开。
+    pub(crate) fn check_access(self, path: &Path) -> Result<(), UiMessage> {
+        let access = match self {
+            Self::Folder => std::fs::read_dir(path).map(|_| true),
+            Self::File => path.metadata().and_then(|metadata| {
+                if metadata.is_file() { std::fs::File::open(path).map(|_| true) } else { Ok(false) }
+            }),
+        };
+        match access {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(self.access_error(path, std::io::ErrorKind::NotFound)),
+            Err(error) => Err(self.access_error(path, error.kind())),
+        }
+    }
+
+    pub(crate) fn access_error(self, path: &Path, cause: std::io::ErrorKind) -> UiMessage {
+        use std::io::ErrorKind;
+        let reason = match cause {
+            ErrorKind::NotFound | ErrorKind::NotADirectory => match self {
+                Self::File => "home.fileMissing", Self::Folder => "home.folderMissing",
+            },
+            ErrorKind::PermissionDenied => "home.entryPermission",
+            _ => "home.entryUnavailable",
+        };
+        UiMessage::new(reason).arg("name", entry_name(path))
+    }
+}
+
+enum Preview { Ready { image: Arc<RenderImage>, title: SharedString, fingerprint: String }, Unavailable, Failed(UiMessage) }
 struct CachedPreview { preview: Preview, used: u64, stale: bool, fade_started: Option<Instant> }
 
 impl CachedPreview {
@@ -354,7 +386,7 @@ impl Home {
         let palette = self.preview_theme.clone();
         let render_palette = palette.clone();
         let known = self.previews.get(&path).and_then(|entry| match &entry.preview {
-            Preview::Ready { fingerprint, .. } => Some(fingerprint.clone()), Preview::Failed(_) => None,
+            Preview::Ready { fingerprint, .. } => Some(fingerprint.clone()), _ => None,
         });
         let task = cx.background_executor().spawn(async move { thumbnail::load(&background_path, &render_palette, known.as_deref(), &background_cancel) });
         self.worker = Some(cx.spawn(async move |this, cx| {
@@ -366,8 +398,9 @@ impl Home {
                 if home.active && home.preview_theme == palette && !cancel.load(Ordering::Acquire)
                     && home.visible.contains(&path) {
                     let replacement = match result {
-                        Ok(None) => None,
-                        Ok(Some(thumbnail::Thumbnail { mut pixels, title, fingerprint })) => {
+                        Ok(thumbnail::ThumbnailLoad::Unchanged) => None,
+                        Ok(thumbnail::ThumbnailLoad::Unavailable) => Some(Preview::Unavailable),
+                        Ok(thumbnail::ThumbnailLoad::Ready(thumbnail::Thumbnail { mut pixels, title, fingerprint })) => {
                             // GPUI 的 RenderImage 使用 BGRA，磁盘缓存仍保留标准 PNG。
                             for pixel in pixels.pixels_mut() { pixel.0.swap(0,2); }
                             home.bytes += BITMAP_BYTES + title.len() + fingerprint.len();
@@ -563,7 +596,7 @@ impl Home {
             .on_mouse_down(MouseButton::Left, cx.listener(move |home, _, _, cx| home.set_card_pressed(press_path.clone(), true, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(move |home, _, _, cx| home.set_card_pressed(release_path.clone(), false, cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(move |home, _, _, cx| home.set_card_pressed(outside_path.clone(), false, cx)))
-            .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Open(path.to_path_buf()))));
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Open { path: path.to_path_buf(), directory: false })));
         self.draggable(card, node, Some((width, height)), Some(document_card::DocumentCover {
             favorite: document_card::FavoriteVisual { visible: favorite.active, ..favorite },
             thumbnail_opacity: 1.0, ..cover

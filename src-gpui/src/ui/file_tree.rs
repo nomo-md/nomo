@@ -79,6 +79,7 @@ impl DirectorySnapshot {
 #[derive(Debug)]
 pub enum ScanError<E = String> {
     Cancelled,
+    DirectoryUnavailable(E),
     Failed(E),
 }
 
@@ -350,14 +351,15 @@ fn check_cancel(cancel: &AtomicBool) -> Result<(), ScanError<UiMessage>> {
 /// 单次扫描只持有一个有界快照；目录变更通过取消标记和调用方的代次失效。
 pub fn scan_directory(root: &Path, dir: &Path, cancel: &AtomicBool) -> Result<DirectorySnapshot, ScanError> {
     scan_directory_message(root, dir, cancel).map_err(|error| match error {
-        ScanError::Cancelled => ScanError::Cancelled, ScanError::Failed(message) => ScanError::Failed(message.to_string()),
+        ScanError::Cancelled => ScanError::Cancelled,
+        ScanError::DirectoryUnavailable(message) | ScanError::Failed(message) => ScanError::Failed(message.to_string()),
     })
 }
 
 pub(crate) fn scan_directory_message(root: &Path, dir: &Path, cancel: &AtomicBool) -> Result<DirectorySnapshot, ScanError<UiMessage>> {
     check_cancel(cancel)?;
+    let iter = std::fs::read_dir(dir).map_err(|error| ScanError::DirectoryUnavailable(UiMessage::new("tree.readDirectory").arg("error", error)))?;
     let rules = IgnoreRules::load(root, dir)?;
-    let iter = std::fs::read_dir(dir).map_err(|error| ScanError::Failed(UiMessage::new("tree.readDirectory").arg("error", error)))?;
     let mut entries = Vec::new();
     let mut bytes = path_cost(dir);
     let resolved_dir = dir.canonicalize().ok();

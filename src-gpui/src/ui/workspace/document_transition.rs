@@ -72,8 +72,8 @@ impl Workspace {
                 false
             }
             Err(error) => {
-                // 提交失败由文档横幅说明；原始错误仅在用户展开详情后显示。
-                if !document.read(cx).has_failed_input(cx) {
+                // 切换工作区时，失败文档可能是隐藏的后台标签。
+                if self.folder_open_pending() || !document.read(cx).has_failed_input(cx) {
                     self.failure_notice = Some(error.to_string().into());
                 }
                 self.cancel_close(cx);
@@ -100,8 +100,7 @@ impl Workspace {
             }
             Err(error) => {
                 self.pending_document_transition = None;
-                // 提交失败由文档横幅说明；原始错误仅在用户展开详情后显示。
-                if !document.read(cx).has_failed_input(cx) {
+                if self.folder_open_pending() || !document.read(cx).has_failed_input(cx) {
                     self.failure_notice = Some(error.to_string().into());
                 }
                 self.cancel_close(cx);

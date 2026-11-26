@@ -61,7 +61,7 @@ use explorer::ExplorerState;
 actions!(
     workspace,
     [
-        NewFile, NewWindow, OpenFile, OpenFolder, Save, SaveAs, ExportHtml, ExportPdf, ExportWord, PrintDocument, CloseTab, NextTab, PrevTab, Find, FindReplace, ToggleFind, ToggleReplace, FindNext,
+        NewFile, NewWindow, OpenFile, OpenFolder, Save, SaveAs, ExportHtml, ExportPdf, ExportWord, PrintDocument, CloseTab, CloseWorkspace, NextTab, PrevTab, Find, FindReplace, ToggleFind, ToggleReplace, FindNext,
         FindPrev, ToggleSource, ModeSemantic, ModeSource, ModeSplit, ToggleEditLock, ToggleOutline, ToggleSidebar, ToggleToolbar,
         ResetOutlinePosition, ToggleSplitGuide, ToggleCodeLineNumbers, ToggleZoomControl, ToggleWritingStats, ToggleLintIndicator, ToggleEditLockButton,
         ToggleTheme, FollowSystemTheme, ToggleTypography, Underline, Highlight, ZoomIn, ZoomOut, ZoomReset, Bold, Italic, Strike, InlineCode, Link,
@@ -334,14 +334,11 @@ impl Workspace {
         let surface = WorkspaceSurface::default();
         let home = cx.new(|cx| Home::new(library.clone(), home_visible, cx));
         let home_subscription = cx.subscribe_in(&home, window, |workspace, _, event, window, cx| match event {
-            HomeEvent::Open(path) => {
-                let root = (!path.is_dir()).then(|| workspace.home.read(cx).root_for_file(path)).flatten();
-                if let Some(root) = root.filter(|root| workspace.tree.as_ref().is_none_or(|tree| &tree.root != root)) { workspace.replace_tree(root, cx); }
-                workspace.open_path(path, window, cx);
-            },
+            HomeEvent::Open { path, directory } => workspace.open_record(path, *directory, window, cx),
             HomeEvent::OpenFavoriteFolder(path) => workspace.open_batch([OpenRequest {
                 path: Some(path.clone()),
                 favorite_folder: true,
+                check_record: Some(home::EntryKind::Folder),
                 ..Default::default()
             }], window, cx),
             HomeEvent::Restore => workspace.restore_last_layout(window,cx),
@@ -551,6 +548,7 @@ impl Workspace {
         if self.folder_open_pending() { self.cancel_close(cx); }
         self.next_open_intent();
         self.open_requests.pending.clear();
+        self.open_requests.checking_record.take();
         self.pending_tree_click.take();
         self.deferred_open = None;
         for opening in &self.opening { opening.request.cancel(); }
@@ -583,6 +581,7 @@ impl Workspace {
 
     fn document(&self) -> Option<Entity<DocumentHost>> { self.tab().map(|tab|tab.document.clone()) }
 
+    #[cfg(feature = "automation")]
     pub fn open_path(&mut self,path:&Path,window:&mut Window,cx:&mut Context<Self>) {
         if self.waiting_library_close { self.waiting_library_close=false; self.cancel_close(cx); }
         self.pending_tree_click.take();
@@ -624,7 +623,15 @@ impl Workspace {
         let Some(path) = request.path.take() else { return; };
         let generation = request.generation;
         if self.explorer.mutating.iter().any(|busy| path.starts_with(busy)) {self.notice=Some(ToolbarLocale::current(cx).app_text("workspace.fileBusy").into());cx.notify();return;}
-        let metadata = path.metadata().ok();
+        let metadata = path.metadata();
+        if request.home_folder && !metadata.as_ref().is_ok_and(|meta| meta.is_dir()) {
+            let cause = metadata.err().map_or(std::io::ErrorKind::NotFound, |error| error.kind());
+            let message = home::EntryKind::Folder.access_error(&path, cause);
+            self.failure_notice = Some(message.render(ToolbarLocale::current(cx)).into());
+            cx.notify();
+            return;
+        }
+        let metadata = metadata.ok();
         if request.document_only && metadata.as_ref().is_some_and(|metadata| !metadata.is_file()) {
             let locale = ToolbarLocale::current(cx);
             let message = locale.app_format("workspace.openFailed", &[("error", locale.app_text("preview.notFile"))]);
@@ -635,7 +642,7 @@ impl Workspace {
         if metadata.is_some_and(|metadata| metadata.is_dir()) {
             self.cancel_preview_opens(None);
             let root=path.canonicalize().unwrap_or_else(|_|path.to_path_buf());
-            self.open_folder_workspace(root, None, window, cx);
+            self.open_folder_workspace(root, None, None, window, cx);
             return;
         }
         let path=path.canonicalize().unwrap_or_else(|_|path.to_path_buf());
@@ -804,6 +811,11 @@ impl Workspace {
                 Ok((port,Err(error),layout))=>(Err(error),Some(port),layout),
                 Err(error)=>(Err(error),None,None),
             };
+            // 文件也可能在窗口选择或后台加载期间失联。只在实际打开失败时复核源路径。
+            let access_error = if matches!(&source, application_dialogs::OpenSource::File)
+                && matches!(&result, Err(ControlError::HostFailure(_))) && let Some(path) = requested.clone() {
+                cx.background_executor().spawn(async move { home::EntryKind::File.check_access(&path).err() }).await
+            } else { None };
             let completed_path=requested.clone();
             let accepted=this.update_in(cx,|workspace,window,cx| {
                 let Some(opening)=workspace.opening.iter().find(|opening|opening.id==id) else {return false;};
@@ -898,7 +910,19 @@ impl Workspace {
                         }
                         true
                     }
-                    Err(e)=>{workspace.failure_notice=Some(ToolbarLocale::current(cx).app_format("workspace.openFailed", &[("error", &e.to_string())]).into());cx.notify();false}
+                    Err(error) => {
+                        let locale = ToolbarLocale::current(cx);
+                        let message = match access_error {
+                            Some(message) => message.render(locale),
+                            None => {
+                                let detail = match error { ControlError::HostFailure(reason) => reason, other => other.to_string() };
+                                locale.app_format("workspace.openFailed", &[("error", &detail)])
+                            }
+                        };
+                        workspace.failure_notice = Some(message.into());
+                        cx.notify();
+                        false
+                    }
                 }
             }).unwrap_or(false);
             let mut recovery_finished=accepted;
@@ -1069,7 +1093,7 @@ impl Workspace {
         cx.notify();
     }
     fn close_tab(&mut self,index:usize,window:&mut Window,cx:&mut Context<Self>) {
-        if self.close_prompt || self.comparison.closing.is_some() || window.has_active_prompt() {return;}
+        if self.close_prompt || self.comparison.closing.is_some() || self.folder_open_pending() || window.has_active_prompt() {return;}
         let Some(tab)=self.tabs.get(index) else{return;};
         if let Some(pair)=self.comparison.item(tab.key).and_then(TabItem::pair) {
             self.close_pair(pair, window, cx); return;
@@ -1132,6 +1156,7 @@ impl Workspace {
             self.last_notice=None;
             self.toast=None;
             self.sync_tree_selection(false,cx);
+            self.popover=None;
             self.toolbar_popup=None;
             self.tab_menu_open=false;
             self.search=None;
@@ -1146,7 +1171,7 @@ impl Workspace {
             }
         }
         else if !self.folder_open_pending() {if !self.home_visible || self.closing_window {self.activate(self.active,window,cx);}if self.closing_window {self.close_tab(self.active,window,cx);}}
-        if !self.closing_window {self.next_batch_close(window,cx);}
+        if !self.closing_window && !self.folder_open_pending() {self.next_batch_close(window,cx);}
         cx.notify();
     }
     pub(crate) fn window_placement(&self, window: &Window, cx: &App) -> Option<WindowPlacement> {
@@ -1165,7 +1190,11 @@ impl Workspace {
         }
         if self.mini.active() { self.return_from_mini(window,cx); return false; }
         if !self.application_dialogs.close_approved {self.choose_close_behavior(window,cx);return false;}
-        if !self.opening.is_empty() || !self.open_requests.pending.is_empty() {self.notice=Some(ToolbarLocale::current(cx).app_text("workspace.openingClose").into());cx.notify();return false;}
+        if !self.opening.is_empty() || !self.open_requests.pending.is_empty() {
+            self.cancel_close(cx);
+            self.reveal_window(window,cx);
+            self.notice=Some(ToolbarLocale::current(cx).app_text("workspace.openingClose").into());cx.notify();return false;
+        }
         if self.tabs.is_empty() {
             if !self.closing_window {self.flush_layout(cx);}
             if self.library.read(cx).is_busy() {
@@ -1187,8 +1216,21 @@ impl Workspace {
         }
         true
     }
+    fn close_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_prompt() || self.close_prompt || self.closing_window { return; }
+        let mut others = cx.windows().into_iter().filter(|handle| *handle != window.window_handle())
+            .filter_map(|handle| handle.downcast::<Self>()).peekable();
+        if others.peek().is_none() || cx.global::<Settings>().string("closeWindowBehavior") == "close-to-tray"
+            || others.any(|other| other.read(cx).is_ok_and(|workspace| workspace.application_dialogs.tray_hidden))
+        {
+            cx.defer(crate::quit_workspaces);
+        } else if self.request_quit(window, cx) {
+            window.remove_window();
+        }
+    }
+
     pub(crate) fn request_quit(&mut self,window:&mut Window,cx:&mut Context<Self>)->bool {
-        if window.has_active_prompt(){crate::cancel_quit(cx);return false;}
+        if window.has_active_prompt() || self.close_prompt {self.reveal_window(window,cx);crate::cancel_quit(cx);return false;}
         if self.closing_window && !self.tabs.is_empty() {return false;}
         if let Some(document)=self.document() {
             if !self.prepare_document_transition(&document, true, window, cx, |workspace, window, cx| {
@@ -1196,7 +1238,7 @@ impl Workspace {
             }) { return false; }
         }
         if !self.leave_mini(window,cx) {crate::cancel_quit(cx);return false;}
-        if self.tabs.iter().any(|tab|tab.document.read(cx).is_dirty(cx)){self.reveal_window(window,cx);}
+        if crate::quit_requires_save_confirmation(cx) && self.tabs.iter().any(|tab|tab.document.read(cx).is_dirty(cx)){self.reveal_window(window,cx);}
         self.application_dialogs.close_approved=true;
         self.request_close_window(window,cx)
     }
@@ -1508,7 +1550,7 @@ impl Workspace {
 
     fn chrome_event(&mut self, event:&ChromeEvent, window:&mut Window, cx:&mut Context<Self>) {
         match event {
-            ChromeEvent::OpenRecent { path, .. } => self.open_path(path, window, cx),
+            ChromeEvent::OpenRecent { path, folder } => self.open_record(path, *folder, window, cx),
             ChromeEvent::RemoveRecent(path) => self.library.update(cx, |library, cx| library.change(LibraryChange::Remove { path: path.clone(), folder: false }, cx)),
             ChromeEvent::ClearRecent => self.library.update(cx, |library, cx| library.change(LibraryChange::ClearRecent, cx)),
             ChromeEvent::CloseWindow=>{if self.request_close_window(window,cx){window.remove_window();}},
@@ -2302,6 +2344,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &Rule, window, cx| w.with_document(window, cx, |b, cx| b.command(crate::nomo_mark::commands::EditIntent::ToggleRule, cx))))
             .on_action(cx.listener(|w, _: &crate::editor::Undo, _, cx| {if let Some(doc)=w.document(){doc.update(cx,|h,cx|h.undo_redo(false,cx));}}))
             .on_action(cx.listener(|w, _: &crate::editor::Redo, _, cx| {if let Some(doc)=w.document(){doc.update(cx,|h,cx|h.undo_redo(true,cx));}}))
+            .on_action(cx.listener(|w, _: &CloseWorkspace, window, cx| w.close_workspace(window, cx)))
             .on_action(cx.listener(|_, _: &Quit, _, cx|cx.defer(crate::quit_workspaces)))
             .children(chrome)
             .children(mini_bar)

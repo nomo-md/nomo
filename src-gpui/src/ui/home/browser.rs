@@ -210,6 +210,10 @@ impl Home {
                                 home.browser.error = Some(UiMessage::new("tree.cacheBudget").arg("size", "16 MiB"));
                             }
                         }
+                        Err(ScanError::DirectoryUnavailable(_)) => {
+                            home.browser.failed.insert(path.clone());
+                            if let Some(old) = home.browser.directories.remove(&path) { home.browser.bytes -= old.bytes; }
+                        },
                         Err(ScanError::Failed(error)) => { home.browser.failed.insert(path.clone()); home.browser.error = Some(error); },
                         Err(ScanError::Cancelled) => {},
                     }

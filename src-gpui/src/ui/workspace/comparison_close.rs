@@ -1,5 +1,5 @@
 use super::*;
-use crate::ui::toolbar_i18n::{ToolbarLocale, UiMessage};
+use crate::ui::toolbar_i18n::ToolbarLocale;
 
 pub(in crate::ui::workspace) struct GroupClose {
     pair: Option<Pair>,
@@ -16,7 +16,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.comparison.item(item.first()) != Some(item) {
+        if self.folder_open_pending() || self.comparison.item(item.first()) != Some(item) {
             return;
         }
         if self.load_to_close(item, window, cx) {
@@ -37,7 +37,6 @@ impl Workspace {
                 return;
             }
         }
-        self.finish_folder_open(window, cx);
     }
     pub(in crate::ui::workspace) fn close_pair(
         &mut self,
@@ -71,54 +70,20 @@ impl Workspace {
     }
 
     pub(in crate::ui::workspace) fn begin_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let has_drafts = self.tabs.iter().any(|tab| {
-            let doc = tab.document.read(cx);
-            doc.path().is_none() && doc.is_dirty(cx) && !doc.has_failed_input(cx)
-        });
-        if !has_drafts || crate::quit_clears_drafts(cx) {
-            self.close_window_normally(window, cx);
+        if crate::quit_requires_save_confirmation(cx) {
+            // 清除使用数据或手动覆盖安装前，让用户逐篇保存、放弃或取消退出。
+            self.flush_layout(cx);
+            self.closing_window = true;
+            self.close_tab(self.active, window, cx);
             return;
         }
-        if cx.global::<Settings>().bool("keepUntitledDraftsOnClose") {
-            self.close_window_keeping_drafts(window, cx);
-            return;
-        }
-        use dialogs::{SecondaryAction as A, SecondaryDialog, SecondaryKind, Tone};
-        self.close_prompt = true;
-        let response = dialogs::choose(SecondaryDialog {
-            kind: SecondaryKind::Recovery,
-            title: UiMessage::new("draftClose.title"),
-            message: UiMessage::new("draftClose.message"),
-            actions: vec![
-                A::new(UiMessage::new("draftClose.keep"), IconName::FileText, Tone::Primary),
-                A::new(UiMessage::new("draftClose.review"), IconName::Save, Tone::Normal),
-                A::new(UiMessage::toolbar("cancel"), IconName::Close, Tone::Quiet),
-            ],
-            cancel: 2, detail: None, notes: None, remember: None, leading: Vec::new(),
-        }, window, cx);
-        cx.spawn_in(window, async move |this, cx| {
-            let choice = response.await;
-            let _ = this.update_in(cx, |workspace, window, cx| {
-                workspace.close_prompt = false;
-                match choice.index {
-                    0 => workspace.close_window_keeping_drafts(window, cx),
-                    1 => workspace.close_window_normally(window, cx),
-                    _ => workspace.cancel_close(cx),
-                }
-            });
-        }).detach();
-    }
-
-    fn close_window_normally(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.flush_layout(cx);
-        self.closing_window = true;
-        self.close_tab(self.active, window, cx);
-    }
-
-    fn close_window_keeping_drafts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let keys: Vec<_> = self.tabs.iter().map(|tab| tab.key).collect();
-        if !self.prepare_members(&keys, true, window, cx, Self::close_window_keeping_drafts) { return; }
+        if !self.prepare_members(&keys, true, window, cx, Self::begin_window_close) { return; }
         self.closing_window = true;
+        self.close_workspace_documents(keys, window, cx);
+    }
+
+    pub(in crate::ui::workspace) fn close_workspace_documents(&mut self, keys: Vec<u64>, window: &mut Window, cx: &mut Context<Self>) {
         self.comparison.closing = Some(GroupClose { pair: None, keys, decisions: Vec::new(), saving: None });
         self.advance_group_close(window, cx);
     }
@@ -141,12 +106,19 @@ impl Workspace {
             let revision = doc.read(cx).status().revision;
             let host = doc.read(cx);
             let automatic = if !host.is_dirty(cx) { Some(CloseDisposition::Clean) }
-                else if pair.is_none() && host.path().is_none() && !host.has_failed_input(cx) { Some(CloseDisposition::KeepDraft) }
+                else if pair.is_none() && !host.has_failed_input(cx) { Some(CloseDisposition::KeepDraft) }
                 else { None };
             if let Some(decision) = automatic {
                 self.comparison.closing.as_mut().unwrap().decisions.push((key, revision, decision));
                 continue;
             }
+            if self.folder_open_pending() {
+                self.failure_notice = Some(ToolbarLocale::current(cx).app_format("layout.folderDraftFailed", &[("name", &host.display_title(cx))]).into());
+                self.cancel_close(cx);
+                cx.notify();
+                return;
+            }
+            if self.closing_window { self.reveal_window(window, cx); }
             self.close_prompt = true;
             let response = dialogs::confirm_document_close(doc.read(cx).title_message(), doc.read(cx).has_failed_input(cx), window, cx);
             cx.spawn_in(window, async move |this, cx| {
@@ -183,7 +155,7 @@ impl Workspace {
             return;
         }
         let close = self.comparison.closing.as_ref().unwrap();
-        if pair.is_none() && (!self.open_requests.pending.is_empty() || !self.opening.is_empty()) {
+        if pair.is_none() && (!self.opening.is_empty() || (self.closing_window && !self.open_requests.pending.is_empty())) {
             self.cancel_close(cx);
             self.notice = Some(ToolbarLocale::current(cx).app_text("workspace.openingClose").into());
             self.drain_open_requests(window, cx);
@@ -234,13 +206,14 @@ impl Workspace {
         }) {
             Ok(kept) => kept,
             Err(error) => {
+                if self.closing_window { self.reveal_window(window, cx); }
                 self.failure_notice = Some(error.to_string().into());
                 self.cancel_close(cx);
                 cx.notify();
                 return;
             }
         };
-        Self::register_kept_drafts(kept, cx);
+        self.register_kept_drafts(kept, cx);
         let close = self.comparison.closing.take().unwrap();
         let pos = pair.and_then(|p| self.comparison.position(p.left));
         let previous = self.tabs.get(self.active).map(|tab| tab.key);
@@ -266,6 +239,7 @@ impl Workspace {
             self.comparison.items.clear();
             self.active = 0;
             self.after_tabs_removed(window, cx);
+            if self.folder_open_pending() { self.finish_folder_open(window, cx); }
             return;
         };
         self.comparison.items.remove(pos);

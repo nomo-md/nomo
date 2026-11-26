@@ -216,7 +216,7 @@ impl Chrome {
                 MenuItem::submenu(Menu::Export, locale),
                 action(locale.app_text("menu.print"), "", || Box::new(action::PrintDocument), doc && self.capable(C::Print)), separator(),
                 action(locale.app_text("chrome.closeFile"), "Ctrl + W", || Box::new(action::CloseTab), doc),
-                MenuItem::new(locale.app_text("settings.closeWindowBehavior.choice.close-window"), "Alt + F4", A::Emit(E::CloseWindow), true), separator(),
+                action(locale.app_text("settings.closeWindowBehavior.choice.close-window"), "Alt + F4", || Box::new(action::CloseWorkspace), true), separator(),
                 MenuItem::new(locale.app_text("chrome.quit"), "", A::Emit(E::Quit), true),
             ],
             Menu::Edit => vec![
@@ -302,7 +302,7 @@ impl Chrome {
             Menu::Window => vec![
                 MenuItem::new(locale.app_text("window.minimize"), "", A::Minimize, true),
                 MenuItem::new(if maximized { locale.app_text("window.restore") } else { locale.app_text("window.maximize") }, "", A::Maximize, true), separator(),
-                MenuItem::new(locale.app_text("settings.closeWindowBehavior.choice.close-window"), "Alt + F4", A::Emit(E::CloseWindow), true),
+                action(locale.app_text("settings.closeWindowBehavior.choice.close-window"), "Alt + F4", || Box::new(action::CloseWorkspace), true),
             ],
         };
         for entry in &mut entries {

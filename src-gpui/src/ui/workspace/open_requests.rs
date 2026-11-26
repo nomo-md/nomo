@@ -12,9 +12,11 @@ pub(super) struct OpenRequest {
     pub choose_window: bool,
     /// 主页目录入口必须先遵循窗口偏好，不能被空窗口或已有工作区复用短路。
     pub home_folder: bool,
+    pub home_file_root: Option<PathBuf>,
     pub newly_created: bool,
     pub document_only: bool,
     pub favorite_folder: bool,
+    pub check_record: Option<home::EntryKind>,
     pub generation: u64,
 }
 
@@ -30,9 +32,21 @@ pub(super) struct AfterOpen {
 pub(super) struct OpenRequests {
     pub generation: u64,
     pub pending: VecDeque<OpenRequest>,
+    pub checking_record: Option<Task<()>>,
 }
 
 impl Workspace {
+    pub(super) fn open_record(&mut self, path: &Path, directory: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_batch([OpenRequest {
+            path: Some(path.to_path_buf()),
+            choose_window: true,
+            home_folder: directory && self.home_visible,
+            document_only: !directory,
+            check_record: Some(if directory { home::EntryKind::Folder } else { home::EntryKind::File }),
+            ..Default::default()
+        }], window, cx);
+    }
+
     pub(super) fn next_open_intent(&mut self) -> u64 {
         self.explorer.clear_folder_reveal();
         self.open_requests.generation = self.open_requests.generation.wrapping_add(1);
@@ -112,11 +126,15 @@ impl Workspace {
     }
 
     pub(super) fn drain_open_requests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.opening.is_empty() || self.pending_document_transition.is_some()
+        if self.open_requests.checking_record.is_some() || !self.opening.is_empty() || self.pending_document_transition.is_some()
             || self.application_dialogs.busy || window.has_active_prompt() || self.closing_window
             || self.folder_open_pending()
         { return; }
-        while !self.open_requests.pending.is_empty() {
+        while let Some(next) = self.open_requests.pending.front() {
+            if let (Some(kind), Some(path)) = (next.check_record, &next.path) {
+                self.check_record_access(kind, path.clone(), next.generation, window, cx);
+                return;
+            }
             if let Some(document)=self.document() {
                 if !self.prepare_document_transition(&document,false,window,cx,|workspace,window,cx|workspace.drain_open_requests(window,cx)) {
                     if self.pending_document_transition.is_none() {self.open_requests.pending.pop_front();}
@@ -130,7 +148,45 @@ impl Workspace {
         }
     }
 
-    pub(super) fn open_request_here(&mut self, request: OpenRequest, window: &mut Window, cx: &mut Context<Self>) {
+    fn check_record_access(&mut self, kind: home::EntryKind, path: PathBuf, generation: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let check = cx.background_executor().spawn(async move {
+            let result = kind.check_access(&path);
+            (path, result)
+        });
+        self.open_requests.checking_record = Some(cx.spawn_in(window, async move |this, cx| {
+            let (path, result) = check.await;
+            let _ = this.update_in(cx, |workspace, window, cx| {
+                workspace.open_requests.checking_record = None;
+                // 排队期间入口可能被移动、移除或由另一个请求替代。
+                if let Some(next) = workspace.open_requests.pending.front_mut().filter(|next|
+                    next.generation == generation && next.path.as_ref() == Some(&path)) {
+                    match result {
+                        Ok(()) => {
+                            next.check_record = None;
+                            if workspace.home_visible && kind == home::EntryKind::File {
+                                next.home_file_root = workspace.home.read(cx).root_for_file(&path);
+                            }
+                        }
+                        Err(message) => {
+                            workspace.open_requests.pending.pop_front();
+                            workspace.failure_notice = Some(message.render(ToolbarLocale::current(cx)).into());
+                            cx.notify();
+                        }
+                    }
+                }
+                workspace.drain_open_requests(window, cx);
+            });
+        }));
+    }
+
+    pub(super) fn open_request_here(&mut self, mut request: OpenRequest, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(root) = request.home_file_root.take()
+            && self.tree.as_ref().is_none_or(|tree| tree.root != root)
+        {
+            request.choose_window = false;
+            self.open_folder_workspace(root, None, Some(request), window, cx);
+            return;
+        }
         if request.path.is_some() {
             self.open_path_now(request, window, cx);
         } else {

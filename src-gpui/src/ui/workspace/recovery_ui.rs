@@ -53,9 +53,19 @@ impl Workspace {
         }).detach();
     }
 
-    pub(super) fn register_kept_drafts(drafts: Vec<RecoveryCandidate>, cx: &mut App) {
+    pub(super) fn register_kept_drafts(&self, mut drafts: Vec<RecoveryCandidate>, cx: &mut App) {
         if !drafts.is_empty() {
-            cx.global_mut::<RecoveryCatalog>().candidates.splice(0..0, drafts);
+            let catalog = cx.global_mut::<RecoveryCatalog>();
+            for draft in &mut drafts {
+                catalog.offered.remove(&draft.document_id);
+                if let Some(change) = self.application_dialogs.ignored.get(&draft.document_id)
+                    .filter(|change| draft.path.as_ref() == Some(&change.path))
+                {
+                    draft.conflict = true;
+                    draft.change = Some(change.clone());
+                }
+            }
+            catalog.candidates.splice(0..0, drafts);
         }
     }
 

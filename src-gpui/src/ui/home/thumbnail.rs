@@ -19,6 +19,12 @@ pub(super) struct Thumbnail {
     pub fingerprint: String,
 }
 
+pub(super) enum ThumbnailLoad {
+    Unchanged,
+    Unavailable,
+    Ready(Thumbnail),
+}
+
 /// 使用稳定的目标主题，避免外壳颜色过渡的每一帧都重新生成位图。
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Palette {
@@ -119,16 +125,12 @@ fn check(cancel: &AtomicBool) -> Result<(), String> {
     if cancel.load(Ordering::Acquire) { Err("预览请求已取消".into()) } else { Ok(()) }
 }
 
-pub(super) fn load(path: &Path, palette: &Palette, known: Option<&str>, cancel: &AtomicBool) -> Result<Option<Thumbnail>, UiMessage> {
+pub(super) fn load(path: &Path, palette: &Palette, known: Option<&str>, cancel: &AtomicBool) -> Result<ThumbnailLoad, UiMessage> {
     check(cancel)?;
-    if !std::fs::metadata(path).map_err(|_| UiMessage::new("preview.inaccessible"))?.is_file() { return Err(UiMessage::new("preview.notFile")); }
-    let file = File::open(path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => UiMessage::new("preview.missing"),
-        std::io::ErrorKind::PermissionDenied => UiMessage::new("preview.permission"),
-        _ => UiMessage::new("preview.readFailed").arg("error", e),
-    })?;
+    if !path.is_file() { return Ok(ThumbnailLoad::Unavailable); }
+    let Ok(file) = File::open(path) else { return Ok(ThumbnailLoad::Unavailable); };
     let metadata = file.metadata().map_err(|e| e.to_string())?;
-    if !metadata.is_file() { return Err(UiMessage::new("preview.notFile")); }
+    if !metadata.is_file() { return Ok(ThumbnailLoad::Unavailable); }
     let mut bytes = Vec::new();
     file.take(HEAD_BYTES).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     check(cancel)?;
@@ -161,7 +163,7 @@ pub(super) fn load(path: &Path, palette: &Palette, known: Option<&str>, cancel: 
         }
     }
     let fingerprint = format!("{:x}", hash.finalize());
-    if known == Some(&fingerprint) { return Ok(None); }
+    if known == Some(&fingerprint) { return Ok(ThumbnailLoad::Unchanged); }
     if let Some(png) = library::cached_thumbnail(path, &fingerprint)? {
         let mut reader = image::ImageReader::with_format(Cursor::new(png), image::ImageFormat::Png);
         let mut limits = image::Limits::default();
@@ -170,7 +172,7 @@ pub(super) fn load(path: &Path, palette: &Palette, known: Option<&str>, cancel: 
         limits.max_alloc = Some(u64::from(WIDTH * HEIGHT * 8));
         reader.limits(limits);
         if let Ok(image) = reader.decode() {
-            if image.width() == WIDTH && image.height() == HEIGHT { check(cancel)?; return Ok(Some(Thumbnail { pixels: image.into_rgba8(), title, fingerprint })); }
+            if image.width() == WIDTH && image.height() == HEIGHT { check(cancel)?; return Ok(ThumbnailLoad::Ready(Thumbnail { pixels: image.into_rgba8(), title, fingerprint })); }
         }
     }
     check(cancel)?;
@@ -180,7 +182,7 @@ pub(super) fn load(path: &Path, palette: &Palette, known: Option<&str>, cancel: 
     image::codecs::png::PngEncoder::new(&mut png).write_image(image.as_raw(), WIDTH, HEIGHT, image::ExtendedColorType::Rgba8).map_err(|e| e.to_string())?;
     check(cancel)?;
     library::store_thumbnail(path, &fingerprint, &png)?;
-    Ok(Some(Thumbnail { pixels: image, title, fingerprint }))
+    Ok(ThumbnailLoad::Ready(Thumbnail { pixels: image, title, fingerprint }))
 }
 
 fn decode_head(bytes: &[u8]) -> String {

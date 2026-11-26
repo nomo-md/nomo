@@ -72,24 +72,25 @@ struct LastActiveWorkspace(gpui::AnyWindowHandle);
 impl gpui::Global for LastActiveWorkspace {}
 
 pub(crate) fn cancel_quit(cx:&mut App){cx.set_global(QuitRequested(None));}
-pub(crate) fn quit_clears_drafts(cx: &App) -> bool {
+pub(crate) fn quit_requires_save_confirmation(cx: &App) -> bool {
     matches!(cx.try_global::<QuitRequested>().and_then(|request| request.0).map(|q| q.reason),
         Some(QuitReason::Reset(app_data::Scope::All | app_data::Scope::Usage)))
 }
 pub(crate) fn quit_workspaces(cx:&mut App){
     request_quit(QuitReason::Normal,cx);
 }
+fn workspaces_ready_to_quit(cx: &mut App) -> bool {
+    cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()).all(|handle|
+        handle.update(cx, |workspace, window, cx| workspace.can_quit_to_install(window, cx)).unwrap_or(false))
+}
+
 pub(crate) fn quit_to_reset(scope: app_data::Scope, cx: &mut App) {
-    for handle in cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()) {
-        if !handle.update(cx, |workspace, window, cx| workspace.can_quit_to_install(window, cx)).unwrap_or(false) { return; }
-    }
+    if !workspaces_ready_to_quit(cx) { return; }
     request_quit(QuitReason::Reset(scope), cx);
 }
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub(crate) fn quit_to_install(cx:&mut App){
-    for handle in cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()) {
-        if !handle.update(cx,|workspace,window,cx| workspace.can_quit_to_install(window,cx)).unwrap_or(false) { return; }
-    }
+    if !workspaces_ready_to_quit(cx) { return; }
     request_quit(QuitReason::Install,cx);
 }
 fn preferred_workspace(cx: &App) -> Option<gpui::WindowHandle<Workspace>> {
@@ -114,7 +115,7 @@ fn request_quit(reason: QuitReason,cx:&mut App){
 fn finish_quit(cx:&mut App){
     let Some(PendingQuit { reason: _reason, placement, .. }) = cx.try_global::<QuitRequested>().and_then(|request| request.0) else { return; };
     if cx.windows().iter().any(|window|window.downcast::<Workspace>().is_some()){return;}
-    cancel_quit(cx);
+    cx.set_global(QuitRequested(None));
     if let Some(placement) = placement { placement.save(); }
     if let QuitReason::Reset(scope) = _reason && let Err(error) = app_data::launch_after_close(scope) {
         app_data::show_error(&error);
@@ -266,20 +267,7 @@ fn main() {
             cx.set_global(instance);
             cx.spawn(async move |cx| {
                 while let Some(paths)=receiver.recv().await {
-                    cx.update(|cx| {
-                        // 连续启动先复用空主页，避免重叠窗口让后续卡片打开看起来像另开窗口。
-                        if paths.is_empty() {
-                            let reused = cx.windows().into_iter()
-                                .filter_map(|handle| handle.downcast::<Workspace>())
-                                .any(|handle| handle.update(cx, |workspace, window, cx| {
-                                    workspace.reuse_empty_home(window, cx)
-                                }).unwrap_or(false));
-                            if !reused { open_workspace(Vec::new(),cx); }
-                            cx.activate(true);
-                        } else {
-                            open_paths(paths,cx);
-                        }
-                    });
+                    cx.update(|cx| open_paths(paths, cx));
                 }
             }).detach();
         }
@@ -288,18 +276,23 @@ fn main() {
 }
 
 fn open_paths(paths: Vec<PathBuf>, cx: &mut App) {
-    let handle=cx.active_window().and_then(|window|window.downcast::<Workspace>())
-        .or_else(||cx.windows().into_iter().find_map(|window|window.downcast::<Workspace>()));
-    if let Some(handle)=handle {
-        if let Err(error)=handle.update(cx,|workspace,window,cx| {
-            if paths.is_empty() {workspace.reveal_window(window,cx);}
-            else {
-                // 先唤醒接收窗口，再让文档路由决定最终目标，避免把源窗口重新置前。
-                workspace.reveal_window(window,cx);
-                workspace.open_paths(paths,window,cx);
+    let handle = if paths.is_empty() {
+        preferred_workspace(cx)
+    } else {
+        cx.active_window().and_then(|window| window.downcast::<Workspace>())
+            .or_else(|| cx.windows().into_iter().find_map(|window| window.downcast::<Workspace>()))
+    };
+    if let Some(handle) = handle {
+        if let Err(error) = handle.update(cx, |workspace, window, cx| {
+            workspace.reveal_window(window, cx);
+            if !paths.is_empty() {
+                // 文档可能属于其他窗口，最终焦点由打开请求决定。
+                workspace.open_paths(paths, window, cx);
             }
-        }) {eprintln!("打开文档窗口失败：{error}");}
-    }else{open_workspace(paths,cx);}
+        }) { eprintln!("打开文档窗口失败：{error}"); }
+    } else {
+        open_workspace(paths, cx);
+    }
     cx.activate(true);
 }
 

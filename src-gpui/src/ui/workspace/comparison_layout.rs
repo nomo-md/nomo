@@ -348,7 +348,7 @@ impl Workspace {
         discard: bool,
         cx: &mut Context<Self>,
     ) {
-        if (!self.closing_window && !self.folder_open_pending()) || !self.comparison.layout.tracked {
+        if !self.closing_window || !self.comparison.layout.tracked {
             return;
         }
         let Some(store) = cx.try_global::<Store>() else {
@@ -373,7 +373,6 @@ impl Workspace {
         }
         if let Err(error) = Self::publish_layouts(vec![saved], cx) {
             self.failure_notice = Some(ToolbarLocale::current(cx).app_format("layout.saveFailed", &[("error", &error)]).into());
-            if self.folder_open_pending() { self.cancel_close(cx); }
             cx.notify();
         }
     }
@@ -382,9 +381,8 @@ impl Workspace {
             || cx.try_global::<Store>().is_some_and(|store| store.importing) { return; }
         self.restore_drafts_on_start = false;
         if !self.home_visible || !self.tabs.is_empty() || !self.opening.is_empty() || !self.open_requests.pending.is_empty() { return; }
-        let auto_keep = cx.global::<Settings>().bool("keepUntitledDraftsOnClose");
         let has_draft = cx.try_global::<Store>().and_then(Store::available).is_some_and(|layout| {
-            layout.documents.values().any(|doc| doc.path.is_none() && (doc.kept_in.is_some() || auto_keep)
+            layout.documents.values().any(|doc| (doc.kept_in.is_some() || doc.path.is_none())
                 && matches!(self.layout_recovery_candidate(&doc.session, cx), Ok(Some(_))))
         });
         if has_draft { self.restore_last_layout(window, cx); }

@@ -337,7 +337,7 @@ impl Workspace {
                             }
                         }
                         Err(ScanError::Cancelled) => tree.cancel_load(&path),
-                        Err(ScanError::Failed(error)) => {
+                        Err(ScanError::DirectoryUnavailable(error) | ScanError::Failed(error)) => {
                             failed = true;
                             tree.cancel_load(&path);
                             workspace.notice = Some(ToolbarLocale::current(cx).app_format("tree.pathFailure", &[("path", &path.display().to_string()), ("error", &error.render(ToolbarLocale::current(cx)))]).into());

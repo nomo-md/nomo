@@ -1408,10 +1408,10 @@ impl MarkdownDocumentSessionManager {
             match decision {
                 CloseDisposition::Clean if session.dirty => return Err(error("unsaved-document", "文档尚有未保存内容")),
                 CloseDisposition::KeepDraft => {
-                    if session.manifest.path.is_some() || !session.dirty || session.manifest.event.is_none() {
+                    if !session.dirty || session.manifest.event.is_none() {
                         return Err(error("draft-changed", "草稿状态已改变，请重新关闭窗口"));
                     }
-                    kept.push(RecoveryCandidate::kept(&self.root, member.document_id.clone()));
+                    kept.push(RecoveryCandidate::kept(&self.root, &session.manifest));
                 }
                 _ => {}
             }

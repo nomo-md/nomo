@@ -59,7 +59,6 @@ pub fn default_value(key: &str) -> Value {
         "editorMode" => json!("semantic"),
         "splitViewLayout" => json!("semantic-source"),
         "autoSaveEnabled" => json!(false),
-        "keepUntitledDraftsOnClose" => json!(false),
         "autoSaveDelayMs" => json!(1000),
         "createSnapshotBeforeSave" => json!(true),
         "fontSize" => json!(16),

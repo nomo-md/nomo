@@ -31,8 +31,9 @@ pub(crate) struct RecoveryCandidate {
     legacy: Option<crate::legacy_records::Draft>,
 }
 impl RecoveryCandidate {
-    pub(super) fn kept(root: &Path, document_id: String) -> Self {
-        Self { root: root.to_owned(), document_id, path: None, conflict: false, verified: true,
+    pub(super) fn kept(root: &Path, manifest: &Manifest) -> Self {
+        Self { root: root.to_owned(), document_id: manifest.document_id.clone(), path: manifest.path.clone(),
+            conflict: manifest.legacy_unconfirmed, verified: true,
             modified: std::time::SystemTime::now(), change: None, _lease: None, legacy: None }
     }
     pub(crate) fn is_legacy(&self) -> bool {self.legacy.is_some()}
@@ -189,9 +190,10 @@ impl MarkdownDocumentSessionManager {
                 let path = directory.join("manifest.json");
                 if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && !cache_cleanup::is_link(&m) && m.len() <= 1024 * 1024) { continue; }
                 let Some(manifest) = File::open(&path).ok().and_then(|f| serde_json::from_reader::<_, Manifest>(f).ok()) else { continue; };
-                if manifest.version != 1 || manifest.document_id != id || manifest.path.is_some() || manifest.event.is_none() { continue; }
-                known.insert(id.clone());
-                let mut candidate = RecoveryCandidate::kept(&root, id);
+                if manifest.version != 1 || manifest.document_id != id || manifest.event.is_none() { continue; }
+                known.insert(id);
+                let mut candidate = RecoveryCandidate::kept(&root, &manifest);
+                (candidate.conflict, candidate.change) = recovery_change(manifest.path.as_deref(), manifest.revision, &manifest.identity, manifest.legacy_unconfirmed);
                 candidate._lease = Some(lease.clone());
                 candidate.modified = file_modified(&path);
                 candidates.push(candidate);

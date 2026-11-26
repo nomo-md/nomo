@@ -1,10 +1,10 @@
-//! 目录切换沿用标签关闭确认；历史只保存引用，离开后释放全部已挂载文档。
+//! 先保留原工作区的草稿和布局，再释放已挂载文档并恢复目标目录。
 use super::*;
 
 pub(super) struct FolderOpen {
     root: PathBuf,
     reveal: Option<PathBuf>,
-    closing: bool,
+    file_after_switch: Option<OpenRequest>,
 }
 
 fn matches_folder(saved: &Path, root: &Path) -> bool {
@@ -79,7 +79,7 @@ impl Workspace {
         }
         if let Some(tree) = self.tree.as_ref().filter(|tree| path.starts_with(&tree.root)) {
             let root = tree.root.clone();
-            if self.leave_mini(window, cx) { self.open_folder_workspace(root, Some(path), window, cx); }
+            if self.leave_mini(window, cx) { self.open_folder_workspace(root, Some(path), None, window, cx); }
             return;
         }
         // 文件树使用目录项原路径；链接目录在所属工作区中按链接位置显示。
@@ -94,22 +94,23 @@ impl Workspace {
             (root.clone(), root)
         };
         if !self.reuse_open_folder(&root, Some(&reveal), true, window, cx) && self.leave_mini(window, cx) {
-            self.open_folder_workspace(root, Some(reveal), window, cx);
+            self.open_folder_workspace(root, Some(reveal), None, window, cx);
         }
     }
 
     pub(in crate::ui::workspace) fn open_folder_workspace(
-        &mut self, root: PathBuf, reveal: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>,
+        &mut self, root: PathBuf, reveal: Option<PathBuf>, file_after_switch: Option<OpenRequest>,
+        window: &mut Window, cx: &mut Context<Self>,
     ) {
         if self.tab_interaction_busy(window) { return; }
         if self.tree.as_ref().is_some_and(|tree| matches_folder(&tree.root, &root)) {
             self.library.update(cx, |library, cx| library.change(LibraryChange::AddFolder(root), cx));
             self.show_folder_workspace(window, cx);
             if let Some(path) = reveal { self.reveal_tree_folder(path, cx); }
-            self.resume_folder_requests(window, cx);
+            self.resume_folder_requests(file_after_switch, window, cx);
             return;
         }
-        self.comparison.layout.folder_open = Some(FolderOpen { root, reveal, closing: false });
+        self.comparison.layout.folder_open = Some(FolderOpen { root, reveal, file_after_switch });
         self.start_recovery_catalog(cx);
         self.continue_folder_open(window, cx);
     }
@@ -118,7 +119,7 @@ impl Workspace {
         &mut self, window: &mut Window, cx: &mut Context<Self>,
     ) {
         let Some(pending) = &self.comparison.layout.folder_open else { return; };
-        if pending.closing || !self.opening.is_empty() || self.pending_document_transition.is_some()
+        if self.comparison.closing.is_some() || !self.opening.is_empty() || self.pending_document_transition.is_some()
             || window.has_active_prompt() { return; }
         // 两个现有后台任务完成时直接继续，不增加轮询或常驻任务。
         if cx.try_global::<Store>().is_some_and(|store| store.importing) || self.recovery_catalog_loading(cx) {
@@ -145,31 +146,16 @@ impl Workspace {
             workspace.continue_folder_open(window, cx);
         }) { return; }
 
-        // 先落盘完整原布局，再关闭会话；关闭期间不发布逐渐减少的标签列表。
+        // 布局包含未加载标签的引用；只为已挂载文档办理会话交接。
         self.comparison.layout.flush.take();
         self.claim_layout(cx);
-        if let Err(error) = Self::publish_layouts(vec![self.layout_snapshot(cx)], cx) {
-            self.failure_notice = Some(error.into());
-            self.cancel_close(cx);
-            cx.notify();
-            return;
-        }
-        self.comparison.layout.folder_open.as_mut().unwrap().closing = true;
-        // 未加载的后台标签只保留原记录，不为了切换目录加载其正文。
-        self.comparison.batch = self.comparison.items.iter()
-            .filter(|item| self.tabs.iter().any(|tab| item.contains(tab.key)))
-            .map(|item| item.first()).collect();
-        self.next_batch_close(window, cx);
+        self.close_workspace_documents(keys, window, cx);
     }
 
     pub(in crate::ui::workspace) fn finish_folder_open(
         &mut self, window: &mut Window, cx: &mut Context<Self>,
     ) {
-        if !self.tabs.is_empty() || !self.opening.is_empty()
-            || !self.comparison.layout.folder_open.as_ref().is_some_and(|pending| pending.closing) {
-            return;
-        }
-        let pending = self.comparison.layout.folder_open.take().unwrap();
+        let Some(pending) = self.comparison.layout.folder_open.take() else { return; };
         if cx.try_global::<Store>().is_some() {
             cx.global_mut::<Store>().claims.remove(&self.comparison.layout.id);
         }
@@ -178,7 +164,6 @@ impl Workspace {
         self.active = 0;
         let saved = cx.try_global::<Store>().and_then(|store| store.for_folder(&pending.root)).cloned();
         self.library.update(cx, |library, cx| library.change(LibraryChange::AddFolder(pending.root.clone()), cx));
-        // 目标目录在确认保存期间消失时也不能把空窗口重新记到原目录名下。
         self.replace_tree(pending.root.clone(), cx);
         if let Some(mut saved) = saved {
             saved.folder = Some(pending.root);
@@ -188,11 +173,12 @@ impl Workspace {
         }
         self.explorer.sidebar_temporarily_visible = !cx.global::<Settings>().show_sidebar;
         if let Some(path) = pending.reveal { self.reveal_tree_folder(path, cx); }
-        self.resume_folder_requests(window, cx);
+        self.resume_folder_requests(pending.file_after_switch, window, cx);
         cx.notify();
     }
 
-    fn resume_folder_requests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn resume_folder_requests(&mut self, file_after_switch: Option<OpenRequest>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(request) = file_after_switch { self.open_requests.pending.push_front(request); }
         if self.open_requests.pending.is_empty() { return; }
         // 关闭和恢复标签会推进内部代次，排在目录之后的显式打开意图仍应获得最终焦点。
         let generation = self.next_open_intent();

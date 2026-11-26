@@ -82,7 +82,7 @@ impl Home {
                 .on_click(cx.listener(move |home, _, _, cx| {
                     cx.stop_propagation(); home.library.update(cx, |library, cx| library.change(Change::Remove { path: remove_path.clone(), folder: directory }, cx));
                 })))
-            .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Open(open.clone()))));
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Open { path: open.clone(), directory })));
         let row = self.draggable(row, node, None, None, width, cx);
         row.into_any_element()
     }
@@ -93,7 +93,7 @@ impl Home {
         let directory = entry.directory;
         let title = if directory { entry_name(&path) } else { document_name(&path) };
         let icon_name = if directory { IconName::Folder } else { IconName::FileText };
-        let open = if directory { HomeEvent::OpenFavoriteFolder(path.clone()) } else { HomeEvent::Open(path.clone()) };
+        let open = if directory { HomeEvent::OpenFavoriteFolder(path.clone()) } else { HomeEvent::Open { path: path.clone(), directory: false } };
         let base_name = favorite_base_name(entry);
         let duplicate = self.snapshot.favorites.iter().any(|other| other.path != path && favorite_base_name(other) == base_name);
         let parent_hint = path.parent().filter(|_| duplicate).map(entry_name);
@@ -176,7 +176,7 @@ impl Home {
             .on_mouse_down(MouseButton::Left, cx.listener(move |home, _, _, cx| home.set_card_pressed(press_path.clone(), true, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(move |home, _, _, cx| home.set_card_pressed(release_path.clone(), false, cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(move |home, _, _, cx| home.set_card_pressed(outside_path.clone(), false, cx)))
-            .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Open(open.clone()))));
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Open { path: open.clone(), directory: true })));
         self.draggable(card, node, Some((width, height)), None, 0.0, cx).into_any_element()
     }
 
