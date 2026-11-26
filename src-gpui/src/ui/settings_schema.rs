@@ -65,6 +65,7 @@ pub const CATEGORIES: &[Category] = &[
             item("autoSaveEnabled", "settings.autoSaveEnabled.label", "settings.autoSaveEnabled.description", Control::Toggle, Support::Full),
             item("autoSaveDelayMs", "settings.autoSaveDelayMs.label", "settings.autoSaveDelayMs.description", Control::Range { min: 500.0, max: 5000.0, step: 100.0, unit: "ms" }, Support::Full),
             item("createSnapshotBeforeSave", "settings.createSnapshotBeforeSave.label", "settings.createSnapshotBeforeSave.description", Control::Toggle, Support::Full),
+            item("keepUntitledDraftsOnClose", "settings.keepUntitledDraftsOnClose.label", "settings.keepUntitledDraftsOnClose.description", Control::Toggle, Support::Full),
             item("interfaceLanguage", "settings.interfaceLanguage.label", "settings.interfaceLanguage.description", Control::Choice(&[("system", "settings.interfaceLanguage.choice.system"), ("zh-CN", "settings.interfaceLanguage.choice.zh-CN"), ("zh-TW", "settings.interfaceLanguage.choice.zh-TW"), ("en-US", "settings.interfaceLanguage.choice.en-US"), ("ja-JP", "settings.interfaceLanguage.choice.ja-JP")]), Support::Full),
         ])]),
     },

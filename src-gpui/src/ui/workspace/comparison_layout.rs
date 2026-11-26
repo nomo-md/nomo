@@ -16,6 +16,8 @@ const CLOSED_WINDOWS: usize = 16;
 pub(in crate::ui::workspace) struct SavedDocument {
     pub(in crate::ui::workspace) path: Option<PathBuf>,
     pub(in crate::ui::workspace) session: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kept_in: Option<String>,
     pub(in crate::ui::workspace) mode: EditorMode,
     pub(in crate::ui::workspace) dirty: bool,
     #[serde(default)]
@@ -225,6 +227,7 @@ impl Workspace {
                             if matches!(&result, Ok(None)) && limited {workspace.notice=Some(ToolbarLocale::current(cx).app_text("layout.legacyLimited").into());}
                             workspace.continue_folder_open(window, cx);
                             workspace.drain_open_requests(window, cx);
+                            workspace.restore_startup_drafts(window, cx);
                             cx.notify();
                         });
                     }
@@ -245,6 +248,7 @@ impl Workspace {
         SavedDocument {
             path: doc.path(),
             session: doc.status().document_id.clone(),
+            kept_in: None,
             mode: tab.mode,
             dirty: doc.is_dirty(cx),
             revision: doc.status().revision,
@@ -271,6 +275,32 @@ impl Workspace {
         let locale = ToolbarLocale::current(cx);
         cx.try_global::<Store>().ok_or_else(|| locale.app_text("layout.directory").to_owned())?;
         cx.global_mut::<Store>().update(updates).map_err(|message| message.render(locale))
+    }
+    pub(in crate::ui::workspace) fn kept_draft_locations(cx: &App) -> BTreeMap<String, Vec<String>> {
+        let mut locations = BTreeMap::new();
+        if let Some(store) = cx.try_global::<Store>() {
+            for doc in store.book.windows.iter().flat_map(|layout| layout.documents.values()) {
+                if let Some(process) = &doc.kept_in {
+                    locations.entry(process.clone()).or_insert_with(Vec::new).push(doc.session.clone());
+                }
+            }
+        }
+        locations
+    }
+    pub(super) fn layout_for_close(&self, decisions: &[(u64, u64, CloseDisposition)], process: &str, cx: &App) -> SavedLayout {
+        let mut layout = self.layout_snapshot(cx);
+        for &(key, _, decision) in decisions {
+            if let Some(member) = layout.documents.get_mut(&key) {
+                if decision == CloseDisposition::Discard && member.path.is_none() {
+                    layout.documents.remove(&key);
+                } else {
+                    member.dirty = decision == CloseDisposition::KeepDraft;
+                    member.kept_in = member.dirty.then(|| process.to_owned());
+                }
+            }
+        }
+        layout.normalize();
+        layout
     }
     pub(super) fn claim_layout(&self, cx: &mut Context<Self>) {
         if cx.try_global::<Store>().is_some() {
@@ -347,6 +377,19 @@ impl Workspace {
             cx.notify();
         }
     }
+    pub(in crate::ui::workspace) fn restore_startup_drafts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.restore_drafts_on_start || self.recovery_catalog_loading(cx)
+            || cx.try_global::<Store>().is_some_and(|store| store.importing) { return; }
+        self.restore_drafts_on_start = false;
+        if !self.home_visible || !self.tabs.is_empty() || !self.opening.is_empty() || !self.open_requests.pending.is_empty() { return; }
+        let auto_keep = cx.global::<Settings>().bool("keepUntitledDraftsOnClose");
+        let has_draft = cx.try_global::<Store>().and_then(Store::available).is_some_and(|layout| {
+            layout.documents.values().any(|doc| doc.path.is_none() && (doc.kept_in.is_some() || auto_keep)
+                && matches!(self.layout_recovery_candidate(&doc.session, cx), Ok(Some(_))))
+        });
+        if has_draft { self.restore_last_layout(window, cx); }
+    }
+
     pub(in crate::ui::workspace) fn restore_last_layout(
         &mut self,
         window: &mut Window,

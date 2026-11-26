@@ -1,5 +1,6 @@
 //! 标签顺序独立于文档宿主。组合只引用两篇已有文档，命令仍由活动成员处理。
 use super::*;
+use crate::text_document::markdown_session::CloseDisposition;
 use serde::{Deserialize, Serialize};
 
 #[path = "comparison_close.rs"]
@@ -87,7 +88,7 @@ pub(super) struct ComparisonState {
     pub(super) highlight: Option<drag::Placement>,
     ghost: Option<(gpui::Point<gpui::Pixels>, String)>,
     suppress_click: Option<Instant>,
-    pub(super) closing: Option<close::PairClose>,
+    pub(super) closing: Option<close::GroupClose>,
     pub(super) batch: std::collections::VecDeque<u64>,
     layout: layout::LayoutState,
 }

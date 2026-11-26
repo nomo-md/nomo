@@ -156,6 +156,9 @@ pub(crate) struct SessionMember {
     pub revision: Option<u64>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloseDisposition { Clean, Discard, KeepDraft }
+
 struct Session {
     root: PathBuf,
     owner: String,
@@ -1364,9 +1367,14 @@ impl MarkdownDocumentSessionManager {
     }
     /// 组合成员全部通过归属、快照和保存校验后才共同释放，避免部分关闭。
     pub(crate) fn close_many(&self, owner: &str, documents: Vec<(String, bool)>) -> TextDocumentResult<()> {
-        self.close_documents(documents.into_iter().map(|(document_id, discard)| (SessionMember { document_id, owner: owner.to_owned(), revision: None }, discard)).collect())
+        self.close_documents(documents.into_iter().map(|(document_id, discard)| (SessionMember { document_id, owner: owner.to_owned(), revision: None },
+            if discard { CloseDisposition::Discard } else { CloseDisposition::Clean })).collect(), || Ok(())).map(|_| ())
     }
-    pub(crate) fn close_documents(&self, mut documents: Vec<(SessionMember, bool)>) -> TextDocumentResult<()> {
+    pub(crate) fn close_documents(
+        &self,
+        mut documents: Vec<(SessionMember, CloseDisposition)>,
+        before_release: impl FnOnce() -> Result<(), String>,
+    ) -> TextDocumentResult<Vec<RecoveryCandidate>> {
         documents.sort_by(|left, right| left.0.document_id.cmp(&right.0.document_id));
         if documents.windows(2).any(|pair| pair[0].0.document_id == pair[1].0.document_id) {
             return Err(error("invalid-close-group", "组合关闭包含重复文档"));
@@ -1376,21 +1384,31 @@ impl MarkdownDocumentSessionManager {
         let gates = handles.iter().map(|handle| Ok(lock(handle)?.save_gate.clone())).collect::<TextDocumentResult<Vec<_>>>()?;
         let _saving = gates.iter().map(|gate| lock(gate)).collect::<TextDocumentResult<Vec<_>>>()?;
         let mut sessions = handles.iter().map(|handle| lock(handle)).collect::<TextDocumentResult<Vec<_>>>()?;
-        {
-            for ((member, discard), session) in documents.iter().zip(sessions.iter()) {
-                member.validate(session)?;
-                self.require_released_snapshots(&member.document_id, "close-many", "组合文档仍有正在使用的完整快照")?;
-                if session.dirty && !discard { return Err(error("unsaved-document", "组合文档尚有未保存内容")); }
+        let mut kept = Vec::new();
+        for ((member, decision), session) in documents.iter().zip(sessions.iter()) {
+            member.validate(session)?;
+            self.require_released_snapshots(&member.document_id, "close-many", "组合文档仍有正在使用的完整快照")?;
+            match decision {
+                CloseDisposition::Clean if session.dirty => return Err(error("unsaved-document", "文档尚有未保存内容")),
+                CloseDisposition::KeepDraft => {
+                    if session.manifest.path.is_some() || !session.dirty || session.manifest.event.is_none() {
+                        return Err(error("draft-changed", "草稿状态已改变，请重新关闭窗口"));
+                    }
+                    kept.push(RecoveryCandidate::kept(&self.root, member.document_id.clone()));
+                }
+                _ => {}
             }
         }
-        for session in &mut sessions {
-            session.closed = true; session.cleanup.remove = true;
-            self.release_document_services(session);
-        }
         let mut registry = lock(&self.sessions)?;
-        for (member, _) in documents { registry.remove(&member.document_id); }
-        drop(registry); drop(sessions);
-        Ok(())
+        // 先确认整组修订，再持久化布局。任一检查或写入失败时所有标签仍可编辑。
+        before_release().map_err(|cause| error("close-layout", cause))?;
+        for ((member, decision), session) in documents.iter().zip(&mut sessions) {
+            session.closed = true;
+            session.cleanup.remove = *decision != CloseDisposition::KeepDraft;
+            self.release_document_services(session);
+            registry.remove(&member.document_id);
+        }
+        Ok(kept)
     }
 
     pub(crate) fn close(

@@ -72,6 +72,10 @@ struct LastActiveWorkspace(gpui::AnyWindowHandle);
 impl gpui::Global for LastActiveWorkspace {}
 
 pub(crate) fn cancel_quit(cx:&mut App){cx.set_global(QuitRequested(None));}
+pub(crate) fn quit_clears_drafts(cx: &App) -> bool {
+    matches!(cx.try_global::<QuitRequested>().and_then(|request| request.0).map(|q| q.reason),
+        Some(QuitReason::Reset(app_data::Scope::All | app_data::Scope::Usage)))
+}
 pub(crate) fn quit_workspaces(cx:&mut App){
     request_quit(QuitReason::Normal,cx);
 }

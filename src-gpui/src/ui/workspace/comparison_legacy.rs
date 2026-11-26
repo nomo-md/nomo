@@ -41,7 +41,7 @@ pub(super) fn load(root: &Path) -> Result<(Vec<SavedLayout>, Option<String>), St
             let byte = tab["scrollAnchor"]["byteOffset"].as_u64().unwrap_or(0);
             let selection = DocumentSelection {anchor_byte:tab["selection"]["anchorByte"].as_u64().unwrap_or(byte),head_byte:tab["selection"]["headByte"].as_u64().unwrap_or(byte)};
             let tab_mode = if matches!(tab["documentKind"].as_str(),Some("text"|"json")) {EditorMode::Source} else {default_mode};
-            documents.insert(key,SavedDocument {path,session,mode:tab_mode,dirty,revision:0,byte,fraction:0.0,selection,legacy_line});
+            documents.insert(key,SavedDocument {path,session,kept_in:None,mode:tab_mode,dirty,revision:0,byte,fraction:0.0,selection,legacy_line});
             keys.insert(tab_id,key);
             order.push(key);
         }

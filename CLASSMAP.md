@@ -12,7 +12,7 @@
 | 应用数据清理 | `src-gpui/src/app_data.rs`、`main.rs`、`ui/settings_window.rs`、`scripts/packaging/windows.nsi` | 设置分别恢复偏好／清除使用数据，卸载可全清；共享／独占锁、退出后按原范围清理和失败重试，不删除外部文档 |
 | 默认应用外壳 | `src-gpui/src/ui/workspace.rs`、`workspace/toolbar.rs`、`workspace/navigation.rs`、`workspace_surface.rs` | 多标签、连体边框与阴影、三种文档导航布局和显隐生命周期、主页往返、模式、工具栏、搜索、自动保存；仅工作区左侧栏顶部显示主页入口，主页隐藏文档标签栏；侧栏宽度、左栏标签、分区比例与大纲显隐独立持久化 |
 | Windows 组合标签 | `src-gpui/src/ui/workspace/comparison.rs`、`comparison_ui.rs`、`comparison_close.rs`、`comparison_drag.rs`、`comparison_layout.rs` | 展示项与文档会话分离；双文档焦点、标签/成员拖放、批量关闭、跨窗归属移交及按需恢复 |
-| 普通工作区恢复 | `src-gpui/src/ui/workspace/comparison_layout.rs`、`folder_workspace.rs`、`workspace.rs` | 三平台记录普通标签顺序、活动文档、模式、选区、阅读位置及文件夹；进入目录自动恢复该目录最新布局，切换前保存并沿用关闭确认；macOS／Linux 将组合记录展开，沿用有界清单与按需恢复 |
+| 普通工作区恢复 | `src-gpui/src/ui/workspace/comparison_layout.rs`、`comparison_close.rs`、`folder_workspace.rs`、`workspace.rs` | 三平台记录标签顺序、活动文档、模式、选区、阅读位置及文件夹；关闭窗口可按次或自动保留未命名草稿，直接启动时恢复含草稿的上次工作区；进入目录恢复其最新布局，macOS／Linux 将组合记录展开，沿用有界清单与按需恢复 |
 | 编辑收尾与文档切换 | `src-gpui/src/ui/workspace/document_transition.rs`、`nomo_mark/workspace_host.rs`、`nomo_mark/object_ui.rs` | 组字和对象草稿收尾、确认后继续切换或关闭；单个待执行意图、临时订阅，无正文镜像或轮询 |
 | 右下角控件 | `src-gpui/src/ui/workspace/status.rs` | 缩放、统计、格式检查和锁图标各自显隐，隐藏时清理对应弹层状态；切换编辑锁先收尾输入 |
 | Markdown 格式检查 | `src-gpui/src/text_document/markdown_lint/`、`markdown_session/lint.rs`、`nomo_mark/markdown_lint.rs`、`ui/workspace/markdown_lint.rs` | 固定修订的原生只读规则扫描；默认／宽松规则、注释作用域、按字节定位的有界诊断；活动文档调度、取消及超预算跳过，不修改正文 |

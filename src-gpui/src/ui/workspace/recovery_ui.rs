@@ -33,22 +33,30 @@ impl Workspace {
         catalog.loading=true;
         cx.set_global(catalog);
         let cancel=cx.global::<RecoveryCatalog>().cancel.clone();
-        let task=cx.background_executor().spawn(async move {manager.recovery_candidates(&cancel)});
+        let kept = Self::kept_draft_locations(cx);
+        let task=cx.background_executor().spawn(async move {manager.recovery_candidates(kept, &cancel)});
         // 不引用首个窗口；关闭首窗后其他窗口仍能访问恢复资料。
         cx.spawn(async move |_,cx| {
             let result=task.await;
             let _=cx.update(|cx| {
                 let catalog=cx.global_mut::<RecoveryCatalog>();
                 catalog.loading=false;
-                match result {Ok((candidates,warning))=>{catalog.candidates=candidates;catalog.warning=warning;},Err(error)=>catalog.error=Some(error.to_string())}
+                match result {Ok((candidates,warning))=>{catalog.candidates.extend(candidates);catalog.warning=warning;},Err(error)=>catalog.error=Some(error.to_string())}
                 for handle in cx.windows().into_iter().filter_map(|handle| handle.downcast::<Workspace>()) {
                     let _ = handle.update(cx, |workspace, window, cx| {
                         workspace.continue_folder_open(window, cx);
                         workspace.drain_open_requests(window, cx);
+                        workspace.restore_startup_drafts(window, cx);
                     });
                 }
             });
         }).detach();
+    }
+
+    pub(super) fn register_kept_drafts(drafts: Vec<RecoveryCandidate>, cx: &mut App) {
+        if !drafts.is_empty() {
+            cx.global_mut::<RecoveryCatalog>().candidates.splice(0..0, drafts);
+        }
     }
 
     pub(super) fn offer_document_recovery(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {

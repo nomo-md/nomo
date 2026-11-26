@@ -94,6 +94,7 @@ impl Workspace {
     }
 
     pub(super) fn enqueue_open_request(&mut self, mut request: OpenRequest, cx: &mut Context<Self>) {
+        self.restore_drafts_on_start = false;
         if self.open_requests.pending.len() >= MAX_PENDING_OPENS
             || request.path.as_ref().is_some_and(|path| path.as_os_str().len() > 32 * 1024)
             || request.anchor.as_ref().is_some_and(|anchor| anchor.len() > 8192)

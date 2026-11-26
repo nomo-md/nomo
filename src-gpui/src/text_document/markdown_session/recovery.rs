@@ -31,6 +31,10 @@ pub(crate) struct RecoveryCandidate {
     legacy: Option<crate::legacy_records::Draft>,
 }
 impl RecoveryCandidate {
+    pub(super) fn kept(root: &Path, document_id: String) -> Self {
+        Self { root: root.to_owned(), document_id, path: None, conflict: false, verified: true,
+            modified: std::time::SystemTime::now(), change: None, _lease: None, legacy: None }
+    }
     pub(crate) fn is_legacy(&self) -> bool {self.legacy.is_some()}
     pub(crate) fn label(&self) -> String {
         let name=self.legacy.as_ref().map(|draft|format!("旧版 · {}",draft.title)).unwrap_or_else(||self.path.as_ref().and_then(|path|path.file_name()).map(|name|name.to_string_lossy().into_owned()).unwrap_or_else(||"未命名".into()));
@@ -145,12 +149,40 @@ fn has_unsaved_changes(root:&Path,manifest:&Manifest,cancel:&std::sync::atomic::
 }
 
 impl MarkdownDocumentSessionManager {
+    pub(crate) fn process_directory(&self) -> &str {
+        self.root.file_name().and_then(|name| name.to_str()).unwrap_or_default()
+    }
     pub(crate) fn refresh_recovery_location(&self,candidate:&mut RecoveryCandidate) {
         if self.root.join(&candidate.document_id).is_dir() {candidate.root=self.root.clone();candidate.legacy=None;}
     }
-    pub(crate) fn recovery_candidates(&self,cancel:&std::sync::atomic::AtomicBool) -> TextDocumentResult<(Vec<RecoveryCandidate>,Option<String>)> {
+    pub(crate) fn recovery_candidates(&self, kept: std::collections::BTreeMap<String, Vec<String>>, cancel:&std::sync::atomic::AtomicBool) -> TextDocumentResult<(Vec<RecoveryCandidate>,Option<String>)> {
         let parent=self.root.parent().ok_or_else(|| error("recovery-root", "会话目录缺少父目录"))?;
         let mut candidates=RecoveryCandidate::discover(parent, &self.root, cancel)?;
+        // 布局明确引用的草稿按目录和 ID 定位，不受意外退出扫描的 32 项上限影响。
+        let mut known: std::collections::HashSet<_> = candidates.iter().map(|c| c.document_id.clone()).collect();
+        for (process, ids) in kept {
+            if !cache_cleanup::numbered_name(&process, "", 2) { continue; }
+            let root = parent.join(process);
+            if root == self.root || !fs::symlink_metadata(&root).is_ok_and(|m| m.is_dir() && !cache_cleanup::is_link(&m)) { continue; }
+            let lease = candidates.iter().find(|c| c.root == root).and_then(|c| c._lease.clone())
+                .or_else(|| SessionLease::acquire(&root).ok().map(Arc::new));
+            let Some(lease) = lease else { continue; };
+            for id in ids {
+                super::super::markdown_search::check_cancel(cancel)?;
+                if known.contains(&id) || !id.starts_with("md-") || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') { continue; }
+                let directory = root.join(&id);
+                if !fs::symlink_metadata(&directory).is_ok_and(|m| m.is_dir() && !cache_cleanup::is_link(&m)) { continue; }
+                let path = directory.join("manifest.json");
+                if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && !cache_cleanup::is_link(&m) && m.len() <= 1024 * 1024) { continue; }
+                let Some(manifest) = File::open(&path).ok().and_then(|f| serde_json::from_reader::<_, Manifest>(f).ok()) else { continue; };
+                if manifest.version != 1 || manifest.document_id != id || manifest.path.is_some() || manifest.event.is_none() { continue; }
+                known.insert(id.clone());
+                let mut candidate = RecoveryCandidate::kept(&root, id);
+                candidate._lease = Some(lease.clone());
+                candidate.modified = file_modified(&path);
+                candidates.push(candidate);
+            }
+        }
         let Some(data_root)=parent.parent().filter(|_|parent.file_name()==Some(std::ffi::OsStr::new("gpui-sessions"))) else {return Ok((candidates,None));};
         let (drafts,warning)=match crate::legacy_records::drafts(data_root) {Ok(result)=>result,Err(error)=>(Vec::new(),Some(error))};
         for draft in drafts {

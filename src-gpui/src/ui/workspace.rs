@@ -310,6 +310,7 @@ pub struct Workspace {
     toast: Option<Entity<Toast>>,
     /// 工具栏内容宽度滑杆是否正在拖动。
     width_dragging: bool,
+    restore_drafts_on_start: bool,
     application_dialogs: application_dialogs::ApplicationDialogs,
 }
 
@@ -327,6 +328,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let home_visible = paths.is_empty();
+        let restore_drafts_on_start = home_visible && cx.try_global::<DocumentServices>().is_none();
         let library = home::library::shared(cx);
         // 编辑页独占连体标签轮廓；主页使用平面左右分栏。
         let surface = WorkspaceSurface::default();
@@ -476,6 +478,7 @@ impl Workspace {
             last_notice: None,
             toast: None,
             width_dragging: false,
+            restore_drafts_on_start,
             application_dialogs: Default::default(),
             mini: Default::default(),
         };
@@ -1152,7 +1155,7 @@ impl Workspace {
     }
 
     pub(crate) fn request_close_window(&mut self,window:&mut Window,cx:&mut Context<Self>)->bool {
-        if window.has_active_prompt() {return false;}
+        if window.has_active_prompt() || self.close_prompt || self.comparison.closing.is_some() {return false;}
         if self.folder_open_pending() {self.cancel_close(cx);}
         if self.closing_window && !self.tabs.is_empty() {return false;}
         if let Some(document)=self.document() {
@@ -1172,7 +1175,7 @@ impl Workspace {
             crate::save_closing_workspace_placement(self, window, cx);
             return true;
         }
-        if !self.closing_window {self.flush_layout(cx);self.closing_window=true;self.close_tab(self.active,window,cx);}
+        if !self.closing_window {self.begin_window_close(window,cx);}
         false
     }
     fn cancel_close(&mut self,cx:&mut Context<Self>){self.cancel_folder_open();self.comparison.closing=None;self.comparison.batch.clear();self.closing_window=false;self.application_dialogs.close_approved=false;self.record_layout(cx);crate::cancel_quit(cx);}
@@ -1269,7 +1272,7 @@ impl Workspace {
                     workspace.refresh_tree(cx);
                     workspace.sync_tree_selection(false,cx);
                     if workspace.document().as_ref()==Some(&document) {window.set_window_title(&format!("{} — Nomo",document.read(cx).display_title(cx)));}
-                    if close_after && workspace.comparison.closing.is_some() {workspace.continue_pair_save(&document,window,cx);} else if close_after {if document.read(cx).is_dirty(cx) {workspace.cancel_close(cx);workspace.notice=Some(ToolbarLocale::current(cx).app_text("workspace.saveChanged").into());}else{workspace.remove_tab(&document,false,window,cx);}}
+                    if close_after && workspace.comparison.closing.is_some() {workspace.continue_group_save(&document,window,cx);} else if close_after {if document.read(cx).is_dirty(cx) {workspace.cancel_close(cx);workspace.notice=Some(ToolbarLocale::current(cx).app_text("workspace.saveChanged").into());}else{workspace.remove_tab(&document,false,window,cx);}}
                 }else{workspace.cancel_close(cx);}
                 cx.notify();
             });
