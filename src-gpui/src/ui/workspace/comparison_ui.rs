@@ -84,6 +84,9 @@ impl Render for DocumentTabTooltip {
             return div();
         };
         let max_width = (window.viewport_size().width - px(12.0)).clamp(px(0.0), px(440.0));
+        // GPUI 分别对外框和两侧内边距做像素对齐，换行判断要使用对齐后的净宽。
+        let padding_width = window.pixel_snap(TOOLTIP_HORIZONTAL_PADDING) * 2.0;
+        let max_content_width = window.pixel_snap(max_width) - padding_width;
         let text_style = window.text_style();
         let text_system = window.text_system();
         let name_width = |text: &str| {
@@ -111,17 +114,20 @@ impl Render for DocumentTabTooltip {
                 continue;
             };
 
-            content_width = content_width.max(name_width(&name));
+            let width = name_width(&name);
+            content_width = content_width.max(width);
             body = body.child(
                 div()
                     .min_w(px(0.0))
                     .font_weight(FontWeight::SEMIBOLD)
+                    .when(width <= max_content_width, |row| row.whitespace_nowrap())
                     .child(name),
             );
         }
 
-        // GPUI 以最小内容尺寸布局提示框，给定实际宽度后才按窗口上限换行。
-        body.w((content_width.ceil() + TOOLTIP_HORIZONTAL_PADDING * 2.0).min(max_width))
+        let scale = window.scale_factor();
+        let content_width = px(content_width.scale(scale).ceil().as_f32() / scale);
+        body.w((content_width + padding_width).min(max_width))
     }
 }
 
