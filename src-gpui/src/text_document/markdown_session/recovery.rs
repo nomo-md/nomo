@@ -102,8 +102,7 @@ impl RecoveryCandidate {
                     Ok(true) => true,
                     Err(cause) => {crate::app_logger::warn("Recovery", &format!("无法完整核实草稿，保留手动恢复入口：{cause}"));false},
                 };
-                let change=manifest.path.as_ref().and_then(|path|external::identity(path).ok().filter(|current|manifest.legacy_unconfirmed || *current!=manifest.identity).map(|current|ExternalChange{path:path.clone(),revision:manifest.revision,deleted:current.is_none(),token:external::token(&current)}));
-                let conflict=change.is_some();
+                let (conflict, change) = recovery_change(manifest.path.as_deref(), manifest.revision, &manifest.identity, manifest.legacy_unconfirmed);
                 candidates.push(Self { root: entry.path(), document_id: id, path: manifest.path, conflict, verified, change, modified: file_modified(&path), _lease: Some(lease.clone()), legacy: None });
                 if candidates.len() == 32 { break; }
             }
@@ -114,6 +113,21 @@ impl RecoveryCandidate {
 }
 fn file_modified(path:&Path)->std::time::SystemTime {
     fs::metadata(path).and_then(|metadata|metadata.modified()).unwrap_or(std::time::UNIX_EPOCH)
+}
+
+fn recovery_change(path: Option<&Path>, revision: u64, expected: &Option<BaselineIdentity>, unconfirmed: bool) -> (bool, Option<ExternalChange>) {
+    let Some(path) = path else { return (false, None); };
+    let observation = external::identity(path).and_then(|current| {
+        if !unconfirmed && &current == expected { return Ok(None); }
+        ExternalChange::capture(path, revision, &current).map(Some)
+    });
+    match observation {
+        Ok(change) => (change.is_some(), change),
+        Err(cause) => {
+            crate::app_logger::warn("Recovery", &format!("无法核对草稿的磁盘版本，保留恢复资料：{cause}"));
+            (true, None)
+        }
+    }
 }
 
 /// 按片段和 64 KiB 比较缓冲检查保存点，不挂载会话、清空历史或建立正文镜像。
@@ -188,7 +202,7 @@ impl MarkdownDocumentSessionManager {
         for draft in drafts {
             super::super::markdown_search::check_cancel(cancel)?;
             if candidates.iter().any(|candidate|candidate.document_id==draft.id) {continue;}
-            let change=draft.path.as_ref().and_then(|path|external::identity(path).ok().map(|current|ExternalChange{path:path.clone(),revision:1,deleted:current.is_none(),token:external::token(&current)}));
+            let (_, change) = recovery_change(draft.path.as_deref(), 1, &None, true);
             candidates.push(RecoveryCandidate{root:data_root.into(),document_id:draft.id.clone(),path:draft.path.clone(),conflict:draft.path.is_some(),verified:true,modified:draft.modified,change,_lease:None,legacy:Some(draft)});
         }
         candidates.sort_by_key(|candidate|std::cmp::Reverse(candidate.modified));

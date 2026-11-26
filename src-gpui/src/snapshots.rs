@@ -11,7 +11,24 @@ pub(crate) fn write_snapshot(path: &Path) -> std::io::Result<()> {
     let dir = root.join(name);
     std::fs::create_dir_all(&dir)?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_millis());
-    std::fs::copy(path, dir.join(format!("{stamp}.md")))?;
+    let destination = dir.join(format!("{stamp}.md"));
+    let copied = std::fs::copy(path, &destination);
+    #[cfg(windows)]
+    let copied = copied.or_else(|cause| {
+        use windows_sys::Win32::Foundation::{ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_UNRECOGNIZED_VOLUME};
+        if !matches!(cause.raw_os_error().map(|code| code as u32),
+            Some(ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED | ERROR_UNRECOGNIZED_VOLUME)) {
+            return Err(cause);
+        }
+        // 某些虚拟卷可读正文，但不支持系统的跨卷整文件复制。
+        let mut source = std::fs::File::open(path)?;
+        let mut staged = tempfile::NamedTempFile::new_in(&dir)?;
+        let bytes = std::io::copy(&mut source, staged.as_file_mut())?;
+        staged.as_file().sync_all()?;
+        staged.persist(&destination)?;
+        Ok(bytes)
+    });
+    copied?;
     let mut existing: Vec<_> = std::fs::read_dir(&dir)?.filter_map(Result::ok).map(|entry| entry.path()).collect();
     if existing.len() > MAX_SNAPSHOTS_PER_FILE {
         existing.sort();

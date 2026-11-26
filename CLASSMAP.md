@@ -65,7 +65,7 @@
 | 开发界面 | `src-gpui/src/nomo_mark/demo.rs`、`development_ui.rs` | feature 只控制开发入口和调试工具条 |
 | 文档导出与打印 | `src-gpui/src/document_export.rs`、`document_export/{html,resources,remote,model,media,pdf,pdf_fonts,word}.rs`、`ui/workspace/{export,print}.rs`、`ui/workspace/print/` | 固定修订及单个可取消任务。打印按浅色 PDF 分页。Windows 的 PrintManager 按需请求预览页，预览与输出共用纸张和可打印区域布局。macOS 由 PDFKit 打印任务在文档窗口内显示 AppKit 预览。Linux 通过 X11／Wayland 父窗口调用打印 portal，按 PDF 文件输出设置生成所选页面；HTTP(S) 图片有界下载并内嵌，HTML 流式输出，PDF 与 Word 逐张编码并复用图片，每处引用独立排版；PDF 嵌入字体分页、Word 原生 OOXML，原子发布前复核取消 |
 | 外部文件变更策略 | `src-gpui/src/ui/workspace/application_dialogs.rs`、`text_document/markdown_session/external.rs` | 干净文档按偏好自动重载／覆盖／忽略；本地修改和删除仍显式选择，忽略继续阻止普通保存，覆盖校验检测令牌；Mini 返回后处理延迟冲突 |
-| 文档会话与保存 | `src-gpui/src/text_document/mod.rs`、`markdown_session.rs`、`markdown_session/rename.rs`、`markdown_session/external.rs`、`markdown_session/recovery.rs`、`markdown_history.rs` | PieceTree、磁盘正文与历史、快照、保存及重命名事务；会话编辑锁保护正文事务、历史、批量替换和章节移动；外部身份复核、进程租约和原会话按需恢复 |
+| 文档会话与保存 | `src-gpui/src/text_document/mod.rs`、`markdown_session.rs`、`markdown_session/{paths,rename,external,recovery}.rs`、`markdown_history.rs` | PieceTree、磁盘正文与历史、快照、保存及重命名事务；Windows 虚拟卷无法返回标准路径时沿用绝对路径，文件身份不足时在覆盖前校验内容；会话编辑锁保护正文事务、历史、批量替换和章节移动；外部身份复核、进程租约和原会话按需恢复 |
 | 结构索引／搜索／统计 | `src-gpui/src/text_document/structure_index/`、`markdown_search/`、`writing_stats/` | 唯一结构索引、分页查询和有界统计；关闭时撤销索引归属，`structure_index/reclaim.rs` 分批回收派生页 |
 | 编码、文件写入、格式模板 | `src-gpui/src/models.rs`、`file_system.rs`、`markdown_templates.rs` | 编码定义、原子替换、显式模板来源 |
 | Emoji 加载 | `src-gpui/src/nomo_mark/native_emoji.rs`、`ui/emoji_picker.rs` | 按需加载；固定版本 JSON、哈希、虚拟列表和原有缓存预算 |

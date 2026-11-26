@@ -25,6 +25,17 @@ pub(super) struct BaselineIdentity {
 }
 
 impl BaselineIdentity {
+    pub(super) fn reliable_file_id(&self) -> Option<&str> {
+        // 旧会话可能已保存虚拟驱动返回的占位编号；保留磁盘格式，禁止用它合并两个文件。
+        self.file_id.as_deref().filter(|id| !id.starts_with("windows:0:")
+            && !(id.starts_with("windows:") && id.ends_with(":0")))
+    }
+
+    pub(super) fn needs_content_check(&self) -> bool {
+        self.modified_nanos == 0 || self.reliable_file_id().is_none()
+            || matches!(self.change_stamp.as_deref(), None | Some("windows-change:0"))
+    }
+
     pub(super) fn read(path: &Path) -> TextDocumentResult<Self> {
         // 路径身份也通过句柄读取，Windows 才能获得稳定 file index 与 ChangeTime。
         let file = File::open(path)?;
@@ -33,8 +44,20 @@ impl BaselineIdentity {
 
     /// 从已打开句柄读取身份，使 probe 字节与 baseline 绑定到同一个文件对象。
     pub(super) fn read_file(path: &Path, file: &File) -> TextDocumentResult<Self> {
-        let metadata = file.metadata()?;
-        let modified = metadata.modified().map_err(|error| {
+        let metadata = file.metadata();
+        #[cfg(windows)]
+        let metadata = metadata.or_else(|error| {
+            if unsupported_file_info(&error) { std::fs::metadata(path) } else { Err(error) }
+        });
+        let metadata = metadata?;
+        let modified = metadata.modified();
+        #[cfg(windows)]
+        let modified = match modified {
+            Err(error) if unsupported_file_info(&error) => Ok(std::time::UNIX_EPOCH),
+            Ok(time) => Ok(time.max(std::time::UNIX_EPOCH)),
+            other => other,
+        };
+        let modified = modified.map_err(|error| {
             TextDocumentError::new(
                 "file-identity-failed",
                 format!("读取文件修改时间失败：{error}"),
@@ -82,6 +105,15 @@ fn platform_change_stamp(
 }
 
 #[cfg(windows)]
+fn unsupported_file_info(error: &std::io::Error) -> bool {
+    use windows_sys::Win32::Foundation::{
+        ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_UNRECOGNIZED_VOLUME,
+    };
+    matches!(error.raw_os_error().map(|code| code as u32),
+        Some(ERROR_INVALID_FUNCTION | ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED | ERROR_UNRECOGNIZED_VOLUME))
+}
+
+#[cfg(windows)]
 fn platform_file_id(
     file: &File,
     _metadata: &std::fs::Metadata,
@@ -95,12 +127,11 @@ fn platform_file_id(
     // SAFETY: raw handle 在 file 借用期间有效，输出缓冲区类型与 API 要求一致。
     let result = unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut info) };
     if result == 0 {
+        let cause = std::io::Error::last_os_error();
+        if unsupported_file_info(&cause) { return Ok(None); }
         return Err(TextDocumentError::new(
             "file-identity-failed",
-            format!(
-                "读取 Windows 文件 ID 失败：{}",
-                std::io::Error::last_os_error()
-            ),
+            format!("读取 Windows 文件 ID 失败：{cause}"),
         ));
     }
     let file_index = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
@@ -131,12 +162,11 @@ fn platform_change_stamp(
         )
     };
     if result == 0 {
+        let cause = std::io::Error::last_os_error();
+        if unsupported_file_info(&cause) { return Ok(None); }
         return Err(TextDocumentError::new(
             "file-identity-failed",
-            format!(
-                "读取 Windows 文件 ChangeTime 失败：{}",
-                std::io::Error::last_os_error()
-            ),
+            format!("读取 Windows 文件 ChangeTime 失败：{cause}"),
         ));
     }
     Ok(Some(format!("windows-change:{}", info.ChangeTime)))

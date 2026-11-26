@@ -139,7 +139,7 @@ impl Workspace {
             self.open_favorite_folder(path, foreground, window, cx);
             return;
         }
-        let path=path.canonicalize().unwrap_or(path);
+        let path = self.services.as_ref().and_then(|manager| manager.resolve_document_path(&path).ok()).unwrap_or(path);
         request.path=Some(path.clone());
         if path.is_dir() {
             // 新窗口的初始请求和弹窗选定的当前窗口已确定目标，不能再次改派。
@@ -198,7 +198,8 @@ impl Workspace {
         self.application_dialogs.mini_deferred.retain(|id| self.application_dialogs.ignored.contains_key(id));
         self.application_dialogs.checking=true;
         let generation=self.application_dialogs.generation;
-        let task=cx.background_executor().spawn(async move {port.manager.external_change(&port.owner,&port.document_id)});
+        let previous = self.application_dialogs.ignored.get(&port.document_id).cloned();
+        let task=cx.background_executor().spawn(async move {port.manager.external_change(&port.owner,&port.document_id,previous)});
         self.application_dialogs.probe=Some(cx.spawn_in(window,async move |this,cx| {
             let result=task.await;
             let _=this.update_in(cx,|workspace,window,cx| {

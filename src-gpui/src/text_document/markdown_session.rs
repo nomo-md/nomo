@@ -8,6 +8,7 @@ mod toc;
 mod rename;
 mod delete;
 mod external;
+mod paths;
 mod recovery;
 mod cache_cleanup;
 mod legacy;
@@ -28,7 +29,7 @@ use super::{
     piece_tree::{Piece, PieceSource, PieceTree},
     TextDocumentError, TextDocumentResult,
 };
-use crate::{file_system::write_file_atomically_with, models::MarkdownEncoding};
+use crate::{file_system::{write_file_atomically_checked, write_new_file_atomically_with}, models::MarkdownEncoding};
 use serde::{Deserialize, Serialize};
 use crate::markdown_templates::{self, InlineTemplate, TemplateUpdate};
 use sha2::{Digest, Sha256};
@@ -368,7 +369,7 @@ impl MarkdownDocumentSessionManager {
                 "打开文档必须且只能指定路径或初始正文",
             ));
         }
-        let path = path.map(fs::canonicalize).transpose()?;
+        let path = path.as_deref().map(|path| self.resolve_document_path(path)).transpose()?;
         if let Some(path) = &path {
             let sessions: Vec<_> = lock(&self.sessions)?.values().cloned().collect();
             for session in sessions {
@@ -392,13 +393,16 @@ impl MarkdownDocumentSessionManager {
         };
         let raw_path = root.join("raw");
         let identity = if let Some(path) = &path {
-            let mut source = File::open(path)?;
-            let before = BaselineIdentity::read_file(path, &source)?;
+            let mut source = File::open(path).map_err(|cause| error("open-source", format!("打开源文件失败：{cause}")))?;
+            let before = BaselineIdentity::read_file(path, &source)
+                .map_err(|cause| error("file-identity-failed", format!("读取源文件状态失败：{cause}")))?;
             let mut output = File::create(&raw_path)?;
-            std::io::copy(&mut source, &mut output)?;
+            let length = std::io::copy(&mut source, &mut output)
+                .map_err(|cause| error("open-source", format!("读取正文到会话副本失败：{cause}")))?;
             output.sync_all()?;
-            if before != BaselineIdentity::read_file(path, &source)?
+            if length != before.physical_len || before != BaselineIdentity::read_file(path, &source)?
                 || before != BaselineIdentity::read(path)?
+                || (before.needs_content_check() && digest_file(&raw_path)? != digest_file(path)?)
             {
                 return Err(error(
                     "source-changed",
@@ -1103,52 +1107,48 @@ impl MarkdownDocumentSessionManager {
                 session.manifest.path.clone().ok_or_else(|| error("invalid-save-path", "文档尚未指定保存路径"))?
             }
         };
-        let target = if target.exists() {
-            fs::canonicalize(target)?
-        } else {
-            let parent = target
-                .parent()
-                .ok_or_else(|| error("invalid-save-path", "保存路径缺少父目录"))?;
-            let name = target
-                .file_name()
-                .ok_or_else(|| error("invalid-save-path", "保存路径缺少文件名"))?;
-            fs::canonicalize(parent)?.join(name)
-        };
+        let paths::DocumentPath { path: target, open_alias } = self.save_target_path(&target)?;
+        let registered_target = open_alias.as_ref().unwrap_or(&target);
         let sessions: Vec<_> = lock(&self.sessions)?.values().cloned().collect();
         for other in sessions {
             let other = lock(&other)?;
             if other.manifest.document_id != snapshot.document_id
-                && other.manifest.path.as_ref() == Some(&target)
+                && other.manifest.path.as_ref() == Some(registered_target)
             {
                 return Err(error("target-in-use", "目标文件正在另一个文档会话中编辑"));
             }
         }
         let gate = lock(&handle)?.save_gate.clone();
         let _saving = lock(&gate)?;
-        let expected = {
+        let (expected, saved_content) = {
             let session = lock(&handle)?;
             session.owner(owner)?;
             rename::settle_pending_rename(&session)?;
-            if follow_current || session.manifest.path.as_ref() == Some(&target) {
+            if follow_current || session.manifest.path.as_ref() == Some(registered_target) {
                 if session.manifest.legacy_unconfirmed && external.is_none() && !overwrite_external {
                     return Err(error("external-change", "旧草稿的磁盘版本尚未确认，请确认覆盖或另存为新文件"));
                 }
                 let mut identity = session.manifest.identity.clone();
-                if follow_current {
+                if follow_current || open_alias.is_some() {
                     // 同一文件在大小写不敏感卷上的规范化拼写可能与重命名后的路径不同。
                     if let Some(identity) = &mut identity { identity.path = target.to_string_lossy().into_owned(); }
                 }
-                identity
+                let saved = (!overwrite_external && identity.as_ref().is_some_and(BaselineIdentity::needs_content_check))
+                    .then(|| session.saved.clone());
+                (identity, saved)
             } else {
-                None
+                (None, None)
             }
         };
+        // 另存为的目标也可能在写临时文件期间被其他程序创建或替换。
+        let save_as_target = if !follow_current && external.is_none() && expected.is_none() {
+            Some(ExternalChange::capture(&target, snapshot.content.revision, &external::identity(&target)?)?)
+        } else { None };
+        let observed_target = external.or(save_as_target.as_ref());
         let verify = || -> TextDocumentResult<()> {
-            if let Some(change) = external { change.verify(&target)?; }
-            if let Some(expected) = &expected {
-                if !overwrite_external
-                    && BaselineIdentity::read(&target).ok().as_ref() != Some(expected)
-                {
+            if let Some(change) = observed_target { change.verify(&target)?; }
+            if let Some(expected) = expected.as_ref().filter(|_| !overwrite_external) {
+                if external::identity(&target)?.as_ref() != Some(expected) {
                     return Err(error(
                         "external-change",
                         "文件已被外部修改，当前编辑仍然保留",
@@ -1182,10 +1182,27 @@ impl MarkdownDocumentSessionManager {
             &pending_bytes,
         )
         .map_err(|e| error("save-intent", e))?;
-        write_file_atomically_with(&target, |output| {
-            write_snapshot(&snapshot, output).map_err(|e| e.to_string())?;
-            verify().map_err(|e| e.to_string())
-        })
+        let write = |output: &mut File| write_snapshot(&snapshot, output).map_err(|e| e.to_string());
+        let before_replace = || {
+            verify().map_err(|e| e.to_string())?;
+            // 不可靠的文件编号或变更戳可能漏报等长、同时间的改写。
+            // 仅在覆盖前比较上次保存的原始编码字节，后台轮询无需读取全文。
+            if let Some(content) = saved_content {
+                let saved = CapturedSnapshot { content, ..snapshot.clone() };
+                let mut hash = DigestWriter(Sha256::new());
+                write_snapshot(&saved, &mut hash).map_err(|e| e.to_string())?;
+                let expected: [u8; 32] = hash.0.finalize().into();
+                if digest_file(&target).map_err(|e| e.to_string())? != expected {
+                    return Err("文件内容已被外部修改，当前编辑仍然保留；请重新加载或另存为。".into());
+                }
+            }
+            Ok(())
+        };
+        if observed_target.is_some_and(|change| change.deleted) {
+            write_new_file_atomically_with(&target, write)
+        } else {
+            write_file_atomically_checked(&target, write, before_replace)
+        }
         .map_err(|e| error("save-failed", e))?;
         let identity = BaselineIdentity::read(&target)?;
         let mut session = lock(&handle)?;

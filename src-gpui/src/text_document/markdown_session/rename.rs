@@ -17,7 +17,7 @@ pub(crate) struct RenameOutcome {
 }
 
 fn same_file_id(before: &BaselineIdentity, after: &BaselineIdentity) -> bool {
-    before.file_id.as_ref().zip(after.file_id.as_ref()).is_some_and(|(a, b)| a == b)
+    before.reliable_file_id().zip(after.reliable_file_id()).is_some_and(|(a, b)| a == b)
 }
 
 fn same_file(before: &BaselineIdentity, after: &BaselineIdentity) -> bool {
@@ -110,7 +110,7 @@ impl MarkdownDocumentSessionManager {
                 }
             }
             let observed = BaselineIdentity::read(old_path).map_err(|error| format!("读取原文件状态失败：{}", error.message))?;
-            if observed.file_id.is_none() { return Err("无法确认文件身份，不能安全重命名已打开的文档。".into()); }
+            if observed.reliable_file_id().is_none() { return Err("无法确认文件身份，不能安全重命名已打开的文档。".into()); }
             let baseline_unchanged = session.manifest.identity.as_ref() == Some(&observed);
             plans.push((index, RenameIntent { old_path: old_path.clone(), new_path, observed, baseline_unchanged }));
         }
