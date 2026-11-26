@@ -1,11 +1,15 @@
 //! 侧栏目录快照：后台按需读取，保留展开状态并限制目录缓存的总字节数。
 
 use crate::ui::toolbar_i18n::UiMessage;
+use icu_collator::options::{CollatorOptions, Strength};
+use icu_collator::CollatorBorrowed;
+use icu_locale_core::locale;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use unicode_normalization::UnicodeNormalization;
 
 /// 缓存估算包含路径、名称、搜索键、Arc 和两份可见行索引；刷新时最多并存一份新快照。
@@ -15,6 +19,13 @@ const EXPANDED_PATH_BYTES: usize = 2 * 1024 * 1024;
 const IGNORE_FILE_BYTES: u64 = 256 * 1024;
 const DOCUMENT_EXTENSIONS: &[&str] = &["md", "markdown", "txt", "json"];
 
+static NAME_COLLATOR: LazyLock<CollatorBorrowed<'static>> = LazyLock::new(|| {
+    let mut options = CollatorOptions::default();
+    options.strength = Some(Strength::Secondary);
+    CollatorBorrowed::try_new(locale!("zh-u-co-pinyin").into(), options)
+        .expect("compiled ICU data includes Chinese pinyin collation")
+});
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct Entry {
     pub path: PathBuf,
@@ -23,6 +34,15 @@ pub struct Entry {
     pub search_name: String,
     pub is_dir: bool,
     pub has_children: bool,
+}
+
+impl Entry {
+    /// 快照排序与目录二分查找共用同一顺序，比较结果相同的名称用原始路径区分。
+    fn cmp_sibling(&self, is_dir: bool, name: &str, path: &Path) -> Ordering {
+        is_dir.cmp(&self.is_dir)
+            .then_with(|| NAME_COLLATOR.compare(&self.name, name))
+            .then_with(|| self.path.as_path().cmp(path))
+    }
 }
 
 #[derive(Clone)]
@@ -114,11 +134,9 @@ impl FileTree {
 
     pub(crate) fn cached_folder(&self, path: &Path) -> Option<&Entry> {
         let directory = self.children.get(path.parent()?)?;
-        let name: String = path.file_name()?.to_string_lossy().to_lowercase().nfc().collect();
-        let start = directory.entries.partition_point(|entry| entry.is_dir && entry.search_name < name);
-        directory.entries[start..].iter()
-            .take_while(|entry| entry.is_dir && entry.search_name == name)
-            .find(|entry| entry.path == path).map(Arc::as_ref)
+        let name = path.file_name()?.to_string_lossy();
+        let index = directory.entries.binary_search_by(|entry| entry.cmp_sibling(true, &name, path)).ok()?;
+        Some(&directory.entries[index])
     }
 
     pub fn root_expanded(&self) -> bool {
@@ -326,7 +344,7 @@ fn path_cost(path: &Path) -> usize {
 }
 
 fn check_cancel(cancel: &AtomicBool) -> Result<(), ScanError<UiMessage>> {
-    if cancel.load(Ordering::Acquire) { Err(ScanError::Cancelled) } else { Ok(()) }
+    if cancel.load(AtomicOrdering::Acquire) { Err(ScanError::Cancelled) } else { Ok(()) }
 }
 
 /// 单次扫描只持有一个有界快照；目录变更通过取消标记和调用方的代次失效。
@@ -381,7 +399,7 @@ pub(crate) fn scan_directory_message(root: &Path, dir: &Path, cancel: &AtomicBoo
     for (entry, cyclic) in &mut entries {
         if entry.is_dir && !*cyclic { entry.has_children = has_visible_children(root, &entry.path, &rules, cancel)?; }
     }
-    entries.sort_by(|(a, _), (b, _)| b.is_dir.cmp(&a.is_dir).then_with(|| a.search_name.cmp(&b.search_name)));
+    entries.sort_by(|(a, _), (b, _)| a.cmp_sibling(b.is_dir, &b.name, &b.path));
     check_cancel(cancel)?;
     Ok(DirectorySnapshot { entries: entries.into_iter().map(|(entry, _)| Arc::new(entry)).collect::<Vec<_>>().into(), bytes, unchanged_from: None })
 }

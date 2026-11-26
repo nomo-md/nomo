@@ -32,6 +32,9 @@ unicode-segmentation = "1.13"
 # 复用依赖树已有版本，为原生表格测量和排版提供相同的 Unicode 正常断点。
 unicode-linebreak = "=0.1.5"
 unicode-normalization = "=0.1.26"
+# 文件树采用内置的中文拼音排序规则，三平台共用锁文件中的 ICU4X 版本。
+icu_collator = "=2.4.0"
+icu_locale_core = "=2.4.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "=2.5.8"
