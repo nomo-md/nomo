@@ -5,9 +5,15 @@ Unicode true
 !include "FileFunc.nsh"
 !include "x64.nsh"
 !include "nsDialogs.nsh"
+!include "WordFunc.nsh"
+!include "StrFunc.nsh"
+${StrTok}
 !define PRODUCTNAME "Nomo"
 !define MAINBINARYNAME "nomo"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nomo"
+!define SETUP_QUIT_MESSAGE 0x804f ; WM_APP + 0x4f in ui/tray/windows.rs
+Var NomoInstalledVersion
+Var NomoPreviousDir
 Name "Nomo"
 VIProductVersion "${NUMERICVERSION}"
 VIAddVersionKey /LANG=1033 "ProductName" "Nomo"
@@ -27,14 +33,30 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_PAGE_LICENSE "${PAYLOAD}\LICENSE"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+!define MUI_FINISHPAGE_RUN "$INSTDIR\nomo.exe"
+!define MUI_FINISHPAGE_SHOWREADME
+!define MUI_FINISHPAGE_SHOWREADME_TEXT "$(NomoDesktopShortcut)"
+!define MUI_FINISHPAGE_SHOWREADME_FUNCTION CreateNomoDesktopShortcut
+!define MUI_FINISHPAGE_SHOWREADME_NOTCHECKED
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW ConfigureNomoFinishPage
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 UninstPage custom un.DataPage un.DataPageLeave
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "English"
-LangString NomoCloseForInstall ${LANG_SIMPCHINESE} "此安装目录中的 Nomo 正在运行。请先保存所有文档。$\r$\n点击“确定”后，安装器将结束这个 Nomo 进程，再继续安装。$\r$\n$\r$\n$INSTDIR\nomo.exe"
-LangString NomoCloseForInstall ${LANG_ENGLISH} "Nomo is running from this installation folder. Save all your documents first.$\r$\nClick OK to end this Nomo process and continue setup.$\r$\n$\r$\n$INSTDIR\nomo.exe"
+LangString NomoCloseForInstall ${LANG_SIMPCHINESE} "是否让 Nomo 退出以继续安装？请在 Nomo 中处理待保存的文档。取消退出将停止安装。$\r$\n$\r$\n$INSTDIR\nomo.exe"
+LangString NomoCloseForInstall ${LANG_ENGLISH} "Quit Nomo to continue setup? Follow any save prompts in Nomo. Cancelling quit will stop setup.$\r$\n$\r$\n$INSTDIR\nomo.exe"
+LangString NomoQuitPending ${LANG_SIMPCHINESE} "仍在等待 Nomo 退出。请检查 Nomo 中的提示，选择“重试”继续等待，或取消安装。"
+LangString NomoQuitPending ${LANG_ENGLISH} "Nomo is still running. Check its prompts, then choose Retry to keep waiting, or cancel setup."
+LangString NomoQuitCancelled ${LANG_SIMPCHINESE} "Nomo 未同意退出，安装已停止。"
+LangString NomoQuitCancelled ${LANG_ENGLISH} "Nomo did not finish quitting. Setup has stopped."
+LangString NomoDowngrade ${LANG_SIMPCHINESE} "已安装 Nomo $NomoInstalledVersion，即将安装较旧的 ${VERSION}。要继续降级吗？"
+LangString NomoDowngrade ${LANG_ENGLISH} "Nomo $NomoInstalledVersion is installed. Continue with the downgrade to ${VERSION}?"
+LangString NomoDesktopShortcut ${LANG_SIMPCHINESE} "创建桌面快捷方式"
+LangString NomoDesktopShortcut ${LANG_ENGLISH} "Create a desktop shortcut"
+LangString NomoShortcutFailed ${LANG_SIMPCHINESE} "无法创建桌面快捷方式。你可以从开始菜单打开 Nomo。"
+LangString NomoShortcutFailed ${LANG_ENGLISH} "Could not create the desktop shortcut. You can open Nomo from the Start menu."
 LangString NomoInstallLocked ${LANG_SIMPCHINESE} "以下文件仍被占用。请从 Nomo 的托盘菜单退出，或关闭占用该文件的程序，然后重试。$\r$\n$\r$\n$INSTDIR\nomo.exe"
 LangString NomoInstallLocked ${LANG_ENGLISH} "The file below is still in use. Quit Nomo from its tray menu or close the program using the file, then retry.$\r$\n$\r$\n$INSTDIR\nomo.exe"
 LangString NomoDataTitle ${LANG_SIMPCHINESE} "应用数据"
@@ -51,6 +73,73 @@ LangString NomoDataFailed ${LANG_ENGLISH} "Application data could not be complet
 Var NomoUpdateRestart
 Var NomoDeleteData
 Var NomoDeleteDataCheckbox
+
+Function ConfigureNomoFinishPage
+  ${If} $NomoPreviousDir != ""
+    ShowWindow $mui.FinishPage.ShowReadme ${SW_HIDE}
+  ${EndIf}
+FunctionEnd
+
+Function CreateNomoDesktopShortcut
+  ClearErrors
+  CreateShortcut "$DESKTOP\Nomo.lnk" "$INSTDIR\nomo.exe"
+  ${If} ${Errors}
+    MessageBox MB_ICONEXCLAMATION "$(NomoShortcutFailed)" /SD IDOK
+  ${Else}
+    WriteRegDWORD HKCU "${UNINSTKEY}" "DesktopShortcut" 1
+  ${EndIf}
+FunctionEnd
+
+; Cargo 发布版本采用 SemVer。构建元数据不影响顺序，预发布标识符逐段比较。
+Function ConfirmNomoDowngrade
+  StrCmp $NomoPreviousDir "" done
+  ReadRegStr $NomoInstalledVersion HKCU "${UNINSTKEY}" "DisplayVersion"
+  StrCmp $NomoInstalledVersion "" done
+  ${StrTok} $0 $NomoInstalledVersion "+" 0 0
+  ${StrTok} $1 "${VERSION}" "+" 0 0
+  ${StrTok} $2 $0 "-" 0 0
+  ${StrTok} $3 $1 "-" 0 0
+  ${VersionCompare} $2 $3 $4
+  StrCmp $4 1 downgrade
+  StrCmp $4 2 done
+  StrLen $4 $2
+  IntOp $4 $4 + 1
+  StrCpy $0 $0 "" $4
+  StrLen $4 $3
+  IntOp $4 $4 + 1
+  StrCpy $1 $1 "" $4
+  StrCmp $1 "" done
+  StrCmp $0 "" downgrade
+  next_identifier:
+  ${StrTok} $2 $0 "." 0 0
+  ${StrTok} $3 $1 "." 0 0
+  StrLen $4 $2
+  StrLen $5 $3
+  System::Call 'shlwapi::StrSpnW(w r2, w "0123456789") i.r6'
+  System::Call 'shlwapi::StrSpnW(w r3, w "0123456789") i.r7'
+  ${If} $6 == $4
+    StrCmp $7 $5 0 done
+    ; 无前导零的数字先比长度，避免大标识符溢出。
+    IntCmp $4 $5 compare_text done downgrade
+  ${EndIf}
+  StrCmp $7 $5 downgrade
+  compare_text:
+  System::Call 'kernel32::CompareStringOrdinal(w r2, i -1, w r3, i -1, i 0) i.r6'
+  StrCmp $6 3 downgrade
+  StrCmp $6 2 0 done
+  IntOp $4 $4 + 1
+  IntOp $5 $5 + 1
+  StrCpy $0 $0 "" $4
+  StrCpy $1 $1 "" $5
+  StrCmp $0 "" done
+  StrCmp $1 "" downgrade next_identifier
+  downgrade:
+  MessageBox MB_ICONEXCLAMATION|MB_YESNO|MB_DEFBUTTON2 "$(NomoDowngrade)" /SD IDNO IDYES done
+  SetErrorLevel 1
+  Abort
+  done:
+  ClearErrors
+FunctionEnd
 
 Function un.onInit
   StrCpy $NomoDeleteData 0
@@ -189,8 +278,8 @@ Function FindNomoInstallProcess
   System::Call '*$2(i, i, i.r3, p, i, i, i, i, i, &w260 .r4)'
   StrCmp $4 "nomo.exe" 0 next
   StrCmp $3 $6 next
-  ; PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_TERMINATE
-  System::Call 'kernel32::OpenProcess(i 0x00101001, i 0, i r3) p.r7'
+  ; PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+  System::Call 'kernel32::OpenProcess(i 0x00101000, i 0, i r3) p.r7'
   StrCmp $7 0 next
   System::Call 'kernel32::ProcessIdToSessionId(i r3, *i .r5) i.r0'
   StrCmp $0 0 close_process
@@ -245,15 +334,63 @@ Function PrepareNomoManualInstall
     StrCmp $1 1224 locked done
   ${EndIf}
 
-  MessageBox MB_ICONEXCLAMATION|MB_OKCANCEL|MB_DEFBUTTON2 "$(NomoCloseForInstall)" /SD IDCANCEL IDOK close_nomo
+  IfSilent close_cancelled
+  System::Call 'kernel32::GetProcessId(p r0) i.r3'
+  StrCpy $4 0
+  find_tray:
+  System::Call 'user32::FindWindowExW(p 0, p r4, w "Nomo.Tray", p 0) p.r4'
+  StrCmp $4 0 close_locked
+  System::Call 'user32::GetWindowThreadProcessId(p r4, *i .r5)'
+  StrCmp $5 $3 0 find_tray
+  ; 旧版没有退出协议；让用户自行从托盘退出，不发送窗口关闭或强制结束消息。
+  System::Call 'user32::SendMessageTimeoutW(p r4, i ${SETUP_QUIT_MESSAGE}, p 0, p r3, i 2, i 1500, *p .r5) p.r6'
+  StrCmp $6 0 close_locked
+  StrCmp $5 1 0 close_locked
+  MessageBox MB_ICONQUESTION|MB_OKCANCEL|MB_DEFBUTTON2 "$(NomoCloseForInstall)" /SD IDCANCEL IDCANCEL close_cancelled
+  ; 用户确认期间窗口可能变化。再次核对归属，进程句柄始终保持打开。
+  System::Call 'user32::GetWindowThreadProcessId(p r4, *i .r5)'
+  StrCmp $5 $3 0 close_locked
+  System::Call 'kernel32::CreateEventW(p 0, i 1, i 0, w "Local\Nomo.SetupQuit.$3") p.r7 ?e'
+  Pop $6
+  StrCmp $7 0 close_locked
+  StrCmp $6 183 request_failed ; 另一个安装器已经在等同一进程
+  System::Call 'user32::AllowSetForegroundWindow(i r3)'
+  System::Call 'user32::SendMessageTimeoutW(p r4, i ${SETUP_QUIT_MESSAGE}, p 1, p r3, i 2, i 1500, *p .r5) p.r6'
+  StrCmp $6 0 request_failed
+  StrCmp $5 1 0 request_failed
+  ; 取消优先。只在目标进程退出后重查文件，等待期间不反复向应用发送退出请求。
+  System::Call '*(p r7, p r0) p.r8'
+  StrCmp $8 0 request_failed
+  wait_quit:
+  System::Call 'kernel32::WaitForMultipleObjects(i 2, p r8, i 0, i 30000) i.r2'
+  ${If} $2 == 258
+    MessageBox MB_ICONINFORMATION|MB_RETRYCANCEL "$(NomoQuitPending)" /SD IDCANCEL IDRETRY wait_quit
+  ${EndIf}
+  System::Free $8
+  System::Call 'kernel32::CloseHandle(p r7)'
+  ${If} $2 == 1
+    System::Call 'kernel32::GetExitCodeProcess(p r0, *i .r5) i.r6'
+    ${If} $6 == 0
+    ${OrIf} $5 != 0
+      StrCpy $2 0
+    ${EndIf}
+  ${EndIf}
+  System::Call 'kernel32::CloseHandle(p r0)'
+  StrCmp $2 1 check
+  ${If} $2 == 0
+    SetErrorLevel 1
+    Abort "$(NomoQuitCancelled)"
+  ${EndIf}
+  Goto cancelled
+  request_failed:
+  System::Call 'kernel32::CloseHandle(p r7)'
+  close_locked:
+  System::Call 'kernel32::WaitForSingleObject(p r0, i 0) i.r2'
+  System::Call 'kernel32::CloseHandle(p r0)'
+  StrCmp $2 0 check locked
+  close_cancelled:
   System::Call 'kernel32::CloseHandle(p r0)'
   Goto cancelled
-  close_nomo:
-  System::Call 'kernel32::TerminateProcess(p r0, i 0)'
-  ; 用户可能在确认期间已经自行退出。以等待结果确认进程是否结束。
-  System::Call 'kernel32::WaitForSingleObject(p r0, i 10000) i.r2'
-  System::Call 'kernel32::CloseHandle(p r0)'
-  StrCmp $2 0 check
   locked:
   MessageBox MB_ICONEXCLAMATION|MB_RETRYCANCEL "$(NomoInstallLocked)" /SD IDCANCEL IDRETRY check
   cancelled:
@@ -278,6 +415,8 @@ Function .onInit
       StrCpy $0 $0 -1 1
     ${EndIf}
     StrCpy $INSTDIR $0
+    IfFileExists "$0\nomo.exe" 0 +2
+      StrCpy $NomoPreviousDir $0
   ${EndIf}
   Call PrepareNomoUpdate
   ${If} $NomoUpdateRestart != 1
@@ -302,10 +441,12 @@ Function .onInstFailed
 FunctionEnd
 
 Section "Nomo" Main
-  SetOutPath "$INSTDIR"
+  Call ConfirmNomoDowngrade
+  ; 版本确认和正常退出均通过后才写入安装目录。
   ${If} $NomoUpdateRestart != 1
     Call PrepareNomoManualInstall
   ${EndIf}
+  SetOutPath "$INSTDIR"
   ; 文件占用时由安装器报告失败，不能先移除旧版或用户数据。
   ClearErrors
   File "${PAYLOAD}\nomo.exe"
@@ -330,7 +471,19 @@ Section "Nomo" Main
     Abort "Unable to write the Nomo install files."
   CreateDirectory "$SMPROGRAMS\Nomo"
   CreateShortcut "$SMPROGRAMS\Nomo\Nomo.lnk" "$INSTDIR\nomo.exe"
-  CreateShortcut "$DESKTOP\Nomo.lnk" "$INSTDIR\nomo.exe"
+  ; 旧安装器总是创建桌面图标，没有所有权标记。升级只接管仍存在的旧图标。
+  ReadRegDWORD $0 HKCU "${UNINSTKEY}" "DesktopShortcut"
+  IfErrors 0 +2
+    StrCpy $0 1
+  ${If} $NomoPreviousDir == ""
+  ${OrIfNot} ${FileExists} "$DESKTOP\Nomo.lnk"
+    StrCpy $0 0
+  ${EndIf}
+  WriteRegDWORD HKCU "${UNINSTKEY}" "DesktopShortcut" $0
+  ${If} $0 == 1
+  ${AndIf} $NomoPreviousDir != $INSTDIR
+    Call CreateNomoDesktopShortcut
+  ${EndIf}
   WriteRegStr HKCU "${UNINSTKEY}" "DisplayName" "Nomo"
   WriteRegStr HKCU "${UNINSTKEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKCU "${UNINSTKEY}" "Publisher" "Nomo"
@@ -375,7 +528,10 @@ Section "Uninstall"
   !insertmacro NOMO_UNREGISTER_OPEN_WITH
   Delete "$SMPROGRAMS\Nomo\Nomo.lnk"
   RMDir "$SMPROGRAMS\Nomo"
-  Delete "$DESKTOP\Nomo.lnk"
+  ReadRegDWORD $0 HKCU "${UNINSTKEY}" "DesktopShortcut"
+  ${If} $0 == 1
+    Delete "$DESKTOP\Nomo.lnk"
+  ${EndIf}
   Delete "$INSTDIR\nomo.exe"
   Delete "$INSTDIR\vcruntime140.dll"
   Delete "$INSTDIR\LICENSE"

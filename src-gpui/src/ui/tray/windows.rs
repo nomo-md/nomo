@@ -1,12 +1,12 @@
 //! 一个通知区域图标服务整个应用，窗口打开或关闭时保持同一原生消息入口。
-use std::{mem::size_of, ptr::null_mut};
+use std::{mem::size_of, os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle}, ptr::null_mut};
 
 use gpui::{App, Global, Subscription, Task, Window, WindowHandle};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::sync::mpsc;
 use windows_sys::Win32::{
     Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, SetLastError, WPARAM},
-    System::LibraryLoader::GetModuleHandleW,
+    System::{LibraryLoader::GetModuleHandleW, Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent}},
     UI::{Shell::*, WindowsAndMessaging::*},
 };
 
@@ -15,6 +15,8 @@ use crate::ui::{toolbar_i18n::ToolbarLocale, workspace::Workspace};
 
 const CLASS_NAME: *const u16 = windows_sys::core::w!("Nomo.Tray");
 const CALLBACK: u32 = WM_APP + 0x4e;
+// 与 windows.nsi 约定。0 探测支持，1 请求正常退出；返回 1 表示已接受。
+const SETUP_QUIT: u32 = WM_APP + 0x4f;
 const OPEN: u32 = 1;
 const QUIT: u32 = 2;
 const FIRST_WINDOW: u32 = 3;
@@ -23,6 +25,25 @@ enum Event {
     Open,
     Menu,
     TaskbarCreated,
+    QuitForSetup(SetupQuitCancelled),
+}
+
+pub(crate) struct SetupQuitCancelled(OwnedHandle);
+impl Global for SetupQuitCancelled {}
+
+impl SetupQuitCancelled {
+    fn open() -> Option<Self> {
+        let name: Vec<u16> = format!("Local\\Nomo.SetupQuit.{}", std::process::id())
+            .encode_utf16().chain(Some(0)).collect();
+        let handle = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) };
+        (!handle.is_null()).then(|| Self(unsafe { OwnedHandle::from_raw_handle(handle) }))
+    }
+
+    pub(crate) fn signal(self) {
+        if unsafe { SetEvent(self.0.as_raw_handle()) } == 0 {
+            crate::app_logger::warn("Setup", &std::io::Error::last_os_error().to_string());
+        }
+    }
 }
 
 struct CallbackState {
@@ -94,6 +115,7 @@ pub(crate) fn install(cx: &mut App) -> Result<(), String> {
             while let Some(event) = receiver.recv().await {
                 match event {
                     Event::Open => cx.update(|cx| reveal(None, cx)),
+                    Event::QuitForSetup(cancelled) => cx.update(|cx| crate::quit_for_setup(cancelled, cx)),
                     Event::Menu => {
                         let (locale, windows) = cx.update(|cx| (ToolbarLocale::current(cx), workspaces(cx)));
                         // 原生菜单有嵌套消息循环。显示期间不借用 GPUI 或托盘状态。
@@ -256,6 +278,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
         } else if let Some(state) =
             (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const CallbackState).as_ref()
         {
+            if message == SETUP_QUIT {
+                // 安装器握有目标进程句柄，即使窗口句柄被另一副本复用也不能让它退出。
+                if lparam as usize != std::process::id() as usize { return 0; }
+                return match wparam {
+                    0 => 1,
+                    1 => SetupQuitCancelled::open().is_some_and(|cancelled|
+                        state.events.try_send(Event::QuitForSetup(cancelled)).is_ok()) as LRESULT,
+                    _ => 0,
+                };
+            }
             let event = match message {
                 CALLBACK => match lparam as u32 {
                     WM_LBUTTONUP | WM_LBUTTONDBLCLK => Some(Event::Open),

@@ -71,8 +71,16 @@ impl gpui::Global for QuitRequested {}
 struct LastActiveWorkspace(gpui::AnyWindowHandle);
 impl gpui::Global for LastActiveWorkspace {}
 
-pub(crate) fn cancel_quit(cx:&mut App){cx.set_global(QuitRequested(None));}
+pub(crate) fn cancel_quit(cx:&mut App){
+    cx.set_global(QuitRequested(None));
+    #[cfg(windows)]
+    if cx.has_global::<ui::tray::windows::SetupQuitCancelled>() {
+        cx.remove_global::<ui::tray::windows::SetupQuitCancelled>().signal();
+    }
+}
 pub(crate) fn quit_requires_save_confirmation(cx: &App) -> bool {
+    #[cfg(windows)]
+    if cx.has_global::<ui::tray::windows::SetupQuitCancelled>() { return true; }
     matches!(cx.try_global::<QuitRequested>().and_then(|request| request.0).map(|q| q.reason),
         Some(QuitReason::Reset(app_data::Scope::All | app_data::Scope::Usage)))
 }
@@ -82,6 +90,16 @@ pub(crate) fn quit_workspaces(cx:&mut App){
 fn workspaces_ready_to_quit(cx: &mut App) -> bool {
     cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()).all(|handle|
         handle.update(cx, |workspace, window, cx| workspace.can_quit_to_install(window, cx)).unwrap_or(false))
+}
+
+#[cfg(windows)]
+fn quit_for_setup(cancelled: ui::tray::windows::SetupQuitCancelled, cx: &mut App) {
+    if cx.try_global::<QuitRequested>().is_some_and(|request| request.0.is_some()) || !workspaces_ready_to_quit(cx) {
+        cancelled.signal();
+        return;
+    }
+    cx.set_global(cancelled);
+    quit_workspaces(cx);
 }
 
 pub(crate) fn quit_to_reset(scope: app_data::Scope, cx: &mut App) {
@@ -115,7 +133,12 @@ fn request_quit(reason: QuitReason,cx:&mut App){
 fn finish_quit(cx:&mut App){
     let Some(PendingQuit { reason: _reason, placement, .. }) = cx.try_global::<QuitRequested>().and_then(|request| request.0) else { return; };
     if cx.windows().iter().any(|window|window.downcast::<Workspace>().is_some()){return;}
+    // 此时工作区已全部同意退出。外部安装器以进程退出为成功信号。
     cx.set_global(QuitRequested(None));
+    #[cfg(windows)]
+    if cx.has_global::<ui::tray::windows::SetupQuitCancelled>() {
+        cx.remove_global::<ui::tray::windows::SetupQuitCancelled>();
+    }
     if let Some(placement) = placement { placement.save(); }
     if let QuitReason::Reset(scope) = _reason && let Err(error) = app_data::launch_after_close(scope) {
         app_data::show_error(&error);
