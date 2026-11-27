@@ -71,18 +71,16 @@ impl StatusUi {
     }
 }
 
-/// 只暂存两个计数；位数按当前文档和统计类型的最大值预留，选区变短不挤动缩放按钮。
 #[derive(Default)]
 struct StatsTransition {
     metric: Option<usize>,
     value: Option<u64>,
     selected: bool,
-    digits: usize,
     outgoing: Option<(u64, Instant)>,
 }
 
 impl StatsTransition {
-    fn update(&mut self, metric: usize, value: Option<u64>, full: Option<u64>, selected: bool, reduced: bool) {
+    fn update(&mut self, metric: usize, value: Option<u64>, selected: bool, reduced: bool) {
         if self.metric != Some(metric) {
             *self = Self { metric: Some(metric), ..Self::default() };
         }
@@ -96,29 +94,21 @@ impl StatsTransition {
         }
         self.value = value;
         self.selected = selected;
-        for count in [value, full].into_iter().flatten() {
-            self.digits = self.digits.max(count.checked_ilog10().unwrap_or(0) as usize + 1);
-        }
     }
 
     fn render(&self, label: String, unit: &'static str) -> Div {
-        let Some(value) = self.value else { return div().child(label); };
-        let mut number = div().relative()
-            .child(div().opacity(0.0).child("0".repeat(self.digits)));
-        let mut opacity = 1.0;
-        let mut offset = 0.0;
-        if let Some((previous, started)) = self.outgoing {
-            let progress = (started.elapsed().as_secs_f32() / 0.16).min(1.0);
-            let incoming = motion::ease(((progress - 0.15) / 0.85).clamp(0.0, 1.0));
-            let outgoing = motion::ease((progress / 0.72).min(1.0));
-            let distance = if self.selected { 3.0 } else { -3.0 };
-            opacity = incoming;
-            offset = distance * (1.0 - incoming);
-            number = number.child(div().absolute().right_0().top(px(-distance * outgoing))
-                .opacity(1.0 - outgoing).child(previous.to_string()));
-        }
+        let (Some(value), Some((previous, started))) = (self.value, self.outgoing) else { return div().child(label); };
+        let progress = (started.elapsed().as_secs_f32() / 0.16).min(1.0);
+        let incoming = motion::ease(((progress - 0.15) / 0.85).clamp(0.0, 1.0));
+        let outgoing = motion::ease((progress / 0.72).min(1.0));
+        let distance = if self.selected { 3.0 } else { -3.0 };
+        // 新数字参与布局，淡出的旧数字只在新数字的范围内绘制。
+        let number = div().relative().overflow_hidden()
+            .child(div().absolute().right_0().top(px(-distance * outgoing))
+                .opacity(1.0 - outgoing).child(previous.to_string()))
+            .child(div().relative().top(px(distance * (1.0 - incoming))).opacity(incoming).child(value.to_string()));
         div().flex().items_center()
-            .child(number.child(div().absolute().right_0().top(px(offset)).opacity(opacity).child(value.to_string())))
+            .child(number)
             .child(unit)
     }
 }
@@ -320,7 +310,7 @@ impl Workspace {
             let host = doc.read(cx);
             let metric_value = |stats: &crate::text_document::DocumentStats| [stats.lines, stats.words, stats.visible_chars, stats.chars][metric];
             let value = host.stats().map(metric_value);
-            self.status_ui.stats.update(metric, value, host.full_stats().map(metric_value), host.stats_are_selected(), reduced);
+            self.status_ui.stats.update(metric, value, host.stats_are_selected(), reduced);
             format!("{}{}", value.map(|value| value.to_string()).unwrap_or_else(|| "—".into()), locale.text(METRICS[metric].3))
         });
         if zoom_visible && self.status_ui.last_zoom.is_some_and(|previous| previous != percent) {
@@ -399,13 +389,11 @@ impl Workspace {
         let background = motion::color(motion::color(theme.surface, theme.rail_bg, 0.06), theme.surface, hover);
         let border = motion::color(theme.border.opacity(0.82), motion::color(theme.border, theme.accent, 0.3), hover);
         let unit = locale.text(METRICS[self.status_ui.stats.metric.unwrap_or(1)].3);
-        let reserved = if panel == Panel::Stats && self.status_ui.stats.value.is_some() {
-            format!("{}{unit}", "0".repeat(self.status_ui.stats.digits))
-        } else { label.clone() };
-        let content = if panel == Panel::Stats { self.status_ui.stats.render(label, unit) }
-            else { div().child(label) };
+        let content = if panel == Panel::Stats { self.status_ui.stats.render(label.clone(), unit) }
+            else { div().child(label.clone()) };
         // 外层保留稳定命中区域，内层缩放不会挤动相邻按钮或重新定位弹层。
-        div().id(("status-trigger", index)).relative().min_w(px(if index == 0 { 52.0 } else { 58.0 }))
+        div().id(("status-trigger", index)).relative()
+            .when(panel != Panel::Stats, |button| button.min_w(px(if panel == Panel::Zoom { 52.0 } else { 58.0 })))
             .role(gpui::Role::Button).aria_label(title)
             .aria_expanded(self.status_ui.open == Some(panel))
             .h(px(28.0)).px(px(10.0)).flex_none().rounded(px(8.0)).cursor_pointer()
@@ -415,7 +403,7 @@ impl Workspace {
                 color: theme.accent.opacity(0.45), offset: point(px(0.0), px(0.0)),
                 blur_radius: px(0.0), spread_radius: px(3.0) }]))
             .tooltip(tooltip(title))
-            .child(div().opacity(0.0).whitespace_nowrap().child(reserved))
+            .child(div().opacity(0.0).whitespace_nowrap().child(label))
             .child(div().absolute().top_0().left_0().size_full().flex().items_center().justify_center()
                 .child(div().relative().top(px(if self.explorer.reduce_motion { 0.0 } else { -hover }))
                     .w(relative(scale)).h(px(28.0 * scale)).flex().items_center().justify_center()

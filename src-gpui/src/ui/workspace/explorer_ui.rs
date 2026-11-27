@@ -102,7 +102,7 @@ impl Workspace {
                             .when(!target, |el| el.hover(|style| style.bg(row_hover)))
                             .when(highlighted_path.as_ref() == path.as_ref() && highlighted_path.is_some(), |el| el.bg(theme.sidebar_active))
                             .when(target, |el| el.bg(theme.sidebar_active).rounded(px(9.0)))
-                            .child(div().flex_1().min_w(px(0.0)).overflow_hidden().child(TreeLabel::new(root_name.clone(), "", theme.search_match)))
+                            .child(div().flex_1().min_w(px(0.0)).overflow_hidden().child(TreeLabel::new(root_name.clone())))
                             .children(root_loading.then(|| tree_spinner("tree-root-spinner", theme.accent, reduce_motion)))
                             .children(controls)
                             .on_hover(cx.listener(move |workspace, entered, _, cx| {
@@ -180,7 +180,7 @@ impl Workspace {
                             .on_click(|_, _, cx| cx.stop_propagation()).child(field).into_any_element()
                     } else {
                         div().flex_1().min_w(px(0.0)).overflow_hidden().when(preview, |el| el.italic().opacity(0.85))
-                            .child(TreeLabel::new(row.entry.name.clone(), &search_query, theme.search_match)).into_any_element()
+                            .child(TreeLabel::new(row.entry.name.clone()).highlight_match(&search_query, theme.search_match)).into_any_element()
                     };
                     let drag = PathDrag { path: path.clone(), root: root_path.clone().unwrap_or_default(), directory: is_dir, title: row.entry.name.clone().into(), visual: Default::default() };
                     let weak = cx.entity().downgrade();

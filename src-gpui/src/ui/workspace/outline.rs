@@ -66,15 +66,10 @@ impl OutlineRowStyle {
         (self.docked && level > 1).then(|| icon(IconName::FileText, TREE_ROW_ICON_SIZE, theme.muted))
     }
 
-    fn label(self, title: String, theme: &Theme) -> gpui::Div {
-        let label = div().flex_1().min_w_0().overflow_hidden();
-        if self.docked {
-            return label.child(TreeLabel::new(title, "", theme.search_match));
-        }
-        let (number, rest) = split_number(&title);
-        label.flex().whitespace_nowrap()
-            .child(div().flex_none().max_w(px(55.0)).truncate().opacity(0.45).child(number.to_string()))
-            .child(div().flex_1().min_w_0().truncate().child(rest.to_string()))
+    fn label(self, title: String) -> gpui::Div {
+        let number_len = if self.docked { 0 } else { number_prefix_len(&title) };
+        div().flex_1().min_w_0().overflow_hidden()
+            .child(TreeLabel::new(title).fade_prefix(number_len))
     }
 }
 
@@ -326,13 +321,13 @@ impl OutlineUi {
     }
 }
 
-fn split_number(text: &str) -> (&str, &str) {
+fn number_prefix_len(text: &str) -> usize {
     let bytes = text.as_bytes();
-    if !bytes.first().is_some_and(u8::is_ascii_digit) { return ("", text); }
+    if !bytes.first().is_some_and(u8::is_ascii_digit) { return 0; }
     let mut end = 0;
     while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'.') { end += 1; }
     while end < bytes.len() && bytes[end].is_ascii_whitespace() { end += 1; }
-    (&text[..end], &text[end..])
+    end
 }
 
 fn fading_outline_row(row: &OutlineVisualRow, style: OutlineRowStyle, theme: &Theme) -> AnyElement {
@@ -345,7 +340,7 @@ fn fading_outline_row(row: &OutlineVisualRow, style: OutlineRowStyle, theme: &Th
         .when(!style.docked && row.active, |el| el.bg(theme.accent.opacity(0.07)).font_weight(FontWeight::SEMIBOLD))
         .when(style.can_fold(row.level), |el| el.child(style.chevron_slot().children(arrow)))
         .children(style.row_icon(row.level, theme))
-        .child(style.label(row.text.clone(), theme))
+        .child(style.label(row.text.clone()))
         .into_any_element()
 }
 
@@ -660,7 +655,7 @@ impl Workspace {
                             .when(drop.is_some_and(|(_,_,_,valid)| !valid), |el| el.bg(theme.callout_caution.opacity(0.12)).border_1().border_color(theme.callout_caution))
                             .when(drop.is_some_and(|(_,_,place,valid)| valid && matches!(place,crate::text_document::markdown_session::OutlinePlacement::Inside)), |el| el.bg(theme.accent.opacity(0.15)).border_1().border_color(theme.accent))
                             .children(toggle).children(row_style.row_icon(heading.level, &theme))
-                            .child(row_style.label(title, &theme).when(!docked, |el| el.items_center())
+                            .child(row_style.label(title)
                                 .id(("outline-title", index)).tooltip(tooltip(title_hint)))
                             .when(!docked, |el| el.on_hover(cx.listener(move |workspace, hovered: &bool, _, cx| workspace.set_outline_row_hover(hover_key.clone(), *hovered, cx))))
                             .on_click(cx.listener(move |workspace, _, _, cx| {

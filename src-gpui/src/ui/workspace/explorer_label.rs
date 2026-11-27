@@ -8,25 +8,35 @@ use std::ops::Range;
 
 pub(super) struct TreeLabel {
     text: SharedString,
-    matched: Option<Range<usize>>,
-    highlight: Hsla,
+    highlight: Option<(Range<usize>, HighlightStyle)>,
 }
 
 impl TreeLabel {
-    pub fn new(text: String, query: &str, highlight: Hsla) -> Self {
+    pub fn new(text: String) -> Self {
         // Unix 文件名可能含换行，GPUI 的单行排版不能直接接收换行符。
         let text = if text.chars().any(char::is_control) {
             text.chars().map(|ch| if ch.is_control() { ' ' } else { ch }).collect()
         } else { text };
-        let matched = if query.is_empty() {
-            None
-        } else {
-            let lowered = text.to_lowercase();
-            (lowered.len() == text.len()).then(|| lowered.find(query)).flatten()
-                .map(|start| start..start + query.len())
-                .filter(|range| text.is_char_boundary(range.start) && text.is_char_boundary(range.end))
-        };
-        Self { text: text.into(), matched, highlight }
+        Self { text: text.into(), highlight: None }
+    }
+
+    pub fn highlight_match(mut self, query: &str, color: Hsla) -> Self {
+        if query.is_empty() { return self; }
+        let lowered = self.text.to_lowercase();
+        if lowered.len() == self.text.len() && let Some(start) = lowered.find(query) {
+            let range = start..start + query.len();
+            if self.text.get(range.clone()).is_some() {
+                self.highlight = Some((range, HighlightStyle { background_color: Some(color), ..Default::default() }));
+            }
+        }
+        self
+    }
+
+    pub fn fade_prefix(mut self, len: usize) -> Self {
+        if len > 0 {
+            self.highlight = Some((0..len, HighlightStyle { fade_out: Some(0.55), ..Default::default() }));
+        }
+        self
     }
 }
 
@@ -58,9 +68,9 @@ impl Element for TreeLabel {
             style.font_fallbacks = Some(FALLBACKS.get_or_init(|| gpui::FontFallbacks::from_fonts(vec!["Microsoft YaHei".into()])).clone());
         }
         let mut runs: Vec<TextRun> = Vec::new();
-        if let Some(range) = &self.matched {
+        if let Some((range, highlight)) = &self.highlight {
             if range.start > 0 { runs.push(style.to_run(range.start)); }
-            runs.push(style.clone().highlight(HighlightStyle { background_color: Some(self.highlight), ..Default::default() }).to_run(range.len()));
+            runs.push(style.clone().highlight(*highlight).to_run(range.len()));
             if range.end < self.text.len() { runs.push(style.to_run(self.text.len() - range.end)); }
         } else { runs.push(style.to_run(self.text.len())); }
         let font_size = style.font_size.to_pixels(window.rem_size());
