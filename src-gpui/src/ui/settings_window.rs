@@ -456,7 +456,9 @@ impl SettingsWindow {
             let rows: Vec<AnyElement> = group.items.iter().filter(|item| item_is_visible(item, &settings))
                 .map(|item| self.render_item(item, theme, viewport, cx)).collect();
             div().flex_none().flex().flex_col().w_full().max_w(px(740.0))
-                .child(section_heading(ToolbarLocale::current(cx).app_text(group.title), group.badge, theme)).children(rows).into_any_element()
+                .child(section_heading(ToolbarLocale::current(cx).app_text(group.title), group.badge, theme)).children(rows)
+                .when(group.title == "settings.group.fonts", |group| group.child(fonts::font_preview(theme, cx)))
+                .into_any_element()
         }).collect()
     }
 }

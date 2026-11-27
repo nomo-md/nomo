@@ -589,14 +589,13 @@ fn mono_covers(ch: char) -> bool {
 /// 排版一个段落。`width` 为可用行宽（px）。
 pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
     let styles = spec.coverage();
-    // 按样式切出字体段；等宽段再按字符拆分，Menlo 不含的字符（汉字、全角标点、emoji 等）
-    // 显式改用正文字体，而不交给 CoreText 级联回退：回退得到的苹方字形 ID 与 gpui 按 PostScript
-    // 名复用的已加载字体不是同一字形表，光栅化会画出错字。
+    // 按样式切出字体段。等宽正文必须保持一个 Mono 字体 run，让字体回退也沿用
+    // 等宽字体栈；否则把汉字拆到 Family::Text 后，Markdown 中英文会分别使用两套字体。
     let mut fonts: Vec<(usize, gpui::Font)> = Vec::with_capacity(styles.len());
     let styled_font = |family, style: &InlineStyle| style.font(family);
     for (range, style) in &styles {
         let family = if style.mono { Family::Mono } else { spec.family };
-        if style.font_family.is_some() || !matches!(family, Family::Mono | Family::Code) {
+        if style.font_family.is_some() || !matches!(family, Family::Code) {
             fonts.push((range.len(), styled_font(family, style)));
             continue;
         }

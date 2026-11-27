@@ -139,6 +139,38 @@ impl Render for FontPicker {
     }
 }
 
+pub(super) fn font_preview(theme: &Theme, cx: &App) -> AnyElement {
+    let settings = cx.global::<Settings>();
+    let document = settings.string("documentFontFamily");
+    let document = if document.trim().is_empty() {
+        crate::theme::font_for(crate::theme::Family::Text, false, false).family
+    } else { document.into() };
+    let mono = settings.string("monoFontFamily");
+    let mono = if mono.trim().is_empty() {
+        crate::theme::font_for(crate::theme::Family::Code, false, false).family
+    } else { mono.into() };
+    let locale = ToolbarLocale::current(cx);
+    div().id("font-preview").mt(px(8.0)).p(px(12.0)).rounded(px(6.0)).border_1().border_color(theme.border)
+        .bg(theme.surface)
+        .child(div().font_family(document.clone()).text_size(px(18.0)).font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(theme.heading).child(locale.app_text("settings.fonts.preview.heading")))
+        .child(div().mt(px(6.0)).font_family(document.clone()).text_size(px(14.0)).line_height(gpui::relative(1.55))
+            .text_color(theme.fg).child(locale.app_text("settings.fonts.preview.body")))
+        .child(div().mt(px(5.0)).font_family(document.clone()).text_size(px(14.0)).line_height(gpui::relative(1.55))
+            .text_color(theme.fg)
+            .child(div().child(format!("• {}", locale.app_text("settings.fonts.preview.list1"))))
+            .child(div().child(format!("• {}", locale.app_text("settings.fonts.preview.list2")))))
+        .child(div().mt(px(10.0)).text_size(px(12.0)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme.muted)
+            .child(locale.app_text("settings.monoFontFamily.label")))
+        .child(div().mt(px(6.0)).p(px(10.0)).rounded(px(4.0)).bg(theme.code_bg).border_1().border_color(theme.code_border)
+            .font_family(mono).text_size(px(13.0)).line_height(gpui::relative(1.5)).text_color(theme.code_fg)
+            .child(div().child("fn render_document(title: &str) {"))
+            .child(div().child("    let count = 42; // 中文"))
+            .child(div().child("    println!(\"{title}: {count}\");"))
+            .child(div().child("}")))
+        .into_any_element()
+}
+
 impl SettingsWindow {
     pub(super) fn render_font_control(&mut self, item: &'static Item, theme: &Theme, width: f32, viewport: gpui::Size<gpui::Pixels>, cx: &mut Context<Self>) -> AnyElement {
         let key = item.key;

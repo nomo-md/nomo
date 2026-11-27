@@ -416,31 +416,22 @@ struct UiThemeTransition {
 }
 impl Global for UiThemeTransition {}
 
-/// 字体族。正文与等宽字体按平台选择，等宽字体缺少的汉字回退到正文。
+/// 字体族。正文和代码字体分别由文档字体、等宽字体设置及当前主题配置决定。
 ///
 /// 正文若以系统 UI 字体为主、苹方为回退，GPUI 0.2.2 的回退只按字族名匹配，汉字会丢失粗体字重。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Family {
     Text,
     Mono,
-    /// 代码卡片沿用旧版等宽字体优先级，仍尊重用户设置。
+    /// 代码卡片使用配置中的等宽字体。
     Code,
 }
 
 /// 字体覆盖（来自设置“字体”项）：空串表示使用默认字体。由 `Settings::derive` 在设置变化时更新。
 static FONT_OVERRIDES: std::sync::RwLock<(String, String)> = std::sync::RwLock::new((String::new(), String::new()));
 static THEME_FONTS: std::sync::RwLock<[Vec<String>; 3]> = std::sync::RwLock::new([Vec::new(), Vec::new(), Vec::new()]);
-static CODE_FONT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-
-/// 只在首次显示代码卡片时查一次字体清单，避免缺失字体被 GPUI 回退为比例字体。
-pub fn prepare_code_font(window: &gpui::Window) {
-    CODE_FONT.get_or_init(|| {
-        let installed = window.text_system().all_font_names();
-        ["Cascadia Code", "JetBrains Mono", "Consolas", default_fonts().1].into_iter()
-            .find(|candidate| installed.iter().any(|name| name.eq_ignore_ascii_case(candidate)))
-            .unwrap_or(default_fonts().1)
-    });
-}
+/// 代码卡片沿用设置中的等宽字体；保留入口以维持代码布局的按需生命周期。
+pub fn prepare_code_font(_: &gpui::Window) {}
 
 fn set_theme_fonts(variant: &catalog::Variant, cx: &App) {
     // 只在主题实际切换时查询已安装字体；输入和滚动只读取短字体栈。
@@ -483,25 +474,14 @@ fn font_names() -> (gpui::SharedString, gpui::SharedString) {
 
 pub fn font_for(family: Family, bold: bool, italic: bool) -> Font {
     let (document, mono) = font_names();
-    if family == Family::Code {
-        let custom = FONT_OVERRIDES.read().is_ok_and(|names| !names.1.is_empty()) || THEME_FONTS.read().is_ok_and(|fonts| !fonts[2].is_empty());
-        return Font {
-            family: if custom { mono } else { CODE_FONT.get().copied().unwrap_or(default_fonts().1).into() },
-            features: Default::default(),
-            fallbacks: Some(FontFallbacks::from_fonts(vec!["JetBrains Mono".into(), "Consolas".into(), default_fonts().1.into(), document.to_string()])),
-            weight: if bold { FontWeight::BOLD } else { FontWeight::NORMAL },
-            style: if italic { FontStyle::Italic } else { FontStyle::Normal },
-        };
-    }
-    let (name, fallback) = match family {
-        Family::Text => (document, gpui::SharedString::from(ui_font_family())),
-        Family::Mono => (mono, document),
-        Family::Code => unreachable!(),
+    let (name, fallbacks) = match family {
+        Family::Text => (document, vec![ui_font_family().into(), default_fonts().0.into()]),
+        Family::Mono | Family::Code => (mono, vec![default_fonts().1.into(), default_fonts().0.into()]),
     };
     Font {
         family: name,
         features: Default::default(),
-        fallbacks: Some(FontFallbacks::from_fonts(vec![fallback.to_string(), default_fonts().0.into()])),
+        fallbacks: Some(FontFallbacks::from_fonts(fallbacks)),
         weight: if bold { FontWeight::BOLD } else { FontWeight::NORMAL },
         style: if italic { FontStyle::Italic } else { FontStyle::Normal },
     }
