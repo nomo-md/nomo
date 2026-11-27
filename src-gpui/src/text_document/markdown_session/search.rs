@@ -178,6 +178,32 @@ impl MarkdownDocumentSessionManager {
         }
         Ok(page)
     }
+    /// 从最近的稀疏检查点恢复扫描；导航和可见区高亮共用全文匹配的边界。
+    pub(crate) fn search_region(&self, owner: &str, task_id: &str, from: u64, to: u64)
+        -> TextDocumentResult<(u64, Vec<std::ops::Range<u64>>)> {
+        let task = self.search.get(owner, task_id)?;
+        let _lease = task.lease();
+        check_cancel(&task.cancel)?;
+        let checkpoint = {
+            let data = lock(&task.data)?;
+            let index = data.index.as_ref().ok_or_else(|| error("search-not-ready", "搜索尚未完成"))?;
+            let end = index.checkpoints.partition_point(|c| c.byte < from);
+            end.checked_sub(1).map(|i| index.checkpoints[i]).unwrap_or_default()
+        };
+        let mut ordinal = checkpoint.count;
+        let mut ranges: Vec<std::ops::Range<u64>> = Vec::new();
+        task.matcher.scan(&task.snapshot, checkpoint, &task.cancel, false, to, |m, _| {
+            let (start, end) = m.raw();
+            if start < from { ordinal = m.index + 1; }
+            if to > from && end > from {
+                if let Some(last) = ranges.last_mut().filter(|last| last.end == start) { last.end = end; }
+                else { ranges.push(start..end); }
+            }
+            Ok(true)
+        }, |_, _| {})?;
+        check_cancel(&task.cancel)?;
+        Ok((ordinal, ranges))
+    }
     pub(crate) fn search_progress(
         &self,
         owner: &str,
@@ -283,6 +309,7 @@ impl MarkdownDocumentSessionManager {
             Checkpoint::default(),
             &task.cancel,
             false,
+            u64::MAX,
             |matched, actual| {
                 if actual.as_bytes() == replacement {
                     return Ok(true);

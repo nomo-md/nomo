@@ -1250,6 +1250,7 @@ impl DocumentHost {
         }
     }
     pub(super) fn render_panes(&mut self, window:&mut Window, cx:&mut Context<Self>) -> gpui::AnyElement {
+        self.sync_search_marks(cx);
         self.prepare_reading_layouts(window,cx);
         // prepaint 前推进，子控件几何、双栏阅读锚点和预取看到的都是本帧实际位置。
         for pane in 0..self.panes.len() {

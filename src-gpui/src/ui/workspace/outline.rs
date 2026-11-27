@@ -235,7 +235,7 @@ struct SectionDrag {
 pub(super) struct OutlineUi {
     pub bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     pub sidebar_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
-    panel_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    pub(super) panel_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     focus: FocusHandle,
     keyboard_focus_visible: bool,
     selected: usize,

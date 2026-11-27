@@ -77,6 +77,7 @@ impl Matcher {
         start: Checkpoint,
         cancel: &AtomicBool,
         collect_checkpoints: bool,
+        end_byte: u64,
         mut found: impl FnMut(SearchMatch, &str) -> TextDocumentResult<bool>,
         mut progress: impl FnMut(u64, u64),
     ) -> TextDocumentResult<ScanResult> {
@@ -141,6 +142,7 @@ impl Matcher {
                 if !complete && m.start() >= safe_end {
                     break;
                 }
+                if base + m.start() as u64 >= end_byte { return Ok(result); }
                 consumed = m.end();
                 checked += 1;
                 if checked % 256 == 0 {
@@ -181,7 +183,7 @@ impl Matcher {
                 next_checkpoint = next.saturating_add(stride);
             }
             progress(read, result.count);
-            if complete {
+            if complete || next >= end_byte {
                 check_cancel(cancel)?;
                 return Ok(result);
             }

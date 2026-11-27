@@ -33,6 +33,8 @@ use unicode_segmentation::UnicodeSegmentation;
 mod object_ui;
 #[path = "composition.rs"]
 mod composition;
+#[path = "search_highlights.rs"]
+pub(super) mod search_highlights;
 #[path = "keyboard.rs"]
 mod keyboard;
 #[path = "quick_insert_view.rs"]
@@ -82,6 +84,7 @@ pub struct NomoMark {
     cell_selection: Option<table_clipboard::CellSelection>,
     table_drag_anchor: Option<(usize, usize, usize)>,
     implicit_cell: Option<(WindowIdentity, ImplicitCell)>,
+    pub(super) find_marks: Option<Box<search_highlights::VisibleMatches>>,
     pub host: WindowHostAdapter,
     pub mode: ViewMode,
     pub base_dir: Option<PathBuf>,
@@ -141,6 +144,7 @@ impl NomoMark {
     }
     pub fn new(host: WindowHostAdapter, cx: &mut Context<Self>) -> Self {
         Self {
+            find_marks: None,
             heading_indicator: Default::default(),
             table_size_picker: false,
             table_size_hover: None,
@@ -2233,6 +2237,8 @@ impl NomoMark {
                 self.cell_selection.is_none().then_some(selected.start.saturating_sub(base) as usize
                     ..selected.end.saturating_sub(base) as usize),
                 &self.selected_cell_ranges(),
+                self.find_marks.as_deref().filter(|marks| marks.revision == self.host.parsed.identity.revision && self.host.pending_count() == 0),
+                base,
                 &theme,
                 cx.global::<ImageStore>(),
                 window,
@@ -3075,6 +3081,7 @@ impl Element for ControlElement {
                 }
             }
             v.prepare_heading_indicator(bounds, window, cx);
+            v.update_visible_matches(cx);
             v.report_geometry(window, cx);
         });
         let mut cursors = Vec::new();

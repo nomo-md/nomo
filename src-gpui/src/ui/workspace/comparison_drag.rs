@@ -805,7 +805,7 @@ impl Workspace {
                     }
                 }
                 self.popover = None;
-                self.search = None;
+                self.dismiss_search(cx);
                 self.close_status(cx);
                 self.active = source_active.and_then(|k| self.tab_index(k)).unwrap_or(0);
                 if self.tabs.is_empty() && self.comparison.items.is_empty() {

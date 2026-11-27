@@ -193,7 +193,7 @@ impl Workspace {
         self.toolbar_motion_task.take();
         self.toolbar_motion = None;
         self.tab_menu_open = false;
-        self.search = None;
+        self.dismiss_search(cx);
         self.close_status(cx);
         self.outline_ui.suspend_for_mini();
         self.suspend_tree(cx);

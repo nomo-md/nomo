@@ -1,6 +1,7 @@
 //! 正式页面的全文查询。查询在会话后台执行，控件仍只消费命中附近的窗口。
 use super::super::session_window::WindowRequest;
 use super::*;
+use gpui::App;
 use crate::text_document::{
     DocumentStats, ReplaceQuery, SearchMatch, SearchQuery, StatsQuery,
 };
@@ -15,9 +16,45 @@ pub struct SearchState {
     pub current: Option<u64>,
     pub matches: Vec<SearchMatch>,
     pub error: Option<String>,
-    task_id: Option<String>,
+    pub(super) task_id: Option<String>,
+    pub(super) revision: u64,
+    anchor: Option<u64>,
+    pane_id: Option<u64>,
+    first: u64,
+    target: Option<u64>,
+    navigation: WindowRequest,
+    navigation_serial: u64,
+    queued_steps: Vec<(bool, bool, u32)>,
+    feedback_timer: Option<gpui::Task<()>>,
+    pub(super) after_replace: Option<(u64, u64, bool)>,
+    pub feedback: Option<String>,
+    pub panel_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    pub(super) replacing: bool,
     request: WindowRequest,
-    serial: u64,
+    pub(super) serial: u64,
+}
+impl SearchState {
+    fn destination(&self, forward: bool, wrap: bool, count: u32) -> Option<(u64, bool)> {
+        if self.pending || self.total == 0 || self.replacing { return None; }
+        let current = self.target.or(self.current);
+        let index = if forward { current.map_or(self.first, |i| i + 1) as i128 }
+            else { current.unwrap_or(self.first) as i128 - 1 };
+        let crossed = !(0..self.total as i128).contains(&index);
+        if crossed && !wrap { return None; }
+        let extra = count.saturating_sub(1) as i128;
+        let end = index + if forward { extra } else { -extra };
+        let total = self.total as i128;
+        let wrapped = wrap && !(0..total).contains(&end);
+        Some((if wrap { end.rem_euclid(total) } else { end.clamp(0, total - 1) } as u64, wrapped))
+    }
+    pub fn can_step(&self, forward: bool, wrap: bool) -> bool { self.destination(forward, wrap, 1).is_some() }
+    pub fn can_replace(&self) -> bool { self.current.is_some() && self.target.is_none() && !self.replacing && !self.pending }
+    pub fn can_replace_all(&self) -> bool { self.total > 0 && !self.pending && !self.replacing }
+    pub(super) fn current_range(&self) -> Option<std::ops::Range<u64>> {
+        let i = self.current?;
+        let m = self.matches.iter().find(|m| m.index == i)?;
+        Some(m.from_byte + m.preserved_prefix.len() as u64..m.to_byte - m.preserved_suffix.len() as u64)
+    }
 }
 #[derive(Default)]
 pub(super) struct Queries {
@@ -43,6 +80,7 @@ impl Drop for Queries {
     fn drop(&mut self) {
         self.footnote_request.cancel();
         self.metadata_request.cancel();
+        self.search.navigation.cancel();
         self.search.request.cancel();
     }
 }
@@ -86,9 +124,6 @@ impl DocumentHost {
     pub(crate) fn stats(&self) -> Option<&DocumentStats> {
         self.queries.selected_stats.as_ref().or(self.queries.stats.as_ref())
     }
-    pub(crate) fn full_stats(&self) -> Option<&DocumentStats> {
-        self.queries.stats.as_ref()
-    }
     pub(crate) fn stats_are_selected(&self) -> bool {
         self.queries.selected_stats.is_some()
     }
@@ -116,6 +151,8 @@ impl DocumentHost {
         // 隐藏时取消任务，保留有界标题分页和折叠状态；关闭会话才释放投影。
         if self.closed { self.close_outline(cx); }
         else { self.set_outline_enabled(false, cx.global::<crate::settings::Settings>().outline_level, cx); }
+        self.queries.search.feedback_timer = None;
+        self.queries.search.navigation.cancel();
         self.queries.search.matches.clear();
         self.queries.search.request.cancel();
         if let Some(id) = self.queries.search.task_id.take() {
@@ -126,6 +163,7 @@ impl DocumentHost {
                 })
                 .detach();
         }
+        self.sync_search_marks(cx);
     }
     fn cancel_stats(&mut self) {
         self.port.manager.cancel_writing_stats(&self.port.owner, Some(self.queries.serial));
@@ -236,6 +274,56 @@ impl DocumentHost {
             });
         }));
     }
+    pub(crate) fn search_source_hint(&self, cx: &App) -> Option<&'static str> {
+        self.control.read(cx).hidden_search_hit(self.queries.search.current_range()?)
+    }
+
+    pub(crate) fn set_search_panel_bounds(&mut self, bounds: gpui::Bounds<gpui::Pixels>) {
+        self.queries.search.panel_bounds = Some(bounds);
+    }
+
+    pub(super) fn sync_search_marks(&self, cx: &mut Context<Self>) {
+        let state = &self.queries.search;
+        let task_id = state.task_id.as_ref().filter(|_| state.total > 0);
+        let current = task_id.and_then(|_| state.current_range());
+        for pane in &self.panes {
+            for view in std::iter::once(&pane.control).chain(pane.viewport.mounts.iter().map(|m| &m.view).filter(|v| *v != &pane.control)) {
+                let marks = &view.read(cx).find_marks;
+                if marks.as_ref().map(|m| &m.task_id) == task_id && marks.as_ref().and_then(|m| m.current.as_ref()) == current.as_ref() { continue; }
+                view.update(cx, |v, cx| {
+                    if v.find_marks.as_ref().map(|m| &m.task_id) != task_id {
+                        v.find_marks = task_id.map(|id| Box::new(super::super::view::search_highlights::VisibleMatches::new(id.clone(), state.revision)));
+                    }
+                    if let Some(marks) = &mut v.find_marks { marks.current = current.clone(); }
+                    cx.notify();
+                });
+            }
+        }
+    }
+
+    fn restore_find_pane(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(pane) = self.panes.iter().find(|pane| Some(pane.id) == self.queries.search.pane_id) else { return true };
+        let view = pane.control.clone();
+        self.control == view || self.promote(&view, cx)
+    }
+
+    pub(crate) fn focus_after_find(&mut self, cx: &mut Context<Self>) -> gpui::FocusHandle {
+        self.restore_find_pane(cx);
+        self.control.focus_handle(cx)
+    }
+
+    pub(crate) fn begin_find(&mut self, cx: &App) {
+        self.queries.search.pane_id = Some(self.panes[self.active_pane].id);
+        self.queries.search.anchor = Some(self.selection(cx).range().start);
+    }
+
+    pub(crate) fn end_find(&mut self, cx: &mut Context<Self>) {
+        self.queries.search.panel_bounds = None;
+        self.set_search(String::new(), false, false, cx);
+        self.queries.search.anchor = None;
+        self.queries.search.pane_id = None;
+    }
+
     pub(crate) fn set_search(
         &mut self,
         query: String,
@@ -243,6 +331,16 @@ impl DocumentHost {
         whole_word: bool,
         cx: &mut Context<Self>,
     ) {
+        let follow = self.queries.search.after_replace.take();
+        let anchor = follow.map(|(_, end, _)| end).or(self.queries.search.anchor)
+            .unwrap_or_else(|| self.selection(cx).range().start);
+        self.queries.search.anchor = Some(anchor);
+        self.queries.search.revision = self.status().revision;
+        self.queries.search.queued_steps.clear();
+        self.queries.search.feedback_timer = None;
+        self.queries.search.target = None;
+        self.queries.search.feedback = None;
+        self.queries.search.navigation.cancel();
         self.queries.search.request.cancel();
         let old = self.queries.search.task_id.take();
         self.queries.search.serial += 1;
@@ -258,14 +356,20 @@ impl DocumentHost {
         self.queries.search.request = WindowRequest::default();
         let request = self.queries.search.request.clone();
         let port = self.port.clone();
+        if query.is_empty() {
+            self.sync_search_marks(cx);
+            if let Some(id) = old { cx.background_executor().spawn(async move { port.manager.release_search(&port.owner, &id); }).detach(); }
+            cx.emit(DocumentEvent::Status);
+            cx.notify();
+            return;
+        }
         let revision = self.status().revision;
+        let debounce = cx.background_executor().timer(Duration::from_millis(50));
         let task = cx.background_executor().spawn(async move {
             if let Some(id) = old {
                 port.manager.release_search(&port.owner, &id);
             }
-            if query.is_empty() {
-                return Ok(None);
-            }
+            debounce.await;
             request.check()?;
             let identity = port
                 .manager
@@ -308,7 +412,13 @@ impl DocumentHost {
                     .search_page(&port.owner, &identity.task_id, 0, 128)
                     .map_err(search_error)?;
                 request.check()?;
-                Ok(Some(page))
+                let rank = |at| port.manager.search_region(&port.owner, &identity.task_id, at, at)
+                    .map(|(ordinal, _)| ordinal).map_err(search_error);
+                let first = rank(anchor)?;
+                let advance = if let Some((start, _, wrap)) = follow {
+                    first < page.total_count || (wrap && rank(start)? > 0)
+                } else { false };
+                Ok((page, first, advance))
             })();
             if result.is_err() {
                 port.manager.release_search(&port.owner, &identity.task_id);
@@ -321,8 +431,7 @@ impl DocumentHost {
             let id = result
                 .as_ref()
                 .ok()
-                .and_then(|p| p.as_ref())
-                .map(|p| p.identity.task_id.clone());
+                .map(|(p, _, _)| p.identity.task_id.clone());
             let accepted = this
                 .update(cx, |host, cx| {
                     if host.queries.search.serial != serial
@@ -335,12 +444,27 @@ impl DocumentHost {
                     }
                     host.queries.search.pending = false;
                     match result {
-                        Ok(Some(page)) => {
+                        Ok((page, first, advance)) => {
+                            host.queries.search.first = first;
                             host.queries.search.total = page.total_count;
                             host.queries.search.matches = page.matches;
                             host.queries.search.task_id = Some(page.identity.task_id);
+                            let queued = std::mem::take(&mut host.queries.search.queued_steps);
+                            if queued.is_empty() {
+                                if advance { host.step_match(true, true, cx); }
+                            } else {
+                                let state = &mut host.queries.search;
+                                let mut last = None;
+                                for (forward, wrap, count) in queued {
+                                    if let Some((index, crossed)) = state.destination(forward, wrap, count) {
+                                        state.target = Some(index);
+                                        last = Some((index, forward, crossed));
+                                    }
+                                }
+                                state.target = None;
+                                if let Some((index, forward, crossed)) = last { host.navigate_match(index, forward, crossed, cx); }
+                            }
                         }
-                        Ok(None) => {}
                         Err(ControlError::Stale) => {}
                         Err(e) => {
                             host.queries.search.error = Some(e.to_string());
@@ -366,72 +490,104 @@ impl DocumentHost {
         cx.notify();
     }
     pub(crate) fn step_match(&mut self, forward: bool, wrap: bool, cx: &mut Context<Self>) {
-        let state = &self.queries.search;
-        if state.pending || state.total == 0 {
+        if self.queries.search.pending {
+            let queue = &mut self.queries.search.queued_steps;
+            if let Some((_, _, count)) = queue.last_mut().filter(|(dir, cycle, _)| (*dir, *cycle) == (forward, wrap)) {
+                *count = count.saturating_add(1);
+            } else if queue.len() < 128 {
+                queue.push((forward, wrap, 1));
+            }
             return;
         }
-        let index = match state.current {
-            None => {
-                if forward {
-                    0
-                } else {
-                    state.total - 1
-                }
-            }
-            Some(i) => {
-                if !wrap && ((forward && i + 1 >= state.total) || (!forward && i == 0)) { return; }
-                if forward { (i + 1) % state.total } else { (i + state.total - 1) % state.total }
-            }
-        };
-        let Some(id) = state.task_id.clone() else {
-            return;
-        };
+        let Some((index, crossed)) = self.queries.search.destination(forward, wrap, 1) else { return; };
+        self.navigate_match(index, forward, crossed, cx);
+    }
+
+    fn navigate_match(&mut self, index: u64, forward: bool, crossed: bool, cx: &mut Context<Self>) {
+        if !self.restore_find_pane(cx) || !self.ready_for_session_action(cx) { return; }
+        let state = &mut self.queries.search;
+        let Some(id) = state.task_id.clone() else { return; };
+        state.navigation.cancel();
+        state.navigation = WindowRequest::default();
+        state.navigation_serial += 1;
+        state.target = Some(index);
+        let sequence = state.navigation_serial;
         let serial = state.serial;
-        let revision = self.status().revision;
+        let revision = state.revision;
+        let request = state.navigation.clone();
+        let cached = state.matches.iter().find(|m| m.index == index).cloned();
         let port = self.port.clone();
-        let task = cx
-            .background_executor()
-            .spawn(async move { port.manager.search_page(&port.owner, &id, index, 128).map_err(search_error) });
+        let control = self.control.clone();
+        let identity = control.read(cx).host.parsed.identity.clone();
+        let loaded_range = identity.from_byte..identity.to_byte;
+        let settle = cx.background_executor().timer(Duration::from_millis(10));
+        let task = cx.background_executor().spawn(async move {
+            settle.await;
+            request.check()?;
+            let page = if cached.is_none() {
+                Some(port.manager.search_page(&port.owner, &id, index, 128).map_err(search_error)?)
+            } else { None };
+            let found = cached.as_ref().or_else(|| page.as_ref()?.matches.first()).ok_or(ControlError::Stale)?;
+            let selection = DocumentSelection { anchor_byte: found.from_byte + found.preserved_prefix.len() as u64,
+                head_byte: found.to_byte - found.preserved_suffix.len() as u64 };
+            request.check()?;
+            let loaded = if loaded_range.start <= selection.anchor_byte && selection.head_byte <= loaded_range.end { None }
+                else { Some(port.load_group(revision, selection.head_byte, None, &request)?) };
+            Ok::<_, ControlError>((selection, loaded, page))
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |host, cx| {
-                if host.hidden
-                    || host.closed
-                    || host.status().revision != revision
-                    || host.queries.search.serial != serial
-                {
-                    return;
+                if host.closed || host.hidden || host.queries.search.serial != serial
+                    || host.queries.search.navigation_serial != sequence { return; }
+                host.queries.search.target = None;
+                if host.control != control || control.read(cx).host.parsed.identity != identity
+                    || host.status().revision != revision || !host.ready_for_session_action(cx) {
+                    cx.emit(DocumentEvent::Status); cx.notify(); return;
                 }
                 match result {
-                    Ok(page) => {
-                        if let Some(found) = page.matches.first() {
-                            let selection = DocumentSelection {
-                                anchor_byte: found.from_byte + found.preserved_prefix.len() as u64,
-                                head_byte: found.to_byte - found.preserved_suffix.len() as u64,
-                            };
-                            host.load_at_focused(selection.head_byte, Some(selection), false, cx);
-                            host.queries.search.current = Some(index);
+                    Ok((selection, loaded, page)) => {
+                        if let Some(loaded) = loaded {
+                            if let Err(e) = host.install(loaded, Some(selection), cx) { host.report(e, cx); return; }
+                            host.focus_pending = false;
+                        } else {
+                            control.update(cx, |view, cx| view.restore_session_selection(selection, cx));
+                            host.selection_changed(true, cx);
                         }
-                        host.queries.search.matches = page.matches;
+                        if let Some(page) = page { host.queries.search.matches = page.matches; }
+                        host.queries.search.current = Some(index);
+                        let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
+                        host.queries.search.feedback_timer = None;
+                        host.queries.search.feedback = crossed.then(|| locale.text(if forward { "search_wrap_start" } else { "search_wrap_end" }).into());
+                        if crossed {
+                            let timer = cx.background_executor().timer(Duration::from_millis(1800));
+                            host.queries.search.feedback_timer = Some(cx.spawn(async move |this, cx| {
+                                timer.await;
+                                let _ = this.update(cx, |host, cx| {
+                                    host.queries.search.feedback = None; cx.emit(DocumentEvent::Status); cx.notify();
+                                });
+                            }));
+                        }
                     }
                     Err(ControlError::Stale) => {
-                        let search = &host.queries.search;
-                        host.set_search(search.query.clone(), search.case_sensitive, search.whole_word, cx);
+                        let state = &host.queries.search;
+                        host.set_search(state.query.clone(), state.case_sensitive, state.whole_word, cx);
                     }
                     Err(e) => host.report(e, cx),
                 }
                 cx.emit(DocumentEvent::Status);
                 cx.notify();
             });
-        })
-        .detach();
+        }).detach();
+        cx.emit(DocumentEvent::Status);
+        cx.notify();
     }
-    pub(crate) fn replace_current(&mut self, replacement: &str, cx: &mut Context<Self>) {
-        if self.editing_locked() { return; }
-        let Some(index) = self.queries.search.current else {
-            self.step_match(true, true, cx);
-            return;
-        };
+    pub(crate) fn replace_current(&mut self, replacement: &str, wrap: bool, cx: &mut Context<Self>) {
+        if self.editing_locked() || !self.queries.search.can_replace()
+            || self.queries.search.revision != self.status().revision
+            || self.control.read(cx).host.parsed.identity.revision != self.queries.search.revision
+            || !self.ready_for_session_action(cx) { return; }
+        let Some(index) = self.queries.search.current else { return; };
         let Some(found) = self
             .queries
             .search
@@ -442,22 +598,23 @@ impl DocumentHost {
         else {
             return;
         };
-        self.global_edit(
-            DocumentSelection {
-                anchor_byte: found.from_byte,
-                head_byte: found.to_byte,
-            },
-            EditIntent::Replace(format!(
-                "{}{replacement}{}",
-                found.preserved_prefix, found.preserved_suffix
-            )),
-            cx,
-        );
+        let text = format!("{}{replacement}{}", found.preserved_prefix, found.preserved_suffix);
+        let selection = DocumentSelection { anchor_byte: found.from_byte, head_byte: found.to_byte };
+        // 同内容判断以实际命中为准；不区分大小写时 Fox → fox 仍然是一次修改。
+        let view = self.control.read(cx);
+        if super::super::mapping::local_range(&view.host.parsed.source, view.host.parsed.identity.from_byte, selection.range())
+            .ok().and_then(|r| view.host.parsed.source.get(r)) == Some(text.as_str()) {
+            self.queries.search.feedback = Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).text("search_unchanged").into());
+            cx.emit(DocumentEvent::Status); cx.notify(); return;
+        }
+        self.global_edit_follow(selection, EditIntent::Replace(text), Some((self.queries.search.serial, wrap)), cx);
     }
     pub(crate) fn replace_all(&mut self, replacement: String, cx: &mut Context<Self>) {
-        if self.editing_locked() || self.queries.search.query.is_empty() || !self.ready_for_session_action(cx) {
+        if self.editing_locked() || !self.queries.search.can_replace_all() || self.queries.search.revision != self.status().revision || !self.ready_for_session_action(cx) {
             return;
         }
+        self.queries.search.replacing = true;
+        cx.emit(DocumentEvent::Status);
         let request = self.begin_session_action(cx);
         let port = self.port.clone();
         let serial = self.queries.search.serial;
@@ -539,6 +696,8 @@ impl DocumentHost {
             let result = task.await;
             let _ = this.update(cx, |host, cx| {
                 host.navigating = false;
+                host.queries.search.replacing = false;
+                let same_query = serial == host.queries.search.serial;
                 match result {
                     Ok(Some((loaded, byte, count))) => {
                         if let Err(e) =
@@ -546,16 +705,20 @@ impl DocumentHost {
                         {
                             host.action_failed(e, cx);
                         } else {
+                            host.focus_pending = false;
                             host.message = crate::ui::toolbar_i18n::ToolbarLocale::current(cx).app_format("host.replaced", &[("count", &count.to_string())]);
+                            if same_query { host.queries.search.feedback = Some(host.message.clone()); }
                         }
                     }
                     Ok(None) => {
                         host.control.update(cx, |view, _| view.host.set_readonly(false));
                         host.message.clear();
+                        if same_query { host.queries.search.feedback = Some(crate::ui::toolbar_i18n::ToolbarLocale::current(cx).text("search_unchanged").into()); }
                         host.schedule_viewport(16, cx);
                     }
                     Err(e) => host.action_failed(e, cx),
                 }
+                cx.emit(DocumentEvent::Status);
                 cx.notify();
             });
         })

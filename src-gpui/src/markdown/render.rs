@@ -467,14 +467,27 @@ impl BlockLayout {
 
     /// 块内源码区间在各文本项上的覆盖矩形（块坐标）。
     pub fn source_rects_clipped(&self, range: Range<usize>, clip: Range<f32>) -> Vec<(f32, f32, f32, f32)> {
+        if range.is_empty() { return Vec::new(); }
+        self.source_ranges_rects(&[range.start as u64..range.end as u64], 0, clip)
+    }
+
+    /// 按可见显示项遍历一次，用源码有序区间定位覆盖它的搜索结果。
+    pub(crate) fn source_ranges_rects(&self, ranges: &[Range<u64>], base: u64, clip: Range<f32>) -> Vec<(f32, f32, f32, f32)> {
         let mut rects = Vec::new();
-        if range.is_empty() { return rects; }
+        if ranges.is_empty() { return rects; }
+        let overlaps = |start: usize, end: usize| {
+            let start = base + start as u64;
+            let end = base + end as u64;
+            let first = ranges.partition_point(|r| r.end <= start);
+            let last = first + ranges[first..].partition_point(|r| r.start < end);
+            &ranges[first..last]
+        };
         for item in &self.items {
             if let DisplayItem::CodeBody { x, y, w, h, body, .. } = item {
                 let (width, height) = body.viewport(*w, *h);
                 if y + height < clip.start || *y > clip.end { continue; }
                 let (dx, dy) = body.offset.get();
-                for (sx, sy, sw, sh) in body.code.source_rects_clipped(range.clone(), (clip.start-y+dy).max(dy)..(clip.end-y+dy).min(dy+height)) {
+                for (sx, sy, sw, sh) in body.code.source_ranges_rects(ranges, base, (clip.start-y+dy).max(dy)..(clip.end-y+dy).min(dy+height)) {
                     let left = (sx-dx).max(0.0); let right = (sx+sw-dx).min(width);
                     let top = (sy-dy).max(0.0); let bottom = (sy+sh-dy).min(height);
                     if right > left && bottom > top { rects.push((x+body.gutter+left, y+top, right-left, bottom-top)); }
@@ -483,15 +496,15 @@ impl BlockLayout {
             }
             if let DisplayItem::Horizontal{x,y,w,h,offset,layout,..}=item{
                 if y + h < clip.start || *y > clip.end { continue; }
-                for (sx,sy,sw,sh) in layout.source_rects_clipped(range.clone(),(clip.start-y)..(clip.end-y)) {let left=(sx-offset.get()).max(0.0);let right=(sx+sw-offset.get()).min(*w);if right>left{rects.push((x+left,y+sy,right-left,sh));}}
+                for (sx,sy,sw,sh) in layout.source_ranges_rects(ranges,base,(clip.start-y)..(clip.end-y)) {let left=(sx-offset.get()).max(0.0);let right=(sx+sw-offset.get()).min(*w);if right>left{rects.push((x+left,y+sy,right-left,sh));}}
                 continue;
             }
             if let DisplayItem::Image{x,y,w,h,source,..}=item{
                 if y + h < clip.start || *y > clip.end { continue; }
-                if range.start<source.end&&source.start<range.end{rects.push((*x,*y,*w,*h));}continue;
+                if !overlaps(source.start,source.end).is_empty(){rects.push((*x,*y,*w,*h));}continue;
             }
             if let DisplayItem::BlockControls { x, y, w, h, source, kind: "rule", .. } = item {
-                if y + h >= clip.start && *y <= clip.end && range.start < source.end && source.start < range.end {
+                if y + h >= clip.start && *y <= clip.end && !overlaps(source.start,source.end).is_empty() {
                     rects.push((*x, *y, *w, *h));
                 }
                 continue;
@@ -499,20 +512,26 @@ impl BlockLayout {
             let DisplayItem::Text { x, y, layout, map } = item else { continue };
             if y + layout.height() < clip.start || *y > clip.end { continue; }
             let rows = (((clip.start-y)/layout.line_height).floor().max(0.0) as usize)..(((clip.end-y)/layout.line_height).ceil().max(0.0) as usize).saturating_add(1);
+            let first = rows.start.min(layout.lines.len());
+            let last = rows.end.min(layout.lines.len());
+            if first >= last { continue; }
             for seg in map {
-                let seg_end = seg.source_end;
-                let from = range.start.max(seg.source);
-                let to = range.end.min(seg_end);
-                if from >= to {
-                    continue;
+                let mut source = seg.source..seg.source_end;
+                if seg.exact {
+                    source.start += layout.lines[first].start.saturating_sub(seg.text.start).min(seg.text.len());
+                    // 保留可见行末换行符的选区宽度。
+                    source.end = source.end.min(seg.source + layout.lines[last - 1].end.saturating_add(1).saturating_sub(seg.text.start));
                 }
-                let text_range = if seg.exact {
-                    seg.text.start + (from - seg.source)..seg.text.start + (to - seg.source)
-                } else {
-                    seg.text.clone()
-                };
-                for (line, x0, x1) in layout.range_rects_in(text_range,rows.clone()) {
-                    rects.push((x + x0, y + line as f32 * layout.line_height, x1 - x0, layout.line_height));
+                if source.start >= source.end { continue; }
+                for r in overlaps(source.start, source.end) {
+                    let from = r.start.saturating_sub(base) as usize;
+                    let to = r.end.saturating_sub(base) as usize;
+                    let text = if seg.exact {
+                        seg.text.start + (from.max(seg.source) - seg.source)..seg.text.start + (to.min(seg.source_end) - seg.source)
+                    } else { seg.text.clone() };
+                    for (line, x0, x1) in layout.range_rects_in(text, rows.clone()) {
+                        rects.push((x + x0, y + line as f32 * layout.line_height, x1 - x0, layout.line_height));
+                    }
                 }
             }
         }

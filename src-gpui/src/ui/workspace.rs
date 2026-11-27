@@ -40,6 +40,8 @@ mod explorer_ui;
 mod explorer_label;
 mod explorer_search;
 mod outline;
+mod search;
+use search::SearchPanel;
 mod navigation;
 mod toolbar;
 mod status;
@@ -215,17 +217,6 @@ fn tree_chevron(expanded: bool, path: Option<&Path>, animation: Option<&TreeChev
 struct DocumentServices {manager:MarkdownDocumentSessionManager,_lease:std::sync::Arc<crate::text_document::markdown_session::SessionLease>}
 impl gpui::Global for DocumentServices {}
 
-pub(crate) struct SearchPanel {
-    pub(crate) query: Entity<TextField>,
-    pub(crate) replacement: Entity<TextField>,
-    show_replace: bool,
-    case_sensitive: bool,
-    whole_word: bool,
-    backwards: bool,
-    wrap_around: bool,
-    _subscriptions: Vec<Subscription>,
-}
-
 /// 浮层只保留窗口身份/选区和弱文档引用；丢弃时释放输入框及订阅。
 struct PendingPopover {
     document: gpui::WeakEntity<DocumentHost>,
@@ -298,6 +289,8 @@ pub struct Workspace {
     tree: Option<FileTree>,
     explorer: ExplorerState,
     pub(crate) search: Option<SearchPanel>,
+    search_position: Option<gpui::Point<gpui::Pixels>>,
+    last_search: String,
     popover: Option<PendingPopover>,
     outline_scroll: UniformListScrollHandle,
     outline_ui: outline::OutlineUi,
@@ -465,6 +458,8 @@ impl Workspace {
             tree: None,
             explorer: ExplorerState::default(),
             search: None,
+            search_position: None,
+            last_search: String::new(),
             popover: None,
             outline_scroll: UniformListScrollHandle::new(),
             outline_ui: outline::OutlineUi::new(window, cx),
@@ -565,7 +560,7 @@ impl Workspace {
         self.popover = None;
         self.toolbar_popup = None;
         self.tab_menu_open = false;
-        self.search = None;
+        self.dismiss_search(cx);
         self.close_status(cx);
         self.outline_ui.clear_document();
         self.finish_navigation_resize(cx);
@@ -874,7 +869,7 @@ impl Workspace {
                             workspace.forget_document_transition(previous);
                             workspace.pending_saves.retain(|pending|pending.document!=*previous);
                             tab_key=workspace.tabs.remove(index).key; workspace.active=workspace.active.saturating_sub(usize::from(index<workspace.active)).min(workspace.tabs.len().saturating_sub(1));
-                            workspace.search=None; workspace.popover=None;
+                            workspace.dismiss_search(cx); workspace.popover=None;
                         }
                         let document=cx.new(|cx|DocumentHost::workspace(port,adapter,status,if mode==EditorMode::Source {ViewMode::Source}else{ViewMode::Semantic},open_profile,cx));
                         application_dialogs::mark_recovered_change(workspace,&document,&source,cx);
@@ -1042,8 +1037,8 @@ impl Workspace {
         let desired=self.comparison.item(key).map(|item|item.keys()).unwrap_or_else(||vec![key]);
         if !self.show_members(&desired, cx) { return; }
         if let Some(item)=self.comparison.item_mut(key) { item.focus(key); }
+        if self.active != index { self.dismiss_search(cx); }
         if self.active!=index && desired.len()==2 {
-            if self.search.is_some() {self.close_search(window,cx);}
             self.outline_ui.clear_document();
         }
         let from_home = self.home_visible;
@@ -1063,7 +1058,6 @@ impl Workspace {
         window.set_window_title(&format!("{} — Nomo",document.read(cx).display_title(cx)));
         if !window.has_active_prompt() { window.focus(&document.focus_handle(cx), cx); }
         self.last_notice=None;
-        self.run_search(cx);
         if let Some(selection)=after.selection {
             let byte=selection.head_byte.min(document.read(cx).status().byte_length);
             document.update(cx,|host,cx|host.navigate(byte,Some(crate::nomo_mark::protocol::DocumentSelection::caret(byte)),cx));
@@ -1138,6 +1132,7 @@ impl Workspace {
         if self.popover.as_ref().and_then(|p|p.document.upgrade()).as_ref()==Some(document) {self.popover=None;}
         self.pending_saves.retain(|pending| &pending.document != document);
         let pos=self.comparison.position(self.tabs[index].key).unwrap_or(0);
+        if self.active == index { self.dismiss_search(cx); }
         let key=self.tabs.remove(index).key;
         self.note_closed_layout(key,document,discard,cx);
         self.comparison.remove_member(key);
@@ -1159,7 +1154,7 @@ impl Workspace {
             self.popover=None;
             self.toolbar_popup=None;
             self.tab_menu_open=false;
-            self.search=None;
+            self.dismiss_search(cx);
             self.close_status(cx);
             self.outline_ui.clear_document();
             self.surface.clear();
@@ -1329,92 +1324,6 @@ impl Workspace {
             cx.background_executor().timer(delay).await;
             let _=this.update_in(cx,|workspace,window,cx| {if document.read(cx).is_dirty(cx){workspace.save_document(&document,false,false,window,cx);}});
         }));
-    }
-
-    // ---- 搜索 ----
-
-    fn toggle_search(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if replace && self.document().is_some_and(|document| document.read(cx).editing_locked()) { return; }
-        if self.search.as_ref().is_some_and(|search| search.show_replace == replace) {
-            self.close_search(window, cx);
-        } else {
-            self.open_search(replace, window, cx);
-        }
-    }
-
-    pub(crate) fn open_search(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.popover=None;
-        let Some(buffer) = self.document() else { return };
-        let replace = replace && !buffer.read(cx).editing_locked();
-        let selected = buffer.read(cx).selected_text(cx);
-        let was_open = self.search.is_some();
-        if self.search.is_none() {
-            let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
-            let query = cx.new(|cx| TextField::new(locale.text("find"), cx));
-            let replacement = cx.new(|cx| TextField::new(locale.text("replace_with"), cx));
-            let subscriptions = vec![
-                cx.subscribe_in(&query, window, |workspace, _, event, window, cx| workspace.on_query_event(event, window, cx)),
-                cx.subscribe_in(&replacement, window, |workspace, _, event, window, cx| match event {
-                    FieldEvent::Submit { .. } => workspace.replace_one(window, cx),
-                    FieldEvent::Cancel => workspace.close_search(window, cx),
-                    FieldEvent::Changed => {}
-                }),
-            ];
-            self.search = Some(SearchPanel { query, replacement, show_replace: replace, case_sensitive: false, whole_word: false, backwards: false, wrap_around: true, _subscriptions: subscriptions });
-        }
-        let search = self.search.as_mut().expect("created");
-        search.show_replace = replace;
-        let query = search.query.clone();
-        if !was_open && !selected.is_empty() && !selected.contains('\n') && selected.len() < 200 {
-            query.update(cx, |field, cx| field.set_text(&selected, cx));
-        } else {
-            let text = query.read(cx).content.clone();
-            query.update(cx, |field, cx| field.set_text(&text, cx));
-        }
-        window.focus(&query.focus_handle(cx), cx);
-        cx.notify();
-    }
-
-    fn on_query_event(&mut self, event: &FieldEvent, window: &mut Window, cx: &mut Context<Self>) {
-        match event {
-            FieldEvent::Changed => self.run_search(cx),
-            FieldEvent::Submit { backwards } => { let reverse=self.search.as_ref().is_some_and(|search| search.backwards); self.step_match(!(*backwards ^ reverse), window, cx); },
-            FieldEvent::Cancel => self.close_search(window, cx),
-        }
-    }
-
-    fn run_search(&mut self, cx: &mut Context<Self>) {
-        let (Some(search), Some(buffer)) = (&self.search, self.document()) else { return };
-        let query = search.query.read(cx).content.clone();
-        let case = search.case_sensitive;
-        let whole_word = search.whole_word;
-        buffer.update(cx, |buffer, cx| buffer.set_search(query, case, whole_word, cx));
-    }
-
-    pub(crate) fn step_match(&mut self, forward: bool, _: &mut Window, cx: &mut Context<Self>) {
-        let wrap = self.search.as_ref().is_none_or(|search| search.wrap_around);
-        if let Some(document)=self.document() { document.update(cx,|host,cx|host.step_match(forward,wrap,cx)); }
-    }
-    fn replace_one(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let (Some(search),Some(document))=(&self.search,self.document()) else {return;};
-        let replacement=search.replacement.read(cx).content.clone();
-        document.update(cx,|host,cx|host.replace_current(&replacement,cx));
-    }
-    pub(crate) fn replace_all(&mut self, cx: &mut Context<Self>) {
-        let (Some(search),Some(document))=(&self.search,self.document()) else {return;};
-        let replacement=search.replacement.read(cx).content.clone();
-        document.update(cx,|host,cx|host.replace_all(replacement,cx));
-    }
-
-    pub(crate) fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search = None;
-        if let Some(tab) = self.tab() {
-            let buffer = tab.document.clone();
-            let primary = tab.document.clone();
-            buffer.update(cx, |buffer, cx| buffer.set_search(String::new(), false, false, cx));
-            window.focus(&primary.focus_handle(cx), cx);
-        }
-        cx.notify();
     }
 
     // ---- 大纲 ----
@@ -1901,87 +1810,7 @@ impl Workspace {
         self.drain_open_requests(window,cx);
     }
 
-    fn render_search(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let search = self.search.as_ref()?;
-        let locale = crate::ui::toolbar_i18n::ToolbarLocale::current(cx);
-        search.query.update(cx, |field, cx| field.set_placeholder(locale.text("find"), cx));
-        search.replacement.update(cx, |field, cx| field.set_placeholder(locale.text("replace_with"), cx));
-        let buffer = self.document()?;
-        let state = buffer.read(cx).search();
-        let status = if state.pending {
-            "…".to_string()
-        } else if let Some(error) = &state.error {
-            error.clone()
-        } else if state.total == 0 {
-            if search.query.read(cx).content.is_empty() { String::new() } else { locale.text("no_results").into() }
-        } else {
-            format!("{}/{}", state.current.map_or(0, |index| index + 1), state.total)
-        };
-        let case = search.case_sensitive;
-        let whole_word = search.whole_word;
-        let backwards = search.backwards;
-        let wrap_around = search.wrap_around;
-        let editable = !buffer.read(cx).editing_locked();
-        let show_replace = editable && search.show_replace;
-        let available_width = self.outline_ui.bounds.get().map_or(900.0, |bounds| f32::from(bounds.size.width));
-        let panel_width = (available_width - 24.0).clamp(240.0, 400.0);
-        let panel_right = if available_width >= 700.0 { 272.0 } else { 12.0 };
-        let replace_row = show_replace.then(|| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .child(search.replacement.clone())
-                .child(small_icon_button("replace-one", IconName::Replace, false, theme).tooltip(tooltip(locale.text("replace_current"))).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.replace_one(window, cx))))
-                .child(small_icon_button("replace-all", IconName::ReplaceAll, false, theme).tooltip(tooltip(locale.text("replace_all"))).on_click(cx.listener(|w, _: &ClickEvent, _, cx| w.replace_all(cx))))
-                .child(div().w(px(22.0)))
-        });
-        Some(
-            floating_card("search-panel", theme)
-                .top(px(10.0))
-                .right(px(panel_right))
-                .w(px(panel_width))
-                .p(px(8.0))
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .child(icon(IconName::Search, 14.0, theme.muted))
-                        .child(search.query.clone())
-                        .child(div().min_w(px(52.0)).text_size(px(12.0)).text_color(theme.muted).child(status))
-                        .child(small_icon_button("case", IconName::CaseSensitive, case, theme).tooltip(tooltip(locale.text("match_case"))).on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
-                            if let Some(search) = &mut w.search {
-                                search.case_sensitive = !search.case_sensitive;
-                            }
-                            w.run_search(cx);
-                            cx.notify();
-                        })))
-                        .child(small_icon_button("prev", IconName::ArrowUp, false, theme).tooltip(tooltip(format!("{} ⇧⏎", locale.text("previous")))).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.step_match(false, window, cx))))
-                        .child(small_icon_button("next", IconName::ArrowDown, false, theme).tooltip(tooltip(format!("{} ⏎", locale.text("next")))).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.step_match(true, window, cx))))
-                        .when(editable, |row| row.child(small_icon_button("toggle-replace", IconName::Replace, show_replace, theme).tooltip(tooltip(locale.tooltip("replace", if cfg!(target_os = "macos") { "⌘⌥F" } else { "Ctrl+H" }))).on_click(cx.listener(|w, _: &ClickEvent, _, cx| {
-                            if let Some(search) = &mut w.search {
-                                search.show_replace = !search.show_replace;
-                            }
-                            cx.notify();
-                        }))))
-                        .child(small_icon_button("close-search", IconName::Close, false, theme).tooltip(tooltip(format!("{} Esc", locale.text("close")))).on_click(cx.listener(|w, _: &ClickEvent, window, cx| w.close_search(window, cx)))),
-                )
-                .children(replace_row)
-                .child(div().flex().items_center().gap(px(12.0)).text_size(px(12.0)).text_color(theme.muted)
-                    .child(div().id("search-backwards").tab_index(0).cursor_pointer().child(format!("{} {}", if backwards { "☑" } else { "☐" }, locale.text("reverse")))
-                        .on_click(cx.listener(|w, _, _, cx| { if let Some(search)=&mut w.search { search.backwards=!search.backwards; } cx.notify(); })))
-                    .child(div().id("search-whole-word").tab_index(0).cursor_pointer().child(format!("{} {}", if whole_word { "☑" } else { "☐" }, locale.text("whole_word")))
-                        .on_click(cx.listener(|w, _, _, cx| { if let Some(search)=&mut w.search { search.whole_word=!search.whole_word; } w.run_search(cx); cx.notify(); })))
-                    .child(div().id("search-wrap").tab_index(0).cursor_pointer().child(format!("{} {}", if wrap_around { "☑" } else { "☐" }, locale.text("wrap")))
-                        .on_click(cx.listener(|w, _, _, cx| { if let Some(search)=&mut w.search { search.wrap_around=!search.wrap_around; } cx.notify(); }))))
-                .into_any_element(),
-        )
-    }
+
 
     fn render_empty(&mut self, theme: &Theme, title_opacity: f32, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -2160,6 +1989,7 @@ impl Render for Workspace {
                 let tab = self.tab().expect("active tab");
                 tab.document.update(cx, |host, _| host.set_save_directory(self.tree.as_ref().map(|tree|tree.root.as_path())));
                 let editors = if let Some(pair)=self.active_pair() { self.render_comparison(pair, &theme, window, cx) } else { div().size_full().child(tab.document.clone()).into_any_element() };
+                let floating_outline = self.outline_ui.panel_bounds.get();
                 let outline = if !shell_visible || self.active_pair().is_some() { None } else { self.render_outline_panel(&theme, mini_frame.map_or(mode, |frame| frame.mode), window, cx) };
                 let measured = self.outline_ui.bounds.clone();
                 let weak = cx.entity().downgrade();
@@ -2169,7 +1999,8 @@ impl Render for Workspace {
                         window.on_next_frame(move |_, cx| { let _ = weak.update(cx, |_, cx| cx.notify()); });
                     }
                 }, |_, _, _, _| {}).absolute().top_0().left_0().size_full();
-                let search = self.render_search(&theme, cx);
+                let obstacle = outline.as_ref().and(floating_outline).filter(|_| self.outline_visible(cx));
+                let search = self.render_search(obstacle, &theme, cx);
                 let split_guide = (mode == EditorMode::Split && self.split_guide_visible).then(|| {
                     gpui::canvas(|_, _, _| (), |bounds, _, window, _| {
                         let origin = bounds.origin + gpui::point(px(0.0), px(f32::from(bounds.size.height) * 0.3));
@@ -2192,7 +2023,7 @@ impl Render for Workspace {
                     .flex_col()
                     .children(toolbar)
                     .child(div().relative().flex_1().min_h_0()
-                        .children((shell_visible && self.active_pair().is_none()).then_some(outline_measure))
+                        .children(((shell_visible && self.active_pair().is_none()) || self.search.is_some()).then_some(outline_measure))
                         .child(self.mini.render_paper(editors, &theme)).children(outline)
                         .children(search).children(split_guide).children(reveal_toolbar))
                     .into_any_element()
@@ -2273,10 +2104,13 @@ impl Render for Workspace {
                     w.cycle_item(false, window, cx);
                 }
             }))
+            .on_action(cx.listener(|w, _: &crate::nomo_mark::view::Dismiss, window, cx| {
+                if w.search.is_some() { w.close_search(window, cx); } else { cx.propagate(); }
+            }))
             .on_action(cx.listener(|w, _: &Find, window, cx| w.open_search(false, window, cx)))
             .on_action(cx.listener(|w, _: &FindReplace, window, cx| w.open_search(true, window, cx)))
-            .on_action(cx.listener(|w, _: &ToggleFind, window, cx| w.toggle_search(false, window, cx)))
-            .on_action(cx.listener(|w, _: &ToggleReplace, window, cx| w.toggle_search(true, window, cx)))
+            .on_action(cx.listener(|w, _: &ToggleFind, window, cx| w.open_search(false, window, cx)))
+            .on_action(cx.listener(|w, _: &ToggleReplace, window, cx| w.open_search(true, window, cx)))
             .on_action(cx.listener(|w, _: &FindNext, window, cx| w.step_match(true, window, cx)))
             .on_action(cx.listener(|w, _: &FindPrev, window, cx| w.step_match(false, window, cx)))
             .on_action(cx.listener(|w, _: &ToggleSource, window, cx| {

@@ -74,7 +74,17 @@ impl DocumentHost {
             |(_, caret)| f32::from(caret.origin.y - bounds.origin.y),
         );
         let in_table = view.host.interaction.table_widths.borrow().contains(view.host.selection.head_byte);
-        let delta = caret_scroll_delta(caret_top, caret_height, height, if in_table { 0.0 } else { 16.0 });
+        let mut delta = caret_scroll_delta(caret_top, caret_height, height, if in_table { 0.0 } else { 16.0 });
+        if let (Some((_, caret)), Some(panel)) = (&actual, self.queries.search.panel_bounds)
+            && self.queries.search.current_range() == Some(view.host.selection.range())
+            && !panel.intersect(caret).is_empty() {
+            let above = f32::from(caret.bottom() - panel.top()) + 8.;
+            let below = f32::from(caret.top() - panel.bottom()) - 8.;
+            let can_above = panel.top() - bounds.top() >= caret.size.height + px(8.);
+            let can_below = bounds.bottom() - panel.bottom() >= caret.size.height + px(8.);
+            if can_below && (!can_above || -below <= above) { delta = below; }
+            else if can_above { delta = above; }
+        }
         if !delta.is_finite() { return; }
         let before = self.panes[pane].scroll.offset();
         let max = self.panes[pane].scroll.max_offset().y.max(px(0.0));

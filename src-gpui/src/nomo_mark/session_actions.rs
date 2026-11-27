@@ -439,6 +439,11 @@ impl DocumentHost {
         intent: EditIntent,
         cx: &mut Context<Self>,
     ) {
+        self.global_edit_follow(selection, intent, None, cx);
+    }
+
+    pub(super) fn global_edit_follow(&mut self, selection: DocumentSelection, intent: EditIntent,
+        search_follow: Option<(u64, bool)>, cx: &mut Context<Self>) {
         if self.editing_locked() || !self.ready_for_session_action(cx) {
             return;
         }
@@ -493,6 +498,10 @@ impl DocumentHost {
             selection_after: after,
             template_update: None,
         };
+        if search_follow.is_some() {
+            self.queries.search.replacing = true;
+            cx.emit(DocumentEvent::Status);
+        }
         let request = self.begin_session_action(cx);
         let port = self.port.clone();
         let task = cx.background_executor().spawn(async move {
@@ -503,10 +512,19 @@ impl DocumentHost {
             let result = task.await;
             let _ = this.update(cx, |host, cx| {
                 host.navigating = false;
-                if let Err(error) = result.and_then(|loaded| host.install(loaded, Some(after), cx))
-                {
-                    host.action_failed(error, cx);
+                if let Some((serial, wrap)) = search_follow {
+                    host.queries.search.replacing = false;
+                    if serial == host.queries.search.serial && result.is_ok() {
+                        host.queries.search.after_replace = Some((selection.range().start, after.head_byte, wrap));
+                    }
                 }
+                match result.and_then(|loaded| host.install(loaded, Some(after), cx)) {
+                    Ok(()) if search_follow.is_some() => host.focus_pending = false,
+                    Ok(()) => {}
+                    Err(e) => host.action_failed(e, cx),
+                }
+                host.queries.search.after_replace = None;
+                if search_follow.is_some() { cx.emit(DocumentEvent::Status); }
                 cx.notify();
             });
         })

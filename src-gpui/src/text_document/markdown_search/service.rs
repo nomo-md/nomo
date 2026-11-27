@@ -95,7 +95,7 @@ pub(in crate::text_document) struct SearchTask {
     // 会话引用使关闭后的后台取消仍能安全读取快照，最后一个任务释放后才清理目录。
     _lifetime: Box<dyn Send + Sync>,
 }
-struct WorkLease(Arc<SearchTask>);
+pub(in crate::text_document) struct WorkLease(Arc<SearchTask>);
 impl Drop for WorkLease {
     fn drop(&mut self) {
         let mut active = self.0.active.lock().unwrap_or_else(|e| e.into_inner());
@@ -113,7 +113,7 @@ impl Drop for WorkLease {
     }
 }
 impl SearchTask {
-    fn lease(self: &Arc<Self>) -> WorkLease {
+    pub(in crate::text_document) fn lease(self: &Arc<Self>) -> WorkLease {
         *self.active.lock().unwrap_or_else(|e| e.into_inner()) += 1;
         WorkLease(self.clone())
     }
@@ -269,6 +269,7 @@ impl SearchService {
                 Checkpoint::default(),
                 &task.cancel,
                 true,
+                u64::MAX,
                 |_, _| Ok(true),
                 task.progress_reporter(),
             )?;
@@ -322,6 +323,7 @@ impl SearchService {
                             checkpoint,
                             &task.cancel,
                             false,
+                            u64::MAX,
                             |m, _| {
                                 if m.index >= from {
                                     matches.push(m);

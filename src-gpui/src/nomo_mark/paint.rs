@@ -174,12 +174,14 @@ pub(super) fn prepaint_cursors(
     }
 }
 
-pub fn paint_block(
+pub(super) fn paint_block(
     layout: &BlockLayout,
     origin: Point<Pixels>,
     clip: Range<f32>,
     selection: Option<Range<usize>>,
     cell_selections: &[Range<usize>],
+    search: Option<&super::view::search_highlights::VisibleMatches>,
+    base: u64,
     theme: &Theme,
     store: &ImageStore,
     window: &mut Window,
@@ -187,6 +189,11 @@ pub fn paint_block(
 ) {
     // 选区叠在块与行内底色上，字形随后绘制。
     paint_layer(layout, origin, clip.clone(), true, theme, store, window, cx);
+    if let Some(marks) = search {
+        for (x, y, w, h) in layout.source_ranges_rects(&marks.ranges, base, clip.clone()) {
+            paint_box(Bounds::new(origin + point(px(x), px(y)), size(px(w), px(h))), theme.callout_warning.opacity(0.28), 2.0, None, window);
+        }
+    }
     if let Some(selection) = selection {
         for (x, y, w, h) in layout.source_rects_clipped(selection, clip.clone()) {
             paint_box(Bounds::new(origin + point(px(x), px(y)), size(px(w), px(h))), theme.selection, 0.0, None, window);
@@ -195,6 +202,12 @@ pub fn paint_block(
     for (x, y, w, h) in layout.selected_cell_rects(cell_selections) {
         if y + h < clip.start || y > clip.end { continue; }
         paint_box(Bounds::new(origin + point(px(x), px(y)), size(px(w), px(h))), theme.selection, 0.0, None, window);
+    }
+    if let Some(hit) = search.and_then(|marks| marks.current.as_ref()) {
+        let local = hit.start.saturating_sub(base) as usize..hit.end.saturating_sub(base) as usize;
+        for (x, y, w, h) in layout.source_rects_clipped(local, clip.clone()) {
+            paint_box(Bounds::new(origin + point(px(x), px(y)), size(px(w), px(h))), theme.accent.opacity(0.20), 2.0, Some((theme.accent_strong, 1.0)), window);
+        }
     }
     paint_layer(layout, origin, clip, false, theme, store, window, cx);
 }

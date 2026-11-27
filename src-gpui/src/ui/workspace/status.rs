@@ -278,20 +278,20 @@ impl Workspace {
         if !stats_visible { self.status_ui.stats = StatsTransition::default(); }
         let edit_lock = edit_lock_visible.then(|| self.edit_lock_button(doc.read(cx).editing_locked(), theme, cx));
         let settings = cx.global::<Settings>();
-        let track_controls = settings.right_outline_open && settings.document_navigation_layout == DocumentNavigationLayout::RightOutline;
+        let track_controls = self.search.is_some() || (settings.right_outline_open && settings.document_navigation_layout == DocumentNavigationLayout::RightOutline);
         let controls = div().absolute().right(px(16.0)).bottom(px(14.0)).flex().items_center().gap(px(8.0))
             .when(track_controls, |controls| {
                 let measured = self.status_ui.controls_bounds.clone();
                 let workspace = cx.entity().downgrade();
                 controls.on_children_prepainted(move |children, window, _| {
-                    // 按常驻按钮的实际范围避让，弹出的统计面板不改变大纲高度。
+                    // 只报告常驻按钮的实际范围，供搜索和大纲浮层避让。
                     let bounds = children.iter().copied().filter(|bounds| !bounds.is_empty())
                         .reduce(|row, button| row.union(&button));
                     if measured.replace(bounds) != bounds {
                         let workspace = workspace.clone();
                         window.on_next_frame(move |_, cx| {
                             let _ = workspace.update(cx, |workspace, cx| {
-                                if workspace.outline_visible(cx) { cx.notify(); }
+                                if workspace.search.is_some() || workspace.outline_visible(cx) { cx.notify(); }
                             });
                         });
                     }
