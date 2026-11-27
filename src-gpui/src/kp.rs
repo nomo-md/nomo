@@ -138,7 +138,7 @@ fn push_han_glue(items: &mut Vec<Item>, at: usize, font_size: f32) {
     });
 }
 
-/// 表格的固有尺寸与最终折行共用 Unicode 正常断点；不把紧急拆词当作最小宽度。
+/// 表格优先按 Unicode 正常断点折行，超宽片段随后按可见字素拆分。
 pub(crate) fn build_table_items(text: &str, x_at: impl Fn(usize) -> f32) -> Vec<Item> {
     let mut items = Vec::new();
     let mut from = 0;

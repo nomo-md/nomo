@@ -230,19 +230,22 @@ impl NomoMark {
                 let (table, markup) = incoming.as_ref().unwrap();
                 return paste_spans(&parsed, &original, row, column, table, markup);
             }
-            let selection = DocumentSelection::caret(parsed.identity.from_byte + table_at as u64);
-            let resize = crate::nomo_mark::table::TableIntent::Resize { rows: target_rows, columns: target_columns };
-            let result = if original.html {
-                parsed.html_tables.iter().find(|t| t.source.start == table_at).unwrap().edit(&parsed.source, parsed.identity.from_byte,
-                    crate::nomo_mark::html_table::HtmlTableIntent::Resize { rows: target_rows, columns: target_columns })?
-            } else { crate::nomo_mark::table::Table::at(&parsed, table_at).unwrap().edit(&parsed, selection, resize)? };
-            let mut text = parsed.source.to_string();
-            for e in result.edits.iter().rev() { text.replace_range((e.from_byte - parsed.identity.from_byte) as usize..(e.to_byte - parsed.identity.from_byte) as usize, &e.inserted_text); }
-            let mut identity = parsed.identity.clone(); identity.to_byte = identity.from_byte + text.len() as u64;
-            let mut context = parsed.context.clone();
-            crate::markdown_templates::map_templates(&mut context.inline_templates, result.edits.iter().rev()
-                .map(|e| (e.from_byte, e.to_byte, e.inserted_text.len() as u64)), false);
-            let projected = ParsedWindow::from_source_with_context(identity, text.into(), context);
+            let resized = target_rows != original.rows || target_columns != original.columns;
+            let projected = if resized {
+                let selection = DocumentSelection::caret(parsed.identity.from_byte + table_at as u64);
+                let resize = crate::nomo_mark::table::TableIntent::Resize { rows: target_rows, columns: target_columns };
+                let result = if original.html {
+                    parsed.html_tables.iter().find(|t| t.source.start == table_at).unwrap().edit(&parsed.source, parsed.identity.from_byte,
+                        crate::nomo_mark::html_table::HtmlTableIntent::Resize { rows: target_rows, columns: target_columns })?
+                } else { crate::nomo_mark::table::Table::at(&parsed, table_at).unwrap().edit(&parsed, selection, resize)? };
+                let mut text = parsed.source.to_string();
+                for e in result.edits.iter().rev() { text.replace_range((e.from_byte - parsed.identity.from_byte) as usize..(e.to_byte - parsed.identity.from_byte) as usize, &e.inserted_text); }
+                let mut identity = parsed.identity.clone(); identity.to_byte = identity.from_byte + text.len() as u64;
+                let mut context = parsed.context.clone();
+                crate::markdown_templates::map_templates(&mut context.inline_templates, result.edits.iter().rev()
+                    .map(|e| (e.from_byte, e.to_byte, e.inserted_text.len() as u64)), false);
+                std::sync::Arc::new(ParsedWindow::from_source_with_context(identity, text.into(), context))
+            } else { parsed.clone() };
             let target = grid(&projected, table_at).ok_or(ControlError::InvalidRange)?;
             let mut replacements = Vec::new();
             for (r, line) in values.iter().enumerate() {
@@ -258,12 +261,22 @@ impl NomoMark {
             }
             let mut table_text = projected.source[target.source.clone()].to_string();
             replacements.sort_by_key(|(range, _)| range.start);
-            for (range, value) in replacements.into_iter().rev() { table_text.replace_range(range.start - target.source.start..range.end - target.source.start, &value); }
+            for (range, value) in replacements.iter().rev() { table_text.replace_range(range.start - target.source.start..range.end - target.source.start, value); }
             if table_text.len() > crate::nomo_mark::session_window::policy().group_bytes as usize { return Err(ControlError::NeedsContext("粘贴表格超过局部编辑预算；原文已保留".into())); }
             let cell = target.cells.iter().find(|c| c.row == row && c.column == column).ok_or(ControlError::InvalidRange)?;
             let caret = parsed.identity.from_byte + cell.content.start as u64 + if target.html { 3 } else { 0 };
-            Ok(EditResult { edits: vec![SourceEdit { from_byte: parsed.identity.from_byte + original.source.start as u64,
-                to_byte: parsed.identity.from_byte + original.source.end as u64, inserted_text: table_text }], selection: DocumentSelection::caret(caret), template_update: None })
+            // 网格未变化时只替换目标单元格，保持相邻内容与结构锚点。
+            // 仍由 queue_result 一次提交，撤销保持完整的粘贴事务。
+            let base = parsed.identity.from_byte;
+            let edits = if resized {
+                vec![SourceEdit { from_byte: base + original.source.start as u64,
+                    to_byte: base + original.source.end as u64, inserted_text: table_text }]
+            } else {
+                replacements.into_iter().map(|(range, inserted_text)| SourceEdit {
+                    from_byte: base + range.start as u64, to_byte: base + range.end as u64, inserted_text,
+                }).collect()
+            };
+            Ok(EditResult { edits, selection: DocumentSelection::caret(caret), template_update: None })
         })();
         self.history_serial += 1;
         let group = format!("{}:table-paste:{}", self.host.parsed.identity.window_id, self.history_serial);

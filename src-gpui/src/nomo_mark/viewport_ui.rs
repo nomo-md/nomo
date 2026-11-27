@@ -40,7 +40,7 @@ impl Viewport {
 }
 impl Drop for Viewport { fn drop(&mut self) { self.request.cancel(); } }
 
-fn caret_scroll_delta(top: f32, caret_height: f32, viewport_height: f32) -> f32 {
+fn caret_scroll_delta(top: f32, caret_height: f32, viewport_height: f32, margin: f32) -> f32 {
     let bottom = top + caret_height;
     if caret_height > viewport_height {
         // 图片边缘的光标与图片等高。只要仍有一段可见，就保留当前阅读位置。
@@ -48,7 +48,7 @@ fn caret_scroll_delta(top: f32, caret_height: f32, viewport_height: f32) -> f32 
         if top >= viewport_height { return top; }
         return 0.0;
     }
-    let margin = ((viewport_height - caret_height) / 2.0).min(16.0);
+    let margin = ((viewport_height - caret_height) / 2.0).min(margin);
     if top < margin { top - margin }
     else if bottom > viewport_height - margin { bottom - (viewport_height - margin) }
     else { 0.0 }
@@ -73,14 +73,15 @@ impl DocumentHost {
             group_top + 32.0 + caret_y + f32::from(self.panes[pane].scroll.offset().y),
             |(_, caret)| f32::from(caret.origin.y - bounds.origin.y),
         );
-        let delta = caret_scroll_delta(caret_top, caret_height, height);
+        let in_table = view.host.interaction.table_widths.borrow().contains(view.host.selection.head_byte);
+        let delta = caret_scroll_delta(caret_top, caret_height, height, if in_table { 0.0 } else { 16.0 });
         if !delta.is_finite() { return; }
         let before = self.panes[pane].scroll.offset();
         let max = self.panes[pane].scroll.max_offset().y.max(px(0.0));
         let requested = (before.y - px(delta)).clamp(-max, px(0.0));
         if (requested - before.y).abs() < px(0.5) {
             // 输入确认后还会重取结构和邻窗；它们完成前不能把临时占位布局当作最终位置。
-            if actual.is_some() && view.host.pending_count() == 0 && view.measured_height().is_some()
+            if actual.is_some() && view.host.pending_count() == 0 && view.table_settle.is_none() && view.measured_height().is_some()
                 && self.pane_visible_ready(pane, cx) {
                 self.panes[pane].reveal_selection = false;
             }

@@ -93,6 +93,7 @@ pub struct NomoMark {
     layout_key: Option<(LayoutStamp, ViewMode, Vec<Range<usize>>, u64)>,
     layout_resources: super::resources::ResourceDependencies,
     bounds: Option<Bounds<Pixels>>,
+    last_allocated_width: Option<f32>,
     visible_bounds: Option<Bounds<Pixels>>,
     composition_templates: super::template_projection::CompositionTemplates,
     external_composition: Option<composition::ExternalComposition>,
@@ -123,6 +124,7 @@ pub struct NomoMark {
     pub(crate) pending_block_entry: Option<bool>,
     pub(super) pending_navigation_caret: bool,
     pub(super) pending_block_navigation: Option<bool>,
+    pub(super) table_settle: Option<gpui::Task<()>>,
     last_geometry: Option<ControlEvent>,
     horizontal_drag: Option<(usize, f32, f32)>,
 }
@@ -164,6 +166,7 @@ impl NomoMark {
             layout_key: None,
             layout_resources: Default::default(),
             bounds: None,
+            last_allocated_width: None,
             visible_bounds: None,
             composition_templates: Default::default(),
             external_composition: None,
@@ -196,6 +199,7 @@ impl NomoMark {
             workspace_hosted: false,
             windowed_navigation: false,
             open_profile: None,
+            table_settle: None,
             last_geometry: None,
             horizontal_drag: None,
         }
@@ -339,6 +343,7 @@ impl NomoMark {
         self.layout = None;
         self.layout_key = None;
         self.layout_resources = Default::default();
+        self.table_settle = None;
         self.pending_page = None;
         self.bounds = None;
         self.visible_bounds = None;
@@ -371,10 +376,12 @@ impl NomoMark {
         self.dismiss_quick_insert(cx);
         let identity = self.host.parsed.identity.clone();
         self.host.detach(discard)?;
+        self.last_allocated_width = None;
         self.implicit_cell = None;
         self.layout = None;
         self.layout_key = None;
         self.layout_resources = Default::default();
+        self.table_settle = None;
         self.pending_page = None;
         self.bounds = None;
         self.visible_bounds = None;
@@ -397,6 +404,7 @@ impl NomoMark {
         self.host.parsed.estimated_bytes()
             + self.quick_insert.as_ref().map_or(0,|session|std::mem::size_of_val(session)+session.trigger.capacity()+session.identity.document_id.capacity()+session.identity.window_id.capacity()+session.error.as_ref().map_or(0,String::capacity))
             + self.layout_resources.estimated_bytes()
+            + self.host.interaction.table_widths.borrow().estimated_bytes()
             + self.host.pending_bytes()
             + self.composition_templates.estimated_bytes()
             + self.external_composition.as_ref().map_or(0, |composition| composition.estimated_bytes())
@@ -1588,10 +1596,12 @@ impl NomoMark {
                         else { layout.caret_at_with_affinity(at, self.upstream_caret == Some(self.host.selection.head_byte)) };
                     if let Some((x, _, _)) = caret {
                         let current = offset.get();
-                        let next = if x < current + 4.0 {
-                            x - 4.0
-                        } else if x > current + w - 6.0 {
-                            x - w + 6.0
+                        let in_table = self.host.interaction.table_widths.borrow().contains(self.host.selection.head_byte);
+                        let (left, right) = if in_table { (0.0, crate::layout::CARET_WIDTH) } else { (4.0, 6.0) };
+                        let next = if x < current + left {
+                            x - left
+                        } else if x > current + w - right {
+                            x - w + right
                         } else {
                             current
                         };
@@ -1906,7 +1916,15 @@ impl NomoMark {
         (actual - expected).abs() <= 0.5 + precision
     }
     fn prepare_layout(&mut self, width: f32, window: &Window, cx: &mut Context<Self>) {
-        let width = (width * window.scale_factor()).round() / window.scale_factor();
+        let scale = window.scale_factor();
+        let proposed = (width * scale).round();
+        // GPUI 分别对左右边缘取整，最终宽度与单独取整的测量宽度最多相差一个设备像素。
+        // 后续测量沿用已分配的像素宽度；prepaint 更新 bounds 后以本帧真实边缘为准。
+        // 隐藏标签会清空命中边界；保留实际宽度，避免恢复首帧的 1px 测量差重置列宽。
+        let width = self.bounds.map(|bounds| f32::from(bounds.size.width)).or(self.last_allocated_width)
+            .map(|width| (width * scale).round())
+            .filter(|actual| *actual > 0.0 && proposed > 0.0 && (*actual - proposed).abs() <= 1.0)
+            .unwrap_or(proposed) / scale;
         if width <= 0.0
             || matches!(
                 self.host.presentation,
@@ -1945,6 +1963,7 @@ impl NomoMark {
         };
         use std::hash::{Hash, Hasher};
         let mut configuration = std::collections::hash_map::DefaultHasher::new();
+        self.host.interaction.composing.hash(&mut configuration);
         metrics.font_size.to_bits().hash(&mut configuration);
         metrics.line_height.to_bits().hash(&mut configuration);
         window.scale_factor().to_bits().hash(&mut configuration);
@@ -2031,6 +2050,8 @@ impl NomoMark {
             let image_size = |path: &std::path::Path| resources.image_size(path);
             let image_failure = |path: &std::path::Path| resources.images.failure(path);
             let embed = |kind, source: &str| resources.embed(kind, source);
+            let mut measure_revision = std::collections::hash_map::DefaultHasher::new();
+            (&stamp.identity, resource_generation, key.3).hash(&mut measure_revision);
             let env = RenderEnv {
                 metrics,
                 wrap: settings.wrap(),
@@ -2038,6 +2059,9 @@ impl NomoMark {
                 image_size: &image_size,
                 image_failure: &image_failure,
                 text_layouts: Some(&reuse),
+                table_widths: &self.host.interaction.table_widths,
+                table_composition: self.host.interaction.marked.as_ref().map(|r| base + r.start as u64),
+                table_measure_revision: measure_revision.finish(),
                 wide_width: width,
                 code_line_numbers: settings.code_line_numbers,
                 inline_code: settings.inline_code_rendering,
@@ -2069,6 +2093,19 @@ impl NomoMark {
             }
             layout
         };
+        let settle = self.host.interaction.table_widths.get_mut().finish_layout();
+        if settle.is_none() || self.host.interaction.composing {
+            self.table_settle = None;
+        } else if self.table_settle.is_none() && let Some(delay) = settle {
+            self.table_settle = Some(cx.spawn(async move |view, cx| {
+                cx.background_executor().timer(delay).await;
+                let _ = view.update(cx, |view, cx| {
+                    view.table_settle = None;
+                    view.invalidate();
+                    cx.notify();
+                });
+            }));
+        }
         // 空文档和仅含空白的片段也必须具有真实行高、命中位置及 IME 光标。
         let trailing = self.effective_mode() == ViewMode::Semantic && super::editing_rules::trailing_prefix(&self.host.parsed).is_some();
         if layout.items.is_empty() || trailing {
@@ -2154,7 +2191,7 @@ impl NomoMark {
         cx.emit(ControlEvent::ResourceUsage {
             identity: self.host.parsed.identity.clone(),
             parsed_bytes: self.host.parsed.estimated_bytes(),
-            layout_bytes: self
+            layout_bytes: self.host.interaction.table_widths.borrow().estimated_bytes() + self
                 .layout
                 .as_ref()
                 .map_or(0, |layout| layout.estimated_bytes()),
@@ -3016,6 +3053,7 @@ impl Element for ControlElement {
     ) -> Self::PrepaintState {
         self.control.update(cx, |v, cx| {
             v.bounds = Some(bounds);
+            v.last_allocated_width = Some(f32::from(bounds.size.width));
             let mask = window.content_mask().bounds;
             let left = bounds.origin.x.max(mask.origin.x);
             let top = bounds.origin.y.max(mask.origin.y);
@@ -3026,12 +3064,7 @@ impl Element for ControlElement {
                 point(left, top),
                 size((right - left).max(px(0.0)), (bottom - top).max(px(0.0))),
             ));
-            let actual_width = f32::from(bounds.size.width);
-            // 父布局边缘与测量宽度可能相差一个设备像素；沿用本帧测量宽度，避免二次折行。
-            let measured_width = v.layout_key.as_ref().map(|key| key.0.width)
-                .filter(|width| ((actual_width - width) * window.scale_factor()).abs() <= 1.0 + f32::EPSILON)
-                .unwrap_or(actual_width);
-            v.prepare_layout(measured_width, window, cx);
+            v.prepare_layout(f32::from(bounds.size.width), window, cx);
             if let Some((stamp, _, _, _)) = &v.layout_key {
                 if v.layout_height_ready(bounds.size.height, window)
                     && v.host.presentation == Presentation::Preparing

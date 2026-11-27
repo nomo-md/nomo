@@ -20,6 +20,12 @@ pub(super) fn header_style(mut style: InlineStyle, header: bool) -> InlineStyle 
     style
 }
 
+/// 保留单行基线，只将额外的内容高度向上对齐到设备像素。
+/// 一行折返或收回时，下面的行整像素平移，边框之间的像素数保持一致。
+pub(super) fn row_height(single_line: f32, measured: f32, scale: f32) -> f32 {
+    single_line + ((measured - single_line).max(0.0) * scale).ceil() / scale
+}
+
 pub(super) fn measure(
     spec: &ParaSpec,
     map: &[MapSeg],
@@ -27,7 +33,11 @@ pub(super) fn measure(
     images: &[ImageMetric],
     env: &RenderEnv,
     window: &Window,
-) -> (f32, f32) {
+    widths: &mut crate::nomo_mark::table_widths::TableWidths,
+) -> f32 {
+    let natural = |spec: &ParaSpec, widths: &mut crate::nomo_mark::table_widths::TableWidths| {
+        widths.measure(spec.cache_key(f32::MAX), || env.layout(spec, f32::MAX, window).max_line_width())
+    };
     let mut replacements: Vec<_> = map.iter()
         .filter(|segment| !segment.text.is_empty()
             && super::is_revealed(revealed, segment.source..segment.source_end))
@@ -36,8 +46,7 @@ pub(super) fn measure(
     replacements.extend(images.iter().filter(|image| !image.text.is_empty())
         .map(|image| (image.text.clone(), Some(image.width.unwrap_or(12.0 * spec.font_size)))));
     if replacements.is_empty() {
-        let layout = env.layout(spec, f32::MAX, window);
-        return (layout.max_line_width(), layout.min_content_width());
+        return natural(spec, widths);
     }
     replacements.sort_unstable_by_key(|(range, _)| (range.start, range.end));
     let mut semantic = ParaSpec {
@@ -67,8 +76,7 @@ pub(super) fn measure(
         cursor = range.end;
     }
     append_semantic(spec, &mut semantic, cursor..spec.text.len());
-    let layout = env.layout(&semantic, f32::MAX, window);
-    (layout.max_line_width(), layout.min_content_width())
+    natural(&semantic, widths)
 }
 
 fn append_semantic(spec: &ParaSpec, semantic: &mut ParaSpec, range: Range<usize>) {
@@ -97,18 +105,24 @@ pub(super) fn layout(spec: &ParaSpec, width: f32, env: &RenderEnv, window: &Wind
 
 /// 正文悬挂留白只影响断行，图片百分比和缩放仍以未扣留白的内容区域为准。
 pub(super) fn layout_with_image_width(spec: &ParaSpec, width: f32, image_width: f32, env: &RenderEnv, window: &Window) -> Rc<TextLayout> {
-    if !spec.objects.iter().any(|object| matches!(object.key, InlineAsset::Image(_))) {
+    // 公式异步就绪时列宽可能已固定；等比适配该格，防止绘入相邻列。
+    let needs_fit = |object: &InlineObject| matches!(object.key, InlineAsset::Image(_))
+        || (spec.wrap == super::Wrap::TableCell && object.width > width
+            && matches!(object.key, InlineAsset::Embed(_) | InlineAsset::MathInput));
+    if !spec.objects.iter().any(needs_fit) {
         return env.layout(spec, width, window);
     }
     let mut fitted = spec.clone();
     for object in &mut fitted.objects {
-        if !matches!(object.key, InlineAsset::Image(_)) { continue; }
+        if !needs_fit(object) { continue; }
         let next = object.width_percent.take().map_or(object.width, |percent| image_width * percent / 100.0)
             .min(image_width);
         let scale = next / object.width.max(f32::EPSILON);
         object.width = next;
-        object.ascent *= scale;
-        object.descent *= scale;
+        if !matches!(object.key, InlineAsset::MathInput) {
+            object.ascent *= scale;
+            object.descent *= scale;
+        }
     }
     env.layout(&fitted, width, window)
 }

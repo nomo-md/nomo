@@ -299,7 +299,6 @@ pub struct TextLayout {
     natural_width: f32,
     max_width: f32,
     max_hit_width: f32,
-    min_content_width: f32,
     pub lines: Vec<VisualLine>,
     pub line_height: f32,
     font_size: f32,
@@ -364,8 +363,6 @@ impl TextLayout {
     /// 命中范围包含悬挂标点；排版对齐仍使用不含悬挂的 max_line_width。
     pub(crate) fn max_hit_width(&self) -> f32 { self.max_hit_width }
 
-    /// 表格正常断点之间的最大宽度；紧急拆词不参与列宽下限。
-    pub(crate) fn min_content_width(&self) -> f32 { self.min_content_width }
 
     fn shaped_x(&self, byte: usize) -> f32 {
         let at = self.glyphs.partition_point(|glyph| glyph.index < byte);
@@ -735,7 +732,6 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
         natural_width,
         max_width: 0.0,
         max_hit_width: 0.0,
-        min_content_width: 0.0,
         lines: Vec::new(),
         line_height,
         font_size: spec.font_size,
@@ -806,9 +802,6 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
             } else { atomic.push(item); item_index += 1; }
         }
         items = atomic;
-        if spec.wrap == Wrap::TableCell {
-            layout.min_content_width = layout.min_content_width.max(table_min_content_width(&items, &layout));
-        }
         let hyphens = if spec.wrap == Wrap::KnuthPlass && items.len() <= kp::MAX_KP_ITEMS {
             english_breaks(&layout, start..start + text.len(), spec, window)
         } else { Vec::new() };
@@ -844,37 +837,6 @@ pub fn layout_text(spec: &ParaSpec, width: f32, window: &Window) -> TextLayout {
     layout
 }
 
-/// 与实际折行共用条目；允许缩小的图片不撑大最小列宽，公式等对象保持完整。
-fn table_min_content_width(items: &[Item], layout: &TextLayout) -> f32 {
-    let mut minimum = 0.0_f32;
-    let mut unbroken = 0.0;
-    let mut after_break = false;
-    let first = items.first().map_or(0, |item| item.from);
-    let mut object = layout.objects.partition_point(|object| object.at < first);
-    for (index, item) in items.iter().enumerate() {
-        if matches!(item.kind, ItemKind::Glue { .. }) {
-            if index > 0 && matches!(items[index - 1].kind, ItemKind::Box) {
-                minimum = minimum.max(unbroken);
-                unbroken = 0.0;
-                after_break = true;
-            } else if !after_break {
-                // 首行缩进在实际排版中保留；仅断点之后的空白可被跳过。
-                unbroken += item.width;
-            }
-            continue;
-        }
-        after_break = false;
-        let mut width = item.width;
-        while let Some(inline) = layout.objects.get(object).filter(|inline| inline.at < item.to) {
-            if inline.at >= item.from && matches!(inline.key, InlineAsset::Image(_)) {
-                width -= inline.width;
-            }
-            object += 1;
-        }
-        unbroken += width.max(0.0);
-    }
-    minimum.max(unbroken)
-}
 
 /// 单次可见段落最多识别 64 KiB、4,096 个断词候选；不缓存正文词语。
 fn english_breaks(layout: &TextLayout, range: Range<usize>, spec: &ParaSpec, window: &Window) -> Vec<DiscretionaryHyphen> {
@@ -948,7 +910,7 @@ fn split_oversized_boxes(
     layout: &TextLayout,
     width: f32,
     hyphens: &[DiscretionaryHyphen],
-    wrap_inline_code: bool,
+    table_cell: bool,
 ) {
     let break_width = |at| hyphens.binary_search_by_key(&at, |hyphen| hyphen.at).ok().map_or(0.0, |index| hyphens[index].glyph.width);
     if !items.iter().any(|item| matches!(item.kind, ItemKind::Box) && item.width + break_width(item.to) > width) { return; }
@@ -958,30 +920,40 @@ fn split_oversized_boxes(
             output.push(item);
             continue;
         }
-        let first_style = layout.styles.partition_point(|(range, _)| range.end <= item.from);
-        let mut styles = &layout.styles[first_style..];
-        if !wrap_inline_code {
+        if !table_cell {
+            let first_style = layout.styles.partition_point(|(range, _)| range.end <= item.from);
+            let styles = &layout.styles[first_style..];
             if styles.iter().take_while(|(range, _)| range.start < item.to)
                 .any(|(_, style)| style.code_bg || style.footnote) {
                 output.push(item);
                 continue;
             }
-            styles = &[];
         }
         let word = &layout.text[item.from..item.to];
+        if table_cell {
+            // 保留原有的空格、斜线等自然断点。只有这个片段独占一行仍太长时，
+            // 才把它分成一行能容纳的整块，避免紧急断点抢在前一个自然断点之前。
+            let mut from = item.from;
+            let mut previous = from;
+            for end in word.grapheme_indices(true).map(|(at, _)| item.from + at).skip(1)
+                .chain(std::iter::once(item.to)) {
+                if end != item.to && !layout.glyphs.get(layout.glyphs.partition_point(|g| g.index < end))
+                    .is_some_and(|glyph| glyph.index == end) { continue; }
+                if previous > from && layout.shaped_x(end) - layout.shaped_x(from) > width + 0.001 {
+                    output.push(Item { kind: ItemKind::Box, from, to: previous, width: layout.shaped_x(previous) - layout.shaped_x(from) });
+                    output.push(Item { kind: ItemKind::Glue { stretch: 0.0, shrink: 0.0 }, from: previous, to: previous, width: 0.0 });
+                    from = previous;
+                }
+                previous = end;
+            }
+            output.push(Item { kind: ItemKind::Box, from, to: item.to, width: layout.shaped_x(item.to) - layout.shaped_x(from) });
+            continue;
+        }
         let mut from = item.from;
         let mut previous = "";
         for (offset, grapheme) in word.grapheme_indices(true) {
             let at = item.from + offset;
-            while styles.first().is_some_and(|(range, _)| range.end <= at) {
-                styles = &styles[1..];
-            }
-            // 代码中的标点是字面内容；脚注标签仍保持完整。
-            let can_break = match styles.first() {
-                Some((range, style)) if range.start < at && style.footnote => false,
-                Some((range, style)) if range.start < at && style.code_bg => true,
-                _ => kp::can_break_between(previous, grapheme),
-            };
+            let can_break = kp::can_break_between(previous, grapheme);
             if at > from && can_break
                 && layout.glyphs.get(layout.glyphs.partition_point(|glyph| glyph.index < at))
                     .is_some_and(|glyph| glyph.index == at) {

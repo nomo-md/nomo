@@ -10,6 +10,7 @@ use crate::layout::{ColorRole, InlineAsset, InlineObject, InlineStyle, OBJECT_CH
 use crate::theme::{Family, Metrics};
 use crate::nomo_mark::parse::ParsedWindow;
 use crate::nomo_mark::table::ImplicitCell;
+use crate::nomo_mark::table_widths::{ColumnMeasures, LayoutKey as TableLayoutKey, TableWidths};
 use crate::nomo_mark::image_properties::{self, ImageWidth};
 use gpui::{Bounds, Pixels, Point, Window, point, px, size};
 use pulldown_cmark::{Alignment, BlockQuoteKind, CodeBlockKind, Event, Parser, Tag, TagEnd};
@@ -590,6 +591,9 @@ pub struct RenderEnv<'a> {
     pub image_size: &'a dyn Fn(&Path) -> Option<(u32, u32)>,
     pub image_failure: &'a dyn Fn(&Path) -> Option<&'static str>,
     pub text_layouts: Option<&'a std::cell::RefCell<crate::layout::TextLayoutReuse>>,
+    pub(crate) table_widths: &'a std::cell::RefCell<TableWidths>,
+    pub(crate) table_composition: Option<u64>,
+    pub(crate) table_measure_revision: u64,
     /// 宽内容（表格）可用的最大宽度：从正文左缘到编辑区右缘，允许超出正文宽度。
     pub wide_width: f32,
     /// 设置“代码块行号”。
@@ -1355,9 +1359,10 @@ fn push_table_atom(para: &mut ParaBuilder, atom: &crate::nomo_mark::html_table::
     if let Some(object) = object { para.push_object(object, style, range.start); }
     else { para.push(&fallback, style, Some((range.start, false))); }
     if let InlineAtom::Image { width, align, .. } = atom {
+        let intrinsic = para.objects.last().filter(|object| object.at == start && matches!(object.key, InlineAsset::Image(_))).map(|o| o.width);
         para.table_images.push(table_layout::ImageMetric {
             text: start..para.text.len(),
-            width: match width { Some(ImageWidth::Pixels(value)) => Some(value * env.metrics.zoom), _ => None },
+            width: match width { Some(ImageWidth::Pixels(value)) => Some(value * env.metrics.zoom), _ => intrinsic },
             align: match align.as_deref() { Some("center") => Some(Alignment::Center), Some("right") => Some(Alignment::Right), Some("left") => Some(Alignment::Left), _ => None },
         });
     }
@@ -2337,17 +2342,36 @@ impl Builder<'_> {
         self.gap(20.0 * zoom);
     }
 
+    fn table_layout_key(&self, columns: usize, available: f32, html_grid: Option<u64>) -> TableLayoutKey {
+        TableLayoutKey { columns, available, html_grid, zoom: self.env.metrics.zoom, font_size: self.env.metrics.font_size,
+            font_generation: crate::layout::generation(), scale: self.window.scale_factor() }
+    }
+
     fn html_table(&mut self,table:&crate::nomo_mark::html_table::HtmlTable,revealed:&[Range<usize>]) {
-        use crate::nomo_mark::{parse::InlineFormat,table_widths::{self,CellMetrics}};
+        use crate::nomo_mark::parse::InlineFormat;
+        use std::hash::{Hash, Hasher};
         self.flush_paragraph();self.apply_table_gap();let first_item=self.items.len();let top=self.y;
-        let zoom=self.env.metrics.zoom;let em=14.0*zoom;let line_height=em*1.55;let pad_x=11.0*zoom;let pad_y=9.0*zoom;
+        let zoom=self.env.metrics.zoom;let em=self.env.metrics.source_size();let line_height=em*1.55;let pad_x=11.0*zoom;let pad_y=9.0*zoom;
         let border = zoom;
         let viewport_width = (self.width - self.indent).max(1.0);
-        let mut prepared=Vec::new();let mut measures=Vec::new();
+        let mut grid = std::collections::hash_map::DefaultHasher::new();
+        for cell in &table.cells {
+            if cell.colspan > 1 || cell.rowspan > 1 || !cell.widths.is_empty() {
+                (cell.row, cell.column, cell.colspan, cell.rowspan, &cell.widths).hash(&mut grid);
+            }
+        }
+        let key = self.table_layout_key(table.columns, (viewport_width - border).max(0.0), Some(grid.finish()));
+        let anchor = self.env.source_base + table.source.start as u64;
+        let mut tables = self.env.table_widths.borrow_mut();
+        let source = anchor..self.env.source_base + table.source.end as u64;
+        let held = tables.cached(anchor, key, self.env.table_measure_revision, &source, self.env.table_composition);
+        let mut prepared=Vec::new();
+        let mut measures = ColumnMeasures::new(if held.is_none() { table.columns } else { 0 });
         let mut inline=InlineState::default();let mut inline_cursor=table.source.start;
         for cell in &table.cells {
+            let measure_cell = held.is_none();
             let base=table_layout::header_style(InlineStyle::default(), cell.header);
-            let font_size = if cell.header { 13.0 } else { 14.0 } * zoom;
+            let font_size = if cell.header { em * (13.0 / 14.0) } else { em };
             let mut pieces: Vec<_> = cell.runs.iter().map(|run| (
                 run.source.clone(), pulldown_cmark::CowStr::from(run.text.as_str()), run.formats.as_slice(), run.atom.as_ref(),
             )).collect();
@@ -2379,20 +2403,22 @@ impl Builder<'_> {
             }
             if para.map.is_empty(){para.map.push(MapSeg{text:0..0,source:empty_anchor,source_end:empty_anchor,exact:true});}paragraphs.push(para);
             let mut natural=0.0f32;let mut specs=Vec::new();
-            let mut minimum = 0.0f32;
             for para in paragraphs {
                 let spec = ParaSpec { text:para.text, spans:para.spans, base:base.clone(), family:Family::Text,
                     font_size, line_height:font_size*1.55, wrap:Wrap::TableCell, objects:para.objects };
-                let measured = table_layout::measure(&spec, &para.map, revealed, &para.table_images, self.env, self.window);
-                natural = natural.max(measured.0);
-                minimum = minimum.max(measured.1);
+                if measure_cell {
+                    natural = natural.max(table_layout::measure(&spec, &para.map, revealed, &para.table_images, self.env, self.window, &mut tables));
+                }
                 specs.push((spec, para.map));
             }
-            measures.push(CellMetrics{column:cell.column,span:cell.colspan,header:cell.header,natural,minimum,chrome:pad_x*2.0+zoom,explicit:cell.widths.iter().map(|width|*width as f32*zoom).collect()});
+            if measure_cell {
+                measures.cell(cell.column, cell.colspan, natural, cell.widths.iter().map(|width| *width as f32 * zoom));
+            }
             prepared.push(specs);
         }
-        let widths=table_widths::allocate(&table_widths::constraints(table.columns,&measures,zoom),(viewport_width-border).max(0.0));
-        let mut xs=vec![self.indent+border];for width in &widths{xs.push(xs.last().unwrap()+width);}
+        let widths = held.unwrap_or_else(|| tables.record(anchor, key, self.env.table_measure_revision, source, measures.allocate(key.available, em, pad_x * 2.0 + border)));
+        drop(tables);
+        let mut xs=vec![self.indent+border];for width in widths.iter(){xs.push(xs.last().unwrap()+width);}
         let mut row_heights=vec![line_height+pad_y*2.0;table.rows];let mut laid=Vec::new();
         for (cell,paragraphs) in table.cells.iter().zip(prepared){
             let width=widths[cell.column..cell.column+cell.colspan].iter().sum::<f32>();let mut height=0.0;let mut content=Vec::new();
@@ -2411,7 +2437,11 @@ impl Builder<'_> {
             if cell.rowspan==1{row_heights[cell.row]=row_heights[cell.row].max(height+pad_y*2.0);}laid.push((height,content));
         }
         for (cell,(height,_)) in table.cells.iter().zip(&laid){let available=row_heights[cell.row..cell.row+cell.rowspan].iter().sum::<f32>();if available<height+pad_y*2.0{row_heights[cell.row+cell.rowspan-1]+=height+pad_y*2.0-available;}}
-        let mut ys=vec![self.y];for height in row_heights{ys.push(ys.last().unwrap()+height);}
+        let mut ys = vec![self.y];
+        for height in row_heights {
+            let height = table_layout::row_height(line_height + pad_y * 2.0, height, self.window.scale_factor());
+            ys.push(ys.last().unwrap() + height);
+        }
         let table_width = xs.last().unwrap() - self.indent;
         self.items.push(DisplayItem::Rect { x:self.indent, y:top, w:table_width, h:ys.last().unwrap()-top,
             paint:Paint::Surface, radius:0.0, border:Some(Paint::TableBorder) });
@@ -2442,8 +2472,9 @@ impl Builder<'_> {
             else { (self.env.wide_width - self.indent).max(viewport_width) };
         let pad_x = 11.0 * metrics.zoom;
         let pad_y = if self.controlled {9.0} else {8.0} * metrics.zoom;
-        let font_size = 14.0 * metrics.zoom;
-        let line_height = 14.0 * 1.55 * metrics.zoom;
+        let font_size = if self.controlled { metrics.source_size() } else { 14.0 * metrics.zoom };
+        let header_size = font_size * (13.0 / 14.0);
+        let line_height = font_size * 1.55;
         let spec_for = |cell: &ParaBuilder, header: bool| ParaSpec {
             text: cell.text.clone(),
             spans: cell.spans.iter().map(|(range, style)| (range.clone(),
@@ -2451,38 +2482,48 @@ impl Builder<'_> {
             base: if self.controlled { table_layout::header_style(InlineStyle::default(), header) }
                 else { InlineStyle { bold: header, color: if header { ColorRole::Heading } else { ColorRole::Fg }, ..Default::default() } },
             family: Family::Text,
-            font_size: if self.controlled && header { 13.0 * metrics.zoom } else { font_size },
-            line_height: if self.controlled && header { 13.0 * 1.55 * metrics.zoom } else { line_height },
+            font_size: if self.controlled && header { header_size } else { font_size },
+            line_height: if self.controlled && header { header_size * 1.55 } else { line_height },
             wrap: Wrap::TableCell,
             objects: cell.objects.clone(),
         };
         // NomoMark 使用共享语义约束；旧 Buffer 渲染入口保留原有分配方式。
-        let mut natural = vec![40.0f32; columns];
-        let mut cell_metrics=Vec::new();
-        for (header, _, cells) in &table.rows {
-            for (column, cell) in cells.iter().enumerate() {
-                let spec = spec_for(cell, *header);
-                if self.controlled {
-                    let (natural, minimum) = table_layout::measure(&spec, &cell.map, revealed, &cell.table_images, self.env, self.window);
-                    cell_metrics.push(crate::nomo_mark::table_widths::CellMetrics {
-                        column, span:1, header:*header, natural, minimum, chrome:pad_x*2.0+border, explicit:Vec::new() });
-                } else {
-                    let layout = self.env.layout(&spec, 10_000.0, self.window);
+        let widths: std::sync::Arc<[f32]> = if self.controlled {
+            // 解析器的表头结束位置位于分隔行起点，不受表头文字或换行符长度影响。
+            let separator = table.rows.first().map_or(table.source.start, |row| row.1);
+            let anchor = self.env.source_base + separator as u64;
+            let key = self.table_layout_key(columns, available, None);
+            let mut tables = self.env.table_widths.borrow_mut();
+            let source = self.env.source_base + table.source.start as u64..self.env.source_base + table.source.end as u64;
+            if let Some(held) = tables.cached(anchor, key, self.env.table_measure_revision, &source, self.env.table_composition) {
+                held
+            } else {
+                let mut measures = ColumnMeasures::new(columns);
+                for (header, _, cells) in &table.rows {
+                    for (column, cell) in cells.iter().enumerate() {
+                        let natural = table_layout::measure(&spec_for(cell, *header), &cell.map, revealed,
+                            &cell.table_images, self.env, self.window, &mut tables);
+                        measures.cell(column, 1, natural, std::iter::empty());
+                    }
+                }
+                let widths = measures.allocate(available, font_size, pad_x * 2.0 + border);
+                tables.record(anchor, key, self.env.table_measure_revision, source, widths)
+            }
+        } else {
+            let mut natural = vec![40.0f32; columns];
+            for (header, _, cells) in &table.rows {
+                for (column, cell) in cells.iter().enumerate() {
+                    let layout = self.env.layout(&spec_for(cell, *header), 10_000.0, self.window);
                     natural[column] = natural[column].max(layout.max_line_width() + pad_x * 2.0 + 2.0);
                 }
             }
-        }
-        let total: f32 = natural.iter().sum();
-        let widths: Vec<f32> = if self.controlled {
-            let constraints=crate::nomo_mark::table_widths::constraints(columns,&cell_metrics,metrics.zoom);
-            crate::nomo_mark::table_widths::allocate(&constraints,available)
-        } else if total <= available {
-            natural
-        } else {
-            let floors: Vec<f32> = natural.iter().map(|width| width.min(120.0 * metrics.zoom)).collect();
-            let floor_total: f32 = floors.iter().sum();
-            let scale = (available - floor_total).max(0.0) / (total - floor_total).max(1.0);
-            natural.iter().zip(&floors).map(|(width, floor)| floor + (width - floor) * scale).collect()
+            let total: f32 = natural.iter().sum();
+            if total <= available { natural.into() } else {
+                let floors: Vec<f32> = natural.iter().map(|width| width.min(120.0 * metrics.zoom)).collect();
+                let floor_total: f32 = floors.iter().sum();
+                let scale = (available - floor_total).max(0.0) / (total - floor_total).max(1.0);
+                natural.iter().zip(&floors).map(|(width, floor)| floor + (width - floor) * scale).collect()
+            }
         };
         let table_width: f32 = widths.iter().sum::<f32>() + border;
         let top = self.y;
@@ -2490,7 +2531,8 @@ impl Builder<'_> {
         let mut cells_out = Vec::new();
         let mut row_bounds = Vec::new();
         for (row, (header, row_end, cells)) in table.rows.iter().enumerate() {
-            let mut row_height = if self.controlled && *header { 13.0 * 1.55 * metrics.zoom } else { line_height };
+            let single_line = if self.controlled && *header { header_size * 1.55 } else { line_height };
+            let mut row_height = single_line;
             let mut laid = Vec::new();
             let mut x = self.indent + border;
             for column in 0..columns {
@@ -2510,6 +2552,9 @@ impl Builder<'_> {
                     laid.push((x + pad_x + offset, layout, cell.map.clone()));
                 }
                 x += width;
+            }
+            if self.controlled {
+                row_height = table_layout::row_height(single_line, row_height, self.window.scale_factor());
             }
             let height = row_height + pad_y * 2.0;
             row_bounds.push((*header, y, height));

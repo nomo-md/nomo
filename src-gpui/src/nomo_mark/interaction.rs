@@ -5,6 +5,7 @@ use std::ops::Range;
 
 #[derive(Default)]
 pub struct EditorInteraction {
+    pub(crate) table_widths: std::cell::RefCell<super::table_widths::TableWidths>,
     pub composing: bool,
     pub(super) marked: Option<Range<usize>>,
     pub dragging: bool,

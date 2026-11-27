@@ -41,7 +41,7 @@ pub(super) enum MenuAction {
     None, Edit(EditIntent), Undo, Redo, Cut, Copy, CopyMarkdown, Paste(bool), SelectAll, Find,
     LinkEdit, LinkOpen, LinkCopy, LinkRemove, InlineComment, InlineMath, ChooseImage,
     ObjectEdit, ObjectCopy, CodeLanguage, CodeParagraph, Delete,
-    Table(TableIntent), DetailsDefault, DetailsUnwrap,
+    Table(TableIntent), FitTableWidths, DetailsDefault, DetailsUnwrap,
     ImageAlign(&'static str), ImageOriginal, ImageSize, ImageAlt, ImageLocation, ImageCopy, ImagePath,
 }
 
@@ -244,19 +244,24 @@ impl NomoMark {
                 ]); }
                 items.extend([sep(), item("deleteAction", "trash-2", MenuAction::Delete).enabled(editable).danger()]); items
             }
-            Target::Table { row, column, header, rows, columns, .. } => {
+            Target::Table { source, row, column, header, rows, columns } => {
                 let table = |key, icon, intent: TableIntent| item(key, icon, MenuAction::Table(intent)).enabled(editable && !intent.would_empty_table(*rows, *columns));
-                vec![table("addRowBefore", "table-2", TableIntent::InsertRowBefore { row: *row }),
+                let mut items = vec![table("addRowBefore", "table-2", TableIntent::InsertRowBefore { row: *row }),
                     table("addRowAfter", "table-2", TableIntent::InsertRow { after: *row }),
                     table("addColumnBefore", "table-2", TableIntent::InsertColumn { at: *column }),
                     table("addColumnAfter", "table-2", TableIntent::InsertColumn { at: *column + 1 }), sep(),
                     table("alignLeft", "align-left", TableIntent::Align { column: *column, alignment: Alignment::Left }),
                     table("alignCenter", "align-center", TableIntent::Align { column: *column, alignment: Alignment::Center }),
                     table("alignRight", "align-right", TableIntent::Align { column: *column, alignment: Alignment::Right }),
-                    table("toggleTableHeader", "table-2", TableIntent::Header { enabled: !header }), sep(),
+                    table("toggleTableHeader", "table-2", TableIntent::Header { enabled: !header })];
+                if self.host.parsed.html_tables.iter().any(|t| t.source == *source) {
+                    items.push(item("fitTableWidths", "table-2", MenuAction::FitTableWidths).enabled(editable));
+                }
+                items.extend([sep(),
                     table("deleteRow", "trash-2", TableIntent::DeleteRow { row: *row }),
                     table("deleteColumn", "trash-2", TableIntent::DeleteColumn { column: *column }),
-                    item("deleteTable", "trash-2", MenuAction::Delete).enabled(editable).danger()]
+                    item("deleteTable", "trash-2", MenuAction::Delete).enabled(editable).danger()]);
+                items
             }
             Target::Details(_, open) => vec![item("detailsDefaultOpen", "chevrons-down", MenuAction::DetailsDefault).enabled(editable).checked(*open),
                 item("unwrapDetails", "pencil", MenuAction::DetailsUnwrap).enabled(editable)],
@@ -388,6 +393,12 @@ impl NomoMark {
             },
             A::Delete => match menu.target { Target::Block(r, _) | Target::Table { source: r, .. } | Target::Image(r) => self.context_replace(r, String::new(), cx), _ => {} },
             A::Table(intent) => self.table_command(intent, cx),
+            A::FitTableWidths => if let Target::Table { source, .. } = menu.target {
+                let anchor = self.host.parsed.identity.from_byte + source.start as u64;
+                self.host.interaction.table_widths.get_mut().reset(anchor);
+                self.invalidate();
+                cx.notify();
+            },
             A::DetailsDefault | A::DetailsUnwrap => if let Target::Details(range, open) = menu.target {
                 if let Some(block) = self.host.parsed.details.iter().find(|b| b.source == range) {
                     let (range, text) = if matches!(action, A::DetailsDefault) {

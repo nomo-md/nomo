@@ -289,6 +289,7 @@ impl WindowHostAdapter {
             horizontal.insert(mapped, offset);
         }
         self.interaction.horizontal_offsets = horizontal;
+        self.interaction.table_widths.get_mut().rebase(edits.iter().map(|e| (e.from_byte, e.to_byte, e.inserted_text.len() as u64)));
         self.interaction.map_code_offsets(&edits);
         self.serial += 1;
         let transaction = DocumentTransaction {
@@ -385,6 +386,7 @@ impl WindowHostAdapter {
         self.interaction.horizontal_offsets = std::mem::take(&mut self.interaction.horizontal_offsets).into_iter()
             .filter(|(at, _)| !edits.iter().any(|edit| edit.from_byte < *at && *at < edit.to_byte))
             .map(|(at, value)| (super::commands::map_selection(DocumentSelection::caret(at), &edits).head_byte, value)).collect();
+        self.interaction.table_widths.get_mut().rebase(edits.iter().map(|e| (e.from_byte, e.to_byte, e.inserted_text.len() as u64)));
         self.interaction.map_code_offsets(&edits);
         self.serial += 1;
         self.pending.push_back(DocumentTransaction {
@@ -614,6 +616,7 @@ impl WindowHostAdapter {
         for (&at, &offset) in &self.interaction.code_offsets { code.insert(map(at)?, offset); }
         self.interaction.code_offsets = code;
         self.interaction.code_wrapped = self.interaction.code_wrapped.iter().map(|at| map(*at)).collect::<Result<_, _>>()?;
+        self.interaction.table_widths.get_mut().rebase(edits.iter().map(|e| (e.from_byte, e.to_byte, e.inserted_bytes)));
         identity.from_byte = from;
         identity.to_byte = to;
         identity.revision = revision;
@@ -659,12 +662,14 @@ impl WindowHostAdapter {
         {
             return Err(ControlError::Stale);
         }
-        self.parsed = Arc::new(ParsedWindow::parse(
+        let parsed = Arc::new(ParsedWindow::parse(
             window,
             self.parsed.identity.window_id.clone(),
             generation,
             context,
         )?);
+        self.interaction.table_widths.get_mut().replace_window(&self.parsed, &parsed);
+        self.parsed = parsed;
         self.committed_revision = self.parsed.identity.revision;
         self.prune_view_state();
         self.failure = None;
@@ -700,6 +705,7 @@ impl WindowHostAdapter {
         }
         self.layout = None;
         self.presentation = Presentation::Suspended;
+        *self.interaction.table_widths.get_mut() = Default::default();
         Ok(())
     }
     pub fn resume(&mut self) -> Result<(), ControlError> {
